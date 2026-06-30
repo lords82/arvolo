@@ -53,13 +53,13 @@ async fn main() -> Result<()> {
                     Ok(_) => {}
                     Err(e) => tracing::warn!("reaper error: {e}"),
                 }
-                // TTL backstop for seeded backfill blobs not released by the receiver.
+                // TTL backstop for seeded chunks not released by the receiver.
                 for (token, hash) in state.mailbox.expired_seeds(now) {
                     if let Err(e) = state.blobs.release_hex(&hash).await {
                         tracing::warn!("seed reaper release error: {e}");
                     }
-                    let _ = state.mailbox.delete_seed(&token);
-                    tracing::info!(%hash, "reaped expired seeded blob");
+                    let _ = state.mailbox.delete_seed_one(&token, &hash);
+                    tracing::info!(%hash, "reaped expired seeded chunk");
                 }
             }
         });

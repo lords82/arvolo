@@ -10,6 +10,7 @@ use anyhow::Result;
 use std::future::Future;
 
 pub mod backfill;
+pub mod chunked;
 pub mod crypto;
 pub mod node;
 pub mod offline;

@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use arvolo_core::backfill::BlobNode;
+use arvolo_core::chunked::SeedRequest;
 use axum::{
     body::Bytes,
     extract::{Path as AxumPath, Query, State},
@@ -126,9 +127,10 @@ impl Mailbox {
                 downloads     INTEGER NOT NULL
             );
             CREATE TABLE IF NOT EXISTS seeded (
-                token       TEXT PRIMARY KEY,
+                token       TEXT NOT NULL,
                 hash        TEXT NOT NULL,
-                expires_at  INTEGER NOT NULL
+                expires_at  INTEGER NOT NULL,
+                PRIMARY KEY (token, hash)
             );",
         )
         .map_err(backend)?;
@@ -272,30 +274,33 @@ impl Mailbox {
         Ok(())
     }
 
-    /// Look up the blob hash for a release token.
-    pub fn seed_hash_by_token(&self, token: &str) -> Option<String> {
+    /// Does this (token, hash) pair authorize releasing the chunk?
+    pub fn seed_exists(&self, token: &str, hash: &str) -> bool {
         self.conn
             .lock()
             .unwrap()
             .query_row(
-                "SELECT hash FROM seeded WHERE token = ?1",
-                params![token],
-                |r| r.get::<_, String>(0),
+                "SELECT 1 FROM seeded WHERE token = ?1 AND hash = ?2",
+                params![token, hash],
+                |_| Ok(()),
             )
-            .ok()
+            .is_ok()
     }
 
-    /// Forget a seeded-blob record (after release).
-    pub fn delete_seed(&self, token: &str) -> Result<(), MailboxError> {
+    /// Forget a single seeded-chunk record (after release).
+    pub fn delete_seed_one(&self, token: &str, hash: &str) -> Result<(), MailboxError> {
         self.conn
             .lock()
             .unwrap()
-            .execute("DELETE FROM seeded WHERE token = ?1", params![token])
+            .execute(
+                "DELETE FROM seeded WHERE token = ?1 AND hash = ?2",
+                params![token, hash],
+            )
             .map_err(backend)?;
         Ok(())
     }
 
-    /// Tokens+hashes of seeded blobs whose TTL has passed.
+    /// (token, hash) pairs of seeded chunks whose TTL has passed.
     pub fn expired_seeds(&self, now: u64) -> Vec<(String, String)> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = match conn.prepare("SELECT token, hash FROM seeded WHERE expires_at <= ?1") {
@@ -348,7 +353,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/deposit", post(deposit_handler))
         .route("/v1/fetch/{claim}", get(fetch_handler))
         .route("/v1/seed", post(seed_handler))
-        .route("/v1/release/{token}", post(release_handler))
+        .route("/v1/release/{token}/{hash}", post(release_handler))
         .route("/healthz", get(|| async { "ok" }))
         .with_state(state)
 }
@@ -416,21 +421,26 @@ async fn seed_handler(
     State(state): State<AppState>,
     body: String,
 ) -> Result<String, (StatusCode, String)> {
-    let (addr, hash_hex) = state
+    let req = SeedRequest::decode(body.trim())
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("bad seed request: {e}")))?;
+    let addr = state
         .blobs
-        .seed_from_ticket(body.trim())
+        .seed_chunks(req.sender, &req.chunks)
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, format!("seed failed: {e}")))?;
     let token = random_claim();
-    state
-        .mailbox
-        .record_seed(&token, &hash_hex, now_unix().saturating_add(seed_ttl()))
-        .map_err(|e| (status_for(&e), e.to_string()))?;
-    // addr (for dialing) + token (for release) on two lines.
+    let exp = now_unix().saturating_add(seed_ttl());
+    for hash in &req.chunks {
+        state
+            .mailbox
+            .record_seed(&token, &hash.to_string(), exp)
+            .map_err(|e| (status_for(&e), e.to_string()))?;
+    }
+    // addr (for dialing) + token (for releasing this transfer's chunks).
     Ok(format!("{addr}\n{token}"))
 }
 
-/// TTL (seconds) for seeded blobs not yet released. Default 24h.
+/// TTL (seconds) for seeded chunks not yet released. Default 24h.
 fn seed_ttl() -> u64 {
     std::env::var("ARVOLO_SEED_TTL")
         .ok()
@@ -438,20 +448,20 @@ fn seed_ttl() -> u64 {
         .unwrap_or(24 * 3600)
 }
 
-/// Delete-after-delivery: the receiver calls this once it has the file, so the
-/// relay drops the seeded blob immediately (TTL is only a backstop). Idempotent.
+/// Incremental cleanup: the receiver calls this for each chunk as it gets it, so
+/// the relay frees that chunk during the download (TTL is only a backstop).
 async fn release_handler(
     State(state): State<AppState>,
-    AxumPath(token): AxumPath<String>,
+    AxumPath((token, hash)): AxumPath<(String, String)>,
 ) -> Result<String, (StatusCode, String)> {
-    if let Some(hash_hex) = state.mailbox.seed_hash_by_token(&token) {
-        state.blobs.release_hex(&hash_hex).await.map_err(|e| {
+    if state.mailbox.seed_exists(&token, &hash) {
+        state.blobs.release_hex(&hash).await.map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("release failed: {e}"),
             )
         })?;
-        let _ = state.mailbox.delete_seed(&token);
+        let _ = state.mailbox.delete_seed_one(&token, &hash);
     }
     Ok("ok".into())
 }
