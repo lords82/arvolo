@@ -22,13 +22,15 @@ use serde::{Deserialize, Serialize};
 use crate::node::encode_ticket;
 use crate::transfer::{bind_endpoint, fetch_into, RelayChoice};
 
-/// How the receiver tells the relay it's done with a chunk, so the relay can
-/// delete it immediately (incremental cleanup) instead of only at TTL.
+/// Relay coordinates for chunked backfill: where the relay is (HTTP + iroh
+/// address) and the per-transfer token used to seed/release/fetch its chunks.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct RelayRelease {
     /// Relay HTTP base URL, e.g. `http://relay:8787`.
     pub http: String,
-    /// Per-transfer token authorizing release of this transfer's chunks.
+    /// The relay's iroh blob-node address (base32), for fetching backfilled chunks.
+    pub addr: String,
+    /// Per-transfer token authorizing seed/release of this transfer's chunks.
     pub token: String,
 }
 
@@ -69,6 +71,11 @@ impl BlobNode {
     /// This node's dialable address (relay URL + direct addresses).
     pub fn addr(&self) -> EndpointAddr {
         self.endpoint.addr()
+    }
+
+    /// This node's address, base32-encoded for tickets.
+    pub fn addr_encoded(&self) -> Result<String> {
+        encode_ticket(&self.addr())
     }
 
     /// Pull each chunk (by hash) from `sender` into this node's store and tag it,

@@ -16,7 +16,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use arvolo_core::backfill::RelayRelease;
-use arvolo_core::chunked::{decode_addr, ChunkReceiver, ChunkSender, ChunkTicket};
+use arvolo_core::chunked::{ChunkReceiver, ChunkSender, ChunkTicket};
 use arvolo_core::crypto::{open, seal, Identity, PublicId, Sealed};
 use arvolo_core::offline::OfflineTicket;
 use arvolo_core::transfer::RelayChoice;
@@ -140,30 +140,35 @@ async fn send(path: PathBuf, seed_relay: Option<String>) -> Result<()> {
     let sender = ChunkSender::serve(&path, RelayChoice::from_env())
         .await
         .context("start sender")?;
+    let client = reqwest::Client::new();
 
-    let mut providers = vec![sender.addr()];
+    // With --seed-relay we DON'T upload anything yet (lazy): we just learn the
+    // relay's address + a token, and backfill only the undelivered tail if the
+    // receiver drops.
     let mut relay = None;
     if let Some(url) = seed_relay {
         let url = url.trim_end_matches('/').to_string();
-        eprintln!("Seeding chunks to relay (so the recipient can finish even if you go offline)…");
-        let resp = reqwest::Client::new()
-            .post(format!("{url}/v1/seed"))
-            .body(sender.seed_request().encode()?)
+        let resp = client
+            .get(format!("{url}/v1/addr"))
             .send()
             .await
-            .context("seed request")?
+            .context("relay /v1/addr")?
             .error_for_status()
-            .context("relay rejected seed")?
+            .context("relay rejected addr")?
             .text()
             .await
-            .context("read seed response")?;
+            .context("read relay addr")?;
         let mut lines = resp.lines();
-        let addr_enc = lines.next().context("missing relay address")?;
-        let token = lines.next().context("missing release token")?;
-        providers.push(decode_addr(addr_enc.trim()).context("relay address")?);
+        let addr = lines
+            .next()
+            .context("missing relay address")?
+            .trim()
+            .to_string();
+        let token = lines.next().context("missing token")?.trim().to_string();
         relay = Some(RelayRelease {
             http: url,
-            token: token.trim().to_string(),
+            addr,
+            token,
         });
     }
 
@@ -171,31 +176,62 @@ async fn send(path: PathBuf, seed_relay: Option<String>) -> Result<()> {
         total_size: sender.total_size(),
         chunk_size: sender.chunk_size(),
         chunks: sender.chunks().to_vec(),
-        providers,
-        relay,
+        providers: vec![sender.addr()],
+        relay: relay.clone(),
     };
-    if ticket.relay.is_some() {
-        println!("\nSeeded to relay ✓  The recipient can fetch from you OR the relay:\n");
-    } else {
-        println!("\nFile ready to send ({} chunks):\n", ticket.chunks.len());
-    }
-    println!("    arvolo recv {}\n", ticket.encode()?);
     println!(
-        "Stay online for fast P2P, or close this if seeded — the relay delivers. Ctrl-C to stop."
+        "\nFile ready ({} chunks). On the other device:\n",
+        ticket.chunks.len()
     );
+    println!("    arvolo recv {}\n", ticket.encode()?);
+    if relay.is_some() {
+        println!("P2P-first; if the receiver drops, only the missing chunks are backfilled to the relay.");
+    }
+    println!("Ctrl-C to stop.");
 
-    tokio::signal::ctrl_c().await.ok();
+    // Orchestration loop: on receiver-drop, backfill the undelivered tail.
+    loop {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => break,
+            undelivered = sender.receiver_gone() => {
+                let Some(r) = &relay else { continue };
+                if undelivered.is_empty() { continue; }
+                let chunks: Vec<_> = undelivered.iter().map(|&i| sender.chunks()[i]).collect();
+                let req = arvolo_core::chunked::SeedRequest {
+                    sender: sender.addr(),
+                    chunks,
+                    token: r.token.clone(),
+                };
+                eprintln!("Receiver dropped — backfilling {} missing chunks to the relay…", undelivered.len());
+                match client.post(format!("{}/v1/seed", r.http)).body(req.encode()?).send().await {
+                    Ok(resp) if resp.status().is_success() => {
+                        sender.mark_on_relay(&undelivered);
+                        eprintln!("Backfilled. You can close this; the relay can finish the delivery.");
+                    }
+                    Ok(resp) => eprintln!("Relay backfill rejected: {}", resp.status()),
+                    Err(e) => eprintln!("Relay backfill failed: {e}"),
+                }
+            }
+        }
+    }
     sender.shutdown().await;
     Ok(())
 }
 
 async fn recv(ticket: String, out: Option<PathBuf>) -> Result<()> {
+    use std::collections::HashSet;
     use std::io::{Seek, SeekFrom, Write};
+    use std::sync::{Arc, Mutex};
 
     let t = ChunkTicket::decode(&ticket).context("invalid ticket")?;
     let out = out.unwrap_or_else(|| {
         default_out(&t.chunks.first().map(|h| h.to_string()).unwrap_or_default())
     });
+    let sender_addr = t.providers.first().cloned();
+    let relay_addr = match &t.relay {
+        Some(r) => Some(arvolo_core::chunked::decode_addr(&r.addr).context("relay address")?),
+        None => None,
+    };
 
     let mut file = std::fs::OpenOptions::new()
         .create(true)
@@ -209,46 +245,73 @@ async fn recv(ticket: String, out: Option<PathBuf>) -> Result<()> {
     if start > 0 {
         eprintln!("Resuming from chunk {start}/{}…", t.chunks.len());
     } else {
-        eprintln!("Fetching {} chunks (P2P, relay fallback)…", t.chunks.len());
+        eprintln!("Fetching {} chunks…", t.chunks.len());
     }
 
     let receiver = ChunkReceiver::open(RelayChoice::from_env()).await?;
     let client = reqwest::Client::new();
 
-    // Best-effort control channel to the sender (providers[0]) so it knows which
-    // chunks we already have. Bounded so we don't stall if the sender is offline.
-    let mut control = match t.providers.first() {
-        Some(sender) => tokio::time::timeout(
+    // Control channel to the sender; the sender advertises on-relay chunks here.
+    let on_relay: Arc<Mutex<HashSet<u32>>> = Arc::new(Mutex::new(HashSet::new()));
+    let mut control = match &sender_addr {
+        Some(s) => tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            receiver.open_control(sender),
+            receiver.open_control(s, on_relay.clone()),
         )
         .await
         .ok()
-        .and_then(|r| r.ok()),
+        .flatten(),
         None => None,
     };
+    // Give the sender a moment to send its RelayHas snapshot before we choose sources.
+    if control.is_some() {
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    }
 
     for i in start..t.chunks.len() {
+        let on_relay_chunk = on_relay.lock().unwrap().contains(&(i as u32));
+        // Anti-double-send: chunks the sender pushed to the relay are pulled from
+        // the relay; everything else is pulled from the sender (relay fallback).
+        let mut providers = Vec::new();
+        if on_relay_chunk {
+            if let Some(a) = &relay_addr {
+                providers.push(a.clone());
+            }
+            if let Some(a) = &sender_addr {
+                providers.push(a.clone());
+            }
+        } else {
+            if let Some(a) = &sender_addr {
+                providers.push(a.clone());
+            }
+            if let Some(a) = &relay_addr {
+                providers.push(a.clone());
+            }
+        }
+
         let bytes = receiver
-            .fetch_chunk(&t.providers, t.chunks[i])
+            .fetch_chunk(&providers, t.chunks[i])
             .await
             .with_context(|| format!("fetch chunk {}", i + 1))?;
         file.seek(SeekFrom::Start(i as u64 * t.chunk_size as u64))?;
         file.write_all(&bytes)?;
+
         if let Some(c) = control.as_mut() {
             let _ = c.ack(i as u32).await;
         }
-        // Incremental cleanup: free this chunk on the relay now that we have it.
-        if let Some(r) = &t.relay {
-            let _ = client
-                .post(format!(
-                    "{}/v1/release/{}/{}",
-                    r.http.trim_end_matches('/'),
-                    r.token,
-                    t.chunks[i]
-                ))
-                .send()
-                .await;
+        // Free relay-backfilled chunks as we get them.
+        if on_relay_chunk {
+            if let Some(r) = &t.relay {
+                let _ = client
+                    .post(format!(
+                        "{}/v1/release/{}/{}",
+                        r.http.trim_end_matches('/'),
+                        r.token,
+                        t.chunks[i]
+                    ))
+                    .send()
+                    .await;
+            }
         }
     }
     if let Some(c) = control {

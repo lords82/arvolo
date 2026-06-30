@@ -1,5 +1,8 @@
 //! Milestone A, step 1: the sender tracks which chunks the receiver acked.
 
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
+
 use arvolo_core::chunked::{ChunkReceiver, ChunkSender};
 use arvolo_core::transfer::RelayChoice;
 
@@ -22,8 +25,9 @@ async fn sender_tracks_delivered_chunks() {
         .await
         .expect("receiver");
     eprintln!("STEP receiver open");
+    let on_relay = Arc::new(Mutex::new(HashSet::new()));
     let mut control = receiver
-        .open_control(&sender.addr())
+        .open_control(&sender.addr(), on_relay)
         .await
         .expect("control");
     eprintln!("STEP control open");
@@ -53,4 +57,47 @@ async fn sender_tracks_delivered_chunks() {
         "sender should see all chunks delivered"
     );
     eprintln!("STEP DONE");
+}
+
+/// When the receiver drops after acking only some chunks, the sender reports the
+/// remaining (undelivered) chunks — the tail to backfill.
+#[tokio::test]
+async fn sender_reports_undelivered_tail_on_drop() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("f.bin");
+    let data = vec![7u8; 40 * 1024 * 1024]; // ~3 chunks
+    std::fs::write(&path, &data).unwrap();
+
+    let sender = ChunkSender::serve(&path, RelayChoice::Disabled)
+        .await
+        .expect("sender");
+    let n = sender.chunks().len();
+    assert!(n >= 3);
+
+    let receiver = ChunkReceiver::open(RelayChoice::Disabled)
+        .await
+        .expect("receiver");
+    let on_relay = Arc::new(Mutex::new(HashSet::new()));
+    let mut control = receiver
+        .open_control(&sender.addr(), on_relay)
+        .await
+        .expect("control");
+
+    // Ack only chunk 0, then drop the control connection (receiver "goes down").
+    control.ack(0).await.expect("ack 0");
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    drop(control);
+
+    let undelivered =
+        tokio::time::timeout(std::time::Duration::from_secs(30), sender.receiver_gone())
+            .await
+            .expect("receiver_gone timed out");
+    let expected: Vec<usize> = (1..n).collect();
+    assert_eq!(
+        undelivered, expected,
+        "sender should report the undelivered tail"
+    );
+
+    receiver.close().await;
+    sender.shutdown().await;
 }

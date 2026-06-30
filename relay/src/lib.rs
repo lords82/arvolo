@@ -352,6 +352,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/v1/deposit", post(deposit_handler))
         .route("/v1/fetch/{claim}", get(fetch_handler))
+        .route("/v1/addr", get(addr_handler))
         .route("/v1/seed", post(seed_handler))
         .route("/v1/release/{token}/{hash}", post(release_handler))
         .route("/healthz", get(|| async { "ok" }))
@@ -423,21 +424,29 @@ async fn seed_handler(
 ) -> Result<String, (StatusCode, String)> {
     let req = SeedRequest::decode(body.trim())
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("bad seed request: {e}")))?;
-    let addr = state
+    state
         .blobs
         .seed_chunks(req.sender, &req.chunks)
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, format!("seed failed: {e}")))?;
-    let token = random_claim();
     let exp = now_unix().saturating_add(seed_ttl());
     for hash in &req.chunks {
         state
             .mailbox
-            .record_seed(&token, &hash.to_string(), exp)
+            .record_seed(&req.token, &hash.to_string(), exp)
             .map_err(|e| (status_for(&e), e.to_string()))?;
     }
-    // addr (for dialing) + token (for releasing this transfer's chunks).
-    Ok(format!("{addr}\n{token}"))
+    Ok("ok".into())
+}
+
+/// The relay's iroh blob-node address plus a fresh transfer token, so the sender
+/// can advertise the relay as a provider and use the token to seed/release.
+async fn addr_handler(State(state): State<AppState>) -> Result<String, (StatusCode, String)> {
+    let addr = state
+        .blobs
+        .addr_encoded()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("addr: {e}")))?;
+    Ok(format!("{addr}\n{}", random_claim()))
 }
 
 /// TTL (seconds) for seeded chunks not yet released. Default 24h.
