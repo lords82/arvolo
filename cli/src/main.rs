@@ -307,19 +307,21 @@ async fn recv(ticket: String, out: Option<PathBuf>) -> Result<()> {
         if let Some(c) = control.as_mut() {
             let _ = c.ack(i as u32).await;
         }
-        // Free relay-backfilled chunks as we get them.
-        if on_relay_chunk {
-            if let Some(r) = &t.relay {
-                let _ = client
-                    .post(format!(
-                        "{}/v1/release/{}/{}",
-                        r.http.trim_end_matches('/'),
-                        r.token,
-                        t.chunks[i]
-                    ))
-                    .send()
-                    .await;
-            }
+        // Free relay-backfilled chunks as we get them. We attempt release for
+        // every fetched chunk (not just ones the control channel flagged): when
+        // the sender is offline there is no control channel to learn `on_relay`,
+        // yet those are exactly the chunks the relay is holding. The relay's
+        // (token, hash) guard makes release a no-op for anything not seeded.
+        if let Some(r) = &t.relay {
+            let _ = client
+                .post(format!(
+                    "{}/v1/release/{}/{}",
+                    r.http.trim_end_matches('/'),
+                    r.token,
+                    t.chunks[i]
+                ))
+                .send()
+                .await;
         }
     }
     if let Some(c) = control {
