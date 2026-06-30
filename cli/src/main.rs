@@ -214,6 +214,20 @@ async fn recv(ticket: String, out: Option<PathBuf>) -> Result<()> {
 
     let receiver = ChunkReceiver::open(RelayChoice::from_env()).await?;
     let client = reqwest::Client::new();
+
+    // Best-effort control channel to the sender (providers[0]) so it knows which
+    // chunks we already have. Bounded so we don't stall if the sender is offline.
+    let mut control = match t.providers.first() {
+        Some(sender) => tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            receiver.open_control(sender),
+        )
+        .await
+        .ok()
+        .and_then(|r| r.ok()),
+        None => None,
+    };
+
     for i in start..t.chunks.len() {
         let bytes = receiver
             .fetch_chunk(&t.providers, t.chunks[i])
@@ -221,6 +235,9 @@ async fn recv(ticket: String, out: Option<PathBuf>) -> Result<()> {
             .with_context(|| format!("fetch chunk {}", i + 1))?;
         file.seek(SeekFrom::Start(i as u64 * t.chunk_size as u64))?;
         file.write_all(&bytes)?;
+        if let Some(c) = control.as_mut() {
+            let _ = c.ack(i as u32).await;
+        }
         // Incremental cleanup: free this chunk on the relay now that we have it.
         if let Some(r) = &t.relay {
             let _ = client
@@ -233,6 +250,9 @@ async fn recv(ticket: String, out: Option<PathBuf>) -> Result<()> {
                 .send()
                 .await;
         }
+    }
+    if let Some(c) = control {
+        let _ = c.finish().await;
     }
     file.set_len(t.total_size)?;
     receiver.close().await;
