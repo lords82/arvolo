@@ -178,6 +178,7 @@ async fn send(path: PathBuf, seed_relay: Option<String>) -> Result<()> {
         chunks: sender.chunks().to_vec(),
         providers: vec![sender.addr()],
         relay: relay.clone(),
+        key: sender.key().to_vec(),
     };
     println!(
         "\nFile ready ({} chunks). On the other device:\n",
@@ -232,6 +233,12 @@ async fn recv(ticket: String, out: Option<PathBuf>) -> Result<()> {
         Some(r) => Some(arvolo_core::chunked::decode_addr(&r.addr).context("relay address")?),
         None => None,
     };
+    let key: [u8; arvolo_core::crypto::CHUNK_KEY_LEN] = t
+        .key
+        .as_slice()
+        .try_into()
+        .context("ticket has no/invalid content key")?;
+    let total_chunks = t.chunks.len() as u32;
 
     let mut file = std::fs::OpenOptions::new()
         .create(true)
@@ -286,13 +293,17 @@ async fn recv(ticket: String, out: Option<PathBuf>) -> Result<()> {
     if control.is_some() {
         tokio::time::sleep(std::time::Duration::from_millis(400)).await;
     }
+    // If the control channel never came up, the sender is most likely offline
+    // (it backfilled the tail and quit). Don't waste a connect timeout per chunk
+    // dialing the dead sender first — prefer the relay.
+    let sender_offline = control.is_none();
 
     for i in start..t.chunks.len() {
         let on_relay_chunk = on_relay.lock().unwrap().contains(&(i as u32));
         // Anti-double-send: chunks the sender pushed to the relay are pulled from
         // the relay; everything else is pulled from the sender (relay fallback).
         let mut providers = Vec::new();
-        if on_relay_chunk {
+        if on_relay_chunk || sender_offline {
             if let Some(a) = &relay_addr {
                 providers.push(a.clone());
             }
@@ -312,8 +323,12 @@ async fn recv(ticket: String, out: Option<PathBuf>) -> Result<()> {
             .fetch_chunk(&providers, t.chunks[i])
             .await
             .with_context(|| format!("fetch chunk {}", i + 1))?;
+        // The fetched bytes are ciphertext (the relay/providers never see
+        // plaintext); decrypt before writing to disk.
+        let plain = arvolo_core::crypto::open_chunk(&key, i as u32, total_chunks, &bytes)
+            .with_context(|| format!("decrypt chunk {}", i + 1))?;
         file.seek(SeekFrom::Start(i as u64 * t.chunk_size as u64))?;
-        file.write_all(&bytes)?;
+        file.write_all(&plain)?;
 
         if let Some(c) = control.as_mut() {
             let _ = c.ack(i as u32).await;
