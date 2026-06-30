@@ -1,0 +1,20 @@
+services:
+  arvolo-relay:
+    build:
+      context: .
+      dockerfile: relay/Dockerfile
+    image: arvolo-relay:latest
+    container_name: arvolo-relay
+    restart: always
+    ports:
+      - "8787:8787"
+    volumes:
+      - arvolo-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8787/healthz || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  arvolo-data:
