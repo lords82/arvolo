@@ -44,11 +44,18 @@ pub const CTRL_ALPN: &[u8] = b"arvolo/ctrl/2";
 enum CtrlMsg {
     /// Receiver opens the channel.
     Hello,
+    /// Receiver liveness heartbeat.
+    Ping,
     /// Receiver has chunk `idx`.
     Have(u32),
     /// Sender: these chunk indices are now available on the relay.
     RelayHas(Vec<u32>),
 }
+
+/// If the sender hears nothing on the control channel for this long, it treats
+/// the receiver as gone (covers abrupt crashes that don't close cleanly).
+const CTRL_IDLE_SECS: u64 = 6;
+const CTRL_HEARTBEAT_SECS: u64 = 2;
 
 async fn write_msg(send: &mut SendStream, msg: &CtrlMsg) -> Result<()> {
     let bytes = postcard::to_allocvec(msg).context("encode ctrl msg")?;
@@ -95,10 +102,21 @@ impl ProtocolHandler for CtrlHandler {
             let _ = write_msg(&mut send, &CtrlMsg::RelayHas(snapshot)).await;
         }
         let _ = send.finish();
-        // Read Have acks until the receiver disconnects.
-        while let Some(msg) = read_msg(&mut recv).await {
-            if let CtrlMsg::Have(idx) = msg {
-                self.delivered.lock().unwrap().insert(idx);
+        // Read Have acks (and Pings) until the receiver disconnects or goes
+        // silent for CTRL_IDLE_SECS (abrupt crash).
+        loop {
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(CTRL_IDLE_SECS),
+                read_msg(&mut recv),
+            )
+            .await
+            {
+                Ok(Some(CtrlMsg::Have(idx))) => {
+                    self.delivered.lock().unwrap().insert(idx);
+                }
+                Ok(Some(_)) => {}  // Ping/Hello: keepalive
+                Ok(None) => break, // closed cleanly
+                Err(_) => break,   // idle: receiver gone
             }
         }
         // Receiver gone: report the still-undelivered chunk indices.
@@ -214,22 +232,37 @@ impl ChunkSender {
 
 // ---- receiver -------------------------------------------------------------
 
-/// The receiver's control channel: acks chunks; learns which are on the relay.
+/// The receiver's control channel: acks chunks (and heartbeats); learns which
+/// chunks are on the relay. Dropping it closes the connection so the sender
+/// promptly detects the receiver is gone.
 pub struct Control {
-    send: SendStream,
-    _conn: Connection,
+    send: Arc<AsyncMutex<SendStream>>,
+    heartbeat: tokio::task::JoinHandle<()>,
+    reader: tokio::task::JoinHandle<()>,
+    conn: Connection,
 }
 
 impl Control {
     pub async fn ack(&mut self, idx: u32) -> Result<()> {
-        write_msg(&mut self.send, &CtrlMsg::Have(idx)).await
+        let mut send = self.send.lock().await;
+        write_msg(&mut send, &CtrlMsg::Have(idx)).await
     }
-    pub async fn finish(mut self) -> Result<()> {
-        self.send
-            .finish()
-            .map_err(|e| anyhow!("ctrl finish: {e}"))?;
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), self._conn.closed()).await;
+    pub async fn finish(self) -> Result<()> {
+        self.heartbeat.abort();
+        {
+            let mut send = self.send.lock().await;
+            send.finish().map_err(|e| anyhow!("ctrl finish: {e}"))?;
+        }
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), self.conn.closed()).await;
         Ok(())
+    }
+}
+
+impl Drop for Control {
+    fn drop(&mut self) {
+        self.heartbeat.abort();
+        self.reader.abort();
+        self.conn.close(0u32.into(), b"bye");
     }
 }
 
@@ -261,7 +294,9 @@ impl ChunkReceiver {
         let (mut send, mut recv) = conn.open_bi().await.ok()?;
         // Open the stream on the wire so the sender's accept_bi returns.
         write_msg(&mut send, &CtrlMsg::Hello).await.ok()?;
-        tokio::spawn(async move {
+        let send = Arc::new(AsyncMutex::new(send));
+        // Read RelayHas updates from the sender.
+        let reader = tokio::spawn(async move {
             while let Some(msg) = read_msg(&mut recv).await {
                 if let CtrlMsg::RelayHas(indices) = msg {
                     let mut set = on_relay.lock().unwrap();
@@ -271,7 +306,23 @@ impl ChunkReceiver {
                 }
             }
         });
-        Some(Control { send, _conn: conn })
+        // Heartbeat so the sender can tell we're alive (vs. an abrupt crash).
+        let hb_send = send.clone();
+        let heartbeat = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(CTRL_HEARTBEAT_SECS)).await;
+                let mut s = hb_send.lock().await;
+                if write_msg(&mut s, &CtrlMsg::Ping).await.is_err() {
+                    break;
+                }
+            }
+        });
+        Some(Control {
+            send,
+            heartbeat,
+            reader,
+            conn,
+        })
     }
 
     /// Fetch a single chunk by hash, trying each provider in order. Bounded to

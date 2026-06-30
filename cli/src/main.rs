@@ -255,7 +255,7 @@ async fn recv(ticket: String, out: Option<PathBuf>) -> Result<()> {
     let on_relay: Arc<Mutex<HashSet<u32>>> = Arc::new(Mutex::new(HashSet::new()));
     let mut control = match &sender_addr {
         Some(s) => tokio::time::timeout(
-            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(15),
             receiver.open_control(s, on_relay.clone()),
         )
         .await
@@ -263,6 +263,14 @@ async fn recv(ticket: String, out: Option<PathBuf>) -> Result<()> {
         .flatten(),
         None => None,
     };
+    eprintln!(
+        "control channel to sender: {}",
+        if control.is_some() {
+            "connected"
+        } else {
+            "unavailable"
+        }
+    );
     // Give the sender a moment to send its RelayHas snapshot before we choose sources.
     if control.is_some() {
         tokio::time::sleep(std::time::Duration::from_millis(400)).await;
