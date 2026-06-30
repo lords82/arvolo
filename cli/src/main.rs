@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 use anyhow::{Context, Result};
-use arvolo_core::backfill::{fetch_from_providers, parse_relay_addr, ProviderTicket};
+use arvolo_core::backfill::{fetch_from_providers, parse_relay_addr, ProviderTicket, RelayRelease};
 use arvolo_core::crypto::{open, seal, Identity, PublicId, Sealed};
 use arvolo_core::offline::OfflineTicket;
 use arvolo_core::transfer::{fetch_to_path, Provider, RelayChoice};
@@ -150,7 +150,7 @@ async fn send(path: PathBuf, seed_relay: Option<String>) -> Result<()> {
         Some(url) => {
             let url = url.trim_end_matches('/');
             eprintln!("Seeding to relay (so the recipient can finish even if you go offline)…");
-            let relay_enc = reqwest::Client::new()
+            let resp = reqwest::Client::new()
                 .post(format!("{url}/v1/seed"))
                 .body(ticket.to_string())
                 .send()
@@ -160,11 +160,18 @@ async fn send(path: PathBuf, seed_relay: Option<String>) -> Result<()> {
                 .context("relay rejected seed")?
                 .text()
                 .await
-                .context("read relay address")?;
-            let relay_addr = parse_relay_addr(relay_enc.trim()).context("relay address")?;
+                .context("read seed response")?;
+            let mut lines = resp.lines();
+            let addr_enc = lines.next().context("missing relay address")?;
+            let token = lines.next().context("missing release token")?;
+            let relay_addr = parse_relay_addr(addr_enc.trim()).context("relay address")?;
             let pt = ProviderTicket {
                 hash: provider.hash(),
                 providers: vec![ticket.addr().clone(), relay_addr],
+                relay: Some(RelayRelease {
+                    http: url.to_string(),
+                    token: token.trim().to_string(),
+                }),
             };
             println!("\nSeeded to relay ✓  The recipient can fetch from you OR the relay:\n");
             println!("    arvolo recv {}\n", pt.encode()?);
@@ -186,6 +193,17 @@ async fn recv(ticket: String, out: Option<PathBuf>) -> Result<()> {
         fetch_from_providers(&pt, &out, RelayChoice::from_env())
             .await
             .context("fetch")?;
+        // Delete-after-delivery: tell the relay we're done so it drops its copy.
+        if let Some(r) = &pt.relay {
+            let _ = reqwest::Client::new()
+                .post(format!(
+                    "{}/v1/release/{}",
+                    r.http.trim_end_matches('/'),
+                    r.token
+                ))
+                .send()
+                .await;
+        }
         println!("Saved to {}", out.display());
         return Ok(());
     }

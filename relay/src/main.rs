@@ -40,17 +40,26 @@ async fn main() -> Result<()> {
         blobs: blob_node,
     };
 
-    // Background reaper: delete expired blobs every minute.
+    // Background reaper: delete expired mailbox blobs AND expired seeded blobs.
     {
-        let mailbox = mailbox.clone();
+        let state = state.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(60));
             loop {
                 tick.tick().await;
-                match mailbox.reap(now_unix()) {
-                    Ok(n) if n > 0 => tracing::info!(removed = n, "reaped expired blobs"),
+                let now = now_unix();
+                match state.mailbox.reap(now) {
+                    Ok(n) if n > 0 => tracing::info!(removed = n, "reaped expired mailbox blobs"),
                     Ok(_) => {}
                     Err(e) => tracing::warn!("reaper error: {e}"),
+                }
+                // TTL backstop for seeded backfill blobs not released by the receiver.
+                for (token, hash) in state.mailbox.expired_seeds(now) {
+                    if let Err(e) = state.blobs.release_hex(&hash).await {
+                        tracing::warn!("seed reaper release error: {e}");
+                    }
+                    let _ = state.mailbox.delete_seed(&token);
+                    tracing::info!(%hash, "reaped expired seeded blob");
                 }
             }
         });

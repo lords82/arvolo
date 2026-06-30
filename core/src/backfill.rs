@@ -8,10 +8,16 @@
 
 use std::path::Path;
 use std::str::FromStr;
+use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use iroh::{protocol::Router, Endpoint, EndpointAddr};
-use iroh_blobs::{store::fs::FsStore, ticket::BlobTicket, BlobFormat, BlobsProtocol, Hash};
+use iroh_blobs::{
+    store::fs::{options::Options, FsStore},
+    store::GcConfig,
+    ticket::BlobTicket,
+    BlobFormat, BlobsProtocol, Hash,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::node::{decode_ticket, encode_ticket};
@@ -19,10 +25,22 @@ use crate::transfer::{bind_endpoint, export, fetch_into, recv_store_dir, RelayCh
 
 const PREFIX: &str = "arvp";
 
+/// How the receiver tells the relay it's done, so the seeded blob can be deleted
+/// immediately (delete-after-delivery) instead of only at TTL.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct RelayRelease {
+    /// Relay HTTP base URL, e.g. `http://relay:8787`.
+    pub http: String,
+    /// One-time release token for this seeded blob.
+    pub token: String,
+}
+
 #[derive(Serialize, Deserialize)]
 struct Wire {
     hash: Hash,
     providers: Vec<EndpointAddr>,
+    #[serde(default)]
+    relay: Option<RelayRelease>,
 }
 
 /// A multi-provider ticket: a blob hash plus the addresses that can serve it
@@ -31,6 +49,8 @@ struct Wire {
 pub struct ProviderTicket {
     pub hash: Hash,
     pub providers: Vec<EndpointAddr>,
+    /// If seeded to a relay, how to release (delete) the relay copy after delivery.
+    pub relay: Option<RelayRelease>,
 }
 
 impl ProviderTicket {
@@ -39,6 +59,7 @@ impl ProviderTicket {
         let bytes = postcard::to_allocvec(&Wire {
             hash: self.hash,
             providers: self.providers.clone(),
+            relay: self.relay.clone(),
         })
         .context("serialize provider ticket")?;
         Ok(format!(
@@ -60,6 +81,7 @@ impl ProviderTicket {
         Ok(Self {
             hash: w.hash,
             providers: w.providers,
+            relay: w.relay,
         })
     }
 
@@ -82,7 +104,14 @@ impl BlobNode {
     pub async fn spawn(store_dir: &Path, relay: RelayChoice) -> Result<Self> {
         std::fs::create_dir_all(store_dir).ok();
         let endpoint = bind_endpoint(relay).await?;
-        let store = FsStore::load(store_dir)
+        // Enable periodic GC: blobs are kept alive by a tag while needed; once a
+        // tag is removed (on release / TTL) GC deletes the blob within `interval`.
+        let mut opts = Options::new(store_dir);
+        opts.gc = Some(GcConfig {
+            interval: Duration::from_secs(30),
+            add_protected: None,
+        });
+        let store = FsStore::load_with_opts(store_dir.join("blobs.db"), opts)
             .await
             .map_err(|e| anyhow!("open blob store: {e}"))?;
         let blobs = BlobsProtocol::new(&store, None);
@@ -103,16 +132,39 @@ impl BlobNode {
     }
 
     /// Pull the blob described by the sender's ticket string into this node's
-    /// store, then return this node's address (base32-encoded) so the sender can
-    /// advertise the relay as a provider.
-    pub async fn seed_from_ticket(&self, ticket_str: &str) -> Result<String> {
+    /// store and protect it with a tag (so GC keeps it). Returns this node's
+    /// address (base32) and the blob hash (hex), so the relay can track and
+    /// later release it.
+    pub async fn seed_from_ticket(&self, ticket_str: &str) -> Result<(String, String)> {
         let ticket =
             BlobTicket::from_str(ticket_str.trim()).map_err(|e| anyhow!("bad blob ticket: {e}"))?;
+        let hash = ticket.hash();
         fetch_into(&self.store, &self.endpoint, &ticket)
             .await
             .context("seed blob into relay")?;
-        encode_ticket(&self.addr())
+        self.store
+            .tags()
+            .set(tag_name(&hash), hash)
+            .await
+            .context("tag seeded blob")?;
+        Ok((encode_ticket(&self.addr())?, hash.to_string()))
     }
+
+    /// Release a seeded blob (by hex hash): remove its protecting tag so the
+    /// store's periodic GC deletes it. Idempotent.
+    pub async fn release_hex(&self, hash_hex: &str) -> Result<()> {
+        let hash = Hash::from_str(hash_hex).context("parse hash")?;
+        self.store
+            .tags()
+            .delete(tag_name(&hash))
+            .await
+            .context("delete tag")?;
+        Ok(())
+    }
+}
+
+fn tag_name(hash: &Hash) -> String {
+    format!("seed/{hash}")
 }
 
 /// Ask a relay (HTTP) to seed `sender_ticket`, returning the relay's provider
