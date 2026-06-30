@@ -1,0 +1,29 @@
+# Third-party licenses
+
+Arvolo is built on open-source software. This file lists every third-party
+crate compiled into the Arvolo binaries and the full text of its license, as
+required when distributing the binaries (under either the AGPL-3.0 or the
+commercial license).
+
+Generated with [`cargo-about`](https://github.com/EmbarkStudios/cargo-about):
+`cargo about generate about.hbs > THIRD-PARTY-LICENSES.md`
+
+## Overview
+
+{{#each overview}}
+- {{{name}}} ({{count}})
+{{/each}}
+
+---
+
+{{#each licenses}}
+## {{{name}}}
+
+Used by {{#each used_by}}`{{{crate.name}}} {{crate.version}}`{{#unless @last}}, {{/unless}}{{/each}}.
+
+```
+{{{text}}}
+```
+
+---
+{{/each}}

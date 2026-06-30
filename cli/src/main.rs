@@ -16,6 +16,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 use anyhow::{Context, Result};
+use arvolo_core::backfill::{fetch_from_providers, parse_relay_addr, ProviderTicket};
 use arvolo_core::crypto::{open, seal, Identity, PublicId, Sealed};
 use arvolo_core::offline::OfflineTicket;
 use arvolo_core::transfer::{fetch_to_path, Provider, RelayChoice};
@@ -35,8 +36,14 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Serve a file P2P; prints a ticket and stays running until Ctrl-C.
-    Send { path: PathBuf },
-    /// Fetch a file from a P2P ticket.
+    Send {
+        path: PathBuf,
+        /// Also seed the file to a relay so the recipient can finish even if you
+        /// go offline (backfill). Relay base URL, e.g. http://relay:8787
+        #[arg(long)]
+        seed_relay: Option<String>,
+    },
+    /// Fetch a file from a P2P ticket (or a multi-provider `arvp…` ticket).
     Recv {
         ticket: String,
         #[arg(short, long)]
@@ -77,7 +84,7 @@ async fn main() -> Result<()> {
         .init();
 
     match Cli::parse().command {
-        Command::Send { path } => send(path).await,
+        Command::Send { path, seed_relay } => send(path, seed_relay).await,
         Command::Recv { ticket, out } => recv(ticket, out).await,
         Command::Id => id(),
         Command::SendOffline {
@@ -127,16 +134,43 @@ fn decode_id(s: &str) -> Result<PublicId> {
 
 // ---- P2P ------------------------------------------------------------------
 
-async fn send(path: PathBuf) -> Result<()> {
+async fn send(path: PathBuf, seed_relay: Option<String>) -> Result<()> {
     anyhow::ensure!(path.is_file(), "{} is not a file", path.display());
     let provider = Provider::from_path(&path).await.context("start provider")?;
     eprintln!("Connecting to relay…");
     let ticket = provider.ticket_online().await;
 
-    println!("\nFile ready to send: {}", path.display());
-    println!("On the other device run:\n");
-    println!("    arvolo recv {ticket}\n");
-    println!("Keep this running until the transfer completes. Ctrl-C to stop.");
+    match seed_relay {
+        None => {
+            println!("\nFile ready to send: {}", path.display());
+            println!("On the other device run:\n");
+            println!("    arvolo recv {ticket}\n");
+            println!("Keep this running until the transfer completes. Ctrl-C to stop.");
+        }
+        Some(url) => {
+            let url = url.trim_end_matches('/');
+            eprintln!("Seeding to relay (so the recipient can finish even if you go offline)…");
+            let relay_enc = reqwest::Client::new()
+                .post(format!("{url}/v1/seed"))
+                .body(ticket.to_string())
+                .send()
+                .await
+                .context("seed request")?
+                .error_for_status()
+                .context("relay rejected seed")?
+                .text()
+                .await
+                .context("read relay address")?;
+            let relay_addr = parse_relay_addr(relay_enc.trim()).context("relay address")?;
+            let pt = ProviderTicket {
+                hash: provider.hash(),
+                providers: vec![ticket.addr().clone(), relay_addr],
+            };
+            println!("\nSeeded to relay ✓  The recipient can fetch from you OR the relay:\n");
+            println!("    arvolo recv {}\n", pt.encode()?);
+            println!("Stay online for fast P2P, or close this — the relay can still deliver. Ctrl-C to stop.");
+        }
+    }
 
     tokio::signal::ctrl_c().await.ok();
     provider.shutdown().await;
@@ -144,6 +178,18 @@ async fn send(path: PathBuf) -> Result<()> {
 }
 
 async fn recv(ticket: String, out: Option<PathBuf>) -> Result<()> {
+    // Multi-provider ticket (P2P + relay backfill).
+    if ProviderTicket::looks_like(&ticket) {
+        let pt = ProviderTicket::decode(&ticket).context("invalid provider ticket")?;
+        let out = out.unwrap_or_else(|| default_out(&pt.hash.to_string()));
+        eprintln!("Fetching (P2P, relay fallback)…");
+        fetch_from_providers(&pt, &out, RelayChoice::from_env())
+            .await
+            .context("fetch")?;
+        println!("Saved to {}", out.display());
+        return Ok(());
+    }
+
     let ticket = arvolo_core::reexport::BlobTicket::from_str(ticket.trim())
         .map_err(|e| anyhow::anyhow!("invalid ticket: {e}"))?;
     let out = out.unwrap_or_else(|| default_out(&ticket.hash().to_string()));

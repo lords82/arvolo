@@ -6,12 +6,13 @@
 //! (re-fetching a blob already present transfers nothing); relay fallback comes
 //! from iroh's addressing (a ticket carrying only a relay URL routes via relay).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use iroh::{protocol::Router, Endpoint, EndpointAddr, RelayMode};
 use iroh_blobs::{
-    get::Stats, store::mem::MemStore, ticket::BlobTicket, BlobFormat, BlobsProtocol, Hash,
+    api::Store, get::Stats, store::fs::FsStore, store::mem::MemStore, ticket::BlobTicket,
+    BlobFormat, BlobsProtocol, Hash,
 };
 
 use crate::node::{generate_secret_key, local_addr_of};
@@ -91,11 +92,7 @@ impl Provider {
 /// Fetch the blob in `ticket` into `store` over `endpoint`, returning transfer
 /// [`Stats`]. Re-fetching a blob already present in `store` transfers nothing
 /// (this is how resume works: a partially-filled store continues where it left off).
-pub async fn fetch_into(
-    store: &MemStore,
-    endpoint: &Endpoint,
-    ticket: &BlobTicket,
-) -> Result<Stats> {
+pub async fn fetch_into(store: &Store, endpoint: &Endpoint, ticket: &BlobTicket) -> Result<Stats> {
     let conn = endpoint
         .connect(ticket.addr().clone(), iroh_blobs::ALPN)
         .await
@@ -108,7 +105,7 @@ pub async fn fetch_into(
 }
 
 /// Export a complete blob from `store` to `out`.
-pub async fn export(store: &MemStore, hash: Hash, out: &Path) -> Result<()> {
+pub async fn export(store: &Store, hash: Hash, out: &Path) -> Result<()> {
     store
         .blobs()
         .export(hash, out)
@@ -121,11 +118,31 @@ pub async fn export(store: &MemStore, hash: Hash, out: &Path) -> Result<()> {
 /// return its hash, using the given relay choice for NAT traversal.
 pub async fn fetch_to_path(ticket: &BlobTicket, out: &Path, relay: RelayChoice) -> Result<Hash> {
     let endpoint = bind_endpoint(relay).await?;
-    let store = MemStore::new();
+    // Persistent store keyed by hash: if a previous attempt was interrupted, the
+    // partial data is still here and the fetch resumes from where it left off.
+    let store_dir = recv_store_dir(&ticket.hash());
+    std::fs::create_dir_all(&store_dir).ok();
+    let store = FsStore::load(&store_dir)
+        .await
+        .map_err(|e| anyhow!("open resume store: {e}"))?;
+
     fetch_into(&store, &endpoint, ticket).await?;
     export(&store, ticket.hash(), out).await?;
+
     endpoint.close().await;
+    drop(store);
+    // Transfer complete: drop the resume cache.
+    let _ = std::fs::remove_dir_all(&store_dir);
     Ok(ticket.hash())
+}
+
+/// Directory holding the resumable receive store for a given blob hash.
+/// Override the base with `ARVOLO_CACHE`.
+pub(crate) fn recv_store_dir(hash: &Hash) -> PathBuf {
+    let base = std::env::var("ARVOLO_CACHE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| std::env::temp_dir().join("arvolo-recv"));
+    base.join(hash.to_string())
 }
 
 /// Which iroh relays to use for NAT traversal / fallback. The relay only ever
