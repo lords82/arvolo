@@ -60,7 +60,9 @@ impl BlobNode {
         let router = Router::builder(endpoint.clone())
             .accept(iroh_blobs::ALPN, blobs)
             .spawn();
-        endpoint.online().await;
+        // Wait for a dialable address (relay home + reflexive), but never block
+        // startup forever: on a server with no peers `online()` may stay pending.
+        let _ = tokio::time::timeout(Duration::from_secs(10), endpoint.online()).await;
         Ok(Self {
             endpoint,
             store,
