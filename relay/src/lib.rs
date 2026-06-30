@@ -124,6 +124,11 @@ impl Mailbox {
                 expires_at    INTEGER NOT NULL,
                 max_downloads INTEGER NOT NULL,
                 downloads     INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS seeded (
+                token       TEXT PRIMARY KEY,
+                hash        TEXT NOT NULL,
+                expires_at  INTEGER NOT NULL
             );",
         )
         .map_err(backend)?;
@@ -246,6 +251,65 @@ impl Mailbox {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    // ---- seeded-blob lifecycle (backfill) ---------------------------------
+
+    /// Record a seeded blob with a one-time release token and expiry.
+    pub fn record_seed(
+        &self,
+        token: &str,
+        hash_hex: &str,
+        expires_at: u64,
+    ) -> Result<(), MailboxError> {
+        self.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT OR REPLACE INTO seeded (token, hash, expires_at) VALUES (?1, ?2, ?3)",
+                params![token, hash_hex, expires_at as i64],
+            )
+            .map_err(backend)?;
+        Ok(())
+    }
+
+    /// Look up the blob hash for a release token.
+    pub fn seed_hash_by_token(&self, token: &str) -> Option<String> {
+        self.conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT hash FROM seeded WHERE token = ?1",
+                params![token],
+                |r| r.get::<_, String>(0),
+            )
+            .ok()
+    }
+
+    /// Forget a seeded-blob record (after release).
+    pub fn delete_seed(&self, token: &str) -> Result<(), MailboxError> {
+        self.conn
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM seeded WHERE token = ?1", params![token])
+            .map_err(backend)?;
+        Ok(())
+    }
+
+    /// Tokens+hashes of seeded blobs whose TTL has passed.
+    pub fn expired_seeds(&self, now: u64) -> Vec<(String, String)> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = match conn.prepare("SELECT token, hash FROM seeded WHERE expires_at <= ?1") {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let rows = stmt.query_map(params![now as i64], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        });
+        match rows {
+            Ok(it) => it.filter_map(Result::ok).collect(),
+            Err(_) => Vec::new(),
+        }
+    }
 }
 
 /// Current unix time in seconds.
@@ -284,6 +348,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/deposit", post(deposit_handler))
         .route("/v1/fetch/{claim}", get(fetch_handler))
         .route("/v1/seed", post(seed_handler))
+        .route("/v1/release/{token}", post(release_handler))
         .route("/healthz", get(|| async { "ok" }))
         .with_state(state)
 }
@@ -351,9 +416,42 @@ async fn seed_handler(
     State(state): State<AppState>,
     body: String,
 ) -> Result<String, (StatusCode, String)> {
-    state
+    let (addr, hash_hex) = state
         .blobs
         .seed_from_ticket(body.trim())
         .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("seed failed: {e}")))
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("seed failed: {e}")))?;
+    let token = random_claim();
+    state
+        .mailbox
+        .record_seed(&token, &hash_hex, now_unix().saturating_add(seed_ttl()))
+        .map_err(|e| (status_for(&e), e.to_string()))?;
+    // addr (for dialing) + token (for release) on two lines.
+    Ok(format!("{addr}\n{token}"))
+}
+
+/// TTL (seconds) for seeded blobs not yet released. Default 24h.
+fn seed_ttl() -> u64 {
+    std::env::var("ARVOLO_SEED_TTL")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(24 * 3600)
+}
+
+/// Delete-after-delivery: the receiver calls this once it has the file, so the
+/// relay drops the seeded blob immediately (TTL is only a backstop). Idempotent.
+async fn release_handler(
+    State(state): State<AppState>,
+    AxumPath(token): AxumPath<String>,
+) -> Result<String, (StatusCode, String)> {
+    if let Some(hash_hex) = state.mailbox.seed_hash_by_token(&token) {
+        state.blobs.release_hex(&hash_hex).await.map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("release failed: {e}"),
+            )
+        })?;
+        let _ = state.mailbox.delete_seed(&token);
+    }
+    Ok("ok".into())
 }
