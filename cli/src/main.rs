@@ -13,13 +13,13 @@
 //! with HPKE so the relay only ever sees ciphertext.
 
 use std::path::PathBuf;
-use std::str::FromStr;
 
 use anyhow::{Context, Result};
-use arvolo_core::backfill::{fetch_from_providers, parse_relay_addr, ProviderTicket, RelayRelease};
+use arvolo_core::backfill::RelayRelease;
+use arvolo_core::chunked::{decode_addr, ChunkReceiver, ChunkSender, ChunkTicket};
 use arvolo_core::crypto::{open, seal, Identity, PublicId, Sealed};
 use arvolo_core::offline::OfflineTicket;
-use arvolo_core::transfer::{fetch_to_path, Provider, RelayChoice};
+use arvolo_core::transfer::RelayChoice;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -43,7 +43,7 @@ enum Command {
         #[arg(long)]
         seed_relay: Option<String>,
     },
-    /// Fetch a file from a P2P ticket (or a multi-provider `arvp…` ticket).
+    /// Fetch a file from a chunked ticket (`arvc…`); resumes if interrupted.
     Recv {
         ticket: String,
         #[arg(short, long)]
@@ -136,85 +136,106 @@ fn decode_id(s: &str) -> Result<PublicId> {
 
 async fn send(path: PathBuf, seed_relay: Option<String>) -> Result<()> {
     anyhow::ensure!(path.is_file(), "{} is not a file", path.display());
-    let provider = Provider::from_path(&path).await.context("start provider")?;
-    eprintln!("Connecting to relay…");
-    let ticket = provider.ticket_online().await;
+    eprintln!("Splitting and serving chunks…");
+    let sender = ChunkSender::serve(&path, RelayChoice::from_env())
+        .await
+        .context("start sender")?;
 
-    match seed_relay {
-        None => {
-            println!("\nFile ready to send: {}", path.display());
-            println!("On the other device run:\n");
-            println!("    arvolo recv {ticket}\n");
-            println!("Keep this running until the transfer completes. Ctrl-C to stop.");
-        }
-        Some(url) => {
-            let url = url.trim_end_matches('/');
-            eprintln!("Seeding to relay (so the recipient can finish even if you go offline)…");
-            let resp = reqwest::Client::new()
-                .post(format!("{url}/v1/seed"))
-                .body(ticket.to_string())
-                .send()
-                .await
-                .context("seed request")?
-                .error_for_status()
-                .context("relay rejected seed")?
-                .text()
-                .await
-                .context("read seed response")?;
-            let mut lines = resp.lines();
-            let addr_enc = lines.next().context("missing relay address")?;
-            let token = lines.next().context("missing release token")?;
-            let relay_addr = parse_relay_addr(addr_enc.trim()).context("relay address")?;
-            let pt = ProviderTicket {
-                hash: provider.hash(),
-                providers: vec![ticket.addr().clone(), relay_addr],
-                relay: Some(RelayRelease {
-                    http: url.to_string(),
-                    token: token.trim().to_string(),
-                }),
-            };
-            println!("\nSeeded to relay ✓  The recipient can fetch from you OR the relay:\n");
-            println!("    arvolo recv {}\n", pt.encode()?);
-            println!("Stay online for fast P2P, or close this — the relay can still deliver. Ctrl-C to stop.");
-        }
+    let mut providers = vec![sender.addr()];
+    let mut relay = None;
+    if let Some(url) = seed_relay {
+        let url = url.trim_end_matches('/').to_string();
+        eprintln!("Seeding chunks to relay (so the recipient can finish even if you go offline)…");
+        let resp = reqwest::Client::new()
+            .post(format!("{url}/v1/seed"))
+            .body(sender.seed_request().encode()?)
+            .send()
+            .await
+            .context("seed request")?
+            .error_for_status()
+            .context("relay rejected seed")?
+            .text()
+            .await
+            .context("read seed response")?;
+        let mut lines = resp.lines();
+        let addr_enc = lines.next().context("missing relay address")?;
+        let token = lines.next().context("missing release token")?;
+        providers.push(decode_addr(addr_enc.trim()).context("relay address")?);
+        relay = Some(RelayRelease {
+            http: url,
+            token: token.trim().to_string(),
+        });
     }
 
+    let ticket = ChunkTicket {
+        total_size: sender.total_size(),
+        chunk_size: sender.chunk_size(),
+        chunks: sender.chunks().to_vec(),
+        providers,
+        relay,
+    };
+    if ticket.relay.is_some() {
+        println!("\nSeeded to relay ✓  The recipient can fetch from you OR the relay:\n");
+    } else {
+        println!("\nFile ready to send ({} chunks):\n", ticket.chunks.len());
+    }
+    println!("    arvolo recv {}\n", ticket.encode()?);
+    println!(
+        "Stay online for fast P2P, or close this if seeded — the relay delivers. Ctrl-C to stop."
+    );
+
     tokio::signal::ctrl_c().await.ok();
-    provider.shutdown().await;
+    sender.shutdown().await;
     Ok(())
 }
 
 async fn recv(ticket: String, out: Option<PathBuf>) -> Result<()> {
-    // Multi-provider ticket (P2P + relay backfill).
-    if ProviderTicket::looks_like(&ticket) {
-        let pt = ProviderTicket::decode(&ticket).context("invalid provider ticket")?;
-        let out = out.unwrap_or_else(|| default_out(&pt.hash.to_string()));
-        eprintln!("Fetching (P2P, relay fallback)…");
-        fetch_from_providers(&pt, &out, RelayChoice::from_env())
+    use std::io::{Seek, SeekFrom, Write};
+
+    let t = ChunkTicket::decode(&ticket).context("invalid ticket")?;
+    let out = out.unwrap_or_else(|| {
+        default_out(&t.chunks.first().map(|h| h.to_string()).unwrap_or_default())
+    });
+
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&out)
+        .with_context(|| format!("open {}", out.display()))?;
+    let existing = file.metadata()?.len();
+    let start = ((existing / t.chunk_size as u64) as usize).min(t.chunks.len());
+    if start > 0 {
+        eprintln!("Resuming from chunk {start}/{}…", t.chunks.len());
+    } else {
+        eprintln!("Fetching {} chunks (P2P, relay fallback)…", t.chunks.len());
+    }
+
+    let receiver = ChunkReceiver::open(RelayChoice::from_env()).await?;
+    let client = reqwest::Client::new();
+    for i in start..t.chunks.len() {
+        let bytes = receiver
+            .fetch_chunk(&t.providers, t.chunks[i])
             .await
-            .context("fetch")?;
-        // Delete-after-delivery: tell the relay we're done so it drops its copy.
-        if let Some(r) = &pt.relay {
-            let _ = reqwest::Client::new()
+            .with_context(|| format!("fetch chunk {}", i + 1))?;
+        file.seek(SeekFrom::Start(i as u64 * t.chunk_size as u64))?;
+        file.write_all(&bytes)?;
+        // Incremental cleanup: free this chunk on the relay now that we have it.
+        if let Some(r) = &t.relay {
+            let _ = client
                 .post(format!(
-                    "{}/v1/release/{}",
+                    "{}/v1/release/{}/{}",
                     r.http.trim_end_matches('/'),
-                    r.token
+                    r.token,
+                    t.chunks[i]
                 ))
                 .send()
                 .await;
         }
-        println!("Saved to {}", out.display());
-        return Ok(());
     }
-
-    let ticket = arvolo_core::reexport::BlobTicket::from_str(ticket.trim())
-        .map_err(|e| anyhow::anyhow!("invalid ticket: {e}"))?;
-    let out = out.unwrap_or_else(|| default_out(&ticket.hash().to_string()));
-    eprintln!("Fetching…");
-    fetch_to_path(&ticket, &out, RelayChoice::from_env())
-        .await
-        .context("fetch")?;
+    file.set_len(t.total_size)?;
+    receiver.close().await;
     println!("Saved to {}", out.display());
     Ok(())
 }
