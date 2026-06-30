@@ -21,9 +21,12 @@ RUN mkdir -p core/src cli/src relay/src \
  && cargo build --release --locked -p arvolo-relay \
  && rm -rf core/src cli/src relay/src
 
-# 2) Build the real binary (deps are cached above).
+# 2) Build the real binary (deps are cached above). Touch the workspace sources
+# so cargo recompiles our crates instead of reusing the dummy dep-cache build
+# (Docker COPY mtimes can otherwise make cargo think they're unchanged).
 COPY . .
-RUN cargo build --release --locked -p arvolo-relay
+RUN find core cli relay -name "*.rs" -exec touch {} + \
+ && cargo build --release --locked -p arvolo-relay
 
 FROM debian:trixie-slim
 RUN apt-get update \
