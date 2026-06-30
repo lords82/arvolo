@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use arvolo_core::backfill::BlobNode;
 use axum::{
     body::Bytes,
     extract::{Path as AxumPath, Query, State},
@@ -25,6 +26,14 @@ use axum::{
 };
 use rusqlite::{params, Connection};
 use serde::Deserialize;
+
+/// Shared HTTP state: the zero-knowledge mailbox plus the blob-store node that
+/// backs seed-to-relay backfill.
+#[derive(Clone)]
+pub struct AppState {
+    pub mailbox: Arc<Mailbox>,
+    pub blobs: Arc<BlobNode>,
+}
 
 /// Maximum blob size accepted by the relay (server policy / abuse guard).
 pub const MAX_BLOB_BYTES: usize = 2 * 1024 * 1024 * 1024; // 2 GiB
@@ -269,13 +278,14 @@ fn default_max() -> u32 {
     1
 }
 
-/// Build the relay HTTP router over a shared [`Mailbox`].
-pub fn router(mailbox: Arc<Mailbox>) -> Router {
+/// Build the relay HTTP router over the shared [`AppState`].
+pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/v1/deposit", post(deposit_handler))
         .route("/v1/fetch/{claim}", get(fetch_handler))
+        .route("/v1/seed", post(seed_handler))
         .route("/healthz", get(|| async { "ok" }))
-        .with_state(mailbox)
+        .with_state(state)
 }
 
 fn status_for(e: &MailboxError) -> StatusCode {
@@ -288,11 +298,12 @@ fn status_for(e: &MailboxError) -> StatusCode {
 }
 
 async fn deposit_handler(
-    State(mb): State<Arc<Mailbox>>,
+    State(state): State<AppState>,
     Query(q): Query<DepositQuery>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<String, (StatusCode, String)> {
+    let mb = &state.mailbox;
     let encapped_key = headers
         .get(ENCAPPED_KEY_HEADER)
         .and_then(|v| v.to_str().ok())
@@ -317,10 +328,10 @@ async fn deposit_handler(
 }
 
 async fn fetch_handler(
-    State(mb): State<Arc<Mailbox>>,
+    State(state): State<AppState>,
     AxumPath(claim): AxumPath<String>,
 ) -> Result<Response, (StatusCode, String)> {
-    match mb.fetch(&claim, now_unix()) {
+    match state.mailbox.fetch(&claim, now_unix()) {
         Ok(c) => {
             let mut resp = c.ciphertext.into_response();
             let encoded = data_encoding::BASE32_NOPAD.encode(&c.encapped_key);
@@ -331,4 +342,18 @@ async fn fetch_handler(
         }
         Err(e) => Err((status_for(&e), e.to_string())),
     }
+}
+
+/// Seed (backfill) a P2P blob into the relay's store. Body = the sender's blob
+/// ticket; returns the relay's provider address (base32) so the sender can
+/// advertise the relay as a fallback provider.
+async fn seed_handler(
+    State(state): State<AppState>,
+    body: String,
+) -> Result<String, (StatusCode, String)> {
+    state
+        .blobs
+        .seed_from_ticket(body.trim())
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("seed failed: {e}")))
 }

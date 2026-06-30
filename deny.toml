@@ -1,0 +1,73 @@
+# cargo-deny configuration — guards the dependency tree against licenses that
+# would break Arvolo's dual-license model (AGPL-3.0 open core + a commercial
+# license with no copyleft obligations). See LICENSING.md.
+#
+# Run locally:  cargo deny check
+# CI runs the same on every PR.
+
+[graph]
+# Check the targets we actually ship for. A license that only appears on a
+# target we never build (e.g. UEFI-only r-efi) shouldn't fail the build.
+targets = [
+    { triple = "x86_64-unknown-linux-gnu" },
+    { triple = "aarch64-apple-darwin" },
+    { triple = "x86_64-apple-darwin" },
+    { triple = "x86_64-pc-windows-msvc" },
+]
+all-features = true
+
+[licenses]
+# SPDX expressions we accept. For dual-licensed crates ("Apache-2.0 OR GPL-2.0")
+# cargo-deny picks an allowed branch, so listing the permissive licenses is
+# enough — it will never select GPL when Apache/MIT is also offered.
+allow = [
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-1-Clause",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "0BSD",
+    "BSL-1.0",
+    "CC0-1.0",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "CDLA-Permissive-2.0",
+    "Unlicense",
+    # Weak / file-level copyleft. Compatible with both AGPL distribution and a
+    # proprietary larger work, as long as we don't modify the covered files.
+    # Only attohttpc (via iroh's UPnP/igd-next) is currently MPL.
+    "MPL-2.0",
+    # Our own crates.
+    "AGPL-3.0",
+    "AGPL-3.0-only",
+]
+# Strong copyleft (GPL/LGPL/AGPL/SSPL/EUPL/OSL/EPL/CDDL...) is intentionally NOT
+# listed. If one ever enters the tree as the *only* option, the build fails and
+# we review it before it can ship.
+confidence-threshold = 0.9
+
+[bans]
+# Quality-of-life, not licensing: warn on duplicate versions but don't fail.
+multiple-versions = "warn"
+wildcards = "allow"
+
+[advisories]
+# Security advisories. In CI this runs as a separate, non-blocking step
+# (`cargo deny check advisories`) because the current findings are all
+# transitive through iroh and not directly actionable by us. Track them and
+# revisit when iroh bumps its dependencies:
+#   RUSTSEC-2026-0118 / -0119  hickory DNS resolver DoS (NSEC3 loop, O(n²) names)
+#   RUSTSEC-2025-0134          rustls-pemfile unmaintained
+#   RUSTSEC-2024-0436          paste unmaintained
+#   RUSTSEC-2024-0370          proc-macro-error unmaintained
+# The license/bans/sources checks ARE a hard gate (see CI).
+yanked = "warn"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

@@ -7,7 +7,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use arvolo_relay::{now_unix, router, Mailbox};
+use arvolo_core::backfill::BlobNode;
+use arvolo_core::transfer::RelayChoice;
+use arvolo_relay::{now_unix, router, AppState, Mailbox};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -20,9 +22,23 @@ async fn main() -> Result<()> {
     let addr = std::env::var("ARVOLO_RELAY_ADDR").unwrap_or_else(|_| "0.0.0.0:8787".to_string());
     let db = std::env::var("ARVOLO_RELAY_DB").unwrap_or_else(|_| "arvolo-relay.db".to_string());
     let blobs = std::env::var("ARVOLO_RELAY_BLOBS").unwrap_or_else(|_| "arvolo-blobs".to_string());
+    let blobstore =
+        std::env::var("ARVOLO_RELAY_BLOBSTORE").unwrap_or_else(|_| "arvolo-blobstore".to_string());
     let mailbox =
         Arc::new(Mailbox::open(&db, &blobs).map_err(|e| anyhow::anyhow!("open mailbox: {e}"))?);
     tracing::info!(%db, %blobs, "mailbox storage ready");
+
+    // Blob-store node for seed-to-relay backfill (durable P2P delivery).
+    let blob_node = Arc::new(
+        BlobNode::spawn(std::path::Path::new(&blobstore), RelayChoice::from_env())
+            .await
+            .map_err(|e| anyhow::anyhow!("start blob node: {e}"))?,
+    );
+    tracing::info!(%blobstore, "blob-store node ready (backfill)");
+    let state = AppState {
+        mailbox: mailbox.clone(),
+        blobs: blob_node,
+    };
 
     // Background reaper: delete expired blobs every minute.
     {
@@ -42,6 +58,6 @@ async fn main() -> Result<()> {
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("arvolo relay listening on {addr}");
-    axum::serve(listener, router(mailbox)).await?;
+    axum::serve(listener, router(state)).await?;
     Ok(())
 }

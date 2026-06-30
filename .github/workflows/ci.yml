@@ -38,3 +38,22 @@ jobs:
         with:
           components: rustfmt
       - run: cargo fmt --all --check
+
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Hard gate: licenses must stay compatible with the AGPL + commercial
+      # dual-license model, sources must be crates.io, no banned crates.
+      - name: License / sources / bans
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses bans sources
+      # Informational: surface security advisories without blocking the build.
+      # Current findings are transitive through iroh (see deny.toml).
+      - name: Security advisories (non-blocking)
+        uses: EmbarkStudios/cargo-deny-action@v2
+        continue-on-error: true
+        with:
+          command: check advisories
