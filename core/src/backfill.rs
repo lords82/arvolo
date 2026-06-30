@@ -85,15 +85,18 @@ impl BlobNode {
     /// address (base32) for advertising the relay as a provider.
     pub async fn seed_chunks(&self, sender: EndpointAddr, chunks: &[Hash]) -> Result<String> {
         for hash in chunks {
-            let bt = BlobTicket::new(sender.clone(), *hash, BlobFormat::Raw);
-            fetch_into(&self.store, &self.endpoint, &bt)
-                .await
-                .with_context(|| format!("seed chunk {hash}"))?;
+            // Tag BEFORE fetching so the blob is protected from the periodic GC
+            // while it downloads. Otherwise a slow multi-chunk seed races the GC:
+            // freshly-downloaded-but-not-yet-tagged blobs get collected mid-seed.
             self.store
                 .tags()
                 .set(tag_name(hash), *hash)
                 .await
                 .context("tag chunk")?;
+            let bt = BlobTicket::new(sender.clone(), *hash, BlobFormat::Raw);
+            fetch_into(&self.store, &self.endpoint, &bt)
+                .await
+                .with_context(|| format!("seed chunk {hash}"))?;
         }
         encode_ticket(&self.addr())
     }

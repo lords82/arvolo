@@ -251,18 +251,29 @@ async fn recv(ticket: String, out: Option<PathBuf>) -> Result<()> {
     let receiver = ChunkReceiver::open(RelayChoice::from_env()).await?;
     let client = reqwest::Client::new();
 
-    // Control channel to the sender; the sender advertises on-relay chunks here.
+    // Control channel to the sender; the sender advertises on-relay chunks here,
+    // and our acks let it detect a drop and backfill only the undelivered tail.
+    // The first connection to the sender pays the full cold-start cost (relay
+    // handshake + hole punching), which can exceed a single timeout — so retry a
+    // few times; each attempt warms the path for the next.
     let on_relay: Arc<Mutex<HashSet<u32>>> = Arc::new(Mutex::new(HashSet::new()));
-    let mut control = match &sender_addr {
-        Some(s) => tokio::time::timeout(
-            std::time::Duration::from_secs(15),
-            receiver.open_control(s, on_relay.clone()),
-        )
-        .await
-        .ok()
-        .flatten(),
-        None => None,
-    };
+    let mut control = None;
+    if let Some(s) = &sender_addr {
+        for attempt in 1..=3 {
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(15),
+                receiver.open_control(s, on_relay.clone()),
+            )
+            .await
+            {
+                Ok(Some(c)) => {
+                    control = Some(c);
+                    break;
+                }
+                _ => eprintln!("control channel attempt {attempt}/3 failed; retrying…"),
+            }
+        }
+    }
     eprintln!(
         "control channel to sender: {}",
         if control.is_some() {

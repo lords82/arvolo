@@ -93,9 +93,16 @@ struct CtrlHandler {
 
 impl ProtocolHandler for CtrlHandler {
     async fn accept(&self, conn: Connection) -> std::result::Result<(), AcceptError> {
+        let dbg = std::env::var("ARVOLO_DEBUG").is_ok();
         let Ok((mut send, mut recv)) = conn.accept_bi().await else {
+            if dbg {
+                eprintln!("[ctrl] accept_bi failed");
+            }
             return Ok(());
         };
+        if dbg {
+            eprintln!("[ctrl] receiver connected");
+        }
         // On connect, tell the receiver which chunks are already on the relay.
         let snapshot: Vec<u32> = self.on_relay.lock().unwrap().iter().copied().collect();
         if !snapshot.is_empty() {
@@ -104,7 +111,7 @@ impl ProtocolHandler for CtrlHandler {
         let _ = send.finish();
         // Read Have acks (and Pings) until the receiver disconnects or goes
         // silent for CTRL_IDLE_SECS (abrupt crash).
-        loop {
+        let reason = loop {
             match tokio::time::timeout(
                 std::time::Duration::from_secs(CTRL_IDLE_SECS),
                 read_msg(&mut recv),
@@ -114,16 +121,24 @@ impl ProtocolHandler for CtrlHandler {
                 Ok(Some(CtrlMsg::Have(idx))) => {
                     self.delivered.lock().unwrap().insert(idx);
                 }
-                Ok(Some(_)) => {}  // Ping/Hello: keepalive
-                Ok(None) => break, // closed cleanly
-                Err(_) => break,   // idle: receiver gone
+                Ok(Some(_)) => {}        // Ping/Hello: keepalive
+                Ok(None) => break "eof", // closed cleanly
+                Err(_) => break "idle",  // idle: receiver gone
             }
-        }
+        };
         // Receiver gone: report the still-undelivered chunk indices.
         let delivered = self.delivered.lock().unwrap();
         let undelivered: Vec<usize> = (0..self.total)
             .filter(|i| !delivered.contains(&(*i as u32)))
             .collect();
+        if dbg {
+            eprintln!(
+                "[ctrl] receiver gone ({reason}); delivered={} undelivered={}",
+                delivered.len(),
+                undelivered.len()
+            );
+        }
+        drop(delivered);
         let _ = self.gone_tx.send(undelivered);
         Ok(())
     }
