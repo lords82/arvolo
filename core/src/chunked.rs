@@ -1,12 +1,18 @@
-//! Chunked transfer with incremental relay cleanup.
+//! Chunked transfer with lazy tail-backfill and anti-double-send.
 //!
-//! A file is split into fixed-size chunks, each an independent content-addressed
-//! blob. The sender serves all chunks (and can seed them to a relay). The
-//! receiver fetches chunks one by one — from the sender or, as a fallback, the
-//! relay — and **releases each chunk on the relay as soon as it has it**, so the
-//! relay frees storage *during* the download instead of only at the end.
+//! A file is split into fixed-size content-addressed chunks. The sender serves
+//! them P2P. A bidirectional **control channel** lets the receiver ack chunks
+//! it has (`Have`) and lets the sender tell the receiver which chunks it pushed
+//! to a relay (`RelayHas`).
 //!
-//! Resume is driven by the output file length (whole chunks already written).
+//! Orchestration (driven by the CLI):
+//! - Receiver pulls chunks directly from the sender (P2P).
+//! - If the receiver drops, the sender backfills **only the undelivered chunks**
+//!   to the relay (the CLI does the HTTP call when [`ChunkSender::receiver_gone`]
+//!   fires) and calls [`ChunkSender::mark_on_relay`].
+//! - When the receiver returns, the sender advertises the on-relay chunks; the
+//!   receiver pulls **those from the relay** and the rest from the sender
+//!   (anti-double-send), and releases each relay chunk as it gets it.
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -14,76 +20,284 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Context, Result};
 use iroh::{
-    endpoint::{Connection, SendStream},
+    endpoint::{Connection, RecvStream, SendStream},
     protocol::{AcceptError, ProtocolHandler, Router},
     Endpoint, EndpointAddr,
 };
 use iroh_blobs::{store::mem::MemStore, ticket::BlobTicket, BlobFormat, BlobsProtocol, Hash};
 use serde::{Deserialize, Serialize};
+use tokio::sync::{mpsc, Mutex as AsyncMutex};
 
 use crate::backfill::RelayRelease;
-use crate::node::{decode_ticket, encode_ticket};
+use crate::node::{decode_ticket, encode_ticket, local_addr_of};
 use crate::transfer::{bind_endpoint, fetch_into, RelayChoice};
 
-/// Chunk size: 16 MiB. Large enough to keep manifests small, small enough that
-/// incremental relay cleanup is meaningful for big files.
+/// Chunk size: 16 MiB.
 pub const CHUNK_SIZE: u32 = 16 * 1024 * 1024;
 
-/// Control-channel ALPN: the receiver tells the sender which chunks it has, so
-/// the sender knows what's been delivered (for lazy/tail backfill).
-pub const CTRL_ALPN: &[u8] = b"arvolo/ctrl/1";
+/// Control-channel ALPN.
+pub const CTRL_ALPN: &[u8] = b"arvolo/ctrl/2";
 
-/// Sender-side control handler: records the chunk indices the receiver acks.
+// ---- control messages -----------------------------------------------------
+
+#[derive(Debug, Serialize, Deserialize)]
+enum CtrlMsg {
+    /// Receiver opens the channel.
+    Hello,
+    /// Receiver has chunk `idx`.
+    Have(u32),
+    /// Sender: these chunk indices are now available on the relay.
+    RelayHas(Vec<u32>),
+}
+
+async fn write_msg(send: &mut SendStream, msg: &CtrlMsg) -> Result<()> {
+    let bytes = postcard::to_allocvec(msg).context("encode ctrl msg")?;
+    let len = bytes.len() as u32;
+    send.write_all(&len.to_le_bytes())
+        .await
+        .map_err(|e| anyhow!("ctrl write len: {e}"))?;
+    send.write_all(&bytes)
+        .await
+        .map_err(|e| anyhow!("ctrl write: {e}"))?;
+    Ok(())
+}
+
+async fn read_msg(recv: &mut RecvStream) -> Option<CtrlMsg> {
+    let mut len = [0u8; 4];
+    recv.read_exact(&mut len).await.ok()?;
+    let len = u32::from_le_bytes(len) as usize;
+    if len > 64 * 1024 {
+        return None;
+    }
+    let mut buf = vec![0u8; len];
+    recv.read_exact(&mut buf).await.ok()?;
+    postcard::from_bytes(&buf).ok()
+}
+
+// ---- sender ---------------------------------------------------------------
+
 #[derive(Debug, Clone)]
 struct CtrlHandler {
+    total: usize,
     delivered: Arc<Mutex<HashSet<u32>>>,
+    on_relay: Arc<Mutex<HashSet<u32>>>,
+    gone_tx: mpsc::UnboundedSender<Vec<usize>>,
 }
 
 impl ProtocolHandler for CtrlHandler {
     async fn accept(&self, conn: Connection) -> std::result::Result<(), AcceptError> {
-        // The receiver opens a uni stream and writes one little-endian u32 chunk
-        // index per chunk it has received.
-        if let Ok(mut recv) = conn.accept_uni().await {
-            let mut buf = [0u8; 4];
-            while recv.read_exact(&mut buf).await.is_ok() {
-                self.delivered
-                    .lock()
-                    .unwrap()
-                    .insert(u32::from_le_bytes(buf));
+        let Ok((mut send, mut recv)) = conn.accept_bi().await else {
+            return Ok(());
+        };
+        // On connect, tell the receiver which chunks are already on the relay.
+        let snapshot: Vec<u32> = self.on_relay.lock().unwrap().iter().copied().collect();
+        if !snapshot.is_empty() {
+            let _ = write_msg(&mut send, &CtrlMsg::RelayHas(snapshot)).await;
+        }
+        let _ = send.finish();
+        // Read Have acks until the receiver disconnects.
+        while let Some(msg) = read_msg(&mut recv).await {
+            if let CtrlMsg::Have(idx) = msg {
+                self.delivered.lock().unwrap().insert(idx);
             }
         }
+        // Receiver gone: report the still-undelivered chunk indices.
+        let delivered = self.delivered.lock().unwrap();
+        let undelivered: Vec<usize> = (0..self.total)
+            .filter(|i| !delivered.contains(&(*i as u32)))
+            .collect();
+        let _ = self.gone_tx.send(undelivered);
         Ok(())
     }
 }
 
-/// The receiver's end of the control channel: acks chunks to the sender.
+/// A running sender: serves every chunk and orchestrates lazy relay backfill.
+pub struct ChunkSender {
+    _router: Router,
+    _store: MemStore,
+    endpoint: Endpoint,
+    addr: EndpointAddr,
+    chunks: Vec<Hash>,
+    total_size: u64,
+    delivered: Arc<Mutex<HashSet<u32>>>,
+    on_relay: Arc<Mutex<HashSet<u32>>>,
+    gone_rx: AsyncMutex<mpsc::UnboundedReceiver<Vec<usize>>>,
+}
+
+impl ChunkSender {
+    pub async fn serve(path: &Path, relay: RelayChoice) -> Result<Self> {
+        let data = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+        let total_size = data.len() as u64;
+        let store = MemStore::new();
+        let mut chunks = Vec::new();
+        for chunk in data.chunks(CHUNK_SIZE as usize) {
+            let tag = store
+                .blobs()
+                .add_bytes(chunk.to_vec())
+                .await
+                .context("add chunk")?;
+            chunks.push(tag.hash);
+        }
+        let blobs = BlobsProtocol::new(&store, None);
+        let use_relay = !matches!(relay, RelayChoice::Disabled);
+        let endpoint = bind_endpoint(relay).await?;
+
+        let delivered = Arc::new(Mutex::new(HashSet::new()));
+        let on_relay = Arc::new(Mutex::new(HashSet::new()));
+        let (gone_tx, gone_rx) = mpsc::unbounded_channel();
+        let handler = CtrlHandler {
+            total: chunks.len(),
+            delivered: delivered.clone(),
+            on_relay: on_relay.clone(),
+            gone_tx,
+        };
+        let router = Router::builder(endpoint.clone())
+            .accept(iroh_blobs::ALPN, blobs)
+            .accept(CTRL_ALPN, handler)
+            .spawn();
+        let addr = if use_relay {
+            endpoint.online().await;
+            endpoint.addr()
+        } else {
+            local_addr_of(&endpoint)
+        };
+        Ok(Self {
+            _router: router,
+            _store: store,
+            endpoint,
+            addr,
+            chunks,
+            total_size,
+            delivered,
+            on_relay,
+            gone_rx: AsyncMutex::new(gone_rx),
+        })
+    }
+
+    pub fn addr(&self) -> EndpointAddr {
+        self.addr.clone()
+    }
+    pub fn chunks(&self) -> &[Hash] {
+        &self.chunks
+    }
+    pub fn total_size(&self) -> u64 {
+        self.total_size
+    }
+    pub fn chunk_size(&self) -> u32 {
+        CHUNK_SIZE
+    }
+    pub fn delivered_count(&self) -> usize {
+        self.delivered.lock().unwrap().len()
+    }
+
+    /// Resolves when a connected receiver disconnects, yielding the chunk
+    /// indices not yet delivered (the tail to backfill). Never fires if no
+    /// receiver has connected.
+    pub async fn receiver_gone(&self) -> Vec<usize> {
+        let mut rx = self.gone_rx.lock().await;
+        rx.recv().await.unwrap_or_default()
+    }
+
+    /// Record that `indices` are now on the relay (advertised to receivers on
+    /// their next control connection).
+    pub fn mark_on_relay(&self, indices: &[usize]) {
+        let mut set = self.on_relay.lock().unwrap();
+        for &i in indices {
+            set.insert(i as u32);
+        }
+    }
+
+    pub async fn shutdown(self) {
+        self.endpoint.close().await;
+    }
+}
+
+// ---- receiver -------------------------------------------------------------
+
+/// The receiver's control channel: acks chunks; learns which are on the relay.
 pub struct Control {
     send: SendStream,
     _conn: Connection,
 }
 
 impl Control {
-    /// Tell the sender we have chunk `idx`.
     pub async fn ack(&mut self, idx: u32) -> Result<()> {
-        self.send
-            .write_all(&idx.to_le_bytes())
-            .await
-            .map_err(|e| anyhow!("ctrl ack: {e}"))
+        write_msg(&mut self.send, &CtrlMsg::Have(idx)).await
     }
-
-    /// Finish acking: send the stream FIN and wait for the sender to drain it
-    /// (so the last acks aren't lost to an abrupt connection close).
     pub async fn finish(mut self) -> Result<()> {
         self.send
             .finish()
             .map_err(|e| anyhow!("ctrl finish: {e}"))?;
-        // The sender reads to EOF then drops the connection; wait for that (the
-        // connection stays open meanwhile, draining the acks). Bounded so we
-        // never hang if the sender lingers.
         let _ = tokio::time::timeout(std::time::Duration::from_secs(5), self._conn.closed()).await;
         Ok(())
     }
 }
+
+/// A receiver endpoint that fetches chunks (with provider fallback).
+pub struct ChunkReceiver {
+    endpoint: Endpoint,
+}
+
+impl ChunkReceiver {
+    pub async fn open(relay: RelayChoice) -> Result<Self> {
+        Ok(Self {
+            endpoint: bind_endpoint(relay).await?,
+        })
+    }
+
+    /// Open the control channel to the sender. RelayHas updates from the sender
+    /// are written into `on_relay`. Returns the ack side, or None if the sender
+    /// is unreachable.
+    pub async fn open_control(
+        &self,
+        sender: &EndpointAddr,
+        on_relay: Arc<Mutex<HashSet<u32>>>,
+    ) -> Option<Control> {
+        let conn = self
+            .endpoint
+            .connect(sender.clone(), CTRL_ALPN)
+            .await
+            .ok()?;
+        let (mut send, mut recv) = conn.open_bi().await.ok()?;
+        // Open the stream on the wire so the sender's accept_bi returns.
+        write_msg(&mut send, &CtrlMsg::Hello).await.ok()?;
+        tokio::spawn(async move {
+            while let Some(msg) = read_msg(&mut recv).await {
+                if let CtrlMsg::RelayHas(indices) = msg {
+                    let mut set = on_relay.lock().unwrap();
+                    for i in indices {
+                        set.insert(i);
+                    }
+                }
+            }
+        });
+        Some(Control { send, _conn: conn })
+    }
+
+    /// Fetch a single chunk by hash, trying each provider in order. Bounded to
+    /// one chunk in memory.
+    pub async fn fetch_chunk(&self, providers: &[EndpointAddr], hash: Hash) -> Result<Vec<u8>> {
+        let store = MemStore::new();
+        let mut last_err = None;
+        for addr in providers {
+            let bt = BlobTicket::new(addr.clone(), hash, BlobFormat::Raw);
+            match fetch_into(&store, &self.endpoint, &bt).await {
+                Ok(_) => {
+                    let bytes = store.blobs().get_bytes(hash).await.context("read chunk")?;
+                    return Ok(bytes.to_vec());
+                }
+                Err(e) => last_err = Some(e),
+            }
+        }
+        Err(last_err.unwrap_or_else(|| anyhow!("no providers for chunk {hash}")))
+    }
+
+    pub async fn close(self) {
+        self.endpoint.close().await;
+    }
+}
+
+// ---- tickets --------------------------------------------------------------
 
 const TICKET_PREFIX: &str = "arvc";
 
@@ -97,8 +311,7 @@ struct TicketWire {
     relay: Option<RelayRelease>,
 }
 
-/// A chunked transfer ticket (`arvc…`): the ordered chunk hashes, where to get
-/// them, and how to release relay copies.
+/// A chunked transfer ticket (`arvc…`).
 pub struct ChunkTicket {
     pub total_size: u64,
     pub chunk_size: u32,
@@ -146,12 +359,13 @@ impl ChunkTicket {
     }
 }
 
-/// What the sender hands the relay so it can seed the chunks: the sender's
-/// address and the list of chunk hashes. Base32 `arvs…`.
+/// What the sender hands the relay to backfill chunks: the sender's address, the
+/// chunk hashes to fetch, and the transfer token. Base32 `arvs…`.
 #[derive(Serialize, Deserialize)]
 pub struct SeedRequest {
     pub sender: EndpointAddr,
     pub chunks: Vec<Hash>,
+    pub token: String,
 }
 
 impl SeedRequest {
@@ -174,153 +388,10 @@ impl SeedRequest {
     }
 }
 
-/// A running sender: serves every chunk of a file as its own blob, and tracks
-/// which chunks the receiver has acked over the control channel.
-pub struct ChunkSender {
-    _router: Router,
-    _store: MemStore,
-    endpoint: Endpoint,
-    addr: EndpointAddr,
-    chunks: Vec<Hash>,
-    total_size: u64,
-    delivered: Arc<Mutex<HashSet<u32>>>,
-}
-
-impl ChunkSender {
-    /// Split `path` into chunks, add each as a blob, and serve them.
-    pub async fn serve(path: &Path, relay: RelayChoice) -> Result<Self> {
-        let data = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
-        let total_size = data.len() as u64;
-        let store = MemStore::new();
-        let mut chunks = Vec::new();
-        for chunk in data.chunks(CHUNK_SIZE as usize) {
-            let tag = store
-                .blobs()
-                .add_bytes(chunk.to_vec())
-                .await
-                .context("add chunk")?;
-            chunks.push(tag.hash);
-        }
-        let blobs = BlobsProtocol::new(&store, None);
-        let use_relay = !matches!(relay, RelayChoice::Disabled);
-        let endpoint = bind_endpoint(relay).await?;
-        let delivered = Arc::new(Mutex::new(HashSet::new()));
-        let router = Router::builder(endpoint.clone())
-            .accept(iroh_blobs::ALPN, blobs)
-            .accept(
-                CTRL_ALPN,
-                CtrlHandler {
-                    delivered: delivered.clone(),
-                },
-            )
-            .spawn();
-        // online() waits for a relay; with the relay disabled (LAN/tests) there
-        // is none, so use the direct (loopback/LAN) address instead.
-        let addr = if use_relay {
-            endpoint.online().await;
-            endpoint.addr()
-        } else {
-            crate::node::local_addr_of(&endpoint)
-        };
-        Ok(Self {
-            _router: router,
-            _store: store,
-            endpoint,
-            addr,
-            chunks,
-            total_size,
-            delivered,
-        })
-    }
-
-    /// Number of chunks the receiver has acknowledged receiving.
-    pub fn delivered_count(&self) -> usize {
-        self.delivered.lock().unwrap().len()
-    }
-
-    /// The set of chunk indices the receiver has acknowledged.
-    pub fn delivered(&self) -> HashSet<u32> {
-        self.delivered.lock().unwrap().clone()
-    }
-
-    pub fn addr(&self) -> EndpointAddr {
-        self.addr.clone()
-    }
-    pub fn chunks(&self) -> &[Hash] {
-        &self.chunks
-    }
-    pub fn total_size(&self) -> u64 {
-        self.total_size
-    }
-    pub fn chunk_size(&self) -> u32 {
-        CHUNK_SIZE
-    }
-    pub fn seed_request(&self) -> SeedRequest {
-        SeedRequest {
-            sender: self.addr(),
-            chunks: self.chunks.clone(),
-        }
-    }
-    pub async fn shutdown(self) {
-        self.endpoint.close().await;
-    }
-}
-
-/// A receiver endpoint that fetches chunks (with provider fallback).
-pub struct ChunkReceiver {
-    endpoint: Endpoint,
-}
-
-impl ChunkReceiver {
-    pub async fn open(relay: RelayChoice) -> Result<Self> {
-        Ok(Self {
-            endpoint: bind_endpoint(relay).await?,
-        })
-    }
-
-    /// Open a control channel to the sender, to ack chunks as we receive them.
-    pub async fn open_control(&self, sender: &EndpointAddr) -> Result<Control> {
-        let conn = self
-            .endpoint
-            .connect(sender.clone(), CTRL_ALPN)
-            .await
-            .map_err(|e| anyhow!("control connect: {e}"))?;
-        let send = conn
-            .open_uni()
-            .await
-            .map_err(|e| anyhow!("control stream: {e}"))?;
-        Ok(Control { send, _conn: conn })
-    }
-
-    /// Fetch a single chunk by hash, trying each provider in turn. Returns the
-    /// chunk bytes. Memory is bounded to one chunk (transient store).
-    pub async fn fetch_chunk(&self, providers: &[EndpointAddr], hash: Hash) -> Result<Vec<u8>> {
-        let store = MemStore::new();
-        let mut last_err = None;
-        for addr in providers {
-            let bt = BlobTicket::new(addr.clone(), hash, BlobFormat::Raw);
-            match fetch_into(&store, &self.endpoint, &bt).await {
-                Ok(_) => {
-                    let bytes = store.blobs().get_bytes(hash).await.context("read chunk")?;
-                    return Ok(bytes.to_vec());
-                }
-                Err(e) => last_err = Some(e),
-            }
-        }
-        Err(last_err.unwrap_or_else(|| anyhow!("no providers for chunk {hash}")))
-    }
-
-    pub async fn close(self) {
-        self.endpoint.close().await;
-    }
-}
-
-/// Encode a relay provider address (for advertising the relay as a provider).
+/// Encode/decode a relay provider address (its iroh address).
 pub fn encode_addr(addr: &EndpointAddr) -> Result<String> {
     encode_ticket(addr)
 }
-
-/// Decode a relay provider address.
 pub fn decode_addr(s: &str) -> Result<EndpointAddr> {
     decode_ticket(s)
 }
