@@ -1,0 +1,4 @@
+[toolchain]
+# iroh 0.95 + the RustCrypto rc cohort need a recent compiler.
+channel = "stable"
+components = ["clippy", "rustfmt"]

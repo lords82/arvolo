@@ -1,0 +1,31 @@
+[package]
+name = "arvolo-core"
+description = "arvolo shared core: engine abstractions and types"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+iroh = "0.95.1"
+rand = "0.9"
+postcard = { version = "1", features = ["alloc"] }
+data-encoding = "2"
+
+# --- transitive crypto pin (iroh 0.95.1 was built against the RustCrypto rc
+# cohort; the later final releases changed APIs and break the build). Pin the
+# whole cohort to the exact pre-release versions iroh expects. Not used directly. ---
+der = "=0.8.0-rc.9"
+spki = "=0.8.0-rc.4"
+pkcs8 = "=0.11.0-rc.7"
+ed25519 = "=3.0.0-rc.0"
+signature = "=3.0.0-rc.3"
+iroh-blobs = "0.97.0"
+hpke = "0.13.0"
+spake2 = "0.4.0"
+
+[dev-dependencies]
+tokio = { workspace = true }
+tempfile = "3"
+iroh = { version = "0.95.1", features = ["test-utils"] }
