@@ -152,6 +152,7 @@ pub struct ChunkSender {
     addr: EndpointAddr,
     chunks: Vec<Hash>,
     total_size: u64,
+    key: [u8; crate::crypto::CHUNK_KEY_LEN],
     delivered: Arc<Mutex<HashSet<u32>>>,
     on_relay: Arc<Mutex<HashSet<u32>>>,
     gone_rx: AsyncMutex<mpsc::UnboundedReceiver<Vec<usize>>>,
@@ -162,13 +163,15 @@ impl ChunkSender {
         let data = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
         let total_size = data.len() as u64;
         let store = MemStore::new();
+        // Encrypt every chunk under a per-transfer random content key before it
+        // enters the blob store, so the relay (and any other holder of a chunk)
+        // only ever sees ciphertext. The key travels in the ticket, out-of-band.
+        let key = crate::crypto::random_chunk_key();
+        let total_chunks = data.len().div_ceil(CHUNK_SIZE as usize) as u32;
         let mut chunks = Vec::new();
-        for chunk in data.chunks(CHUNK_SIZE as usize) {
-            let tag = store
-                .blobs()
-                .add_bytes(chunk.to_vec())
-                .await
-                .context("add chunk")?;
+        for (idx, chunk) in data.chunks(CHUNK_SIZE as usize).enumerate() {
+            let ct = crate::crypto::seal_chunk(&key, idx as u32, total_chunks, chunk)?;
+            let tag = store.blobs().add_bytes(ct).await.context("add chunk")?;
             chunks.push(tag.hash);
         }
         let blobs = BlobsProtocol::new(&store, None);
@@ -201,6 +204,7 @@ impl ChunkSender {
             addr,
             chunks,
             total_size,
+            key,
             delivered,
             on_relay,
             gone_rx: AsyncMutex::new(gone_rx),
@@ -218,6 +222,11 @@ impl ChunkSender {
     }
     pub fn chunk_size(&self) -> u32 {
         CHUNK_SIZE
+    }
+    /// The per-transfer content key; the CLI puts this in the ticket so the
+    /// receiver can decrypt. Whoever holds the ticket can decrypt.
+    pub fn key(&self) -> [u8; crate::crypto::CHUNK_KEY_LEN] {
+        self.key
     }
     pub fn delivered_count(&self) -> usize {
         self.delivered.lock().unwrap().len()
@@ -373,17 +382,20 @@ struct TicketWire {
     chunk_size: u32,
     chunks: Vec<Hash>,
     providers: Vec<EndpointAddr>,
-    #[serde(default)]
     relay: Option<RelayRelease>,
+    /// Per-transfer content key to decrypt the chunks (32 bytes).
+    key: Vec<u8>,
 }
 
-/// A chunked transfer ticket (`arvc…`).
+/// A chunked transfer ticket (`arvc…`). Carries the content key that decrypts
+/// the chunks — whoever holds the ticket can receive and decrypt.
 pub struct ChunkTicket {
     pub total_size: u64,
     pub chunk_size: u32,
     pub chunks: Vec<Hash>,
     pub providers: Vec<EndpointAddr>,
     pub relay: Option<RelayRelease>,
+    pub key: Vec<u8>,
 }
 
 impl ChunkTicket {
@@ -394,6 +406,7 @@ impl ChunkTicket {
             chunks: self.chunks.clone(),
             providers: self.providers.clone(),
             relay: self.relay.clone(),
+            key: self.key.clone(),
         })
         .context("serialize chunk ticket")?;
         Ok(format!(
@@ -417,6 +430,7 @@ impl ChunkTicket {
             chunks: w.chunks,
             providers: w.providers,
             relay: w.relay,
+            key: w.key,
         })
     }
 
