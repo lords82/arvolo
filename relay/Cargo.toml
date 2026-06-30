@@ -1,0 +1,27 @@
+[package]
+name = "arvolo-relay"
+description = "arvolo self-hostable relay / mailbox (zero-knowledge store-and-forward)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "arvolo-relay"
+path = "src/main.rs"
+
+[dependencies]
+arvolo-core.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+axum = "0.8"
+serde = { version = "1", features = ["derive"] }
+rand = "0.9"
+data-encoding = "2"
+rusqlite = { version = "0.37", features = ["bundled"] }
+
+[dev-dependencies]
+arvolo-core.workspace = true
+tempfile = "3"
