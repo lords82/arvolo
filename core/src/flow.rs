@@ -89,6 +89,8 @@ pub struct SendSession {
 /// uploaded yet — that's lazy, in [`SendSession::serve`]).
 pub async fn prepare_send(
     path: &Path,
+    name: &str,
+    archive: bool,
     seed_relay: Option<String>,
     relay: RelayChoice,
 ) -> Result<SendSession> {
@@ -126,6 +128,8 @@ pub async fn prepare_send(
         providers: vec![sender.addr()],
         relay: relay.clone(),
         key: sender.key().to_vec(),
+        name: name.to_string(),
+        archive,
     };
     Ok(SendSession {
         ticket: ticket.encode()?,
@@ -208,9 +212,19 @@ pub async fn recv_chunked(
     use std::io::{Seek, SeekFrom, Write};
 
     let t = ChunkTicket::decode(ticket).context("invalid ticket")?;
-    let out = out.unwrap_or_else(|| {
-        default_out(&t.chunks.first().map(|h| h.to_string()).unwrap_or_default())
-    });
+    let user_out = out;
+    // Where the payload lands on disk: a stable temp tar for archives (so a
+    // partial resumes), else the requested path or a default from the name.
+    let download: PathBuf = if t.archive {
+        std::env::temp_dir().join(format!(
+            "arvolo-{}.tar",
+            t.chunks.first().map(|h| h.to_string()).unwrap_or_default()
+        ))
+    } else {
+        user_out
+            .clone()
+            .unwrap_or_else(|| default_from_name(&t.name, &t.chunks))
+    };
     let sender_addr = t.providers.first().cloned();
     let relay_addr = match &t.relay {
         Some(r) => Some(crate::chunked::decode_addr(&r.addr).context("relay address")?),
@@ -228,8 +242,8 @@ pub async fn recv_chunked(
         .read(true)
         .write(true)
         .truncate(false)
-        .open(&out)
-        .with_context(|| format!("open {}", out.display()))?;
+        .open(&download)
+        .with_context(|| format!("open {}", download.display()))?;
     let existing = file.metadata()?.len();
     let start = ((existing / t.chunk_size as u64) as usize).min(t.chunks.len());
     on(RecvEvent::Started {
@@ -277,7 +291,7 @@ pub async fn recv_chunked(
         if cancel.is_cancelled() {
             // Partial output is left on disk and can be resumed later.
             receiver.close().await;
-            return Ok(out);
+            return Ok(download);
         }
         let on_relay_chunk = on_relay.lock().unwrap().contains(&(i as u32));
         // Anti-double-send: chunks the sender pushed to the relay are pulled from
@@ -339,9 +353,24 @@ pub async fn recv_chunked(
         let _ = c.finish().await;
     }
     file.set_len(t.total_size)?;
+    drop(file);
     receiver.close().await;
-    on(RecvEvent::Saved { path: out.clone() });
-    Ok(out)
+
+    if t.archive {
+        // Unpack the tar into the target directory, then drop the temp archive.
+        let dir = user_out.unwrap_or_else(|| PathBuf::from(&t.name));
+        std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+        let f = std::fs::File::open(&download).context("open downloaded archive")?;
+        tar::Archive::new(f)
+            .unpack(&dir)
+            .with_context(|| format!("extract into {}", dir.display()))?;
+        let _ = std::fs::remove_file(&download);
+        on(RecvEvent::Saved { path: dir.clone() });
+        Ok(dir)
+    } else {
+        on(RecvEvent::Saved { path: download.clone() });
+        Ok(download)
+    }
 }
 
 // ---- offline mailbox ------------------------------------------------------
@@ -432,4 +461,43 @@ pub async fn fetch_offline(
 /// A stable default output filename derived from a ticket seed.
 pub fn default_out(seed: &str) -> PathBuf {
     PathBuf::from(format!("received-{}.bin", &seed[..seed.len().min(16)]))
+}
+
+/// Pack files and/or directories into a tar archive at `dest` (each top-level
+/// input keeps its base name inside the archive). Used to send folders/multiple
+/// files as one transfer; the receiver unpacks it (see [`recv_chunked`]).
+pub fn pack_tar(paths: &[PathBuf], dest: &Path) -> Result<()> {
+    let file = std::fs::File::create(dest)
+        .with_context(|| format!("create archive {}", dest.display()))?;
+    let mut builder = tar::Builder::new(file);
+    for p in paths {
+        let base = p
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "file".to_string());
+        if p.is_dir() {
+            builder
+                .append_dir_all(&base, p)
+                .with_context(|| format!("archive dir {}", p.display()))?;
+        } else {
+            builder
+                .append_path_with_name(p, &base)
+                .with_context(|| format!("archive file {}", p.display()))?;
+        }
+    }
+    builder.finish().context("finish archive")?;
+    Ok(())
+}
+
+/// Default single-file output: the ticket's suggested name (its final path
+/// component, to avoid traversal), falling back to a seed-derived name.
+fn default_from_name(name: &str, chunks: &[crate::reexport::Hash]) -> PathBuf {
+    let base = std::path::Path::new(name)
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .filter(|s| !s.is_empty() && s != "." && s != "..");
+    match base {
+        Some(n) => PathBuf::from(n),
+        None => default_out(&chunks.first().map(|h| h.to_string()).unwrap_or_default()),
+    }
 }
