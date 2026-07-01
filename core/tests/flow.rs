@@ -49,7 +49,10 @@ async fn send_then_recv_roundtrip_emits_events() {
     // Event shape: Started first, one Chunk per chunk, Saved last.
     let events = events.lock().unwrap();
     assert!(
-        matches!(events.first(), Some(RecvEvent::Started { total: 2, resuming_from: 0 })),
+        matches!(
+            events.first(),
+            Some(RecvEvent::Started { total: 2, resuming_from: 0, .. })
+        ),
         "first event is Started"
     );
     let chunk_events = events

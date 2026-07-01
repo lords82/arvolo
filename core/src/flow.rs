@@ -48,6 +48,10 @@ pub enum RecvEvent {
     Started {
         total: usize,
         resuming_from: usize,
+        /// Plaintext size of the whole file (progress-bar length).
+        total_size: u64,
+        /// Bytes already on disk from a resumed partial (progress-bar start).
+        resumed_bytes: u64,
     },
     Control {
         connected: bool,
@@ -231,6 +235,8 @@ pub async fn recv_chunked(
     on(RecvEvent::Started {
         total: t.chunks.len(),
         resuming_from: start,
+        total_size: t.total_size,
+        resumed_bytes: start as u64 * t.chunk_size as u64,
     });
 
     let receiver = ChunkReceiver::open(relay).await?;
