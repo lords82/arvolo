@@ -19,3 +19,5 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 tokio-util = "0.7"
 data-encoding = "2"
+indicatif = "0.17"
+qrcode = "0.14"

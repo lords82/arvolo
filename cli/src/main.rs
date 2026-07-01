@@ -14,13 +14,17 @@
 //! ciphertext. All transfer orchestration lives in `arvolo_core::flow`; this CLI
 //! just drives it and renders progress.
 
+use std::io::IsTerminal;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use arvolo_core::crypto::{Identity, PublicId};
-use arvolo_core::flow::{self, RecvEvent, SendEvent};
+use arvolo_core::flow::{self, ChunkSource, RecvEvent, SendEvent};
 use arvolo_core::transfer::RelayChoice;
 use clap::{Parser, Subcommand};
+use indicatif::{ProgressBar, ProgressStyle};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Parser)]
@@ -43,6 +47,9 @@ enum Command {
         /// go offline (backfill). Relay base URL, e.g. http://relay:8787
         #[arg(long)]
         seed_relay: Option<String>,
+        /// Also render the ticket as a scannable QR code.
+        #[arg(long)]
+        qr: bool,
     },
     /// Fetch a file from a chunked ticket (`arvc…`); resumes if interrupted.
     Recv {
@@ -67,6 +74,9 @@ enum Command {
         /// Max downloads before deletion (default 1 = burn-after-read).
         #[arg(long, default_value_t = 1)]
         max: u32,
+        /// Also render the ticket as a scannable QR code.
+        #[arg(long)]
+        qr: bool,
     },
     /// Fetch and decrypt an offline ticket (`arvm…`).
     RecvOffline {
@@ -85,7 +95,11 @@ async fn main() -> Result<()> {
         .init();
 
     match Cli::parse().command {
-        Command::Send { path, seed_relay } => send(path, seed_relay).await,
+        Command::Send {
+            path,
+            seed_relay,
+            qr,
+        } => send(path, seed_relay, qr).await,
         Command::Recv { ticket, out } => recv(ticket, out).await,
         Command::Id => id(),
         Command::SendOffline {
@@ -94,7 +108,8 @@ async fn main() -> Result<()> {
             relay,
             ttl,
             max,
-        } => send_offline(path, to, relay, ttl, max).await,
+            qr,
+        } => send_offline(path, to, relay, ttl, max, qr).await,
         Command::RecvOffline { ticket, out } => recv_offline(ticket, out).await,
     }
 }
@@ -144,14 +159,28 @@ fn cancel_on_ctrl_c() -> CancellationToken {
     token
 }
 
+/// Render a ticket as a QR code on stdout (best-effort).
+fn print_qr(data: &str) {
+    match qrcode::QrCode::new(data) {
+        Ok(code) => {
+            let art = code
+                .render::<qrcode::render::unicode::Dense1x2>()
+                .quiet_zone(true)
+                .build();
+            println!("{art}");
+        }
+        Err(e) => eprintln!("(could not render QR: {e})"),
+    }
+}
+
 // ---- P2P ------------------------------------------------------------------
 
-async fn send(path: PathBuf, seed_relay: Option<String>) -> Result<()> {
+async fn send(path: PathBuf, seed_relay: Option<String>, qr: bool) -> Result<()> {
     eprintln!("Splitting and serving chunks…");
     let session = flow::prepare_send(&path, seed_relay, RelayChoice::from_env()).await?;
     let cancel = cancel_on_ctrl_c();
     session
-        .serve(cancel, |ev| match ev {
+        .serve(cancel, move |ev| match ev {
             SendEvent::Ready {
                 chunks,
                 ticket,
@@ -160,6 +189,9 @@ async fn send(path: PathBuf, seed_relay: Option<String>) -> Result<()> {
             } => {
                 println!("\nFile ready ({chunks} chunks). On the other device:\n");
                 println!("    arvolo recv {ticket}\n");
+                if qr {
+                    print_qr(&ticket);
+                }
                 if has_relay {
                     println!("P2P-first; if the receiver drops, only the missing chunks are backfilled to the relay.");
                 }
@@ -178,24 +210,75 @@ async fn send(path: PathBuf, seed_relay: Option<String>) -> Result<()> {
 
 async fn recv(ticket: String, out: Option<PathBuf>) -> Result<()> {
     let cancel = cancel_on_ctrl_c();
-    flow::recv_chunked(&ticket, out, RelayChoice::from_env(), cancel, |ev| match ev {
-        RecvEvent::Started {
-            total,
-            resuming_from,
-        } => {
-            if resuming_from > 0 {
-                eprintln!("Resuming from chunk {resuming_from}/{total}…");
-            } else {
-                eprintln!("Fetching {total} chunks…");
+    let tty = std::io::stderr().is_terminal();
+    let bar: Arc<Mutex<Option<ProgressBar>>> = Arc::new(Mutex::new(None));
+    let b = bar.clone();
+    flow::recv_chunked(&ticket, out, RelayChoice::from_env(), cancel, move |ev| {
+        let mut slot = b.lock().unwrap();
+        match ev {
+            RecvEvent::Started {
+                total,
+                resuming_from,
+                total_size,
+                resumed_bytes,
+            } => {
+                let head = if resuming_from > 0 {
+                    format!("resuming from chunk {resuming_from}/{total}")
+                } else {
+                    format!("fetching {total} chunks")
+                };
+                if tty {
+                    let pb = ProgressBar::new(total_size);
+                    pb.set_style(
+                        ProgressStyle::with_template(
+                            "{spinner} {bytes}/{total_bytes} ({bytes_per_sec}, ETA {eta}) {msg}",
+                        )
+                        .unwrap(),
+                    );
+                    pb.set_position(resumed_bytes);
+                    pb.set_message(head);
+                    pb.enable_steady_tick(Duration::from_millis(120));
+                    *slot = Some(pb);
+                } else {
+                    eprintln!("{head}…");
+                }
+            }
+            RecvEvent::Control { connected } => {
+                let msg = format!(
+                    "control channel to sender: {}",
+                    if connected { "connected" } else { "unavailable" }
+                );
+                match slot.as_ref() {
+                    Some(pb) => pb.println(msg),
+                    None => eprintln!("{msg}"),
+                }
+            }
+            RecvEvent::Chunk {
+                index,
+                total,
+                source,
+                bytes,
+            } => {
+                if let Some(pb) = slot.as_ref() {
+                    pb.inc(bytes);
+                    let src = match source {
+                        ChunkSource::Relay => "relay",
+                        ChunkSource::Sender => "sender",
+                    };
+                    pb.set_message(format!("chunk {}/{total} from {src}", index + 1));
+                }
+            }
+            RecvEvent::Warning { message } => match slot.as_ref() {
+                Some(pb) => pb.println(message),
+                None => eprintln!("{message}"),
+            },
+            RecvEvent::Saved { path } => {
+                if let Some(pb) = slot.take() {
+                    pb.finish_and_clear();
+                }
+                println!("Saved to {}", path.display());
             }
         }
-        RecvEvent::Control { connected } => eprintln!(
-            "control channel to sender: {}",
-            if connected { "connected" } else { "unavailable" }
-        ),
-        RecvEvent::Chunk { .. } => {}
-        RecvEvent::Saved { path } => println!("Saved to {}", path.display()),
-        RecvEvent::Warning { message } => eprintln!("{message}"),
     })
     .await?;
     Ok(())
@@ -203,13 +286,24 @@ async fn recv(ticket: String, out: Option<PathBuf>) -> Result<()> {
 
 // ---- offline mailbox ------------------------------------------------------
 
-async fn send_offline(path: PathBuf, to: String, relay: String, ttl: u64, max: u32) -> Result<()> {
+async fn send_offline(
+    path: PathBuf,
+    to: String,
+    relay: String,
+    ttl: u64,
+    max: u32,
+    qr: bool,
+) -> Result<()> {
     let me = my_identity()?;
     let recipient = decode_id(&to)?;
     let ticket = flow::deposit_offline(&path, &recipient, &me, &relay, ttl, max).await?;
+    let encoded = ticket.encode();
     println!("\nEncrypted and deposited (expires in {ttl}s, {max} download(s)).");
     println!("Send this ticket to the recipient:\n");
-    println!("    arvolo recv-offline {}\n", ticket.encode());
+    println!("    arvolo recv-offline {encoded}\n");
+    if qr {
+        print_qr(&encoded);
+    }
     Ok(())
 }
 
