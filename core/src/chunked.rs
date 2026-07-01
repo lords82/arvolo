@@ -19,13 +19,13 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use crate::hash::Hash;
 use anyhow::{anyhow, Context, Result};
 use iroh::{
     endpoint::{Connection, RecvStream, SendStream},
     protocol::{AcceptError, ProtocolHandler, Router},
     Endpoint, EndpointAddr,
 };
-use crate::hash::Hash;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, Mutex as AsyncMutex};
 
@@ -174,7 +174,8 @@ impl ChunkBackend {
             } => {
                 let idx = *index.get(hash)?;
                 let mut file = std::fs::File::open(path).ok()?;
-                file.seek(SeekFrom::Start(idx as u64 * CHUNK_SIZE as u64)).ok()?;
+                file.seek(SeekFrom::Start(idx as u64 * CHUNK_SIZE as u64))
+                    .ok()?;
                 let mut buf = vec![0u8; CHUNK_SIZE as usize];
                 let n = fill(&mut file, &mut buf).ok()?;
                 let ct = crate::crypto::seal_chunk(key, idx, *total_chunks, &buf[..n]).ok()?;
@@ -215,7 +216,13 @@ impl ProtocolHandler for ChunkServer {
             };
             match self.backend.produce(&req.hash) {
                 Some(ct) => {
-                    let _ = write_frame(&mut send, &ChunkResp { total_len: ct.len() as u64 }).await;
+                    let _ = write_frame(
+                        &mut send,
+                        &ChunkResp {
+                            total_len: ct.len() as u64,
+                        },
+                    )
+                    .await;
                     let start = (req.offset as usize).min(ct.len());
                     let _ = send.write_all(&ct[start..]).await;
                 }
@@ -251,7 +258,10 @@ pub(crate) async fn fetch_chunk_wire(
     if resp.total_len == 0 {
         anyhow::bail!("chunk not available from this provider");
     }
-    anyhow::ensure!(resp.total_len <= MAX_CHUNK_CT, "provider claims oversized chunk");
+    anyhow::ensure!(
+        resp.total_len <= MAX_CHUNK_CT,
+        "provider claims oversized chunk"
+    );
     let want = resp.total_len.saturating_sub(offset) as usize;
     let mut buf = vec![0u8; want];
     recv.read_exact(&mut buf)
@@ -285,14 +295,18 @@ async fn fetch_chunk_wire_to_file(
     if resp.total_len == 0 {
         anyhow::bail!("chunk not available from this provider");
     }
-    anyhow::ensure!(resp.total_len <= MAX_CHUNK_CT, "provider claims oversized chunk");
+    anyhow::ensure!(
+        resp.total_len <= MAX_CHUNK_CT,
+        "provider claims oversized chunk"
+    );
     let mut remaining = resp.total_len.saturating_sub(have);
     let mut buf = vec![0u8; 64 * 1024];
     while remaining > 0 {
         let want = (remaining as usize).min(buf.len());
         match recv.read(&mut buf[..want]).await {
             Ok(Some(n)) if n > 0 => {
-                out.write_all(&buf[..n]).map_err(|e| anyhow!("stage chunk: {e}"))?;
+                out.write_all(&buf[..n])
+                    .map_err(|e| anyhow!("stage chunk: {e}"))?;
                 remaining -= n as u64;
             }
             _ => break,
@@ -389,8 +403,8 @@ impl ChunkSender {
         let mut chunks = Vec::new();
         let mut index: HashMap<Hash, u32> = HashMap::new();
         {
-            let mut file = std::fs::File::open(path)
-                .with_context(|| format!("open {}", path.display()))?;
+            let mut file =
+                std::fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
             let mut buf = vec![0u8; CHUNK_SIZE as usize];
             let mut idx: u32 = 0;
             loop {

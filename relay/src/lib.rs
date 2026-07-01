@@ -442,7 +442,10 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/addr", get(addr_handler))
         .route("/v1/seed", post(seed_handler))
         .route("/v1/release/{token}/{hash}", post(release_handler))
-        .route("/v1/rz/{slot}/{key}", post(rz_post_handler).get(rz_get_handler))
+        .route(
+            "/v1/rz/{slot}/{key}",
+            post(rz_post_handler).get(rz_get_handler),
+        )
         .route("/healthz", get(|| async { "ok" }))
         .with_state(state)
 }

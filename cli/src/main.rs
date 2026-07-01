@@ -411,73 +411,84 @@ async fn recv(ticket: String, out: Option<PathBuf>) -> Result<()> {
     let tty = std::io::stderr().is_terminal();
     let bar: Arc<Mutex<Option<ProgressBar>>> = Arc::new(Mutex::new(None));
     let b = bar.clone();
-    flow::recv_chunked(&ticket, out, Some(&me), RelayChoice::from_env(), cancel, move |ev| {
-        let mut slot = b.lock().unwrap();
-        match ev {
-            RecvEvent::Started {
-                total,
-                resuming_from,
-                total_size,
-                resumed_bytes,
-            } => {
-                let head = if resuming_from > 0 {
-                    format!("resuming from chunk {resuming_from}/{total}")
-                } else {
-                    format!("fetching {total} chunks")
-                };
-                if tty {
-                    let pb = ProgressBar::new(total_size);
-                    pb.set_style(
+    flow::recv_chunked(
+        &ticket,
+        out,
+        Some(&me),
+        RelayChoice::from_env(),
+        cancel,
+        move |ev| {
+            let mut slot = b.lock().unwrap();
+            match ev {
+                RecvEvent::Started {
+                    total,
+                    resuming_from,
+                    total_size,
+                    resumed_bytes,
+                } => {
+                    let head = if resuming_from > 0 {
+                        format!("resuming from chunk {resuming_from}/{total}")
+                    } else {
+                        format!("fetching {total} chunks")
+                    };
+                    if tty {
+                        let pb = ProgressBar::new(total_size);
+                        pb.set_style(
                         ProgressStyle::with_template(
                             "{spinner} {bytes}/{total_bytes} ({bytes_per_sec}, ETA {eta}) {msg}",
                         )
                         .unwrap(),
                     );
-                    pb.set_position(resumed_bytes);
-                    pb.set_message(head);
-                    pb.enable_steady_tick(Duration::from_millis(120));
-                    *slot = Some(pb);
-                } else {
-                    eprintln!("{head}…");
+                        pb.set_position(resumed_bytes);
+                        pb.set_message(head);
+                        pb.enable_steady_tick(Duration::from_millis(120));
+                        *slot = Some(pb);
+                    } else {
+                        eprintln!("{head}…");
+                    }
+                }
+                RecvEvent::Control { connected } => {
+                    let msg = format!(
+                        "control channel to sender: {}",
+                        if connected {
+                            "connected"
+                        } else {
+                            "unavailable"
+                        }
+                    );
+                    match slot.as_ref() {
+                        Some(pb) => pb.println(msg),
+                        None => eprintln!("{msg}"),
+                    }
+                }
+                RecvEvent::Chunk {
+                    index,
+                    total,
+                    source,
+                    bytes,
+                } => {
+                    if let Some(pb) = slot.as_ref() {
+                        pb.inc(bytes);
+                        let src = match source {
+                            ChunkSource::Relay => "relay",
+                            ChunkSource::Sender => "sender",
+                        };
+                        pb.set_message(format!("chunk {}/{total} from {src}", index + 1));
+                    }
+                }
+                RecvEvent::Warning { message } => match slot.as_ref() {
+                    Some(pb) => pb.println(message),
+                    None => eprintln!("{message}"),
+                },
+                RecvEvent::Saved { path } => {
+                    if let Some(pb) = slot.take() {
+                        pb.finish_and_clear();
+                    }
+                    println!("Saved to {}", path.display());
                 }
             }
-            RecvEvent::Control { connected } => {
-                let msg = format!(
-                    "control channel to sender: {}",
-                    if connected { "connected" } else { "unavailable" }
-                );
-                match slot.as_ref() {
-                    Some(pb) => pb.println(msg),
-                    None => eprintln!("{msg}"),
-                }
-            }
-            RecvEvent::Chunk {
-                index,
-                total,
-                source,
-                bytes,
-            } => {
-                if let Some(pb) = slot.as_ref() {
-                    pb.inc(bytes);
-                    let src = match source {
-                        ChunkSource::Relay => "relay",
-                        ChunkSource::Sender => "sender",
-                    };
-                    pb.set_message(format!("chunk {}/{total} from {src}", index + 1));
-                }
-            }
-            RecvEvent::Warning { message } => match slot.as_ref() {
-                Some(pb) => pb.println(message),
-                None => eprintln!("{message}"),
-            },
-            RecvEvent::Saved { path } => {
-                if let Some(pb) = slot.take() {
-                    pb.finish_and_clear();
-                }
-                println!("Saved to {}", path.display());
-            }
-        }
-    })
+        },
+    )
     .await?;
     Ok(())
 }

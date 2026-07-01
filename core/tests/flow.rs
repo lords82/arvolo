@@ -48,11 +48,15 @@ async fn send_then_recv_roundtrip_emits_events() {
     assert_eq!(std::fs::read(&saved).unwrap(), data);
 
     // Event shape: Started first, one Chunk per chunk, Saved last.
-    let events = events.lock().unwrap();
+    let events = events.lock().unwrap().clone();
     assert!(
         matches!(
             events.first(),
-            Some(RecvEvent::Started { total: 2, resuming_from: 0, .. })
+            Some(RecvEvent::Started {
+                total: 2,
+                resuming_from: 0,
+                ..
+            })
         ),
         "first event is Started"
     );
@@ -105,7 +109,7 @@ async fn recv_cancelled_returns_without_saving() {
     .await
     .expect("recv_chunked returns Ok on cancel");
 
-    let events = events.lock().unwrap();
+    let events = events.lock().unwrap().clone();
     assert!(
         !events.iter().any(|e| matches!(e, RecvEvent::Saved { .. })),
         "cancelled recv must not emit Saved"
@@ -131,7 +135,7 @@ async fn archive_roundtrip_packs_and_extracts() {
 
     // Pack it, then serve the archive.
     let tar_path = dir.path().join("payload.tar");
-    flow::pack_tar(&[src.clone()], &tar_path).unwrap();
+    flow::pack_tar(std::slice::from_ref(&src), &tar_path).unwrap();
     let session = flow::prepare_send(&tar_path, "folder", true, None, None, RelayChoice::Disabled)
         .await
         .expect("prepare_send");
@@ -155,7 +159,10 @@ async fn archive_roundtrip_packs_and_extracts() {
     .await
     .expect("recv_chunked");
     assert_eq!(saved, outdir);
-    assert_eq!(std::fs::read(outdir.join("folder/a.txt")).unwrap(), b"hello alpha");
+    assert_eq!(
+        std::fs::read(outdir.join("folder/a.txt")).unwrap(),
+        b"hello alpha"
+    );
     assert_eq!(
         std::fs::read(outdir.join("folder/sub/b.bin")).unwrap(),
         vec![7u8; 1000]
