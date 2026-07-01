@@ -1,6 +1,7 @@
 /target
 **/*.rs.bk
 Cargo.lock.orig
+docs/ROADMAP-FUTURE.md
 
 # editors / OS
 .DS_Store
