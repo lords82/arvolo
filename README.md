@@ -1,77 +1,135 @@
 # Arvolo
 
-Secure, cross-platform file sending: **P2P-first** when possible, **store-and-forward via a self-hostable relay with expiry** when the recipient is offline. End-to-end encrypted, zero-knowledge relay.
+Secure, cross-platform file sending. **P2P-first** when both devices are online;
+**store-and-forward via a self-hostable, expiring relay** when the recipient is
+away. Every transfer is **end-to-end encrypted** and the relay is **zero-knowledge**
+(it only ever holds ciphertext).
 
-> Status: **working CLI MVP** — P2P transfer (relay fallback + resume), HPKE
-> end-to-end encryption with sender authenticity, and a self-hostable
-> expiring mailbox. Desktop GUI, mobile, and browser link-mode are planned.
+> Status: **working CLI** (v0.1). P2P + relay-backfill transfer with resume,
+> per-chunk E2E encryption, short human pairing codes, send-to-a-contact, folders,
+> and an expiring zero-knowledge mailbox. Desktop GUI, browser link-mode and
+> federation are planned (see Roadmap).
+
+## Install
+
+**Prebuilt binaries** — grab `arvolo` (and `arvolo-relay`) for your OS from the
+[latest release](https://github.com/lords82/arvolo/releases), unpack, and put it
+on your `PATH`.
+
+**From source** (needs Rust ≥ 1.88):
+
+```sh
+cargo install --git https://github.com/lords82/arvolo arvolo-cli    # the `arvolo` client
+cargo install --git https://github.com/lords82/arvolo arvolo-relay  # the relay (self-host)
+```
+
+## Quickstart
+
+**P2P, both online** — share a short code instead of a giant ticket:
+
+```sh
+# sender (relay is used only to bootstrap the code exchange, never for your data)
+arvolo send --code --relay https://relay.example.com ./photo.jpg
+#   ->  4821-crater-mango@https://relay.example.com
+
+# receiver
+arvolo recv 4821-crater-mango@https://relay.example.com
+```
+
+With a configured default relay (see [Config](#config)) the code is just
+`4821-crater-mango`. Plain `arvolo send ./file` (no `--code`) prints a
+self-contained `arvc…` ticket instead — no relay needed at all.
+
+**Offline mailbox** — recipient is away; encrypt to their identity and leave it
+on a relay until they fetch it:
+
+```sh
+arvolo id                                             # recipient shows their public id
+arvolo send-offline ./report.pdf --to <id-or-contact> # sender deposits (HPKE E2E)
+arvolo recv-offline arvm…                             # recipient fetches + decrypts (burns on read)
+```
+
+## Commands
+
+| Command | What it does |
+|---|---|
+| `arvolo send <paths…>` | Serve one or more files/folders P2P (multiple paths or a folder are packed into one archive). Prints an `arvc…` ticket. |
+| &nbsp;&nbsp;`--code` | Show a short pairing code instead of the ticket (needs a relay). |
+| &nbsp;&nbsp;`--relay <url>` | Rendezvous relay for `--code`; embedded in the code so the receiver needs no config. |
+| &nbsp;&nbsp;`--to <name\|id>` | Encrypt so **only** this recipient can receive, and authenticate you as sender. |
+| &nbsp;&nbsp;`--seed-relay <url>` | Also seed to a relay so the transfer finishes even if you go offline (lazy backfill). |
+| &nbsp;&nbsp;`--qr` | Also render the ticket/code as a scannable QR. |
+| `arvolo recv <ticket\|code> [-o out]` | Receive from an `arvc…` ticket **or** a pairing code; resumes if interrupted; unpacks folders. |
+| `arvolo id` | Show your public id (created on first use). |
+| `arvolo contacts add\|list\|remove` | Address book of recipients, used by `--to`. |
+| `arvolo send-offline <file> --to <name\|id> [--relay --ttl --max --qr]` | Encrypt (HPKE) and deposit on a relay for an offline recipient. |
+| `arvolo recv-offline <arvm…> [-o out]` | Fetch + decrypt an offline ticket. |
+
+Run `arvolo <cmd> --help` for the full flag list.
+
+## Config
+
+`~/.config/arvolo/config.toml`:
+
+```toml
+relay = "https://relay.example.com"   # default relay for --code / recv <code> / send-offline
+```
+
+Contacts live in `~/.config/arvolo/contacts.toml` (managed via `arvolo contacts`).
+
+**Environment variables** (override config where relevant):
+
+| Var | Meaning |
+|---|---|
+| `ARVOLO_RELAY` | Default relay URL (wins over `config.toml`). |
+| `ARVOLO_IDENTITY` | Path to your identity key (default `~/.config/arvolo/identity.key`). |
+| `ARVOLO_CONFIG_DIR` | Override the config/contacts directory. |
+| `ARVOLO_IROH_RELAY` | Self-hosted **iroh** NAT relay for P2P hole-punching (vs. n0's public relays). |
+
+## How it works
+
+- **P2P transport** over [iroh](https://www.iroh.computer/) QUIC (dial by key, not
+  IP; automatic hole-punching with relay fallback).
+- **Per-chunk E2E encryption**: files are split into 16 MiB chunks, each sealed
+  with ChaCha20-Poly1305 under a per-transfer key; the content key travels only in
+  the ticket/code. The sender encrypts **on the fly** and stores nothing — sending
+  a file uses bounded memory and **no extra disk**, regardless of file size.
+- **Zero-knowledge relay**: for lazy backfill (sender may go offline) or the
+  offline mailbox, the relay holds only **ciphertext** addressed by BLAKE3 hash,
+  and auto-deletes on release / TTL / burn-after-read.
+- **Short-code pairing** (magic-wormhole style): a SPAKE2 PAKE over a relay
+  rendezvous exchanges the ticket, so two short words are safe (no offline
+  dictionary attack) and the relay never sees the ticket in the clear.
+- **Resume**: interrupted receives resume — both across chunks and *within* a chunk.
+
+**Self-host everything** (production, no third party): run `arvolo-relay` and your
+own iroh relay on a VPS, point clients with `ARVOLO_IROH_RELAY` and a configured
+`relay`. See [`docs/DEPLOY.md`](docs/DEPLOY.md) (`relay/` ships a Dockerfile +
+`docker-compose.yml`).
 
 ## Workspace layout
 
 | Crate | Path | Role |
 |-------|------|------|
-| `arvolo-core` | [`core/`](core/) | Shared engine abstractions and types. The networking engine ([iroh](https://www.iroh.computer/)) lives behind a `Transport` trait. |
+| `arvolo-core` | [`core/`](core/) | Engine: transport, chunk protocol, crypto, flows. |
 | `arvolo-cli` (`arvolo`) | [`cli/`](cli/) | Command-line client. |
-| `arvolo-relay` (`arvolo-relay`) | [`relay/`](relay/) | Self-hostable relay / mailbox (built in Milestone 2). |
+| `arvolo-relay` | [`relay/`](relay/) | Self-hostable zero-knowledge relay / mailbox. |
 
-## Build
-
-Needs a recent Rust (iroh + the RustCrypto rc cohort require ≥1.88; CI uses stable).
-
-```sh
-cargo build
-cargo test
-cargo run -p arvolo-cli -- --help
-```
-
-## Usage
-
-**P2P (both devices online):**
-
-```sh
-# device A
-arvolo send ./photo.jpg          # prints: arvolo recv blob…
-# device B
-arvolo recv blob…                # fetches it (LAN-direct or relay fallback, with resume)
-```
-
-**Offline mailbox (recipient away — store-and-forward with expiry):**
-
-```sh
-# recipient: show your public id
-arvolo id                         # prints e.g. kpb27rz2…
-
-# run a relay (self-hostable; SQLite + files on disk, auto-expiring)
-arvolo-relay                      # listens on 0.0.0.0:8787
-
-# sender: encrypt (HPKE, end-to-end) and deposit
-arvolo send-offline ./report.pdf --to <recipient-id> --relay http://relay:8787
-#   -> prints: arvolo recv-offline arvm…
-
-# recipient (later): fetch + decrypt; blob is burned/expires on the relay
-arvolo recv-offline arvm…
-```
-
-The relay only ever sees ciphertext (zero-knowledge); blobs auto-delete at TTL or
-after the download budget (burn-after-read).
-
-**Full self-host (production):** run the mailbox *and* your own iroh NAT relay on
-a VPS, then point clients with `ARVOLO_IROH_RELAY=https://relay.example.com` so no
-third-party server is involved. See [`docs/DEPLOY.md`](docs/DEPLOY.md).
+Build & test: `cargo build && cargo test`.
 
 ## Roadmap
 
-The v1.0 MVP delivers: P2P-first send (LAN + remote with relay fallback + resume), HPKE end-to-end encryption with sender authenticity, ephemeral code/QR and persistent-identity pairing, a single self-hostable relay with expiring offline mailbox, browser link-mode (Firefox Send heir), and a desktop UI.
-
-Post-MVP ideas (federation, multi-recipient, swarming, mobile, business edition) are tracked in [`docs/ROADMAP-FUTURE.md`](docs/ROADMAP-FUTURE.md).
+Planned next: desktop GUI, browser link-mode (Firefox Send heir), relay
+federation (short codes across independent relays), mobile. Post-MVP ideas are
+tracked in [`docs/ROADMAP-FUTURE.md`](docs/ROADMAP-FUTURE.md).
 
 ## Licensing
 
 Open-core. The core (client + single relay) is free software under
-**[AGPL-3.0-only](LICENSE)** — you can self-host and modify it, and the AGPL keeps
-it open even when run as a network service. A separate **commercial license** is
-available for proprietary/embedded use without the AGPL's obligations; business
-features (federation, SSO, audit, managed hosting) are commercial.
+**[AGPL-3.0-only](LICENSE)** — self-host and modify it; the AGPL keeps it open
+even when run as a network service. A separate **commercial license** is available
+for proprietary/embedded use without the AGPL's obligations; business features
+(federation, SSO, audit, managed hosting) are commercial.
 
 The AGPL covers the **code**, not the **name**: "Arvolo" is a trademark of the
 project owner and may not be used by forks in a way that implies endorsement.

@@ -1,0 +1,57 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, label: linux-x86_64 }
+          - { os: macos-latest, label: macos-arm64 }
+          - { os: macos-13, label: macos-x86_64 }
+          - { os: windows-latest, label: windows-x86_64 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release --locked -p arvolo-cli -p arvolo-relay
+      - name: Package (unix)
+        if: runner.os != 'Windows'
+        run: tar czf "arvolo-${{ github.ref_name }}-${{ matrix.label }}.tar.gz" -C target/release arvolo arvolo-relay
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        run: Compress-Archive -Path target/release/arvolo.exe, target/release/arvolo-relay.exe -DestinationPath "arvolo-${{ github.ref_name }}-${{ matrix.label }}.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.label }}
+          path: arvolo-${{ github.ref_name }}-*
+
+  release:
+    name: publish (draft)
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      # Created as a DRAFT: review the built binaries, then publish from the
+      # GitHub Releases page.
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          draft: true
