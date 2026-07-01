@@ -17,4 +17,6 @@ tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4", features = ["derive"] }
-arvolo-core = { path = "core" }
+# Both a path (for local builds) and a version (required so the binary crates
+# can be published to crates.io referencing a released core).
+arvolo-core = { path = "core", version = "0.1.0" }

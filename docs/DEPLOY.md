@@ -14,6 +14,27 @@ file data *and* the NAT-traversal coordination stay on your infrastructure:
 
 A 1 vCPU / 1 GB VPS is plenty to start.
 
+## Quick start: the mailbox via Docker
+
+The fastest way to run just the `arvolo-relay` mailbox is the published image
+(`linux/amd64` + `linux/arm64`), which reads its config from env vars and stores
+state under `/data`:
+
+```sh
+docker run -d --name arvolo-relay -p 8787:8787 -v arvolo-data:/data \
+  ghcr.io/lords82/arvolo-relay:latest
+```
+
+Or with the bundled compose file (includes a `/healthz` healthcheck):
+
+```sh
+docker compose up -d
+```
+
+Put a TLS reverse proxy (Caddy, see §3) in front for a public deployment. The
+sections below cover a from-source systemd deployment and the companion
+`iroh-relay` for NAT traversal.
+
 ## 1. Build the binaries
 
 On the VPS (or build elsewhere and copy the binaries):

@@ -1,9 +1,11 @@
 services:
   arvolo-relay:
-    build:
-      context: .
-      dockerfile: relay/Dockerfile
-    image: arvolo-relay:latest
+    # Uses the published image by default. For local development, comment out
+    # `image:` and uncomment `build:` to build from source.
+    image: ghcr.io/lords82/arvolo-relay:latest
+    # build:
+    #   context: .
+    #   dockerfile: relay/Dockerfile
     container_name: arvolo-relay
     restart: always
     ports:

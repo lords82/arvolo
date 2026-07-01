@@ -12,15 +12,38 @@ away. Every transfer is **end-to-end encrypted** and the relay is **zero-knowled
 
 ## Install
 
-**Prebuilt binaries** — grab `arvolo` (and `arvolo-relay`) for your OS from the
+**One-liner** (Linux x86_64, macOS arm64):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/lords82/arvolo/main/install.sh | sh
+```
+
+Installs `arvolo` (and `arvolo-relay`) into `/usr/local/bin` (override with
+`ARVOLO_INSTALL_DIR`). Pin a version with `ARVOLO_VERSION=vX.Y.Z`.
+
+**Prebuilt binaries** — or grab `arvolo` (and `arvolo-relay`) for your OS from the
 [latest release](https://github.com/lords82/arvolo/releases), unpack, and put it
 on your `PATH`.
 
-**From source** (needs Rust ≥ 1.88):
+**From crates.io** (needs Rust ≥ 1.88):
 
 ```sh
-cargo install --git https://github.com/lords82/arvolo arvolo-cli    # the `arvolo` client
-cargo install --git https://github.com/lords82/arvolo arvolo-relay  # the relay (self-host)
+cargo install arvolo-cli    # the `arvolo` client
+cargo install arvolo-relay  # the relay (self-host)
+```
+
+**From git** (latest, unreleased):
+
+```sh
+cargo install --git https://github.com/lords82/arvolo arvolo-cli
+cargo install --git https://github.com/lords82/arvolo arvolo-relay
+```
+
+**Relay via Docker** — self-host the zero-knowledge relay in one command:
+
+```sh
+docker run -d --name arvolo-relay -p 8787:8787 -v arvolo-data:/data \
+  ghcr.io/lords82/arvolo-relay:latest
 ```
 
 ## Quickstart

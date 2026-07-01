@@ -1,10 +1,14 @@
 [package]
 name = "arvolo-core"
-description = "arvolo shared core: engine abstractions and types"
+description = "Arvolo shared core: end-to-end encryption, chunked P2P transfer, and relay-backfill engine"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["file-transfer", "p2p", "e2ee", "encryption", "hpke"]
+categories = ["network-programming", "cryptography"]
 
 [dependencies]
 anyhow.workspace = true

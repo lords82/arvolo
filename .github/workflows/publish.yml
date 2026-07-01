@@ -1,0 +1,36 @@
+name: Publish to crates.io
+
+# Manual only: publishing claims crate names and is irreversible. Set the
+# repository secret CARGO_REGISTRY_TOKEN (crates.io API token) first, then run
+# this workflow from the Actions tab once the release is ready.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  publish:
+    name: cargo publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # Publish in dependency order. `cargo publish` waits for each crate to be
+      # available in the index before returning, so the binaries can depend on
+      # the freshly published core.
+      - name: Publish arvolo-core
+        run: cargo publish -p arvolo-core --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      - name: Publish arvolo-cli
+        run: cargo publish -p arvolo-cli --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      - name: Publish arvolo-relay
+        run: cargo publish -p arvolo-relay --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
