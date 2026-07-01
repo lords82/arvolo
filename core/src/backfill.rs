@@ -1,26 +1,23 @@
-//! Relay-side blob store for chunked backfill.
+//! Relay-side chunk store for backfill.
 //!
-//! The relay runs an iroh-blobs store node that holds **seeded chunks** (each an
-//! independent content-addressed blob), protected by a tag. The receiver
-//! releases each chunk as it gets it; releasing removes the tag and the store's
-//! periodic GC deletes the blob — so storage is freed *during* the download.
+//! The relay holds **seeded chunks** as plain ciphertext files (one per BLAKE3
+//! hash) and serves them over the custom chunk protocol ([`CHUNK_ALPN`]). It
+//! pulls chunks from the sender with the same protocol. Releasing a chunk just
+//! deletes its file (freeing storage *during* the download); expiry is a TTL
+//! backstop in the relay's mailbox.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Duration;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use iroh::{protocol::Router, Endpoint, EndpointAddr};
-use iroh_blobs::{
-    store::fs::{options::Options, FsStore},
-    store::GcConfig,
-    ticket::BlobTicket,
-    BlobFormat, BlobsProtocol, Hash,
-};
+use iroh_blobs::Hash;
 use serde::{Deserialize, Serialize};
 
+use crate::chunked::{fetch_chunk_wire, ChunkServer, CHUNK_ALPN};
 use crate::node::encode_ticket;
-use crate::transfer::{bind_endpoint, fetch_into, RelayChoice};
+use crate::transfer::{bind_endpoint, RelayChoice};
 
 /// Relay coordinates for chunked backfill: where the relay is (HTTP + iroh
 /// address) and the per-transfer token used to seed/release/fetch its chunks.
@@ -28,59 +25,38 @@ use crate::transfer::{bind_endpoint, fetch_into, RelayChoice};
 pub struct RelayRelease {
     /// Relay HTTP base URL, e.g. `http://relay:8787`.
     pub http: String,
-    /// The relay's iroh blob-node address (base32), for fetching backfilled chunks.
+    /// The relay's iroh chunk-node address (base32), for fetching backfilled chunks.
     pub addr: String,
     /// Per-transfer token authorizing seed/release of this transfer's chunks.
     pub token: String,
 }
 
-/// A relay-side blob provider: holds seeded chunks and serves them; releasing a
-/// chunk untags it so the store's GC deletes it.
+/// A relay-side chunk provider: holds seeded ciphertext files and serves them.
 pub struct BlobNode {
     endpoint: Endpoint,
-    store: FsStore,
+    dir: PathBuf,
     _router: Router,
 }
 
 impl BlobNode {
-    /// Start a blob node backed by `store_dir`, reachable over the given relay.
-    /// Periodic GC deletes any untagged (released/expired) blob within ~15s.
+    /// Start a chunk node backed by `store_dir` (one file per chunk hash),
+    /// reachable over the given relay.
     pub async fn spawn(store_dir: &Path, relay: RelayChoice) -> Result<Self> {
-        Self::spawn_with_gc(store_dir, relay, Duration::from_secs(15)).await
-    }
-
-    /// Like [`spawn`](Self::spawn) but with an explicit GC interval. Tests use a
-    /// short interval to assert that a released chunk is collected promptly.
-    pub async fn spawn_with_gc(
-        store_dir: &Path,
-        relay: RelayChoice,
-        gc_interval: Duration,
-    ) -> Result<Self> {
-        std::fs::create_dir_all(store_dir).ok();
+        let dir = store_dir.to_path_buf();
+        std::fs::create_dir_all(&dir).ok();
         let use_relay = !matches!(relay, RelayChoice::Disabled);
         let endpoint = bind_endpoint(relay).await?;
-        let mut opts = Options::new(store_dir);
-        opts.gc = Some(GcConfig {
-            interval: gc_interval,
-            add_protected: None,
-        });
-        let store = FsStore::load_with_opts(store_dir.join("blobs.db"), opts)
-            .await
-            .map_err(|e| anyhow!("open blob store: {e}"))?;
-        let blobs = BlobsProtocol::new(&store, None);
         let router = Router::builder(endpoint.clone())
-            .accept(iroh_blobs::ALPN, blobs)
+            .accept(CHUNK_ALPN, ChunkServer::files(dir.clone()))
             .spawn();
         // Wait for a dialable address (relay home + reflexive), but never block
-        // startup forever: on a server with no peers `online()` may stay pending.
-        // With the relay disabled (local/tests) there is nothing to come online
-        // for, so skip it entirely.
+        // startup forever; with the relay disabled (local/tests) skip it.
         if use_relay {
             let _ = tokio::time::timeout(Duration::from_secs(10), endpoint.online()).await;
         }
         Ok(Self {
             endpoint,
-            store,
+            dir,
             _router: router,
         })
     }
@@ -95,39 +71,35 @@ impl BlobNode {
         encode_ticket(&self.addr())
     }
 
-    /// Pull each chunk (by hash) from `sender` into this node's store and tag it,
-    /// so the chunks are served and kept until released. Returns this node's
-    /// address (base32) for advertising the relay as a provider.
+    fn chunk_path(&self, hash: &Hash) -> PathBuf {
+        self.dir.join(hash.to_string())
+    }
+
+    /// Pull each chunk (by hash) from `sender` and store it as a ciphertext file,
+    /// verifying `BLAKE3(ciphertext) == hash`. Returns this node's address
+    /// (base32) for advertising the relay as a provider.
     pub async fn seed_chunks(&self, sender: EndpointAddr, chunks: &[Hash]) -> Result<String> {
         for hash in chunks {
-            // Tag BEFORE fetching so the blob is protected from the periodic GC
-            // while it downloads. Otherwise a slow multi-chunk seed races the GC:
-            // freshly-downloaded-but-not-yet-tagged blobs get collected mid-seed.
-            self.store
-                .tags()
-                .set(tag_name(hash), *hash)
-                .await
-                .context("tag chunk")?;
-            let bt = BlobTicket::new(sender.clone(), *hash, BlobFormat::Raw);
-            fetch_into(&self.store, &self.endpoint, &bt)
+            if self.chunk_path(hash).exists() {
+                continue; // already held
+            }
+            let (total_len, ct) = fetch_chunk_wire(&self.endpoint, &sender, *hash, 0)
                 .await
                 .with_context(|| format!("seed chunk {hash}"))?;
+            anyhow::ensure!(
+                ct.len() as u64 == total_len && Hash::new(&ct) == *hash,
+                "seeded chunk {hash} failed integrity check"
+            );
+            std::fs::write(self.chunk_path(hash), &ct)
+                .with_context(|| format!("write chunk {hash}"))?;
         }
         encode_ticket(&self.addr())
     }
 
-    /// Release a chunk (by hex hash): remove its tag so GC deletes it. Idempotent.
+    /// Release a chunk (by hex hash): delete its file. Idempotent.
     pub async fn release_hex(&self, hash_hex: &str) -> Result<()> {
         let hash = Hash::from_str(hash_hex).context("parse hash")?;
-        self.store
-            .tags()
-            .delete(tag_name(&hash))
-            .await
-            .context("delete tag")?;
+        let _ = std::fs::remove_file(self.chunk_path(&hash));
         Ok(())
     }
-}
-
-fn tag_name(hash: &Hash) -> String {
-    format!("seed/{hash}")
 }

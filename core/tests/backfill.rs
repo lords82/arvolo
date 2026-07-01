@@ -1,23 +1,20 @@
-//! Relay-side backfill: seed chunks into a blob node, serve them, and release
-//! (untag → GC deletes) them. Exercises the path that had the tag-vs-GC race.
-
-use std::time::Duration;
+//! Relay-side backfill over the custom chunk protocol: seed chunks into the
+//! relay's file store, serve them, and release (delete) them.
 
 use arvolo_core::backfill::BlobNode;
 use arvolo_core::chunked::{ChunkReceiver, ChunkSender};
 use arvolo_core::reexport::Hash;
 use arvolo_core::transfer::RelayChoice;
 
-/// Try to fetch a chunk from the blob node; `true` if it served it.
+/// Try to fetch a chunk from the relay node; `true` if it served it.
 async fn served(receiver: &ChunkReceiver, node: &BlobNode, hash: Hash) -> bool {
     receiver.fetch_chunk(&[node.addr()], hash).await.is_ok()
 }
 
-// Integration test over three local iroh endpoints (sender → relay → receiver).
-// It's reliable in isolation but flaky under the full suite's parallel load
-// (local iroh connectivity gets starved), so it's #[ignore]d by default and run
-// on demand: `cargo test -p arvolo-core --test backfill -- --ignored`. The
-// seed→serve→release path is also validated live against the deployed relay.
+// Integration test over local iroh endpoints (sender → relay → receiver). Kept
+// #[ignore] by default because local iroh connectivity gets starved under the
+// full suite's parallel load; reliable in isolation and validated live:
+//   cargo test -p arvolo-core --test backfill -- --ignored
 #[ignore = "iroh integration; run in isolation via --ignored"]
 #[tokio::test]
 async fn seed_serve_release_roundtrip() {
@@ -33,18 +30,12 @@ async fn seed_serve_release_roundtrip() {
     let chunks = sender.chunks().to_vec();
     assert_eq!(chunks.len(), 2);
 
-    // Relay-side blob node with a GC interval long enough that it never runs
-    // during the (locally slow, and under full-suite load slower) multi-chunk
-    // seed — otherwise the periodic GC races the seed and flakes. This test
-    // guards the tag-before-fetch fix (seeded chunks stay complete/servable);
-    // the "released chunk is eventually collected" timing is validated in real
-    // deployments, not here where GC timing under load is nondeterministic.
     let store_dir = dir.path().join("relaystore");
-    let node = BlobNode::spawn_with_gc(&store_dir, RelayChoice::Disabled, Duration::from_secs(3600))
+    let node = BlobNode::spawn(&store_dir, RelayChoice::Disabled)
         .await
-        .expect("blob node");
+        .expect("relay node");
 
-    // Seed both chunks from the sender into the relay's store.
+    // Seed both chunks from the sender into the relay's file store.
     node.seed_chunks(sender.addr(), &chunks)
         .await
         .expect("seed chunks");
@@ -53,20 +44,28 @@ async fn seed_serve_release_roundtrip() {
         .await
         .expect("receiver");
 
-    // Both seeded chunks are complete and servable from the relay (this is what
-    // the tag-before-fetch fix guarantees during a slow multi-chunk seed).
+    // Both seeded chunks are complete and servable from the relay.
     for &h in &chunks {
         assert!(served(&receiver, &node, h).await, "seeded chunk must serve");
     }
 
-    // Release is idempotent and untags the chunk (the periodic GC then frees it;
-    // that collection is time-based and exercised in real deployments).
+    // Release chunk 0: its file is deleted immediately (deterministic).
     node.release_hex(&chunks[0].to_string())
         .await
         .expect("release");
+    assert!(
+        !served(&receiver, &node, chunks[0]).await,
+        "released chunk must no longer serve"
+    );
+    // Release is idempotent.
     node.release_hex(&chunks[0].to_string())
         .await
-        .expect("release is idempotent");
+        .expect("release idempotent");
+    // The un-released chunk is still served.
+    assert!(
+        served(&receiver, &node, chunks[1]).await,
+        "un-released chunk must remain servable"
+    );
 
     receiver.close().await;
     sender.shutdown().await;
