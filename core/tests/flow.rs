@@ -47,18 +47,23 @@ async fn send_then_recv_roundtrip_emits_events() {
     // Integrity.
     assert_eq!(std::fs::read(&saved).unwrap(), data);
 
-    // Event shape: Started first, one Chunk per chunk, Saved last.
+    // Event shape: anonymous Sender first (plain ticket), then Started, one Chunk
+    // per chunk, Saved last.
     let events = events.lock().unwrap().clone();
     assert!(
+        matches!(events.first(), Some(RecvEvent::Sender { id: None })),
+        "first event is an anonymous Sender for a plain ticket"
+    );
+    assert!(
         matches!(
-            events.first(),
+            events.get(1),
             Some(RecvEvent::Started {
                 total: 2,
                 resuming_from: 0,
                 ..
             })
         ),
-        "first event is Started"
+        "Started follows the Sender event"
     );
     let chunk_events = events
         .iter()
@@ -203,19 +208,30 @@ async fn sealed_to_recipient_only_intended_can_decrypt() {
         tokio::spawn(async move { session.serve(c, |_| {}).await })
     };
 
-    // The intended recipient recovers the file.
+    // The intended recipient recovers the file, and learns the verified sender.
     let out = dir.path().join("out.bin");
+    let seen_sender = Arc::new(Mutex::new(None));
+    let ss = seen_sender.clone();
     flow::recv_chunked(
         &ticket,
         Some(out.clone()),
         Some(&recipient),
         RelayChoice::Disabled,
         CancellationToken::new(),
-        |_| {},
+        move |e| {
+            if let RecvEvent::Sender { id } = e {
+                *ss.lock().unwrap() = Some(id);
+            }
+        },
     )
     .await
     .expect("recipient decrypts");
     assert_eq!(std::fs::read(&out).unwrap(), data);
+    assert_eq!(
+        seen_sender.lock().unwrap().clone(),
+        Some(Some(sender_id.public().to_bytes())),
+        "recv surfaces the HPKE-verified sender id"
+    );
 
     // A stranger cannot open the sealed content key.
     let stranger_res = flow::recv_chunked(
