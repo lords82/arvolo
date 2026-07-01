@@ -12,6 +12,7 @@ use std::future::Future;
 pub mod backfill;
 pub mod chunked;
 pub mod crypto;
+pub mod flow;
 pub mod node;
 pub mod offline;
 pub mod pairing;

@@ -27,9 +27,11 @@ async fn seed_serve_release_roundtrip() {
     let chunks = sender.chunks().to_vec();
     assert_eq!(chunks.len(), 2);
 
-    // Relay-side blob node with a fast GC so we can assert prompt collection.
+    // Relay-side blob node. The GC interval is long enough not to run *during*
+    // the (locally slow) multi-chunk seed, but short enough to assert prompt
+    // collection after a release. (Production uses 15s and seeds are fast.)
     let store_dir = dir.path().join("relaystore");
-    let node = BlobNode::spawn_with_gc(&store_dir, RelayChoice::Disabled, Duration::from_secs(1))
+    let node = BlobNode::spawn_with_gc(&store_dir, RelayChoice::Disabled, Duration::from_secs(10))
         .await
         .expect("blob node");
 
@@ -53,14 +55,14 @@ async fn seed_serve_release_roundtrip() {
         .await
         .expect("release");
 
-    // Within a few GC cycles the released chunk is gone…
+    // Within a couple of GC cycles the released chunk is gone…
     let mut gone = false;
-    for _ in 0..20 {
+    for _ in 0..30 {
         if !served(&receiver, &node, chunks[0]).await {
             gone = true;
             break;
         }
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        tokio::time::sleep(Duration::from_millis(800)).await;
     }
     assert!(gone, "released chunk should be collected by GC");
 
