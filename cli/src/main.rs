@@ -163,7 +163,10 @@ fn contacts_cmd(action: ContactAction) -> Result<()> {
                 eprintln!("(no contacts yet — add one: arvolo contacts add <name> <id>)");
             }
             for (name, id) in list {
-                println!("{name}\t{id}");
+                match book::fingerprint_of(&id) {
+                    Some(fp) => println!("{name}\t{id}\t({fp})"),
+                    None => println!("{name}\t{id}"),
+                }
             }
         }
         ContactAction::Remove { name } => {
@@ -193,7 +196,9 @@ fn my_identity() -> Result<Identity> {
 
 fn id() -> Result<()> {
     let id = my_identity()?;
-    println!("{}", encode_id(&id.public()));
+    let pubid = id.public();
+    println!("{}", encode_id(&pubid));
+    eprintln!("fingerprint: {}", pubid.fingerprint());
     eprintln!("(identity stored at {})", identity_path().display());
     Ok(())
 }
@@ -213,6 +218,50 @@ fn cancel_on_ctrl_c() -> CancellationToken {
         t.cancel();
     });
     token
+}
+
+/// Announce who a received transfer is from, and record it in the TOFU ledger.
+///
+/// `id` is `None` for a plain (anonymous, unauthenticated) ticket, or the
+/// sender's HPKE-authenticated public-key bytes for a sealed one. Prints to
+/// stderr before the progress bar starts.
+fn print_sender_banner(id: Option<&[u8]>) {
+    let bytes = match id {
+        None => {
+            eprintln!(
+                "⚠  From: anonymous sender — this ticket is not authenticated; anyone \
+                 holding it could have created it."
+            );
+            return;
+        }
+        Some(b) => b,
+    };
+    let Ok(pubid) = PublicId::from_bytes(bytes) else {
+        eprintln!("⚠  From: a sender with an unreadable identity in the ticket.");
+        return;
+    };
+    let id_b32 = encode_id(&pubid);
+    let fp = pubid.fingerprint();
+    let status = book::sender_status(&id_b32);
+    match (status.name, status.seen_before) {
+        (Some(name), _) => {
+            eprintln!("✓ From: {name}  (verified — fingerprint: {fp})");
+        }
+        (None, true) => {
+            eprintln!("From: known sender  (fingerprint: {fp})");
+            eprintln!("      id: {id_b32}");
+            eprintln!("      not in contacts — save with: arvolo contacts add <name> {id_b32}");
+        }
+        (None, false) => {
+            eprintln!("⚠  From: NEW sender (first time you receive from this identity)");
+            eprintln!("      fingerprint: {fp}");
+            eprintln!("      id: {id_b32}");
+            eprintln!(
+                "      Verify the fingerprint out-of-band, then: arvolo contacts add <name> {id_b32}"
+            );
+        }
+    }
+    book::record_seen(&id_b32);
 }
 
 /// Render a ticket as a QR code on stdout (best-effort).
@@ -420,6 +469,9 @@ async fn recv(ticket: String, out: Option<PathBuf>) -> Result<()> {
         move |ev| {
             let mut slot = b.lock().unwrap();
             match ev {
+                RecvEvent::Sender { id } => {
+                    print_sender_banner(id.as_deref());
+                }
                 RecvEvent::Started {
                     total,
                     resuming_from,
@@ -521,7 +573,12 @@ async fn send_offline(
 
 async fn recv_offline(ticket: String, out: Option<PathBuf>) -> Result<()> {
     let me = my_identity()?;
+    // A successful fetch means HPKE auth passed, so the sender in the ticket is
+    // genuine — surface it (offline tickets are always sealed to a recipient).
     let (path, n) = flow::fetch_offline(&ticket, out, &me).await?;
+    if let Ok(t) = arvolo_core::offline::OfflineTicket::decode(&ticket) {
+        print_sender_banner(Some(&t.sender));
+    }
     println!("Saved {n} bytes to {}", path.display());
     Ok(())
 }

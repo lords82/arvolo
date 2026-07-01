@@ -21,6 +21,9 @@ fn config_path() -> PathBuf {
 fn contacts_path() -> PathBuf {
     config_dir().join("contacts.toml")
 }
+fn seen_path() -> PathBuf {
+    config_dir().join("seen.toml")
+}
 
 #[derive(Default, Deserialize)]
 struct Config {
@@ -79,6 +82,59 @@ pub fn resolve_recipient(arg: &str) -> Result<PublicId> {
         return decode_id(id).with_context(|| format!("contact '{arg}' has an invalid id"));
     }
     decode_id(arg).context("not a known contact name or a valid public id")
+}
+
+/// The word fingerprint for a stored base32 id (for display in listings).
+pub fn fingerprint_of(id_b32: &str) -> Option<String> {
+    decode_id(id_b32).ok().map(|p| p.fingerprint())
+}
+
+/// Reverse-lookup: the saved contact name for a base32 public id, if any.
+pub fn resolve_name(id_b32: &str) -> Option<String> {
+    load_contacts()
+        .contacts
+        .into_iter()
+        .find(|(_, id)| id == id_b32)
+        .map(|(name, _)| name)
+}
+
+/// What we know about a sender before recording this receipt: their contact name
+/// (if saved) and whether we've received from them before (TOFU).
+pub struct SenderStatus {
+    pub name: Option<String>,
+    pub seen_before: bool,
+}
+
+#[derive(Default, Serialize, Deserialize)]
+struct Seen {
+    #[serde(default)]
+    seen: BTreeMap<String, u64>,
+}
+
+fn load_seen() -> Seen {
+    std::fs::read_to_string(seen_path())
+        .ok()
+        .and_then(|s| toml::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+/// Contact name + whether this sender id has been seen before. Read-only.
+pub fn sender_status(id_b32: &str) -> SenderStatus {
+    SenderStatus {
+        name: resolve_name(id_b32),
+        seen_before: load_seen().seen.contains_key(id_b32),
+    }
+}
+
+/// Record a receipt from `id_b32` (TOFU ledger): increments its counter. Best
+/// effort — a failure to persist must not break a completed transfer.
+pub fn record_seen(id_b32: &str) {
+    let mut s = load_seen();
+    *s.seen.entry(id_b32.to_string()).or_insert(0) += 1;
+    if let Ok(text) = toml::to_string_pretty(&s) {
+        std::fs::create_dir_all(config_dir()).ok();
+        let _ = std::fs::write(seen_path(), text);
+    }
 }
 
 /// Add or update a contact (validates the id).
@@ -140,6 +196,21 @@ mod tests {
             resolve_recipient(&id_b32).unwrap().to_bytes(),
             id.to_bytes()
         );
+
+        // Reverse-lookup: id -> saved contact name.
+        assert_eq!(resolve_name(&id_b32).as_deref(), Some("alice"));
+        assert_eq!(resolve_name("nonexistentid"), None);
+
+        // TOFU ledger: unseen at first, then seen after recording a receipt.
+        let st = sender_status(&id_b32);
+        assert_eq!(st.name.as_deref(), Some("alice"));
+        assert!(!st.seen_before, "sender not seen before the first receipt");
+        record_seen(&id_b32);
+        assert!(
+            sender_status(&id_b32).seen_before,
+            "sender is seen after recording a receipt"
+        );
+
         assert_eq!(contact_list(), vec![("alice".into(), id_b32)]);
         assert!(contact_remove("alice").unwrap());
         assert!(contact_list().is_empty());

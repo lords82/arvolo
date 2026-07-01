@@ -108,6 +108,23 @@ impl PublicId {
                 .map_err(|e| anyhow!("invalid public id: {e}"))?,
         ))
     }
+
+    /// A short, human-comparable fingerprint of this identity: six words derived
+    /// from `BLAKE3` of the public key (~48 bits). It is a *display aid* for
+    /// out-of-band verification ("read me your six words") — the full base32 id
+    /// remains the authoritative value for matching contacts.
+    pub fn fingerprint(&self) -> String {
+        let mut h = blake3::Hasher::new();
+        h.update(b"arvolo/fp/v1");
+        h.update(&self.to_bytes());
+        let digest = h.finalize();
+        let bytes = digest.as_bytes();
+        bytes[..6]
+            .iter()
+            .map(|b| crate::wordlist::WORDS[*b as usize])
+            .collect::<Vec<_>>()
+            .join("-")
+    }
 }
 
 /// Encrypt `plaintext` toward `recipient`, authenticated as `sender`.
@@ -323,5 +340,24 @@ mod tests {
         let mut ct = seal_chunk(&key, 0, 1, b"payload").unwrap();
         ct[0] ^= 0xff;
         assert!(open_chunk(&key, 0, 1, &ct).is_err());
+    }
+
+    #[test]
+    fn fingerprint_is_stable_and_distinct() {
+        let alice = Identity::generate();
+        let bob = Identity::generate();
+
+        let fp = alice.public().fingerprint();
+        // Six dash-separated words, all from the shared wordlist.
+        let words: Vec<&str> = fp.split('-').collect();
+        assert_eq!(words.len(), 6, "fingerprint is six words: {fp}");
+        assert!(words.iter().all(|w| crate::wordlist::WORDS.contains(w)));
+
+        // Deterministic: same id -> same fingerprint (via a byte roundtrip too).
+        let restored = PublicId::from_bytes(&alice.public().to_bytes()).unwrap();
+        assert_eq!(restored.fingerprint(), fp);
+
+        // Different identities almost surely differ.
+        assert_ne!(bob.public().fingerprint(), fp);
     }
 }

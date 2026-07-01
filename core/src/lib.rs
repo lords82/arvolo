@@ -19,6 +19,7 @@ pub mod node;
 pub mod offline;
 pub mod pairing;
 pub mod transfer;
+pub mod wordlist;
 
 /// Re-exports of types that appear in the public API.
 pub mod reexport {

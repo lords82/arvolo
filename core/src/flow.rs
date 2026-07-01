@@ -48,6 +48,12 @@ pub enum SendEvent {
 /// Progress events emitted while receiving a file.
 #[derive(Debug, Clone)]
 pub enum RecvEvent {
+    /// Who sent this transfer, emitted before `Started`. `Some(pubkey_bytes)` is
+    /// an HPKE-authenticated sender (`--to`); `None` is a `Plain` ticket that
+    /// anyone holding it could have produced (anonymous, unauthenticated).
+    Sender {
+        id: Option<Vec<u8>>,
+    },
     Started {
         total: usize,
         resuming_from: usize,
@@ -256,9 +262,11 @@ pub async fn recv_chunked(
         None => None,
     };
     // Recover the content key: sealed tickets need our identity and verify the
-    // sender; plain tickets carry the key directly.
-    let key_bytes: Vec<u8> = match &t.key {
-        KeyDelivery::Plain(k) => k.clone(),
+    // sender; plain tickets carry the key directly. A sealed key that opens is a
+    // proof the sender is who the ticket claims, so we surface it only *after*
+    // `open` succeeds; a plain ticket has no authenticated sender.
+    let (key_bytes, sender_id): (Vec<u8>, Option<Vec<u8>>) = match &t.key {
+        KeyDelivery::Plain(k) => (k.clone(), None),
         KeyDelivery::Sealed {
             encapped_key,
             ciphertext,
@@ -268,7 +276,7 @@ pub async fn recv_chunked(
                 "this transfer is addressed to a specific recipient; run with your identity",
             )?;
             let sender_pub = PublicId::from_bytes(sender).context("invalid sender in ticket")?;
-            open(
+            let k = open(
                 &Sealed {
                     encapped_key: encapped_key.clone(),
                     ciphertext: ciphertext.clone(),
@@ -277,9 +285,11 @@ pub async fn recv_chunked(
                 &sender_pub,
                 CHUNK_KEY_AAD,
             )
-            .context("decrypt content key (not the intended recipient, or wrong sender)")?
+            .context("decrypt content key (not the intended recipient, or wrong sender)")?;
+            (k, Some(sender.clone()))
         }
     };
+    on(RecvEvent::Sender { id: sender_id });
     let key: [u8; crate::crypto::CHUNK_KEY_LEN] = key_bytes
         .as_slice()
         .try_into()
