@@ -107,6 +107,11 @@ async fn read_msg(recv: &mut RecvStream) -> Option<CtrlMsg> {
 /// Chunk-transfer ALPN.
 pub const CHUNK_ALPN: &[u8] = b"arvolo/chunk/1";
 
+/// Maximum ciphertext length for one chunk (plaintext chunk + AEAD tag). A
+/// provider that claims more than this is rejected BEFORE we allocate/download,
+/// so a malicious provider can't drive the receiver to OOM or fill the disk.
+const MAX_CHUNK_CT: u64 = CHUNK_SIZE as u64 + 16;
+
 #[derive(Serialize, Deserialize)]
 struct ChunkReq {
     hash: Hash,
@@ -246,6 +251,7 @@ pub(crate) async fn fetch_chunk_wire(
     if resp.total_len == 0 {
         anyhow::bail!("chunk not available from this provider");
     }
+    anyhow::ensure!(resp.total_len <= MAX_CHUNK_CT, "provider claims oversized chunk");
     let want = resp.total_len.saturating_sub(offset) as usize;
     let mut buf = vec![0u8; want];
     recv.read_exact(&mut buf)
@@ -279,6 +285,7 @@ async fn fetch_chunk_wire_to_file(
     if resp.total_len == 0 {
         anyhow::bail!("chunk not available from this provider");
     }
+    anyhow::ensure!(resp.total_len <= MAX_CHUNK_CT, "provider claims oversized chunk");
     let mut remaining = resp.total_len.saturating_sub(have);
     let mut buf = vec![0u8; 64 * 1024];
     while remaining > 0 {
