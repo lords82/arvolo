@@ -156,3 +156,76 @@ async fn release_unseeded_is_noop_ok() {
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(body_bytes(resp).await, b"ok");
 }
+
+// ---- rendezvous (short-code pairing) --------------------------------------
+
+async fn rz_post(app: &axum::Router, slot: &str, key: &str, body: &[u8]) -> StatusCode {
+    app.clone()
+        .oneshot(
+            Request::post(format!("/v1/rz/{slot}/{key}"))
+                .body(Body::from(body.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .status()
+}
+
+async fn rz_get(app: &axum::Router, slot: &str, key: &str) -> (StatusCode, Vec<u8>) {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::get(format!("/v1/rz/{slot}/{key}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    (status, body_bytes(resp).await)
+}
+
+#[tokio::test]
+async fn rz_claim_put_get_and_conflict() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app(dir.path()).await;
+
+    // Unposted key is 404.
+    assert_eq!(rz_get(&app, "42", "ms").await.0, StatusCode::NOT_FOUND);
+
+    // Sender claims the slot.
+    assert_eq!(rz_post(&app, "42", "ms", b"sender-pake").await, StatusCode::OK);
+    let (st, v) = rz_get(&app, "42", "ms").await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(v, b"sender-pake");
+
+    // A second claim on the same slot is refused.
+    assert_eq!(
+        rz_post(&app, "42", "ms", b"other").await,
+        StatusCode::CONFLICT
+    );
+
+    // Receiver posts its message (non-claim key overwrites freely).
+    assert_eq!(rz_post(&app, "42", "mr", b"recv-pake").await, StatusCode::OK);
+    assert_eq!(rz_get(&app, "42", "mr").await.1, b"recv-pake");
+}
+
+#[tokio::test]
+async fn rz_ticket_fetch_burns_slot() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app(dir.path()).await;
+    assert_eq!(rz_post(&app, "7", "ms", b"x").await, StatusCode::OK);
+    assert_eq!(
+        rz_post(&app, "7", "tkt", b"encrypted-ticket").await,
+        StatusCode::OK
+    );
+
+    // First fetch of the ticket returns it…
+    let (st, v) = rz_get(&app, "7", "tkt").await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(v, b"encrypted-ticket");
+
+    // …and burns the whole slot: ticket and the claim key are both gone.
+    assert_eq!(rz_get(&app, "7", "tkt").await.0, StatusCode::NOT_FOUND);
+    assert_eq!(rz_get(&app, "7", "ms").await.0, StatusCode::NOT_FOUND);
+}
