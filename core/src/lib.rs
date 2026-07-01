@@ -11,6 +11,7 @@ use std::future::Future;
 
 pub mod backfill;
 pub mod chunked;
+pub mod code;
 pub mod crypto;
 pub mod flow;
 pub mod node;

@@ -131,6 +131,13 @@ impl Mailbox {
                 hash        TEXT NOT NULL,
                 expires_at  INTEGER NOT NULL,
                 PRIMARY KEY (token, hash)
+            );
+            CREATE TABLE IF NOT EXISTS rendezvous (
+                slot        TEXT NOT NULL,
+                key         TEXT NOT NULL,
+                value       BLOB NOT NULL,
+                expires_at  INTEGER NOT NULL,
+                PRIMARY KEY (slot, key)
             );",
         )
         .map_err(backend)?;
@@ -315,6 +322,86 @@ impl Mailbox {
             Err(_) => Vec::new(),
         }
     }
+
+    // ---- rendezvous (short-code pairing) ----------------------------------
+
+    /// Claim a rendezvous slot by writing its first value. Returns `false` if the
+    /// slot key already exists (someone else claimed it) — the sender then retries
+    /// with a fresh nameplate.
+    pub fn rz_claim(
+        &self,
+        slot: &str,
+        key: &str,
+        value: &[u8],
+        expires_at: u64,
+    ) -> Result<bool, MailboxError> {
+        let n = self
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT OR IGNORE INTO rendezvous (slot, key, value, expires_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![slot, key, value, expires_at as i64],
+            )
+            .map_err(backend)?;
+        Ok(n == 1)
+    }
+
+    /// Write (or overwrite) a rendezvous value.
+    pub fn rz_put(
+        &self,
+        slot: &str,
+        key: &str,
+        value: &[u8],
+        expires_at: u64,
+    ) -> Result<(), MailboxError> {
+        self.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT OR REPLACE INTO rendezvous (slot, key, value, expires_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![slot, key, value, expires_at as i64],
+            )
+            .map_err(backend)?;
+        Ok(())
+    }
+
+    /// Read a rendezvous value (if present and unexpired).
+    pub fn rz_get(&self, slot: &str, key: &str, now: u64) -> Option<Vec<u8>> {
+        self.conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT value FROM rendezvous WHERE slot = ?1 AND key = ?2 AND expires_at > ?3",
+                params![slot, key, now as i64],
+                |r| r.get::<_, Vec<u8>>(0),
+            )
+            .ok()
+    }
+
+    /// Delete a whole rendezvous slot (all its keys) — called after the ticket is
+    /// fetched (burn) so nothing lingers.
+    pub fn rz_delete_slot(&self, slot: &str) {
+        let _ = self
+            .conn
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM rendezvous WHERE slot = ?1", params![slot]);
+    }
+
+    /// Delete all expired rendezvous rows; returns how many.
+    pub fn rz_reap(&self, now: u64) -> usize {
+        self.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "DELETE FROM rendezvous WHERE expires_at <= ?1",
+                params![now as i64],
+            )
+            .unwrap_or(0)
+    }
 }
 
 /// Current unix time in seconds.
@@ -355,8 +442,58 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/addr", get(addr_handler))
         .route("/v1/seed", post(seed_handler))
         .route("/v1/release/{token}/{hash}", post(release_handler))
+        .route("/v1/rz/{slot}/{key}", post(rz_post_handler).get(rz_get_handler))
         .route("/healthz", get(|| async { "ok" }))
         .with_state(state)
+}
+
+/// TTL (seconds) for a rendezvous slot: long enough for a human to type the code,
+/// short enough that abandoned slots vanish quickly.
+const RZ_TTL: u64 = 600;
+/// Key under which the sender claims a slot (its SPAKE2 message).
+const RZ_CLAIM_KEY: &str = "ms";
+/// Key holding the encrypted ticket; fetching it burns the whole slot.
+const RZ_TICKET_KEY: &str = "tkt";
+
+/// Store a rendezvous value. The claim key (`ms`) fails with 409 if the slot is
+/// already taken, so the sender can pick a fresh nameplate.
+async fn rz_post_handler(
+    State(state): State<AppState>,
+    AxumPath((slot, key)): AxumPath<(String, String)>,
+    body: Bytes,
+) -> Result<String, (StatusCode, String)> {
+    let exp = now_unix().saturating_add(RZ_TTL);
+    if key == RZ_CLAIM_KEY {
+        let claimed = state
+            .mailbox
+            .rz_claim(&slot, &key, &body, exp)
+            .map_err(|e| (status_for(&e), e.to_string()))?;
+        if !claimed {
+            return Err((StatusCode::CONFLICT, "slot already taken".into()));
+        }
+    } else {
+        state
+            .mailbox
+            .rz_put(&slot, &key, &body, exp)
+            .map_err(|e| (status_for(&e), e.to_string()))?;
+    }
+    Ok("ok".into())
+}
+
+/// Read a rendezvous value (404 until posted). Reading the ticket burns the slot.
+async fn rz_get_handler(
+    State(state): State<AppState>,
+    AxumPath((slot, key)): AxumPath<(String, String)>,
+) -> Result<Bytes, (StatusCode, String)> {
+    match state.mailbox.rz_get(&slot, &key, now_unix()) {
+        Some(v) => {
+            if key == RZ_TICKET_KEY {
+                state.mailbox.rz_delete_slot(&slot);
+            }
+            Ok(Bytes::from(v))
+        }
+        None => Err((StatusCode::NOT_FOUND, "not yet".into())),
+    }
 }
 
 fn status_for(e: &MailboxError) -> StatusCode {

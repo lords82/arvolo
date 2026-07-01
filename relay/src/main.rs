@@ -61,6 +61,11 @@ async fn main() -> Result<()> {
                     let _ = state.mailbox.delete_seed_one(&token, &hash);
                     tracing::info!(%hash, "reaped expired seeded chunk");
                 }
+                // Expired pairing rendezvous slots.
+                match state.mailbox.rz_reap(now) {
+                    n if n > 0 => tracing::info!(removed = n, "reaped expired rendezvous rows"),
+                    _ => {}
+                }
             }
         });
     }

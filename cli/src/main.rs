@@ -20,6 +20,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use arvolo_core::code;
 use arvolo_core::crypto::{Identity, PublicId};
 use arvolo_core::flow::{self, ChunkSource, RecvEvent, SendEvent};
 use arvolo_core::transfer::RelayChoice;
@@ -40,18 +41,27 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Serve a file P2P; prints a ticket and stays running until Ctrl-C.
+    /// Serve a file P2P; prints a ticket (or short code) and stays running.
     Send {
         path: PathBuf,
         /// Also seed the file to a relay so the recipient can finish even if you
         /// go offline (backfill). Relay base URL, e.g. http://relay:8787
         #[arg(long)]
         seed_relay: Option<String>,
-        /// Also render the ticket as a scannable QR code.
+        /// Show a short pairing code (e.g. 4821-crater-mango) instead of the long
+        /// ticket. Needs a relay: --relay, or the ARVOLO_RELAY env var.
+        #[arg(long)]
+        code: bool,
+        /// Rendezvous relay for --code. When given, it is embedded in the code so
+        /// the receiver needs no configuration.
+        #[arg(long)]
+        relay: Option<String>,
+        /// Also render the ticket/code as a scannable QR code.
         #[arg(long)]
         qr: bool,
     },
-    /// Fetch a file from a chunked ticket (`arvc…`); resumes if interrupted.
+    /// Fetch a file from a chunked ticket (`arvc…`) or a pairing code
+    /// (`N-word-word[@relay]`); resumes if interrupted.
     Recv {
         ticket: String,
         #[arg(short, long)]
@@ -98,8 +108,10 @@ async fn main() -> Result<()> {
         Command::Send {
             path,
             seed_relay,
+            code,
+            relay,
             qr,
-        } => send(path, seed_relay, qr).await,
+        } => send(path, seed_relay, code, relay, qr).await,
         Command::Recv { ticket, out } => recv(ticket, out).await,
         Command::Id => id(),
         Command::SendOffline {
@@ -175,7 +187,16 @@ fn print_qr(data: &str) {
 
 // ---- P2P ------------------------------------------------------------------
 
-async fn send(path: PathBuf, seed_relay: Option<String>, qr: bool) -> Result<()> {
+async fn send(
+    path: PathBuf,
+    seed_relay: Option<String>,
+    code_mode: bool,
+    relay: Option<String>,
+    qr: bool,
+) -> Result<()> {
+    if code_mode {
+        return send_with_code(path, relay, qr).await;
+    }
     eprintln!("Splitting and serving chunks…");
     let session = flow::prepare_send(&path, seed_relay, RelayChoice::from_env()).await?;
     let cancel = cancel_on_ctrl_c();
@@ -208,7 +229,68 @@ async fn send(path: PathBuf, seed_relay: Option<String>, qr: bool) -> Result<()>
         .await
 }
 
+/// `send --code`: hand the ticket to the receiver via a short pairing code over a
+/// relay rendezvous, serving the file (and using the relay for backfill) meanwhile.
+async fn send_with_code(path: PathBuf, relay: Option<String>, qr: bool) -> Result<()> {
+    // An explicit --relay is embedded in the code (works with no receiver config);
+    // otherwise fall back to ARVOLO_RELAY (short code, shared default).
+    let (relay_url, embed) = match relay {
+        Some(r) => (r, true),
+        None => match std::env::var("ARVOLO_RELAY") {
+            Ok(r) if !r.trim().is_empty() => (r, false),
+            _ => anyhow::bail!("--code needs a relay: pass --relay <url> or set ARVOLO_RELAY"),
+        },
+    };
+
+    eprintln!("Splitting and serving chunks…");
+    let session = flow::prepare_send(&path, Some(relay_url.clone()), RelayChoice::from_env()).await?;
+    let (shown_code, complete) = code::publish_ticket(&session.ticket, &relay_url, embed)
+        .await
+        .context("start pairing")?;
+
+    println!("\nOn the other device:\n");
+    println!("    arvolo recv {shown_code}\n");
+    if qr {
+        print_qr(&shown_code);
+    }
+    println!("Ctrl-C to stop.");
+
+    let cancel = cancel_on_ctrl_c();
+    // Finish the pairing (publish the encrypted ticket once the receiver shows up)
+    // in the background while we serve.
+    let pairing = tokio::spawn(async move {
+        if let Err(e) = complete.run().await {
+            eprintln!("Pairing failed: {e:#}");
+        }
+    });
+    let result = session
+        .serve(cancel, |ev| match ev {
+            SendEvent::ReceiverDropped { missing } => {
+                eprintln!("Receiver dropped — backfilling {missing} missing chunks to the relay…")
+            }
+            SendEvent::Backfilled => {
+                eprintln!("Backfilled. You can close this; the relay can finish the delivery.")
+            }
+            SendEvent::BackfillFailed { reason } => eprintln!("Relay backfill failed: {reason}"),
+            SendEvent::Ready { .. } => {} // code already printed
+        })
+        .await;
+    pairing.abort();
+    result
+}
+
 async fn recv(ticket: String, out: Option<PathBuf>) -> Result<()> {
+    // A short pairing code is resolved to the real ticket over a rendezvous first.
+    let ticket = if code::looks_like_code(&ticket) {
+        eprintln!("Pairing… (waiting for the sender)");
+        let default_relay = std::env::var("ARVOLO_RELAY").ok();
+        code::resolve_code(&ticket, default_relay.as_deref())
+            .await
+            .context("pairing")?
+    } else {
+        ticket
+    };
+
     let cancel = cancel_on_ctrl_c();
     let tty = std::io::stderr().is_terminal();
     let bar: Arc<Mutex<Option<ProgressBar>>> = Arc::new(Mutex::new(None));
