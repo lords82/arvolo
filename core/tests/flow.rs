@@ -17,7 +17,7 @@ async fn send_then_recv_roundtrip_emits_events() {
     std::fs::write(&src, &data).unwrap();
 
     // Serve (no relay) and grab the ticket.
-    let session = flow::prepare_send(&src, "src.bin", false, None, RelayChoice::Disabled)
+    let session = flow::prepare_send(&src, "src.bin", false, None, None, RelayChoice::Disabled)
         .await
         .expect("prepare_send");
     let ticket = session.ticket.clone();
@@ -36,6 +36,7 @@ async fn send_then_recv_roundtrip_emits_events() {
     let saved = flow::recv_chunked(
         &ticket,
         Some(out.clone()),
+        None,
         RelayChoice::Disabled,
         CancellationToken::new(),
         move |e| ev.lock().unwrap().push(e),
@@ -77,7 +78,7 @@ async fn recv_cancelled_returns_without_saving() {
     let data: Vec<u8> = (0..24 * 1024 * 1024).map(|i| (i * 5 + 1) as u8).collect();
     std::fs::write(&src, &data).unwrap();
 
-    let session = flow::prepare_send(&src, "src.bin", false, None, RelayChoice::Disabled)
+    let session = flow::prepare_send(&src, "src.bin", false, None, None, RelayChoice::Disabled)
         .await
         .expect("prepare_send");
     let ticket = session.ticket.clone();
@@ -96,6 +97,7 @@ async fn recv_cancelled_returns_without_saving() {
     let path = flow::recv_chunked(
         &ticket,
         Some(out.clone()),
+        None,
         RelayChoice::Disabled,
         cancel,
         move |e| ev.lock().unwrap().push(e),
@@ -130,7 +132,7 @@ async fn archive_roundtrip_packs_and_extracts() {
     // Pack it, then serve the archive.
     let tar_path = dir.path().join("payload.tar");
     flow::pack_tar(&[src.clone()], &tar_path).unwrap();
-    let session = flow::prepare_send(&tar_path, "folder", true, None, RelayChoice::Disabled)
+    let session = flow::prepare_send(&tar_path, "folder", true, None, None, RelayChoice::Disabled)
         .await
         .expect("prepare_send");
     let ticket = session.ticket.clone();
@@ -145,6 +147,7 @@ async fn archive_roundtrip_packs_and_extracts() {
     let saved = flow::recv_chunked(
         &ticket,
         Some(outdir.clone()),
+        None,
         RelayChoice::Disabled,
         CancellationToken::new(),
         |_| {},
@@ -157,6 +160,67 @@ async fn archive_roundtrip_packs_and_extracts() {
         std::fs::read(outdir.join("folder/sub/b.bin")).unwrap(),
         vec![7u8; 1000]
     );
+
+    send_cancel.cancel();
+    let _ = serve.await;
+}
+
+#[tokio::test]
+async fn sealed_to_recipient_only_intended_can_decrypt() {
+    use arvolo_core::crypto::Identity;
+
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("s.bin");
+    let data = vec![9u8; 20 * 1024 * 1024]; // 2 chunks
+    std::fs::write(&src, &data).unwrap();
+
+    let sender_id = Identity::generate();
+    let recipient = Identity::generate();
+    let stranger = Identity::generate();
+
+    // Seal the content key to `recipient`, authenticated as `sender_id`.
+    let session = flow::prepare_send(
+        &src,
+        "s.bin",
+        false,
+        Some((&sender_id, &recipient.public())),
+        None,
+        RelayChoice::Disabled,
+    )
+    .await
+    .expect("prepare_send");
+    let ticket = session.ticket.clone();
+    let send_cancel = CancellationToken::new();
+    let serve = {
+        let c = send_cancel.clone();
+        tokio::spawn(async move { session.serve(c, |_| {}).await })
+    };
+
+    // The intended recipient recovers the file.
+    let out = dir.path().join("out.bin");
+    flow::recv_chunked(
+        &ticket,
+        Some(out.clone()),
+        Some(&recipient),
+        RelayChoice::Disabled,
+        CancellationToken::new(),
+        |_| {},
+    )
+    .await
+    .expect("recipient decrypts");
+    assert_eq!(std::fs::read(&out).unwrap(), data);
+
+    // A stranger cannot open the sealed content key.
+    let stranger_res = flow::recv_chunked(
+        &ticket,
+        Some(dir.path().join("no.bin")),
+        Some(&stranger),
+        RelayChoice::Disabled,
+        CancellationToken::new(),
+        |_| {},
+    )
+    .await;
+    assert!(stranger_res.is_err(), "a non-recipient must not decrypt");
 
     send_cancel.cancel();
     let _ = serve.await;

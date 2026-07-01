@@ -28,6 +28,8 @@ use clap::{Parser, Subcommand};
 use indicatif::{ProgressBar, ProgressStyle};
 use tokio_util::sync::CancellationToken;
 
+mod book;
+
 #[derive(Parser)]
 #[command(
     name = "arvolo",
@@ -58,6 +60,10 @@ enum Command {
         /// the receiver needs no configuration.
         #[arg(long)]
         relay: Option<String>,
+        /// Encrypt so only this recipient can receive (a saved contact name or a
+        /// public id). Authenticates you as the sender.
+        #[arg(long)]
+        to: Option<String>,
         /// Also render the ticket/code as a scannable QR code.
         #[arg(long)]
         qr: bool,
@@ -69,17 +75,22 @@ enum Command {
         #[arg(short, long)]
         out: Option<PathBuf>,
     },
+    /// Manage your address book of recipients (used by --to).
+    Contacts {
+        #[command(subcommand)]
+        action: ContactAction,
+    },
     /// Show your public id (creates an identity on first use).
     Id,
     /// Encrypt a file for a recipient and deposit it on a relay (offline send).
     SendOffline {
         path: PathBuf,
-        /// Recipient's public id (from their `arvolo id`).
+        /// Recipient: a saved contact name or a public id (from their `arvolo id`).
         #[arg(long)]
         to: String,
-        /// Relay base URL, e.g. https://relay.example:8787
+        /// Relay base URL (defaults to ARVOLO_RELAY / config `relay`).
         #[arg(long)]
-        relay: String,
+        relay: Option<String>,
         /// Time-to-live in seconds (default 7 days).
         #[arg(long, default_value_t = 7 * 24 * 3600)]
         ttl: u64,
@@ -98,6 +109,16 @@ enum Command {
     },
 }
 
+#[derive(Subcommand)]
+enum ContactAction {
+    /// Save (or update) a contact: a name and their public id.
+    Add { name: String, id: String },
+    /// List saved contacts.
+    List,
+    /// Remove a saved contact.
+    Remove { name: String },
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -112,10 +133,12 @@ async fn main() -> Result<()> {
             seed_relay,
             code,
             relay,
+            to,
             qr,
-        } => send(paths, seed_relay, code, relay, qr).await,
+        } => send(paths, seed_relay, code, relay, to, qr).await,
         Command::Recv { ticket, out } => recv(ticket, out).await,
         Command::Id => id(),
+        Command::Contacts { action } => contacts_cmd(action),
         Command::SendOffline {
             path,
             to,
@@ -126,6 +149,32 @@ async fn main() -> Result<()> {
         } => send_offline(path, to, relay, ttl, max, qr).await,
         Command::RecvOffline { ticket, out } => recv_offline(ticket, out).await,
     }
+}
+
+fn contacts_cmd(action: ContactAction) -> Result<()> {
+    match action {
+        ContactAction::Add { name, id } => {
+            book::contact_add(&name, &id)?;
+            println!("Saved contact '{name}'.");
+        }
+        ContactAction::List => {
+            let list = book::contact_list();
+            if list.is_empty() {
+                eprintln!("(no contacts yet — add one: arvolo contacts add <name> <id>)");
+            }
+            for (name, id) in list {
+                println!("{name}\t{id}");
+            }
+        }
+        ContactAction::Remove { name } => {
+            if book::contact_remove(&name)? {
+                println!("Removed contact '{name}'.");
+            } else {
+                eprintln!("No such contact '{name}'.");
+            }
+        }
+    }
+    Ok(())
 }
 
 // ---- identity -------------------------------------------------------------
@@ -153,13 +202,6 @@ fn encode_id(p: &PublicId) -> String {
     data_encoding::BASE32_NOPAD
         .encode(&p.to_bytes())
         .to_lowercase()
-}
-
-fn decode_id(s: &str) -> Result<PublicId> {
-    let bytes = data_encoding::BASE32_NOPAD
-        .decode(s.trim().to_uppercase().as_bytes())
-        .context("invalid public id (base32)")?;
-    PublicId::from_bytes(&bytes)
 }
 
 /// A cancellation token that fires on Ctrl-C.
@@ -221,19 +263,33 @@ async fn send(
     seed_relay: Option<String>,
     code_mode: bool,
     relay: Option<String>,
+    to: Option<String>,
     qr: bool,
 ) -> Result<()> {
     let (payload, name, archive, temp) = resolve_payload(&paths)?;
     if archive {
         eprintln!("Packing {} item(s) into an archive…", paths.len());
     }
+    // Resolve --to into a (sender identity, recipient) pair we can borrow from.
+    let to_owned: Option<(Identity, PublicId)> = match &to {
+        Some(t) => Some((my_identity()?, book::resolve_recipient(t)?)),
+        None => None,
+    };
+    let to_ref = to_owned.as_ref().map(|(me, r)| (me, r));
+
     if code_mode {
-        let r = send_with_code(payload, name, archive, temp, relay, qr).await;
-        return r;
+        return send_with_code(payload, name, archive, temp, relay, to_ref, qr).await;
     }
     eprintln!("Splitting and serving chunks…");
-    let session =
-        flow::prepare_send(&payload, &name, archive, seed_relay, RelayChoice::from_env()).await?;
+    let session = flow::prepare_send(
+        &payload,
+        &name,
+        archive,
+        to_ref,
+        seed_relay,
+        RelayChoice::from_env(),
+    )
+    .await?;
     if let Some(t) = &temp {
         let _ = std::fs::remove_file(t); // fully read into memory by now
     }
@@ -275,22 +331,29 @@ async fn send_with_code(
     archive: bool,
     temp: Option<PathBuf>,
     relay: Option<String>,
+    to: Option<(&Identity, &PublicId)>,
     qr: bool,
 ) -> Result<()> {
     // An explicit --relay is embedded in the code (works with no receiver config);
-    // otherwise fall back to ARVOLO_RELAY (short code, shared default).
+    // otherwise fall back to the default relay (short code, shared default).
     let (relay_url, embed) = match relay {
         Some(r) => (r, true),
-        None => match std::env::var("ARVOLO_RELAY") {
-            Ok(r) if !r.trim().is_empty() => (r, false),
-            _ => anyhow::bail!("--code needs a relay: pass --relay <url> or set ARVOLO_RELAY"),
+        None => match book::default_relay() {
+            Some(r) => (r, false),
+            None => anyhow::bail!("--code needs a relay: pass --relay <url>, set ARVOLO_RELAY, or configure `relay` in config.toml"),
         },
     };
 
     eprintln!("Splitting and serving chunks…");
-    let session =
-        flow::prepare_send(&payload, &name, archive, Some(relay_url.clone()), RelayChoice::from_env())
-            .await?;
+    let session = flow::prepare_send(
+        &payload,
+        &name,
+        archive,
+        to,
+        Some(relay_url.clone()),
+        RelayChoice::from_env(),
+    )
+    .await?;
     if let Some(t) = &temp {
         let _ = std::fs::remove_file(t);
     }
@@ -333,19 +396,22 @@ async fn recv(ticket: String, out: Option<PathBuf>) -> Result<()> {
     // A short pairing code is resolved to the real ticket over a rendezvous first.
     let ticket = if code::looks_like_code(&ticket) {
         eprintln!("Pairing… (waiting for the sender)");
-        let default_relay = std::env::var("ARVOLO_RELAY").ok();
+        let default_relay = book::default_relay();
         code::resolve_code(&ticket, default_relay.as_deref())
             .await
             .context("pairing")?
     } else {
         ticket
     };
+    // Our identity is needed to open a ticket sealed to us (--to); harmless
+    // otherwise (created on first use).
+    let me = my_identity()?;
 
     let cancel = cancel_on_ctrl_c();
     let tty = std::io::stderr().is_terminal();
     let bar: Arc<Mutex<Option<ProgressBar>>> = Arc::new(Mutex::new(None));
     let b = bar.clone();
-    flow::recv_chunked(&ticket, out, RelayChoice::from_env(), cancel, move |ev| {
+    flow::recv_chunked(&ticket, out, Some(&me), RelayChoice::from_env(), cancel, move |ev| {
         let mut slot = b.lock().unwrap();
         match ev {
             RecvEvent::Started {
@@ -421,13 +487,16 @@ async fn recv(ticket: String, out: Option<PathBuf>) -> Result<()> {
 async fn send_offline(
     path: PathBuf,
     to: String,
-    relay: String,
+    relay: Option<String>,
     ttl: u64,
     max: u32,
     qr: bool,
 ) -> Result<()> {
     let me = my_identity()?;
-    let recipient = decode_id(&to)?;
+    let recipient = book::resolve_recipient(&to)?;
+    let relay = relay
+        .or_else(book::default_relay)
+        .context("no relay: pass --relay <url>, set ARVOLO_RELAY, or configure `relay`")?;
     let ticket = flow::deposit_offline(&path, &recipient, &me, &relay, ttl, max).await?;
     let encoded = ticket.encode();
     println!("\nEncrypted and deposited (expires in {ttl}s, {max} download(s)).");
