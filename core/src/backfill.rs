@@ -46,11 +46,22 @@ impl BlobNode {
     /// Start a blob node backed by `store_dir`, reachable over the given relay.
     /// Periodic GC deletes any untagged (released/expired) blob within ~15s.
     pub async fn spawn(store_dir: &Path, relay: RelayChoice) -> Result<Self> {
+        Self::spawn_with_gc(store_dir, relay, Duration::from_secs(15)).await
+    }
+
+    /// Like [`spawn`](Self::spawn) but with an explicit GC interval. Tests use a
+    /// short interval to assert that a released chunk is collected promptly.
+    pub async fn spawn_with_gc(
+        store_dir: &Path,
+        relay: RelayChoice,
+        gc_interval: Duration,
+    ) -> Result<Self> {
         std::fs::create_dir_all(store_dir).ok();
+        let use_relay = !matches!(relay, RelayChoice::Disabled);
         let endpoint = bind_endpoint(relay).await?;
         let mut opts = Options::new(store_dir);
         opts.gc = Some(GcConfig {
-            interval: Duration::from_secs(15),
+            interval: gc_interval,
             add_protected: None,
         });
         let store = FsStore::load_with_opts(store_dir.join("blobs.db"), opts)
@@ -62,7 +73,11 @@ impl BlobNode {
             .spawn();
         // Wait for a dialable address (relay home + reflexive), but never block
         // startup forever: on a server with no peers `online()` may stay pending.
-        let _ = tokio::time::timeout(Duration::from_secs(10), endpoint.online()).await;
+        // With the relay disabled (local/tests) there is nothing to come online
+        // for, so skip it entirely.
+        if use_relay {
+            let _ = tokio::time::timeout(Duration::from_secs(10), endpoint.online()).await;
+        }
         Ok(Self {
             endpoint,
             store,

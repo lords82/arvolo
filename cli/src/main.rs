@@ -261,14 +261,19 @@ async fn recv(ticket: String, out: Option<PathBuf>) -> Result<()> {
     // Control channel to the sender; the sender advertises on-relay chunks here,
     // and our acks let it detect a drop and backfill only the undelivered tail.
     // The first connection to the sender pays the full cold-start cost (relay
-    // handshake + hole punching), which can exceed a single timeout — so retry a
-    // few times; each attempt warms the path for the next.
+    // handshake + hole punching), which can exceed a single timeout.
+    //
+    // How patient we are scales with whether we have a fallback: if the ticket
+    // carries a relay we can complete even with the sender offline, so one short
+    // attempt is enough (don't burn ~45s dialing a dead sender). With no relay
+    // the sender is the ONLY source, so keep retrying to ride out a cold start.
     let on_relay: Arc<Mutex<HashSet<u32>>> = Arc::new(Mutex::new(HashSet::new()));
     let mut control = None;
     if let Some(s) = &sender_addr {
-        for attempt in 1..=3 {
+        let attempts = if t.relay.is_some() { 1 } else { 3 };
+        for attempt in 1..=attempts {
             match tokio::time::timeout(
-                std::time::Duration::from_secs(15),
+                std::time::Duration::from_secs(12),
                 receiver.open_control(s, on_relay.clone()),
             )
             .await
@@ -277,7 +282,10 @@ async fn recv(ticket: String, out: Option<PathBuf>) -> Result<()> {
                     control = Some(c);
                     break;
                 }
-                _ => eprintln!("control channel attempt {attempt}/3 failed; retrying…"),
+                _ if attempt < attempts => {
+                    eprintln!("control channel attempt {attempt}/{attempts} failed; retrying…")
+                }
+                _ => {}
             }
         }
     }

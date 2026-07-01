@@ -4,6 +4,11 @@
 //! `7-crater-mango`) by exchanging one message each. A wrong code yields a
 //! different key on each side, so it never matches — and the code itself never
 //! travels on the wire. Zero registration; ideal for one-shot sends.
+//!
+//! **Status: not yet wired.** This is a tested building block for the planned
+//! ephemeral code/QR pairing mode (roadmap M1.2); no CLI flow calls it today.
+//! Kept because it's a correct, self-contained primitive to build that feature
+//! on — not dead code to remove.
 
 use anyhow::{anyhow, Result};
 use spake2::{Ed25519Group, Identity as PakeId, Password, Spake2};

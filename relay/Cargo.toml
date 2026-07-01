@@ -25,3 +25,7 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 [dev-dependencies]
 arvolo-core.workspace = true
 tempfile = "3"
+tokio = { workspace = true }
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+data-encoding = "2"
