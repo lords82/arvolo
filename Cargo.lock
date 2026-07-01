@@ -185,8 +185,8 @@ dependencies = [
  "arvolo-core",
  "clap",
  "data-encoding",
- "reqwest 0.12.28",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
 ]
@@ -206,12 +206,14 @@ dependencies = [
  "pkcs8",
  "postcard",
  "rand 0.9.4",
+ "reqwest 0.12.28",
  "serde",
  "signature",
  "spake2",
  "spki",
  "tempfile",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]

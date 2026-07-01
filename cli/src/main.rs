@@ -9,18 +9,19 @@
 //!   arvolo send-offline <file> --to <id> --relay <url>
 //!   arvolo recv-offline <ticket>
 //!
-//! P2P transport is encrypted by QUIC; the offline path is end-to-end encrypted
-//! with HPKE so the relay only ever sees ciphertext.
+//! P2P transport is encrypted by QUIC and each chunk is end-to-end encrypted;
+//! the offline path is end-to-end encrypted with HPKE. The relay only ever sees
+//! ciphertext. All transfer orchestration lives in `arvolo_core::flow`; this CLI
+//! just drives it and renders progress.
 
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use arvolo_core::backfill::RelayRelease;
-use arvolo_core::chunked::{ChunkReceiver, ChunkSender, ChunkTicket};
-use arvolo_core::crypto::{open, seal, Identity, PublicId, Sealed};
-use arvolo_core::offline::OfflineTicket;
+use arvolo_core::crypto::{Identity, PublicId};
+use arvolo_core::flow::{self, RecvEvent, SendEvent};
 use arvolo_core::transfer::RelayChoice;
 use clap::{Parser, Subcommand};
+use tokio_util::sync::CancellationToken;
 
 #[derive(Parser)]
 #[command(
@@ -132,275 +133,80 @@ fn decode_id(s: &str) -> Result<PublicId> {
     PublicId::from_bytes(&bytes)
 }
 
+/// A cancellation token that fires on Ctrl-C.
+fn cancel_on_ctrl_c() -> CancellationToken {
+    let token = CancellationToken::new();
+    let t = token.clone();
+    tokio::spawn(async move {
+        let _ = tokio::signal::ctrl_c().await;
+        t.cancel();
+    });
+    token
+}
+
 // ---- P2P ------------------------------------------------------------------
 
 async fn send(path: PathBuf, seed_relay: Option<String>) -> Result<()> {
-    anyhow::ensure!(path.is_file(), "{} is not a file", path.display());
     eprintln!("Splitting and serving chunks…");
-    let sender = ChunkSender::serve(&path, RelayChoice::from_env())
-        .await
-        .context("start sender")?;
-    let client = reqwest::Client::new();
-
-    // With --seed-relay we DON'T upload anything yet (lazy): we just learn the
-    // relay's address + a token, and backfill only the undelivered tail if the
-    // receiver drops.
-    let mut relay = None;
-    if let Some(url) = seed_relay {
-        let url = url.trim_end_matches('/').to_string();
-        let resp = client
-            .get(format!("{url}/v1/addr"))
-            .send()
-            .await
-            .context("relay /v1/addr")?
-            .error_for_status()
-            .context("relay rejected addr")?
-            .text()
-            .await
-            .context("read relay addr")?;
-        let mut lines = resp.lines();
-        let addr = lines
-            .next()
-            .context("missing relay address")?
-            .trim()
-            .to_string();
-        let token = lines.next().context("missing token")?.trim().to_string();
-        relay = Some(RelayRelease {
-            http: url,
-            addr,
-            token,
-        });
-    }
-
-    let ticket = ChunkTicket {
-        total_size: sender.total_size(),
-        chunk_size: sender.chunk_size(),
-        chunks: sender.chunks().to_vec(),
-        providers: vec![sender.addr()],
-        relay: relay.clone(),
-        key: sender.key().to_vec(),
-    };
-    println!(
-        "\nFile ready ({} chunks). On the other device:\n",
-        ticket.chunks.len()
-    );
-    println!("    arvolo recv {}\n", ticket.encode()?);
-    if relay.is_some() {
-        println!("P2P-first; if the receiver drops, only the missing chunks are backfilled to the relay.");
-    }
-    println!("Ctrl-C to stop.");
-
-    // Orchestration loop: on receiver-drop, backfill the undelivered tail.
-    loop {
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => break,
-            undelivered = sender.receiver_gone() => {
-                let Some(r) = &relay else { continue };
-                if undelivered.is_empty() { continue; }
-                let chunks: Vec<_> = undelivered.iter().map(|&i| sender.chunks()[i]).collect();
-                let req = arvolo_core::chunked::SeedRequest {
-                    sender: sender.addr(),
-                    chunks,
-                    token: r.token.clone(),
-                };
-                eprintln!("Receiver dropped — backfilling {} missing chunks to the relay…", undelivered.len());
-                match client.post(format!("{}/v1/seed", r.http)).body(req.encode()?).send().await {
-                    Ok(resp) if resp.status().is_success() => {
-                        sender.mark_on_relay(&undelivered);
-                        eprintln!("Backfilled. You can close this; the relay can finish the delivery.");
-                    }
-                    Ok(resp) => eprintln!("Relay backfill rejected: {}", resp.status()),
-                    Err(e) => eprintln!("Relay backfill failed: {e}"),
+    let session = flow::prepare_send(&path, seed_relay, RelayChoice::from_env()).await?;
+    let cancel = cancel_on_ctrl_c();
+    session
+        .serve(cancel, |ev| match ev {
+            SendEvent::Ready {
+                chunks,
+                ticket,
+                has_relay,
+                ..
+            } => {
+                println!("\nFile ready ({chunks} chunks). On the other device:\n");
+                println!("    arvolo recv {ticket}\n");
+                if has_relay {
+                    println!("P2P-first; if the receiver drops, only the missing chunks are backfilled to the relay.");
                 }
+                println!("Ctrl-C to stop.");
             }
-        }
-    }
-    sender.shutdown().await;
-    Ok(())
+            SendEvent::ReceiverDropped { missing } => {
+                eprintln!("Receiver dropped — backfilling {missing} missing chunks to the relay…")
+            }
+            SendEvent::Backfilled => {
+                eprintln!("Backfilled. You can close this; the relay can finish the delivery.")
+            }
+            SendEvent::BackfillFailed { reason } => eprintln!("Relay backfill failed: {reason}"),
+        })
+        .await
 }
 
 async fn recv(ticket: String, out: Option<PathBuf>) -> Result<()> {
-    use std::collections::HashSet;
-    use std::io::{Seek, SeekFrom, Write};
-    use std::sync::{Arc, Mutex};
-
-    let t = ChunkTicket::decode(&ticket).context("invalid ticket")?;
-    let out = out.unwrap_or_else(|| {
-        default_out(&t.chunks.first().map(|h| h.to_string()).unwrap_or_default())
-    });
-    let sender_addr = t.providers.first().cloned();
-    let relay_addr = match &t.relay {
-        Some(r) => Some(arvolo_core::chunked::decode_addr(&r.addr).context("relay address")?),
-        None => None,
-    };
-    let key: [u8; arvolo_core::crypto::CHUNK_KEY_LEN] = t
-        .key
-        .as_slice()
-        .try_into()
-        .context("ticket has no/invalid content key")?;
-    let total_chunks = t.chunks.len() as u32;
-
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .open(&out)
-        .with_context(|| format!("open {}", out.display()))?;
-    let existing = file.metadata()?.len();
-    let start = ((existing / t.chunk_size as u64) as usize).min(t.chunks.len());
-    if start > 0 {
-        eprintln!("Resuming from chunk {start}/{}…", t.chunks.len());
-    } else {
-        eprintln!("Fetching {} chunks…", t.chunks.len());
-    }
-
-    let receiver = ChunkReceiver::open(RelayChoice::from_env()).await?;
-    let client = reqwest::Client::new();
-
-    // Control channel to the sender; the sender advertises on-relay chunks here,
-    // and our acks let it detect a drop and backfill only the undelivered tail.
-    // The first connection to the sender pays the full cold-start cost (relay
-    // handshake + hole punching), which can exceed a single timeout.
-    //
-    // How patient we are scales with whether we have a fallback: if the ticket
-    // carries a relay we can complete even with the sender offline, so one short
-    // attempt is enough (don't burn ~45s dialing a dead sender). With no relay
-    // the sender is the ONLY source, so keep retrying to ride out a cold start.
-    let on_relay: Arc<Mutex<HashSet<u32>>> = Arc::new(Mutex::new(HashSet::new()));
-    let mut control = None;
-    if let Some(s) = &sender_addr {
-        let attempts = if t.relay.is_some() { 1 } else { 3 };
-        for attempt in 1..=attempts {
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(12),
-                receiver.open_control(s, on_relay.clone()),
-            )
-            .await
-            {
-                Ok(Some(c)) => {
-                    control = Some(c);
-                    break;
-                }
-                _ if attempt < attempts => {
-                    eprintln!("control channel attempt {attempt}/{attempts} failed; retrying…")
-                }
-                _ => {}
+    let cancel = cancel_on_ctrl_c();
+    flow::recv_chunked(&ticket, out, RelayChoice::from_env(), cancel, |ev| match ev {
+        RecvEvent::Started {
+            total,
+            resuming_from,
+        } => {
+            if resuming_from > 0 {
+                eprintln!("Resuming from chunk {resuming_from}/{total}…");
+            } else {
+                eprintln!("Fetching {total} chunks…");
             }
         }
-    }
-    eprintln!(
-        "control channel to sender: {}",
-        if control.is_some() {
-            "connected"
-        } else {
-            "unavailable"
-        }
-    );
-    // Give the sender a moment to send its RelayHas snapshot before we choose sources.
-    if control.is_some() {
-        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-    }
-    // If the control channel never came up, the sender is most likely offline
-    // (it backfilled the tail and quit). Don't waste a connect timeout per chunk
-    // dialing the dead sender first — prefer the relay.
-    let sender_offline = control.is_none();
-
-    for i in start..t.chunks.len() {
-        let on_relay_chunk = on_relay.lock().unwrap().contains(&(i as u32));
-        // Anti-double-send: chunks the sender pushed to the relay are pulled from
-        // the relay; everything else is pulled from the sender (relay fallback).
-        let mut providers = Vec::new();
-        if on_relay_chunk || sender_offline {
-            if let Some(a) = &relay_addr {
-                providers.push(a.clone());
-            }
-            if let Some(a) = &sender_addr {
-                providers.push(a.clone());
-            }
-        } else {
-            if let Some(a) = &sender_addr {
-                providers.push(a.clone());
-            }
-            if let Some(a) = &relay_addr {
-                providers.push(a.clone());
-            }
-        }
-
-        let bytes = receiver
-            .fetch_chunk(&providers, t.chunks[i])
-            .await
-            .with_context(|| format!("fetch chunk {}", i + 1))?;
-        // The fetched bytes are ciphertext (the relay/providers never see
-        // plaintext); decrypt before writing to disk.
-        let plain = arvolo_core::crypto::open_chunk(&key, i as u32, total_chunks, &bytes)
-            .with_context(|| format!("decrypt chunk {}", i + 1))?;
-        file.seek(SeekFrom::Start(i as u64 * t.chunk_size as u64))?;
-        file.write_all(&plain)?;
-
-        if let Some(c) = control.as_mut() {
-            let _ = c.ack(i as u32).await;
-        }
-        // Free relay-backfilled chunks as we get them. We attempt release for
-        // every fetched chunk (not just ones the control channel flagged): when
-        // the sender is offline there is no control channel to learn `on_relay`,
-        // yet those are exactly the chunks the relay is holding. The relay's
-        // (token, hash) guard makes release a no-op for anything not seeded.
-        if let Some(r) = &t.relay {
-            let _ = client
-                .post(format!(
-                    "{}/v1/release/{}/{}",
-                    r.http.trim_end_matches('/'),
-                    r.token,
-                    t.chunks[i]
-                ))
-                .send()
-                .await;
-        }
-    }
-    if let Some(c) = control {
-        let _ = c.finish().await;
-    }
-    file.set_len(t.total_size)?;
-    receiver.close().await;
-    println!("Saved to {}", out.display());
+        RecvEvent::Control { connected } => eprintln!(
+            "control channel to sender: {}",
+            if connected { "connected" } else { "unavailable" }
+        ),
+        RecvEvent::Chunk { .. } => {}
+        RecvEvent::Saved { path } => println!("Saved to {}", path.display()),
+        RecvEvent::Warning { message } => eprintln!("{message}"),
+    })
+    .await?;
     Ok(())
 }
 
 // ---- offline mailbox ------------------------------------------------------
 
 async fn send_offline(path: PathBuf, to: String, relay: String, ttl: u64, max: u32) -> Result<()> {
-    anyhow::ensure!(path.is_file(), "{} is not a file", path.display());
     let me = my_identity()?;
     let recipient = decode_id(&to)?;
-    let plaintext = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
-
-    let sealed = seal(&plaintext, &recipient, &me, b"").context("encrypt")?;
-
-    let relay = relay.trim_end_matches('/').to_string();
-    let url = format!("{relay}/v1/deposit?ttl={ttl}&max={max}");
-    let client = reqwest::Client::new();
-    let claim = client
-        .post(&url)
-        .header(
-            "x-arvolo-encapped-key",
-            data_encoding::BASE32_NOPAD.encode(&sealed.encapped_key),
-        )
-        .body(sealed.ciphertext)
-        .send()
-        .await
-        .context("deposit request")?
-        .error_for_status()
-        .context("relay rejected deposit")?
-        .text()
-        .await
-        .context("read claim")?;
-
-    let ticket = OfflineTicket {
-        relay,
-        claim: claim.trim().to_string(),
-        sender: me.public().to_bytes(),
-    };
+    let ticket = flow::deposit_offline(&path, &recipient, &me, &relay, ttl, max).await?;
     println!("\nEncrypted and deposited (expires in {ttl}s, {max} download(s)).");
     println!("Send this ticket to the recipient:\n");
     println!("    arvolo recv-offline {}\n", ticket.encode());
@@ -409,47 +215,7 @@ async fn send_offline(path: PathBuf, to: String, relay: String, ttl: u64, max: u
 
 async fn recv_offline(ticket: String, out: Option<PathBuf>) -> Result<()> {
     let me = my_identity()?;
-    let t = OfflineTicket::decode(&ticket)?;
-    let sender = PublicId::from_bytes(&t.sender).context("invalid sender in ticket")?;
-
-    let url = format!("{}/v1/fetch/{}", t.relay.trim_end_matches('/'), t.claim);
-    let resp = reqwest::Client::new()
-        .get(&url)
-        .send()
-        .await
-        .context("fetch request")?
-        .error_for_status()
-        .context("relay rejected fetch (expired or already claimed?)")?;
-
-    let encapped = resp
-        .headers()
-        .get("x-arvolo-encapped-key")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| {
-            data_encoding::BASE32_NOPAD
-                .decode(s.to_uppercase().as_bytes())
-                .ok()
-        })
-        .context("missing encapped key from relay")?;
-    let ciphertext = resp.bytes().await.context("read ciphertext")?.to_vec();
-
-    let plaintext = open(
-        &Sealed {
-            encapped_key: encapped,
-            ciphertext,
-        },
-        &me,
-        &sender,
-        b"",
-    )
-    .context("decrypt (wrong identity, sender, or tampered)")?;
-
-    let out = out.unwrap_or_else(|| default_out(&t.claim));
-    std::fs::write(&out, &plaintext).with_context(|| format!("write {}", out.display()))?;
-    println!("Saved {} bytes to {}", plaintext.len(), out.display());
+    let (path, n) = flow::fetch_offline(&ticket, out, &me).await?;
+    println!("Saved {n} bytes to {}", path.display());
     Ok(())
-}
-
-fn default_out(seed: &str) -> PathBuf {
-    PathBuf::from(format!("received-{}.bin", &seed[..seed.len().min(16)]))
 }
