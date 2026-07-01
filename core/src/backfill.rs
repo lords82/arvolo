@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use iroh::{protocol::Router, Endpoint, EndpointAddr};
-use iroh_blobs::Hash;
+use crate::hash::Hash;
 use serde::{Deserialize, Serialize};
 
 use crate::chunked::{fetch_chunk_wire, ChunkServer, CHUNK_ALPN};

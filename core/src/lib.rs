@@ -14,15 +14,15 @@ pub mod chunked;
 pub mod code;
 pub mod crypto;
 pub mod flow;
+pub mod hash;
 pub mod node;
 pub mod offline;
 pub mod pairing;
 pub mod transfer;
 
-/// Re-exports of upstream types that appear in the public API.
+/// Re-exports of types that appear in the public API.
 pub mod reexport {
-    pub use iroh_blobs::ticket::BlobTicket;
-    pub use iroh_blobs::Hash;
+    pub use crate::hash::Hash;
 }
 
 /// Crate version, surfaced by the CLI and relay.

@@ -25,7 +25,7 @@ use iroh::{
     protocol::{AcceptError, ProtocolHandler, Router},
     Endpoint, EndpointAddr,
 };
-use iroh_blobs::Hash;
+use crate::hash::Hash;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, Mutex as AsyncMutex};
 
