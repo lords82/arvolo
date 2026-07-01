@@ -77,7 +77,11 @@ async fn poll_get(client: &reqwest::Client, url: &str, what: &str) -> Result<Vec
     loop {
         let resp = client.get(url).send().await.context("rendezvous poll")?;
         if resp.status().is_success() {
-            return Ok(resp.bytes().await.context("read rendezvous value")?.to_vec());
+            return Ok(resp
+                .bytes()
+                .await
+                .context("read rendezvous value")?
+                .to_vec());
         }
         if resp.status() != reqwest::StatusCode::NOT_FOUND {
             resp.error_for_status().context("rendezvous poll")?;

@@ -179,6 +179,7 @@ async fn intra_chunk_resume_completes_partial() {
     let half = full.len() / 2;
     let mut part = std::fs::OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(&part_path)

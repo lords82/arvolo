@@ -33,7 +33,9 @@ async fn code_roundtrip_delivers_ticket() {
     let relay = spawn_relay().await;
     let ticket = "arvcTHISISAFAKETICKETBUTITROUNDTRIPS";
 
-    let (code, complete) = publish_ticket(ticket, &relay, false).await.expect("publish");
+    let (code, complete) = publish_ticket(ticket, &relay, false)
+        .await
+        .expect("publish");
     // Code is `N-word-word` (no @relay when embed=false).
     assert!(!code.contains('@'));
     let sender = tokio::spawn(complete.run());
@@ -53,7 +55,9 @@ async fn self_contained_code_needs_no_default_relay() {
     assert!(code.contains('@'), "self-contained code embeds the relay");
     let sender = tokio::spawn(complete.run());
 
-    let got = resolve_code(&code, None).await.expect("resolve with no default");
+    let got = resolve_code(&code, None)
+        .await
+        .expect("resolve with no default");
     assert_eq!(got, ticket);
     sender.await.unwrap().expect("sender completes");
 }

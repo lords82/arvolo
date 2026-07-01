@@ -10,9 +10,9 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Duration;
 
+use crate::hash::Hash;
 use anyhow::{Context, Result};
 use iroh::{protocol::Router, Endpoint, EndpointAddr};
-use crate::hash::Hash;
 use serde::{Deserialize, Serialize};
 
 use crate::chunked::{fetch_chunk_wire, ChunkServer, CHUNK_ALPN};

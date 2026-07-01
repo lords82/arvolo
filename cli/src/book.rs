@@ -120,7 +120,10 @@ mod tests {
             "relay = \"https://relay.example.com\"\n",
         )
         .unwrap();
-        assert_eq!(default_relay().as_deref(), Some("https://relay.example.com"));
+        assert_eq!(
+            default_relay().as_deref(),
+            Some("https://relay.example.com")
+        );
 
         // Contacts: add, resolve by name, list, remove.
         let id = Identity::generate().public();

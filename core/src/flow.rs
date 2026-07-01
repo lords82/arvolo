@@ -99,7 +99,9 @@ pub async fn prepare_send(
     relay: RelayChoice,
 ) -> Result<SendSession> {
     anyhow::ensure!(path.is_file(), "{} is not a file", path.display());
-    let sender = ChunkSender::serve(path, relay).await.context("start sender")?;
+    let sender = ChunkSender::serve(path, relay)
+        .await
+        .context("start sender")?;
     let client = reqwest::Client::new();
 
     // Deliver the content key: sealed to a recipient with `--to`, else in the
@@ -136,7 +138,11 @@ pub async fn prepare_send(
             .trim()
             .to_string();
         let token = lines.next().context("missing token")?.trim().to_string();
-        relay = Some(RelayRelease { http: url, addr, token });
+        relay = Some(RelayRelease {
+            http: url,
+            addr,
+            token,
+        });
     }
 
     let ticket = ChunkTicket {
@@ -258,8 +264,9 @@ pub async fn recv_chunked(
             ciphertext,
             sender,
         } => {
-            let me = identity
-                .context("this transfer is addressed to a specific recipient; run with your identity")?;
+            let me = identity.context(
+                "this transfer is addressed to a specific recipient; run with your identity",
+            )?;
             let sender_pub = PublicId::from_bytes(sender).context("invalid sender in ticket")?;
             open(
                 &Sealed {
@@ -316,13 +323,17 @@ pub async fn recv_chunked(
                     break;
                 }
                 _ if attempt < attempts => on(RecvEvent::Warning {
-                    message: format!("control channel attempt {attempt}/{attempts} failed; retrying…"),
+                    message: format!(
+                        "control channel attempt {attempt}/{attempts} failed; retrying…"
+                    ),
                 }),
                 _ => {}
             }
         }
     }
-    on(RecvEvent::Control { connected: control.is_some() });
+    on(RecvEvent::Control {
+        connected: control.is_some(),
+    });
     if control.is_some() {
         tokio::time::sleep(std::time::Duration::from_millis(400)).await;
     }
@@ -361,6 +372,7 @@ pub async fn recv_chunked(
         let part_path = PathBuf::from(format!("{}.arvpart", download.display()));
         let mut part = std::fs::OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(&part_path)
@@ -424,7 +436,9 @@ pub async fn recv_chunked(
         on(RecvEvent::Saved { path: dir.clone() });
         Ok(dir)
     } else {
-        on(RecvEvent::Saved { path: download.clone() });
+        on(RecvEvent::Saved {
+            path: download.clone(),
+        });
         Ok(download)
     }
 }
@@ -502,7 +516,10 @@ pub async fn fetch_offline(
     let ciphertext = resp.bytes().await.context("read ciphertext")?.to_vec();
 
     let plaintext = open(
-        &Sealed { encapped_key: encapped, ciphertext },
+        &Sealed {
+            encapped_key: encapped,
+            ciphertext,
+        },
         me,
         &sender,
         b"",

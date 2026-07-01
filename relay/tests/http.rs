@@ -25,7 +25,12 @@ async fn app(store_dir: &Path) -> axum::Router {
 }
 
 async fn body_bytes(resp: axum::response::Response) -> Vec<u8> {
-    resp.into_body().collect().await.unwrap().to_bytes().to_vec()
+    resp.into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes()
+        .to_vec()
 }
 
 #[tokio::test]
@@ -194,7 +199,10 @@ async fn rz_claim_put_get_and_conflict() {
     assert_eq!(rz_get(&app, "42", "ms").await.0, StatusCode::NOT_FOUND);
 
     // Sender claims the slot.
-    assert_eq!(rz_post(&app, "42", "ms", b"sender-pake").await, StatusCode::OK);
+    assert_eq!(
+        rz_post(&app, "42", "ms", b"sender-pake").await,
+        StatusCode::OK
+    );
     let (st, v) = rz_get(&app, "42", "ms").await;
     assert_eq!(st, StatusCode::OK);
     assert_eq!(v, b"sender-pake");
@@ -206,7 +214,10 @@ async fn rz_claim_put_get_and_conflict() {
     );
 
     // Receiver posts its message (non-claim key overwrites freely).
-    assert_eq!(rz_post(&app, "42", "mr", b"recv-pake").await, StatusCode::OK);
+    assert_eq!(
+        rz_post(&app, "42", "mr", b"recv-pake").await,
+        StatusCode::OK
+    );
     assert_eq!(rz_get(&app, "42", "mr").await.1, b"recv-pake");
 }
 
