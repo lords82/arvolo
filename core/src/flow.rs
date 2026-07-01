@@ -12,10 +12,13 @@ use anyhow::{Context, Result};
 use tokio_util::sync::CancellationToken;
 
 use crate::backfill::RelayRelease;
-use crate::chunked::{ChunkReceiver, ChunkSender, ChunkTicket, SeedRequest};
+use crate::chunked::{ChunkReceiver, ChunkSender, ChunkTicket, KeyDelivery, SeedRequest};
 use crate::crypto::{open, open_chunk, seal, Identity, PublicId, Sealed};
 use crate::offline::OfflineTicket;
 use crate::transfer::RelayChoice;
+
+/// AAD binding the sealed content key to its purpose (`--to` sends).
+const CHUNK_KEY_AAD: &[u8] = b"arvolo/chunk-key/v1";
 
 /// Where a received chunk was pulled from (the selected primary provider).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,12 +94,27 @@ pub async fn prepare_send(
     path: &Path,
     name: &str,
     archive: bool,
+    to: Option<(&Identity, &PublicId)>,
     seed_relay: Option<String>,
     relay: RelayChoice,
 ) -> Result<SendSession> {
     anyhow::ensure!(path.is_file(), "{} is not a file", path.display());
     let sender = ChunkSender::serve(path, relay).await.context("start sender")?;
     let client = reqwest::Client::new();
+
+    // Deliver the content key: sealed to a recipient with `--to`, else in the
+    // clear (the ticket itself is the capability).
+    let key = match to {
+        Some((me, recipient)) => {
+            let sealed = seal(&sender.key(), recipient, me, CHUNK_KEY_AAD).context("seal key")?;
+            KeyDelivery::Sealed {
+                encapped_key: sealed.encapped_key,
+                ciphertext: sealed.ciphertext,
+                sender: me.public().to_bytes(),
+            }
+        }
+        None => KeyDelivery::Plain(sender.key().to_vec()),
+    };
 
     let mut relay = None;
     if let Some(url) = seed_relay {
@@ -127,7 +145,7 @@ pub async fn prepare_send(
         chunks: sender.chunks().to_vec(),
         providers: vec![sender.addr()],
         relay: relay.clone(),
-        key: sender.key().to_vec(),
+        key,
         name: name.to_string(),
         archive,
     };
@@ -204,6 +222,7 @@ impl SendSession {
 pub async fn recv_chunked(
     ticket: &str,
     out: Option<PathBuf>,
+    identity: Option<&Identity>,
     relay: RelayChoice,
     cancel: CancellationToken,
     on: impl Fn(RecvEvent) + Send + Sync,
@@ -230,11 +249,34 @@ pub async fn recv_chunked(
         Some(r) => Some(crate::chunked::decode_addr(&r.addr).context("relay address")?),
         None => None,
     };
-    let key: [u8; crate::crypto::CHUNK_KEY_LEN] = t
-        .key
+    // Recover the content key: sealed tickets need our identity and verify the
+    // sender; plain tickets carry the key directly.
+    let key_bytes: Vec<u8> = match &t.key {
+        KeyDelivery::Plain(k) => k.clone(),
+        KeyDelivery::Sealed {
+            encapped_key,
+            ciphertext,
+            sender,
+        } => {
+            let me = identity
+                .context("this transfer is addressed to a specific recipient; run with your identity")?;
+            let sender_pub = PublicId::from_bytes(sender).context("invalid sender in ticket")?;
+            open(
+                &Sealed {
+                    encapped_key: encapped_key.clone(),
+                    ciphertext: ciphertext.clone(),
+                },
+                me,
+                &sender_pub,
+                CHUNK_KEY_AAD,
+            )
+            .context("decrypt content key (not the intended recipient, or wrong sender)")?
+        }
+    };
+    let key: [u8; crate::crypto::CHUNK_KEY_LEN] = key_bytes
         .as_slice()
         .try_into()
-        .context("ticket has no/invalid content key")?;
+        .context("invalid content key length")?;
     let total_chunks = t.chunks.len() as u32;
 
     let mut file = std::fs::OpenOptions::new()

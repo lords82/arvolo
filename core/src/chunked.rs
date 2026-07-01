@@ -376,6 +376,21 @@ impl ChunkReceiver {
 
 const TICKET_PREFIX: &str = "arvc";
 
+/// How the per-transfer content key reaches the receiver.
+#[derive(Clone, Serialize, Deserialize)]
+pub enum KeyDelivery {
+    /// In the clear — whoever holds the ticket can decrypt (ephemeral send).
+    Plain(Vec<u8>),
+    /// HPKE-sealed to a specific recipient and authenticated by the sender, so
+    /// only that recipient decrypts and they learn who sent it (`--to`).
+    Sealed {
+        encapped_key: Vec<u8>,
+        ciphertext: Vec<u8>,
+        /// Sender's public id (for auth-mode verification on open).
+        sender: Vec<u8>,
+    },
+}
+
 #[derive(Serialize, Deserialize)]
 struct TicketWire {
     total_size: u64,
@@ -383,23 +398,23 @@ struct TicketWire {
     chunks: Vec<Hash>,
     providers: Vec<EndpointAddr>,
     relay: Option<RelayRelease>,
-    /// Per-transfer content key to decrypt the chunks (32 bytes).
-    key: Vec<u8>,
+    /// Per-transfer content key delivery.
+    key: KeyDelivery,
     /// Suggested output name (original filename, or archive/bundle name).
     name: String,
     /// The payload is a tar archive to unpack (folder / multiple files).
     archive: bool,
 }
 
-/// A chunked transfer ticket (`arvc…`). Carries the content key that decrypts
-/// the chunks — whoever holds the ticket can receive and decrypt.
+/// A chunked transfer ticket (`arvc…`). Carries the content key delivery — either
+/// in the clear (anyone with the ticket) or sealed to a specific recipient.
 pub struct ChunkTicket {
     pub total_size: u64,
     pub chunk_size: u32,
     pub chunks: Vec<Hash>,
     pub providers: Vec<EndpointAddr>,
     pub relay: Option<RelayRelease>,
-    pub key: Vec<u8>,
+    pub key: KeyDelivery,
     /// Suggested output name (original filename, or archive/bundle name).
     pub name: String,
     /// The payload is a tar archive to unpack (folder / multiple files).
