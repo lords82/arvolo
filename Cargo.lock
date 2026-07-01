@@ -222,11 +222,13 @@ dependencies = [
  "arvolo-core",
  "axum",
  "data-encoding",
+ "http-body-util",
  "rand 0.9.4",
  "rusqlite",
  "serde",
  "tempfile",
  "tokio",
+ "tower",
  "tracing",
  "tracing-subscriber",
 ]
