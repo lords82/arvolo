@@ -148,3 +148,53 @@ async fn chunked_roundtrip_is_encrypted_and_decryptable() {
     receiver.close().await;
     sender.shutdown().await;
 }
+
+/// Intra-chunk resume: a `.part` file pre-seeded with the first half of a chunk's
+/// ciphertext is completed (not re-downloaded from scratch) and verifies.
+#[tokio::test]
+async fn intra_chunk_resume_completes_partial() {
+    use std::io::{Read, Seek, SeekFrom, Write};
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("f.bin");
+    let data = vec![3u8; 20 * 1024 * 1024]; // 2 chunks
+    std::fs::write(&path, &data).unwrap();
+
+    let sender = ChunkSender::serve(&path, RelayChoice::Disabled)
+        .await
+        .expect("sender");
+    let hash = sender.chunks()[0];
+    let receiver = ChunkReceiver::open(RelayChoice::Disabled)
+        .await
+        .expect("receiver");
+
+    // Full ciphertext of chunk 0 (reference).
+    let full = receiver
+        .fetch_chunk(&[sender.addr()], hash)
+        .await
+        .expect("fetch full");
+
+    // Pre-seed a `.part` with the first half, then resume into it.
+    let part_path = dir.path().join("chunk0.arvpart");
+    let half = full.len() / 2;
+    let mut part = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(&part_path)
+        .unwrap();
+    part.write_all(&full[..half]).unwrap();
+
+    receiver
+        .fetch_to_file(&[sender.addr()], hash, &mut part)
+        .await
+        .expect("resume");
+
+    part.seek(SeekFrom::Start(0)).unwrap();
+    let mut got = Vec::new();
+    part.read_to_end(&mut got).unwrap();
+    assert_eq!(got, full, "resumed chunk must equal the full ciphertext");
+
+    receiver.close().await;
+    sender.shutdown().await;
+}

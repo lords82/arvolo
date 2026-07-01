@@ -14,8 +14,9 @@
 //!   receiver pulls **those from the relay** and the rest from the sender
 //!   (anti-double-send), and releases each relay chunk as it gets it.
 
-use std::collections::HashSet;
-use std::path::Path;
+use std::collections::{HashMap, HashSet};
+use std::io::{Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Context, Result};
@@ -24,15 +25,13 @@ use iroh::{
     protocol::{AcceptError, ProtocolHandler, Router},
     Endpoint, EndpointAddr,
 };
-use iroh_blobs::{
-    store::fs::FsStore, store::mem::MemStore, ticket::BlobTicket, BlobFormat, BlobsProtocol, Hash,
-};
+use iroh_blobs::Hash;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, Mutex as AsyncMutex};
 
 use crate::backfill::RelayRelease;
 use crate::node::{decode_ticket, encode_ticket, local_addr_of};
-use crate::transfer::{bind_endpoint, fetch_into, RelayChoice};
+use crate::transfer::{bind_endpoint, RelayChoice};
 
 /// Chunk size: 16 MiB.
 pub const CHUNK_SIZE: u32 = 16 * 1024 * 1024;
@@ -40,7 +39,6 @@ pub const CHUNK_SIZE: u32 = 16 * 1024 * 1024;
 /// Read from `f` until `buf` is full or EOF (a single `read` may return less).
 /// Returns the number of bytes filled (0 at EOF).
 fn fill(f: &mut std::fs::File, buf: &mut [u8]) -> std::io::Result<usize> {
-    use std::io::Read;
     let mut filled = 0;
     while filled < buf.len() {
         match f.read(&mut buf[filled..])? {
@@ -95,6 +93,205 @@ async fn read_msg(recv: &mut RecvStream) -> Option<CtrlMsg> {
     let mut buf = vec![0u8; len];
     recv.read_exact(&mut buf).await.ok()?;
     postcard::from_bytes(&buf).ok()
+}
+
+// ---- chunk transfer protocol ----------------------------------------------
+//
+// Our own content-addressed chunk protocol (ALPN `arvolo/chunk/1`) replaces
+// iroh-blobs for chunk transfer. The receiver asks for a chunk by BLAKE3 hash
+// (with a byte offset for intra-chunk resume); the provider streams the chunk's
+// ciphertext from that offset. The sender regenerates ciphertext ON THE FLY from
+// the original file (deterministic encryption) so nothing is stored; the relay
+// serves from files it holds. The receiver verifies BLAKE3(ciphertext) == hash.
+
+/// Chunk-transfer ALPN.
+pub const CHUNK_ALPN: &[u8] = b"arvolo/chunk/1";
+
+#[derive(Serialize, Deserialize)]
+struct ChunkReq {
+    hash: Hash,
+    /// Start streaming from this byte offset of the ciphertext (resume).
+    offset: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ChunkResp {
+    /// Full ciphertext length; 0 means "not available here".
+    total_len: u64,
+}
+
+async fn write_frame<T: Serialize>(send: &mut SendStream, msg: &T) -> Result<()> {
+    let bytes = postcard::to_allocvec(msg).context("encode frame")?;
+    send.write_all(&(bytes.len() as u32).to_le_bytes())
+        .await
+        .map_err(|e| anyhow!("write len: {e}"))?;
+    send.write_all(&bytes)
+        .await
+        .map_err(|e| anyhow!("write frame: {e}"))?;
+    Ok(())
+}
+
+async fn read_frame<T: serde::de::DeserializeOwned>(recv: &mut RecvStream) -> Option<T> {
+    let mut len = [0u8; 4];
+    recv.read_exact(&mut len).await.ok()?;
+    let len = u32::from_le_bytes(len) as usize;
+    if len > 64 * 1024 {
+        return None;
+    }
+    let mut buf = vec![0u8; len];
+    recv.read_exact(&mut buf).await.ok()?;
+    postcard::from_bytes(&buf).ok()
+}
+
+/// A provider of chunk ciphertext: regenerated on the fly from a file (sender)
+/// or read from stored files (relay).
+enum ChunkBackend {
+    /// Regenerate any chunk from the original plaintext file, on demand.
+    OnTheFly {
+        path: PathBuf,
+        key: [u8; crate::crypto::CHUNK_KEY_LEN],
+        index: HashMap<Hash, u32>,
+        total_chunks: u32,
+    },
+    /// Serve stored ciphertext files, one per hash, from a directory.
+    Files { dir: PathBuf },
+}
+
+impl ChunkBackend {
+    /// Produce the full ciphertext for `hash`, or `None` if not available here.
+    fn produce(&self, hash: &Hash) -> Option<Vec<u8>> {
+        match self {
+            ChunkBackend::OnTheFly {
+                path,
+                key,
+                index,
+                total_chunks,
+            } => {
+                let idx = *index.get(hash)?;
+                let mut file = std::fs::File::open(path).ok()?;
+                file.seek(SeekFrom::Start(idx as u64 * CHUNK_SIZE as u64)).ok()?;
+                let mut buf = vec![0u8; CHUNK_SIZE as usize];
+                let n = fill(&mut file, &mut buf).ok()?;
+                let ct = crate::crypto::seal_chunk(key, idx, *total_chunks, &buf[..n]).ok()?;
+                Some(ct)
+            }
+            ChunkBackend::Files { dir } => std::fs::read(dir.join(hash.to_string())).ok(),
+        }
+    }
+}
+
+/// Serves chunks over [`CHUNK_ALPN`], from either backend.
+#[derive(Clone)]
+pub(crate) struct ChunkServer {
+    backend: Arc<ChunkBackend>,
+}
+
+impl ChunkServer {
+    /// A relay-side server that serves stored ciphertext files from `dir`.
+    pub(crate) fn files(dir: PathBuf) -> Self {
+        Self {
+            backend: Arc::new(ChunkBackend::Files { dir }),
+        }
+    }
+}
+
+impl std::fmt::Debug for ChunkServer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ChunkServer")
+    }
+}
+
+impl ProtocolHandler for ChunkServer {
+    async fn accept(&self, conn: Connection) -> std::result::Result<(), AcceptError> {
+        // Serve one request per accepted bi-stream; a receiver may open several.
+        while let Ok((mut send, mut recv)) = conn.accept_bi().await {
+            let Some(req) = read_frame::<ChunkReq>(&mut recv).await else {
+                break;
+            };
+            match self.backend.produce(&req.hash) {
+                Some(ct) => {
+                    let _ = write_frame(&mut send, &ChunkResp { total_len: ct.len() as u64 }).await;
+                    let start = (req.offset as usize).min(ct.len());
+                    let _ = send.write_all(&ct[start..]).await;
+                }
+                None => {
+                    let _ = write_frame(&mut send, &ChunkResp { total_len: 0 }).await;
+                }
+            }
+            let _ = send.finish();
+        }
+        Ok(())
+    }
+}
+
+/// Fetch `ct[offset..]` of the chunk `hash` from one provider. Returns the full
+/// ciphertext length and the received tail bytes (unverified — the caller
+/// combines with any staged prefix and checks BLAKE3).
+pub(crate) async fn fetch_chunk_wire(
+    endpoint: &Endpoint,
+    addr: &EndpointAddr,
+    hash: Hash,
+    offset: u64,
+) -> Result<(u64, Vec<u8>)> {
+    let conn = endpoint
+        .connect(addr.clone(), CHUNK_ALPN)
+        .await
+        .map_err(|e| anyhow!("connect chunk provider: {e}"))?;
+    let (mut send, mut recv) = conn.open_bi().await.map_err(|e| anyhow!("open_bi: {e}"))?;
+    write_frame(&mut send, &ChunkReq { hash, offset }).await?;
+    send.finish().map_err(|e| anyhow!("finish req: {e}"))?;
+    let resp: ChunkResp = read_frame(&mut recv)
+        .await
+        .ok_or_else(|| anyhow!("no chunk response"))?;
+    if resp.total_len == 0 {
+        anyhow::bail!("chunk not available from this provider");
+    }
+    let want = resp.total_len.saturating_sub(offset) as usize;
+    let mut buf = vec![0u8; want];
+    recv.read_exact(&mut buf)
+        .await
+        .map_err(|e| anyhow!("read chunk body: {e}"))?;
+    Ok((resp.total_len, buf))
+}
+
+/// Stream `ct[have..]` of chunk `hash` from one provider, appending to `out`
+/// (which already holds `have` verified ciphertext bytes). Writes incrementally
+/// so a partial download survives an interruption. Returns the full ciphertext
+/// length.
+async fn fetch_chunk_wire_to_file(
+    endpoint: &Endpoint,
+    addr: &EndpointAddr,
+    hash: Hash,
+    out: &mut std::fs::File,
+    have: u64,
+) -> Result<u64> {
+    use std::io::Write;
+    let conn = endpoint
+        .connect(addr.clone(), CHUNK_ALPN)
+        .await
+        .map_err(|e| anyhow!("connect chunk provider: {e}"))?;
+    let (mut send, mut recv) = conn.open_bi().await.map_err(|e| anyhow!("open_bi: {e}"))?;
+    write_frame(&mut send, &ChunkReq { hash, offset: have }).await?;
+    send.finish().map_err(|e| anyhow!("finish req: {e}"))?;
+    let resp: ChunkResp = read_frame(&mut recv)
+        .await
+        .ok_or_else(|| anyhow!("no chunk response"))?;
+    if resp.total_len == 0 {
+        anyhow::bail!("chunk not available from this provider");
+    }
+    let mut remaining = resp.total_len.saturating_sub(have);
+    let mut buf = vec![0u8; 64 * 1024];
+    while remaining > 0 {
+        let want = (remaining as usize).min(buf.len());
+        match recv.read(&mut buf[..want]).await {
+            Ok(Some(n)) if n > 0 => {
+                out.write_all(&buf[..n]).map_err(|e| anyhow!("stage chunk: {e}"))?;
+                remaining -= n as u64;
+            }
+            _ => break,
+        }
+    }
+    Ok(resp.total_len)
 }
 
 // ---- sender ---------------------------------------------------------------
@@ -163,11 +360,6 @@ impl ProtocolHandler for CtrlHandler {
 /// A running sender: serves every chunk and orchestrates lazy relay backfill.
 pub struct ChunkSender {
     _router: Router,
-    // The ciphertext chunks live on disk (bounded memory for arbitrarily large
-    // files). `_store` is declared before `_tempdir` so it (and its file handles)
-    // drops first, then the temp dir is removed.
-    _store: FsStore,
-    _tempdir: tempfile::TempDir,
     endpoint: Endpoint,
     addr: EndpointAddr,
     chunks: Vec<Hash>,
@@ -180,37 +372,41 @@ pub struct ChunkSender {
 
 impl ChunkSender {
     pub async fn serve(path: &Path, relay: RelayChoice) -> Result<Self> {
-        // Stream the file from disk one chunk at a time into a temp FsStore, so
-        // memory stays bounded (~one chunk) no matter how large the file is.
+        // Compute the chunk hashes by streaming the file (bounded memory), WITHOUT
+        // storing any ciphertext — chunks are regenerated on demand while serving.
         let total_size = std::fs::metadata(path)
             .with_context(|| format!("stat {}", path.display()))?
             .len();
         let total_chunks = (total_size as usize).div_ceil(CHUNK_SIZE as usize) as u32;
-        let tempdir = tempfile::tempdir().context("sender store dir")?;
-        let store = FsStore::load(tempdir.path())
-            .await
-            .map_err(|e| anyhow!("open sender store: {e}"))?;
-
-        // Encrypt every chunk under a per-transfer random content key before it
-        // enters the blob store, so the relay (and any other holder of a chunk)
-        // only ever sees ciphertext. The key travels in the ticket, out-of-band.
         let key = crate::crypto::random_chunk_key();
         let mut chunks = Vec::new();
-        let mut file = std::fs::File::open(path)
-            .with_context(|| format!("open {}", path.display()))?;
-        let mut buf = vec![0u8; CHUNK_SIZE as usize];
-        let mut idx: u32 = 0;
-        loop {
-            let n = fill(&mut file, &mut buf).context("read file")?;
-            if n == 0 {
-                break;
+        let mut index: HashMap<Hash, u32> = HashMap::new();
+        {
+            let mut file = std::fs::File::open(path)
+                .with_context(|| format!("open {}", path.display()))?;
+            let mut buf = vec![0u8; CHUNK_SIZE as usize];
+            let mut idx: u32 = 0;
+            loop {
+                let n = fill(&mut file, &mut buf).context("read file")?;
+                if n == 0 {
+                    break;
+                }
+                let ct = crate::crypto::seal_chunk(&key, idx, total_chunks, &buf[..n])?;
+                let hash = Hash::new(&ct);
+                chunks.push(hash);
+                index.insert(hash, idx);
+                idx += 1;
             }
-            let ct = crate::crypto::seal_chunk(&key, idx, total_chunks, &buf[..n])?;
-            let tag = store.blobs().add_bytes(ct).await.context("add chunk")?;
-            chunks.push(tag.hash);
-            idx += 1;
         }
-        let blobs = BlobsProtocol::new(&store, None);
+        let chunk_server = ChunkServer {
+            backend: Arc::new(ChunkBackend::OnTheFly {
+                path: path.to_path_buf(),
+                key,
+                index,
+                total_chunks,
+            }),
+        };
+
         let use_relay = !matches!(relay, RelayChoice::Disabled);
         let endpoint = bind_endpoint(relay).await?;
 
@@ -224,7 +420,7 @@ impl ChunkSender {
             gone_tx,
         };
         let router = Router::builder(endpoint.clone())
-            .accept(iroh_blobs::ALPN, blobs)
+            .accept(CHUNK_ALPN, chunk_server)
             .accept(CTRL_ALPN, handler)
             .spawn();
         let addr = if use_relay {
@@ -235,8 +431,6 @@ impl ChunkSender {
         };
         Ok(Self {
             _router: router,
-            _store: store,
-            _tempdir: tempdir,
             endpoint,
             addr,
             chunks,
@@ -386,19 +580,71 @@ impl ChunkReceiver {
         })
     }
 
-    /// Fetch a single chunk by hash, trying each provider in order. Bounded to
-    /// one chunk in memory.
+    /// Fetch a whole chunk by hash, trying each provider in order, and verify
+    /// `BLAKE3(ciphertext) == hash`. Bounded to one chunk in memory.
     pub async fn fetch_chunk(&self, providers: &[EndpointAddr], hash: Hash) -> Result<Vec<u8>> {
-        let store = MemStore::new();
+        let (ct, _rest) = self.fetch_from(providers, hash, &[]).await?;
+        Ok(ct)
+    }
+
+    /// Fetch the chunk `hash`, resuming from `prefix` (already-downloaded
+    /// ciphertext bytes). Returns `(full_ciphertext, newly_downloaded_tail)` once
+    /// the full ciphertext is present and BLAKE3-verified. Tries providers in
+    /// order for fallback.
+    pub async fn fetch_from(
+        &self,
+        providers: &[EndpointAddr],
+        hash: Hash,
+        prefix: &[u8],
+    ) -> Result<(Vec<u8>, Vec<u8>)> {
         let mut last_err = None;
         for addr in providers {
-            let bt = BlobTicket::new(addr.clone(), hash, BlobFormat::Raw);
-            match fetch_into(&store, &self.endpoint, &bt).await {
-                Ok(_) => {
-                    let bytes = store.blobs().get_bytes(hash).await.context("read chunk")?;
-                    return Ok(bytes.to_vec());
+            match fetch_chunk_wire(&self.endpoint, addr, hash, prefix.len() as u64).await {
+                Ok((total_len, tail)) => {
+                    let mut ct = Vec::with_capacity(total_len as usize);
+                    ct.extend_from_slice(prefix);
+                    ct.extend_from_slice(&tail);
+                    if ct.len() as u64 != total_len || Hash::new(&ct) != hash {
+                        last_err = Some(anyhow!("chunk {hash} failed integrity check"));
+                        continue;
+                    }
+                    return Ok((ct, tail));
                 }
                 Err(e) => last_err = Some(e),
+            }
+        }
+        Err(last_err.unwrap_or_else(|| anyhow!("no providers for chunk {hash}")))
+    }
+
+    /// Fetch chunk `hash` into `out`, resuming from whatever `out` already holds
+    /// (intra-chunk resume). Tries providers in order; on success `out` contains
+    /// the full BLAKE3-verified ciphertext. A partial download persists in `out`
+    /// for a later resume.
+    pub async fn fetch_to_file(
+        &self,
+        providers: &[EndpointAddr],
+        hash: Hash,
+        out: &mut std::fs::File,
+    ) -> Result<()> {
+        let mut last_err = None;
+        for _round in 0..2 {
+            for addr in providers {
+                let have = out.metadata()?.len();
+                out.seek(SeekFrom::Start(have))?;
+                match fetch_chunk_wire_to_file(&self.endpoint, addr, hash, out, have).await {
+                    Ok(total) if out.metadata()?.len() == total => {
+                        out.seek(SeekFrom::Start(0))?;
+                        let mut ct = Vec::with_capacity(total as usize);
+                        out.read_to_end(&mut ct)?;
+                        if Hash::new(&ct) == hash {
+                            return Ok(());
+                        }
+                        out.set_len(0)?; // bad bytes: start this chunk over
+                        last_err = Some(anyhow!("chunk {hash} failed integrity check"));
+                    }
+                    Ok(_) => last_err = Some(anyhow!("incomplete chunk {hash}")),
+                    Err(e) => last_err = Some(e),
+                }
             }
         }
         Err(last_err.unwrap_or_else(|| anyhow!("no providers for chunk {hash}")))

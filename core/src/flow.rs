@@ -228,7 +228,7 @@ pub async fn recv_chunked(
     on: impl Fn(RecvEvent) + Send + Sync,
 ) -> Result<PathBuf> {
     use std::collections::HashSet;
-    use std::io::{Seek, SeekFrom, Write};
+    use std::io::{Read, Seek, SeekFrom, Write};
 
     let t = ChunkTicket::decode(ticket).context("invalid ticket")?;
     let user_out = out;
@@ -356,15 +356,29 @@ pub async fn recv_chunked(
             (source, providers)
         };
 
-        let bytes = receiver
-            .fetch_chunk(&providers, t.chunks[i])
+        // Stage this chunk's ciphertext in a `.part` file so an interruption
+        // mid-chunk resumes without re-downloading it (intra-chunk resume).
+        let part_path = PathBuf::from(format!("{}.arvpart", download.display()));
+        let mut part = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(&part_path)
+            .with_context(|| format!("open {}", part_path.display()))?;
+        receiver
+            .fetch_to_file(&providers, t.chunks[i], &mut part)
             .await
             .with_context(|| format!("fetch chunk {}", i + 1))?;
-        // Fetched bytes are ciphertext (providers never see plaintext).
-        let plain = open_chunk(&key, i as u32, total_chunks, &bytes)
+        part.seek(SeekFrom::Start(0))?;
+        let mut ct = Vec::new();
+        part.read_to_end(&mut ct)?;
+        // Ciphertext (providers never see plaintext); already BLAKE3-verified.
+        let plain = open_chunk(&key, i as u32, total_chunks, &ct)
             .with_context(|| format!("decrypt chunk {}", i + 1))?;
         file.seek(SeekFrom::Start(i as u64 * t.chunk_size as u64))?;
         file.write_all(&plain)?;
+        drop(part);
+        let _ = std::fs::remove_file(&part_path);
         on(RecvEvent::Chunk {
             index: i,
             total: t.chunks.len(),
