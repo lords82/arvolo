@@ -29,6 +29,7 @@ spake2 = "0.4.0"
 serde = { version = "1", features = ["derive"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 tokio-util = "0.7"
+tar = "0.4"
 
 [dev-dependencies]
 tokio = { workspace = true }

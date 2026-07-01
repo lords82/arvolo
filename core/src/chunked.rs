@@ -385,6 +385,10 @@ struct TicketWire {
     relay: Option<RelayRelease>,
     /// Per-transfer content key to decrypt the chunks (32 bytes).
     key: Vec<u8>,
+    /// Suggested output name (original filename, or archive/bundle name).
+    name: String,
+    /// The payload is a tar archive to unpack (folder / multiple files).
+    archive: bool,
 }
 
 /// A chunked transfer ticket (`arvc…`). Carries the content key that decrypts
@@ -396,6 +400,10 @@ pub struct ChunkTicket {
     pub providers: Vec<EndpointAddr>,
     pub relay: Option<RelayRelease>,
     pub key: Vec<u8>,
+    /// Suggested output name (original filename, or archive/bundle name).
+    pub name: String,
+    /// The payload is a tar archive to unpack (folder / multiple files).
+    pub archive: bool,
 }
 
 impl ChunkTicket {
@@ -407,6 +415,8 @@ impl ChunkTicket {
             providers: self.providers.clone(),
             relay: self.relay.clone(),
             key: self.key.clone(),
+            name: self.name.clone(),
+            archive: self.archive,
         })
         .context("serialize chunk ticket")?;
         Ok(format!(
@@ -431,6 +441,8 @@ impl ChunkTicket {
             providers: w.providers,
             relay: w.relay,
             key: w.key,
+            name: w.name,
+            archive: w.archive,
         })
     }
 

@@ -41,9 +41,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Serve a file P2P; prints a ticket (or short code) and stays running.
+    /// Serve one or more files/folders P2P; prints a ticket (or short code).
+    /// Multiple paths or a folder are packed into one archive automatically.
     Send {
-        path: PathBuf,
+        #[arg(required = true, num_args = 1..)]
+        paths: Vec<PathBuf>,
         /// Also seed the file to a relay so the recipient can finish even if you
         /// go offline (backfill). Relay base URL, e.g. http://relay:8787
         #[arg(long)]
@@ -106,12 +108,12 @@ async fn main() -> Result<()> {
 
     match Cli::parse().command {
         Command::Send {
-            path,
+            paths,
             seed_relay,
             code,
             relay,
             qr,
-        } => send(path, seed_relay, code, relay, qr).await,
+        } => send(paths, seed_relay, code, relay, qr).await,
         Command::Recv { ticket, out } => recv(ticket, out).await,
         Command::Id => id(),
         Command::SendOffline {
@@ -187,18 +189,54 @@ fn print_qr(data: &str) {
 
 // ---- P2P ------------------------------------------------------------------
 
+/// Resolve the send inputs to a single payload file: a lone file is sent as-is;
+/// a folder or several paths are packed into a temp tar. Returns
+/// `(payload, suggested_name, is_archive, temp_to_cleanup)`.
+fn resolve_payload(paths: &[PathBuf]) -> Result<(PathBuf, String, bool, Option<PathBuf>)> {
+    if paths.len() == 1 && paths[0].is_file() {
+        let name = paths[0]
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "file".into());
+        return Ok((paths[0].clone(), name, false, None));
+    }
+    for p in paths {
+        anyhow::ensure!(p.exists(), "{} does not exist", p.display());
+    }
+    let name = if paths.len() == 1 {
+        paths[0]
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "bundle".into())
+    } else {
+        "bundle".into()
+    };
+    let temp = std::env::temp_dir().join(format!("arvolo-send-{}.tar", std::process::id()));
+    flow::pack_tar(paths, &temp).context("pack archive")?;
+    Ok((temp.clone(), name, true, Some(temp)))
+}
+
 async fn send(
-    path: PathBuf,
+    paths: Vec<PathBuf>,
     seed_relay: Option<String>,
     code_mode: bool,
     relay: Option<String>,
     qr: bool,
 ) -> Result<()> {
+    let (payload, name, archive, temp) = resolve_payload(&paths)?;
+    if archive {
+        eprintln!("Packing {} item(s) into an archive…", paths.len());
+    }
     if code_mode {
-        return send_with_code(path, relay, qr).await;
+        let r = send_with_code(payload, name, archive, temp, relay, qr).await;
+        return r;
     }
     eprintln!("Splitting and serving chunks…");
-    let session = flow::prepare_send(&path, seed_relay, RelayChoice::from_env()).await?;
+    let session =
+        flow::prepare_send(&payload, &name, archive, seed_relay, RelayChoice::from_env()).await?;
+    if let Some(t) = &temp {
+        let _ = std::fs::remove_file(t); // fully read into memory by now
+    }
     let cancel = cancel_on_ctrl_c();
     session
         .serve(cancel, move |ev| match ev {
@@ -231,7 +269,14 @@ async fn send(
 
 /// `send --code`: hand the ticket to the receiver via a short pairing code over a
 /// relay rendezvous, serving the file (and using the relay for backfill) meanwhile.
-async fn send_with_code(path: PathBuf, relay: Option<String>, qr: bool) -> Result<()> {
+async fn send_with_code(
+    payload: PathBuf,
+    name: String,
+    archive: bool,
+    temp: Option<PathBuf>,
+    relay: Option<String>,
+    qr: bool,
+) -> Result<()> {
     // An explicit --relay is embedded in the code (works with no receiver config);
     // otherwise fall back to ARVOLO_RELAY (short code, shared default).
     let (relay_url, embed) = match relay {
@@ -243,7 +288,12 @@ async fn send_with_code(path: PathBuf, relay: Option<String>, qr: bool) -> Resul
     };
 
     eprintln!("Splitting and serving chunks…");
-    let session = flow::prepare_send(&path, Some(relay_url.clone()), RelayChoice::from_env()).await?;
+    let session =
+        flow::prepare_send(&payload, &name, archive, Some(relay_url.clone()), RelayChoice::from_env())
+            .await?;
+    if let Some(t) = &temp {
+        let _ = std::fs::remove_file(t);
+    }
     let (shown_code, complete) = code::publish_ticket(&session.ticket, &relay_url, embed)
         .await
         .context("start pairing")?;

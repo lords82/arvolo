@@ -17,7 +17,7 @@ async fn send_then_recv_roundtrip_emits_events() {
     std::fs::write(&src, &data).unwrap();
 
     // Serve (no relay) and grab the ticket.
-    let session = flow::prepare_send(&src, None, RelayChoice::Disabled)
+    let session = flow::prepare_send(&src, "src.bin", false, None, RelayChoice::Disabled)
         .await
         .expect("prepare_send");
     let ticket = session.ticket.clone();
@@ -77,7 +77,7 @@ async fn recv_cancelled_returns_without_saving() {
     let data: Vec<u8> = (0..24 * 1024 * 1024).map(|i| (i * 5 + 1) as u8).collect();
     std::fs::write(&src, &data).unwrap();
 
-    let session = flow::prepare_send(&src, None, RelayChoice::Disabled)
+    let session = flow::prepare_send(&src, "src.bin", false, None, RelayChoice::Disabled)
         .await
         .expect("prepare_send");
     let ticket = session.ticket.clone();
@@ -112,6 +112,50 @@ async fn recv_cancelled_returns_without_saving() {
         std::fs::read(&path).unwrap().len(),
         data.len(),
         "cancelled recv must not have written the whole file"
+    );
+
+    send_cancel.cancel();
+    let _ = serve.await;
+}
+
+#[tokio::test]
+async fn archive_roundtrip_packs_and_extracts() {
+    let dir = tempfile::tempdir().unwrap();
+    // A source folder with a nested file.
+    let src = dir.path().join("folder");
+    std::fs::create_dir_all(src.join("sub")).unwrap();
+    std::fs::write(src.join("a.txt"), b"hello alpha").unwrap();
+    std::fs::write(src.join("sub/b.bin"), vec![7u8; 1000]).unwrap();
+
+    // Pack it, then serve the archive.
+    let tar_path = dir.path().join("payload.tar");
+    flow::pack_tar(&[src.clone()], &tar_path).unwrap();
+    let session = flow::prepare_send(&tar_path, "folder", true, None, RelayChoice::Disabled)
+        .await
+        .expect("prepare_send");
+    let ticket = session.ticket.clone();
+    let send_cancel = CancellationToken::new();
+    let serve = {
+        let c = send_cancel.clone();
+        tokio::spawn(async move { session.serve(c, |_| {}).await })
+    };
+
+    // Receive: the archive is unpacked into the output dir.
+    let outdir = dir.path().join("received");
+    let saved = flow::recv_chunked(
+        &ticket,
+        Some(outdir.clone()),
+        RelayChoice::Disabled,
+        CancellationToken::new(),
+        |_| {},
+    )
+    .await
+    .expect("recv_chunked");
+    assert_eq!(saved, outdir);
+    assert_eq!(std::fs::read(outdir.join("folder/a.txt")).unwrap(), b"hello alpha");
+    assert_eq!(
+        std::fs::read(outdir.join("folder/sub/b.bin")).unwrap(),
+        vec![7u8; 1000]
     );
 
     send_cancel.cancel();
