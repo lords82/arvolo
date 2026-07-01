@@ -24,7 +24,9 @@ use iroh::{
     protocol::{AcceptError, ProtocolHandler, Router},
     Endpoint, EndpointAddr,
 };
-use iroh_blobs::{store::mem::MemStore, ticket::BlobTicket, BlobFormat, BlobsProtocol, Hash};
+use iroh_blobs::{
+    store::fs::FsStore, store::mem::MemStore, ticket::BlobTicket, BlobFormat, BlobsProtocol, Hash,
+};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, Mutex as AsyncMutex};
 
@@ -34,6 +36,20 @@ use crate::transfer::{bind_endpoint, fetch_into, RelayChoice};
 
 /// Chunk size: 16 MiB.
 pub const CHUNK_SIZE: u32 = 16 * 1024 * 1024;
+
+/// Read from `f` until `buf` is full or EOF (a single `read` may return less).
+/// Returns the number of bytes filled (0 at EOF).
+fn fill(f: &mut std::fs::File, buf: &mut [u8]) -> std::io::Result<usize> {
+    use std::io::Read;
+    let mut filled = 0;
+    while filled < buf.len() {
+        match f.read(&mut buf[filled..])? {
+            0 => break,
+            n => filled += n,
+        }
+    }
+    Ok(filled)
+}
 
 /// Control-channel ALPN.
 pub const CTRL_ALPN: &[u8] = b"arvolo/ctrl/2";
@@ -147,7 +163,11 @@ impl ProtocolHandler for CtrlHandler {
 /// A running sender: serves every chunk and orchestrates lazy relay backfill.
 pub struct ChunkSender {
     _router: Router,
-    _store: MemStore,
+    // The ciphertext chunks live on disk (bounded memory for arbitrarily large
+    // files). `_store` is declared before `_tempdir` so it (and its file handles)
+    // drops first, then the temp dir is removed.
+    _store: FsStore,
+    _tempdir: tempfile::TempDir,
     endpoint: Endpoint,
     addr: EndpointAddr,
     chunks: Vec<Hash>,
@@ -160,19 +180,35 @@ pub struct ChunkSender {
 
 impl ChunkSender {
     pub async fn serve(path: &Path, relay: RelayChoice) -> Result<Self> {
-        let data = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
-        let total_size = data.len() as u64;
-        let store = MemStore::new();
+        // Stream the file from disk one chunk at a time into a temp FsStore, so
+        // memory stays bounded (~one chunk) no matter how large the file is.
+        let total_size = std::fs::metadata(path)
+            .with_context(|| format!("stat {}", path.display()))?
+            .len();
+        let total_chunks = (total_size as usize).div_ceil(CHUNK_SIZE as usize) as u32;
+        let tempdir = tempfile::tempdir().context("sender store dir")?;
+        let store = FsStore::load(tempdir.path())
+            .await
+            .map_err(|e| anyhow!("open sender store: {e}"))?;
+
         // Encrypt every chunk under a per-transfer random content key before it
         // enters the blob store, so the relay (and any other holder of a chunk)
         // only ever sees ciphertext. The key travels in the ticket, out-of-band.
         let key = crate::crypto::random_chunk_key();
-        let total_chunks = data.len().div_ceil(CHUNK_SIZE as usize) as u32;
         let mut chunks = Vec::new();
-        for (idx, chunk) in data.chunks(CHUNK_SIZE as usize).enumerate() {
-            let ct = crate::crypto::seal_chunk(&key, idx as u32, total_chunks, chunk)?;
+        let mut file = std::fs::File::open(path)
+            .with_context(|| format!("open {}", path.display()))?;
+        let mut buf = vec![0u8; CHUNK_SIZE as usize];
+        let mut idx: u32 = 0;
+        loop {
+            let n = fill(&mut file, &mut buf).context("read file")?;
+            if n == 0 {
+                break;
+            }
+            let ct = crate::crypto::seal_chunk(&key, idx, total_chunks, &buf[..n])?;
             let tag = store.blobs().add_bytes(ct).await.context("add chunk")?;
             chunks.push(tag.hash);
+            idx += 1;
         }
         let blobs = BlobsProtocol::new(&store, None);
         let use_relay = !matches!(relay, RelayChoice::Disabled);
@@ -200,6 +236,7 @@ impl ChunkSender {
         Ok(Self {
             _router: router,
             _store: store,
+            _tempdir: tempdir,
             endpoint,
             addr,
             chunks,
