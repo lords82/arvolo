@@ -13,7 +13,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::backfill::RelayRelease;
 use crate::chunked::{ChunkReceiver, ChunkSender, ChunkTicket, KeyDelivery, SeedRequest};
-use crate::crypto::{open, open_chunk, seal, Identity, PublicId, Sealed};
+use crate::crypto::{
+    open, open_chunk, random_pw_salt, seal, unwrap_with_password, wrap_with_password, Identity,
+    PublicId, Sealed,
+};
 use crate::offline::OfflineTicket;
 use crate::transfer::RelayChoice;
 
@@ -540,8 +543,41 @@ pub async fn recv_chunked(
 
 // ---- offline mailbox ------------------------------------------------------
 
+/// Result of an offline deposit: the ticket to hand the recipient, plus the
+/// sender-only **revoke token** — keep it to later cancel the delivery via
+/// [`revoke_offline`]. The relay stores only a hash of it and never learns the
+/// token unless a revoke is requested.
+pub struct Deposited {
+    pub ticket: OfflineTicket,
+    pub revoke_token: String,
+}
+
+/// HTTP header carrying the base32 revoke-hash at deposit / revoke-token at revoke.
+const REVOKE_HASH_HEADER: &str = "x-arvolo-revoke-hash";
+const REVOKE_TOKEN_HEADER: &str = "x-arvolo-revoke-token";
+
+fn random_token() -> String {
+    let bytes: [u8; 16] = rand::random();
+    data_encoding::BASE32_NOPAD.encode(&bytes).to_lowercase()
+}
+
+/// Default cap on a body downloaded from the (untrusted) relay in
+/// [`fetch_offline`], so a hostile relay can't OOM the client. Override with
+/// `ARVOLO_MAX_FETCH_BYTES`.
+const DEFAULT_MAX_FETCH_BYTES: u64 = 512 * 1024 * 1024; // 512 MiB
+
+fn max_fetch_bytes() -> u64 {
+    std::env::var("ARVOLO_MAX_FETCH_BYTES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(DEFAULT_MAX_FETCH_BYTES)
+}
+
 /// Encrypt `path` for `recipient` (authenticated as `me`) and deposit the
-/// ciphertext on the relay. Returns the offline ticket to hand to the recipient.
+/// ciphertext on the relay. When `password` is set, the ciphertext is
+/// additionally wrapped under a password-derived key (E2E — the relay can never
+/// bypass it), and the recipient must supply the same password to
+/// [`fetch_offline`]. Returns the ticket plus a sender-only revoke token.
 pub async fn deposit_offline(
     path: &Path,
     recipient: &PublicId,
@@ -549,10 +585,26 @@ pub async fn deposit_offline(
     relay: &str,
     ttl: u64,
     max: u32,
-) -> Result<OfflineTicket> {
+    password: Option<&str>,
+) -> Result<Deposited> {
     anyhow::ensure!(path.is_file(), "{} is not a file", path.display());
     let plaintext = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
     let sealed = seal(&plaintext, recipient, me, b"").context("encrypt")?;
+
+    // Optional outer password-wrap layer over the HPKE ciphertext.
+    let (body, salt) = match password {
+        Some(pw) if !pw.is_empty() => {
+            let salt = random_pw_salt();
+            let wrapped =
+                wrap_with_password(pw, &salt, &sealed.ciphertext).context("wrap with password")?;
+            (wrapped, salt.to_vec())
+        }
+        _ => (sealed.ciphertext, Vec::new()),
+    };
+
+    // Sender-held revoke secret; the relay stores only its BLAKE3 hash.
+    let revoke_token = random_token();
+    let revoke_hash = blake3::hash(revoke_token.as_bytes());
 
     let relay = relay.trim_end_matches('/').to_string();
     let url = format!("{relay}/v1/deposit?ttl={ttl}&max={max}");
@@ -562,7 +614,11 @@ pub async fn deposit_offline(
             "x-arvolo-encapped-key",
             data_encoding::BASE32_NOPAD.encode(&sealed.encapped_key),
         )
-        .body(sealed.ciphertext)
+        .header(
+            REVOKE_HASH_HEADER,
+            data_encoding::BASE32_NOPAD.encode(revoke_hash.as_bytes()),
+        )
+        .body(body)
         .send()
         .await
         .context("deposit request")?
@@ -572,11 +628,35 @@ pub async fn deposit_offline(
         .await
         .context("read claim")?;
 
-    Ok(OfflineTicket {
-        relay,
-        claim: claim.trim().to_string(),
-        sender: me.public().to_bytes(),
+    Ok(Deposited {
+        ticket: OfflineTicket {
+            relay,
+            claim: claim.trim().to_string(),
+            sender: me.public().to_bytes(),
+            salt,
+        },
+        revoke_token,
     })
+}
+
+/// Revoke a previously deposited offline blob, deleting it from the relay so it
+/// can no longer be fetched. `revoke_token` is the one returned by
+/// [`deposit_offline`]. Idempotent: a claim the relay no longer holds is treated
+/// as already gone.
+pub async fn revoke_offline(relay: &str, claim: &str, revoke_token: &str) -> Result<()> {
+    let url = format!("{}/v1/entry/{}", relay.trim_end_matches('/'), claim);
+    let resp = reqwest::Client::new()
+        .delete(&url)
+        .header(REVOKE_TOKEN_HEADER, revoke_token)
+        .send()
+        .await
+        .context("revoke request")?;
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(()); // already gone / expired
+    }
+    resp.error_for_status()
+        .context("relay rejected revoke (wrong token?)")?;
+    Ok(())
 }
 
 /// Fetch and decrypt an offline ticket into `out` (default derived from the
@@ -585,9 +665,13 @@ pub async fn fetch_offline(
     ticket: &str,
     out: Option<PathBuf>,
     me: &Identity,
+    password: Option<&str>,
 ) -> Result<(PathBuf, usize)> {
     let t = OfflineTicket::decode(ticket)?;
     let sender = PublicId::from_bytes(&t.sender).context("invalid sender in ticket")?;
+    if t.has_password() && password.map(|p| p.is_empty()).unwrap_or(true) {
+        anyhow::bail!("this link is password-protected — supply the password");
+    }
 
     let url = format!("{}/v1/fetch/{}", t.relay.trim_end_matches('/'), t.claim);
     let resp = reqwest::Client::new()
@@ -608,7 +692,31 @@ pub async fn fetch_offline(
                 .ok()
         })
         .context("missing encapped key from relay")?;
-    let ciphertext = resp.bytes().await.context("read ciphertext")?.to_vec();
+
+    // The relay is untrusted: cap the downloaded body so a hostile/buggy relay
+    // can't stream an unbounded response and OOM us. Reject early on a declared
+    // length, and enforce again while streaming (the header can lie).
+    let cap = max_fetch_bytes();
+    if let Some(len) = resp.content_length() {
+        anyhow::ensure!(len <= cap, "relay response too large ({len} > {cap} bytes)");
+    }
+    let mut resp = resp;
+    let mut body = Vec::new();
+    while let Some(chunk) = resp.chunk().await.context("read ciphertext")? {
+        anyhow::ensure!(
+            body.len() as u64 + chunk.len() as u64 <= cap,
+            "relay response exceeded {cap}-byte cap"
+        );
+        body.extend_from_slice(&chunk);
+    }
+
+    // Peel the optional password-wrap layer before HPKE-opening.
+    let ciphertext = if t.has_password() {
+        let pw = password.expect("password presence checked above");
+        unwrap_with_password(pw, &t.salt, &body).context("unwrap with password")?
+    } else {
+        body
+    };
 
     let plaintext = open(
         &Sealed {

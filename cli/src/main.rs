@@ -97,6 +97,10 @@ enum Command {
         /// Max downloads before deletion (default 1 = burn-after-read).
         #[arg(long, default_value_t = 1)]
         max: u32,
+        /// Protect the link with a password (E2E — required to decrypt, even by
+        /// the intended recipient). Share it out-of-band, not with the ticket.
+        #[arg(long)]
+        password: Option<String>,
         /// Also render the ticket as a scannable QR code.
         #[arg(long)]
         qr: bool,
@@ -106,6 +110,17 @@ enum Command {
         ticket: String,
         #[arg(short, long)]
         out: Option<PathBuf>,
+        /// Password for a password-protected link.
+        #[arg(long)]
+        password: Option<String>,
+    },
+    /// Revoke a previously sent offline ticket, deleting it from the relay.
+    Revoke {
+        /// The offline ticket (`arvm…`) you sent.
+        ticket: String,
+        /// The revoke token printed when you sent it.
+        #[arg(long)]
+        token: String,
     },
 }
 
@@ -145,9 +160,15 @@ async fn main() -> Result<()> {
             relay,
             ttl,
             max,
+            password,
             qr,
-        } => send_offline(path, to, relay, ttl, max, qr).await,
-        Command::RecvOffline { ticket, out } => recv_offline(ticket, out).await,
+        } => send_offline(path, to, relay, ttl, max, password, qr).await,
+        Command::RecvOffline {
+            ticket,
+            out,
+            password,
+        } => recv_offline(ticket, out, password).await,
+        Command::Revoke { ticket, token } => revoke(ticket, token).await,
     }
 }
 
@@ -547,12 +568,14 @@ async fn recv(ticket: String, out: Option<PathBuf>) -> Result<()> {
 
 // ---- offline mailbox ------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 async fn send_offline(
     path: PathBuf,
     to: String,
     relay: Option<String>,
     ttl: u64,
     max: u32,
+    password: Option<String>,
     qr: bool,
 ) -> Result<()> {
     let me = my_identity()?;
@@ -560,25 +583,54 @@ async fn send_offline(
     let relay = relay
         .or_else(book::default_relay)
         .context("no relay: pass --relay <url>, set ARVOLO_RELAY, or configure `relay`")?;
-    let ticket = flow::deposit_offline(&path, &recipient, &me, &relay, ttl, max).await?;
-    let encoded = ticket.encode();
+    let deposited = flow::deposit_offline(
+        &path,
+        &recipient,
+        &me,
+        &relay,
+        ttl,
+        max,
+        password.as_deref(),
+    )
+    .await?;
+    let encoded = deposited.ticket.encode();
     println!("\nEncrypted and deposited (expires in {ttl}s, {max} download(s)).");
+    if password.is_some() {
+        println!("Password-protected — share the password out-of-band (not with the ticket).");
+    }
     println!("Send this ticket to the recipient:\n");
     println!("    arvolo recv-offline {encoded}\n");
+    println!("Keep this revoke token to cancel the delivery later:\n");
+    println!(
+        "    arvolo revoke {encoded} --token {}\n",
+        deposited.revoke_token
+    );
     if qr {
         print_qr(&encoded);
     }
     Ok(())
 }
 
-async fn recv_offline(ticket: String, out: Option<PathBuf>) -> Result<()> {
+async fn recv_offline(
+    ticket: String,
+    out: Option<PathBuf>,
+    password: Option<String>,
+) -> Result<()> {
     let me = my_identity()?;
     // A successful fetch means HPKE auth passed, so the sender in the ticket is
     // genuine — surface it (offline tickets are always sealed to a recipient).
-    let (path, n) = flow::fetch_offline(&ticket, out, &me).await?;
+    let (path, n) = flow::fetch_offline(&ticket, out, &me, password.as_deref()).await?;
     if let Ok(t) = arvolo_core::offline::OfflineTicket::decode(&ticket) {
         print_sender_banner(Some(&t.sender));
     }
     println!("Saved {n} bytes to {}", path.display());
+    Ok(())
+}
+
+async fn revoke(ticket: String, token: String) -> Result<()> {
+    let t = arvolo_core::offline::OfflineTicket::decode(&ticket)
+        .context("not a valid offline ticket (arvm…)")?;
+    flow::revoke_offline(&t.relay, &t.claim, &token).await?;
+    println!("Revoked — the blob is no longer available on the relay.");
     Ok(())
 }

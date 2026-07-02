@@ -36,9 +36,65 @@ pub struct AppState {
     pub blobs: Arc<BlobNode>,
 }
 
-/// Maximum blob size accepted by the relay (server policy / abuse guard).
-pub const MAX_BLOB_BYTES: usize = 2 * 1024 * 1024 * 1024; // 2 GiB
+/// Default cap on a single deposited blob. The relay buffers the whole body in
+/// memory, so this is deliberately memory-safe rather than the aspirational
+/// large-file size — big transfers use the streaming P2P chunk path instead.
+/// Override with `ARVOLO_MAX_BLOB_BYTES`.
+pub const DEFAULT_MAX_BLOB_BYTES: usize = 256 * 1024 * 1024; // 256 MiB
+/// Default cap on the number of stored mailbox entries (disk-fill guard).
+/// Override with `ARVOLO_MAX_ENTRIES`.
+pub const DEFAULT_MAX_ENTRIES: i64 = 100_000;
+/// Cap on chunks a single seed request may ask the relay to fetch+store.
+pub const MAX_SEED_CHUNKS_PER_REQ: usize = 4096;
+/// Default cap on the total number of pending seeded chunk rows (each backs one
+/// ≤16 MiB chunk file on disk), bounding the unauthenticated seed path's disk
+/// footprint. Override with `ARVOLO_MAX_SEEDED_ROWS`.
+pub const DEFAULT_MAX_SEEDED_ROWS: i64 = 50_000;
+/// Cap on a rendezvous value (SPAKE2 message / encrypted ticket are tiny).
+pub const MAX_RZ_VALUE_BYTES: usize = 64 * 1024; // 64 KiB
+/// Default cap on the number of live rendezvous rows (disk-fill guard).
+pub const DEFAULT_MAX_RZ_ROWS: i64 = 100_000;
+/// Default cap on a blob's TTL (seconds). Prevents effectively-immortal entries
+/// permanently occupying storage — and the i64 overflow a near-`u64::MAX` TTL
+/// would cause (`now + ttl` wraps negative → the entry never expires). Override
+/// with `ARVOLO_MAX_TTL`.
+pub const DEFAULT_MAX_TTL_SECS: u64 = 30 * 24 * 3600; // 30 days
+/// Upper bound on the max-downloads a single deposit may request.
+pub const MAX_DOWNLOADS_CAP: u32 = 10_000;
+
+fn env_usize(var: &str, default: usize) -> usize {
+    std::env::var(var)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
+/// Max deposited-blob size (env `ARVOLO_MAX_BLOB_BYTES`, default 256 MiB).
+pub fn max_blob_bytes() -> usize {
+    env_usize("ARVOLO_MAX_BLOB_BYTES", DEFAULT_MAX_BLOB_BYTES)
+}
+
+fn max_entries() -> i64 {
+    env_usize("ARVOLO_MAX_ENTRIES", DEFAULT_MAX_ENTRIES as usize) as i64
+}
+
+fn max_rz_rows() -> i64 {
+    env_usize("ARVOLO_MAX_RZ_ROWS", DEFAULT_MAX_RZ_ROWS as usize) as i64
+}
+
+fn max_ttl_secs() -> u64 {
+    env_usize("ARVOLO_MAX_TTL", DEFAULT_MAX_TTL_SECS as usize) as u64
+}
+
+fn max_seeded_rows() -> i64 {
+    env_usize("ARVOLO_MAX_SEEDED_ROWS", DEFAULT_MAX_SEEDED_ROWS as usize) as i64
+}
+
 const ENCAPPED_KEY_HEADER: &str = "x-arvolo-encapped-key";
+/// Base32 BLAKE3 hash of the revoke token, sent at deposit (optional).
+const REVOKE_HASH_HEADER: &str = "x-arvolo-revoke-hash";
+/// The revoke token itself, sent on a DELETE to authorize revocation.
+const REVOKE_TOKEN_HEADER: &str = "x-arvolo-revoke-token";
 
 /// What the sender deposits: an opaque, end-to-end-encrypted blob.
 #[derive(Clone)]
@@ -51,6 +107,9 @@ pub struct Deposit {
     pub ttl_secs: u64,
     /// How many times it may be fetched before being deleted (>=1).
     pub max_downloads: u32,
+    /// BLAKE3 hash of the sender's revoke token (empty ⇒ not revocable). The
+    /// relay only ever holds the hash, never the token itself.
+    pub revoke_hash: Vec<u8>,
 }
 
 /// What a recipient gets back on a successful claim.
@@ -60,6 +119,16 @@ pub struct Claimed {
     pub ciphertext: Vec<u8>,
 }
 
+/// The metadata result of a claim: enough to read the blob file off-lock.
+/// Returned by [`Mailbox::fetch_plan`].
+pub struct FetchPlan {
+    pub encapped_key: Vec<u8>,
+    /// Filesystem path of the blob to read.
+    pub blob_path: PathBuf,
+    /// This fetch spent the last download → remove the file after reading it.
+    pub burn: bool,
+}
+
 /// Reasons a claim can fail.
 #[derive(Debug, PartialEq, Eq)]
 pub enum MailboxError {
@@ -67,6 +136,10 @@ pub enum MailboxError {
     Expired,
     Exhausted,
     TooLarge,
+    /// The relay is at capacity (too many entries / rows) — abuse/disk guard.
+    Capacity,
+    /// Revoke attempted with a missing/wrong token, or on a non-revocable entry.
+    Forbidden,
     Backend(String),
 }
 
@@ -77,6 +150,8 @@ impl std::fmt::Display for MailboxError {
             MailboxError::Expired => write!(f, "expired"),
             MailboxError::Exhausted => write!(f, "download limit reached"),
             MailboxError::TooLarge => write!(f, "blob too large"),
+            MailboxError::Capacity => write!(f, "relay at capacity"),
+            MailboxError::Forbidden => write!(f, "not allowed (wrong or missing revoke token)"),
             MailboxError::Backend(e) => write!(f, "backend error: {e}"),
         }
     }
@@ -124,7 +199,8 @@ impl Mailbox {
                 encapped_key  BLOB NOT NULL,
                 expires_at    INTEGER NOT NULL,
                 max_downloads INTEGER NOT NULL,
-                downloads     INTEGER NOT NULL
+                downloads     INTEGER NOT NULL,
+                revoke_hash   BLOB
             );
             CREATE TABLE IF NOT EXISTS seeded (
                 token       TEXT NOT NULL,
@@ -141,6 +217,9 @@ impl Mailbox {
             );",
         )
         .map_err(backend)?;
+        // Migrate pre-0.2 databases that predate the revoke_hash column. Adding a
+        // column that already exists errors; that case means we're up to date.
+        let _ = conn.execute("ALTER TABLE entries ADD COLUMN revoke_hash BLOB", []);
         Ok(Self {
             conn: Mutex::new(conn),
             blob_dir,
@@ -153,31 +232,80 @@ impl Mailbox {
 
     /// Store `deposit`, returning a random claim token. `now` is unix seconds.
     pub fn deposit(&self, deposit: Deposit, now: u64) -> Result<String, MailboxError> {
-        if deposit.ciphertext.len() > MAX_BLOB_BYTES {
+        if deposit.ciphertext.len() > max_blob_bytes() {
             return Err(MailboxError::TooLarge);
         }
+        // Disk-fill guard: refuse new blobs once the store is at capacity.
+        if self.len() as i64 >= max_entries() {
+            return Err(MailboxError::Capacity);
+        }
+        // Clamp caller-supplied policy: bound the TTL (no immortal entries / no
+        // i64 overflow) and the download budget.
+        let ttl = deposit.ttl_secs.min(max_ttl_secs());
+        let max_downloads = deposit.max_downloads.clamp(1, MAX_DOWNLOADS_CAP);
         let claim = random_claim();
         std::fs::write(self.blob_path(&claim), &deposit.ciphertext).map_err(backend)?;
+        let revoke_hash: Option<Vec<u8>> = if deposit.revoke_hash.is_empty() {
+            None
+        } else {
+            Some(deposit.revoke_hash)
+        };
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO entries (claim, encapped_key, expires_at, max_downloads, downloads)
-             VALUES (?1, ?2, ?3, ?4, 0)",
+            "INSERT INTO entries
+                (claim, encapped_key, expires_at, max_downloads, downloads, revoke_hash)
+             VALUES (?1, ?2, ?3, ?4, 0, ?5)",
             params![
                 claim,
                 deposit.encapped_key,
-                now.saturating_add(deposit.ttl_secs) as i64,
-                deposit.max_downloads.max(1) as i64,
+                now.saturating_add(ttl) as i64,
+                max_downloads as i64,
+                revoke_hash,
             ],
         )
         .map_err(backend)?;
         Ok(claim)
     }
 
-    /// Claim a blob. Increments the download count; deletes the entry (and its
-    /// file) once the download budget is spent (burn-after-read for `max == 1`).
-    pub fn fetch(&self, claim: &str, now: u64) -> Result<Claimed, MailboxError> {
+    /// Revoke an entry by claim, authorized by the sender's revoke token (whose
+    /// BLAKE3 hash was recorded at deposit). Deletes the blob so it can no longer
+    /// be fetched. Fails `Forbidden` if the entry isn't revocable or the token
+    /// doesn't match; `NotFound` if there's no such claim.
+    pub fn revoke(&self, claim: &str, token: &str) -> Result<(), MailboxError> {
         let conn = self.conn.lock().unwrap();
-        let row = conn
+        let stored: Option<Vec<u8>> = conn
+            .query_row(
+                "SELECT revoke_hash FROM entries WHERE claim = ?1",
+                params![claim],
+                |r| r.get::<_, Option<Vec<u8>>>(0),
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => MailboxError::NotFound,
+                other => backend(other),
+            })?;
+        let stored = stored.ok_or(MailboxError::Forbidden)?;
+        let presented = blake3::hash(token.as_bytes());
+        // Constant-time comparison (both are 32-byte BLAKE3 digests).
+        if stored.len() != presented.as_bytes().len()
+            || !constant_time_eq(&stored, presented.as_bytes())
+        {
+            return Err(MailboxError::Forbidden);
+        }
+        self.delete(&conn, claim)
+    }
+
+    /// The metadata half of a claim: validates and updates the download
+    /// accounting **under the DB lock**, WITHOUT touching the (large) blob file.
+    /// Returns what the caller needs to then read the file *off-lock* — so the
+    /// SQLite mutex is never held across blocking file IO (which would stall
+    /// every other relay request behind one slow/large download).
+    ///
+    /// When this fetch spends the last download it deletes the row here (claiming
+    /// it, so a concurrent fetch sees `NotFound` — exactly-once burn-after-read)
+    /// and sets [`FetchPlan::burn`] so the caller removes the file after reading.
+    pub fn fetch_plan(&self, claim: &str, now: u64) -> Result<FetchPlan, MailboxError> {
+        let conn = self.conn.lock().unwrap();
+        let (encapped_key, expires_at, max_downloads, downloads) = conn
             .query_row(
                 "SELECT encapped_key, expires_at, max_downloads, downloads
                  FROM entries WHERE claim = ?1",
@@ -195,7 +323,6 @@ impl Mailbox {
                 rusqlite::Error::QueryReturnedNoRows => MailboxError::NotFound,
                 other => backend(other),
             })?;
-        let (encapped_key, expires_at, max_downloads, downloads) = row;
 
         if now >= expires_at as u64 {
             self.delete(&conn, claim)?;
@@ -206,19 +333,36 @@ impl Mailbox {
             return Err(MailboxError::Exhausted);
         }
 
-        let ciphertext = std::fs::read(self.blob_path(claim)).map_err(backend)?;
-        let new_downloads = downloads + 1;
-        if new_downloads >= max_downloads {
-            self.delete(&conn, claim)?;
+        let burn = downloads + 1 >= max_downloads;
+        if burn {
+            // Claim the last download by removing the row now (the file is removed
+            // by the caller after it reads it). This serializes exactly one winner.
+            conn.execute("DELETE FROM entries WHERE claim = ?1", params![claim])
+                .map_err(backend)?;
         } else {
             conn.execute(
                 "UPDATE entries SET downloads = ?2 WHERE claim = ?1",
-                params![claim, new_downloads],
+                params![claim, downloads + 1],
             )
             .map_err(backend)?;
         }
-        Ok(Claimed {
+        Ok(FetchPlan {
             encapped_key,
+            blob_path: self.blob_path(claim),
+            burn,
+        })
+    }
+
+    /// Claim a blob (synchronous convenience: [`fetch_plan`] + blocking file read).
+    /// Async callers should use [`fetch_plan`] and read the file off-lock instead.
+    pub fn fetch(&self, claim: &str, now: u64) -> Result<Claimed, MailboxError> {
+        let plan = self.fetch_plan(claim, now)?;
+        let ciphertext = std::fs::read(&plan.blob_path).map_err(backend)?;
+        if plan.burn {
+            let _ = std::fs::remove_file(&plan.blob_path);
+        }
+        Ok(Claimed {
+            encapped_key: plan.encapped_key,
             ciphertext,
         })
     }
@@ -279,6 +423,15 @@ impl Mailbox {
             )
             .map_err(backend)?;
         Ok(())
+    }
+
+    /// Number of pending seeded chunk rows (disk-footprint guard).
+    pub fn seeded_count(&self) -> i64 {
+        self.conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM seeded", [], |r| r.get::<_, i64>(0))
+            .unwrap_or(0)
     }
 
     /// Does this (token, hash) pair authorize releasing the chunk?
@@ -391,6 +544,17 @@ impl Mailbox {
             .execute("DELETE FROM rendezvous WHERE slot = ?1", params![slot]);
     }
 
+    /// Number of rendezvous rows currently stored (capacity guard).
+    pub fn rz_count(&self) -> i64 {
+        self.conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM rendezvous", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap_or(0)
+    }
+
     /// Delete all expired rendezvous rows; returns how many.
     pub fn rz_reap(&self, now: u64) -> usize {
         self.conn
@@ -417,6 +581,14 @@ fn random_claim() -> String {
     data_encoding::BASE32_NOPAD.encode(&bytes).to_lowercase()
 }
 
+/// Length-independent constant-time byte comparison (equal lengths only).
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
 // ---- HTTP layer -----------------------------------------------------------
 
 #[derive(Deserialize)]
@@ -435,10 +607,15 @@ fn default_max() -> u32 {
 }
 
 /// Build the relay HTTP router over the shared [`AppState`].
+///
+/// A global request-body limit (`max_blob_bytes()`) is applied so the relay
+/// never buffers an unbounded body into memory — the deposit path materializes
+/// the whole body, so this is the primary OOM guard.
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/v1/deposit", post(deposit_handler))
         .route("/v1/fetch/{claim}", get(fetch_handler))
+        .route("/v1/entry/{claim}", axum::routing::delete(revoke_handler))
         .route("/v1/addr", get(addr_handler))
         .route("/v1/seed", post(seed_handler))
         .route("/v1/release/{token}/{hash}", post(release_handler))
@@ -447,6 +624,9 @@ pub fn router(state: AppState) -> Router {
             post(rz_post_handler).get(rz_get_handler),
         )
         .route("/healthz", get(|| async { "ok" }))
+        // Applied after the routes so it wraps them all: bounds every request
+        // body, so no handler can buffer an unbounded body into memory.
+        .layer(axum::extract::DefaultBodyLimit::max(max_blob_bytes()))
         .with_state(state)
 }
 
@@ -465,12 +645,22 @@ async fn rz_post_handler(
     AxumPath((slot, key)): AxumPath<(String, String)>,
     body: Bytes,
 ) -> Result<String, (StatusCode, String)> {
+    if body.len() > MAX_RZ_VALUE_BYTES {
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "rendezvous value too large".into(),
+        ));
+    }
+    // Disk-fill guard on the (unauthenticated) rendezvous table.
+    if state.mailbox.rz_count() >= max_rz_rows() {
+        return Err((StatusCode::INSUFFICIENT_STORAGE, "relay at capacity".into()));
+    }
     let exp = now_unix().saturating_add(RZ_TTL);
     if key == RZ_CLAIM_KEY {
         let claimed = state
             .mailbox
             .rz_claim(&slot, &key, &body, exp)
-            .map_err(|e| (status_for(&e), e.to_string()))?;
+            .map_err(err_response)?;
         if !claimed {
             return Err((StatusCode::CONFLICT, "slot already taken".into()));
         }
@@ -478,7 +668,7 @@ async fn rz_post_handler(
         state
             .mailbox
             .rz_put(&slot, &key, &body, exp)
-            .map_err(|e| (status_for(&e), e.to_string()))?;
+            .map_err(err_response)?;
     }
     Ok("ok".into())
 }
@@ -504,7 +694,22 @@ fn status_for(e: &MailboxError) -> StatusCode {
         MailboxError::NotFound => StatusCode::NOT_FOUND,
         MailboxError::Expired | MailboxError::Exhausted => StatusCode::GONE,
         MailboxError::TooLarge => StatusCode::PAYLOAD_TOO_LARGE,
+        MailboxError::Capacity => StatusCode::INSUFFICIENT_STORAGE,
+        MailboxError::Forbidden => StatusCode::FORBIDDEN,
         MailboxError::Backend(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
+/// Map a mailbox error to an HTTP response. Internal backend errors (SQL, IO)
+/// are logged server-side but never echoed to the client, to avoid leaking
+/// implementation detail; all other variants are safe, caller-facing states.
+fn err_response(e: MailboxError) -> (StatusCode, String) {
+    match e {
+        MailboxError::Backend(detail) => {
+            tracing::error!(%detail, "relay backend error");
+            (StatusCode::INTERNAL_SERVER_ERROR, "internal error".into())
+        }
+        other => (status_for(&other), other.to_string()),
     }
 }
 
@@ -528,31 +733,72 @@ async fn deposit_handler(
             format!("missing/invalid {ENCAPPED_KEY_HEADER} header (base32)"),
         ))?;
 
+    // Optional revoke-hash: base32 BLAKE3 of the sender's revoke token.
+    let revoke_hash = headers
+        .get(REVOKE_HASH_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| {
+            data_encoding::BASE32_NOPAD
+                .decode(s.to_uppercase().as_bytes())
+                .ok()
+        })
+        .unwrap_or_default();
+
     let deposit = Deposit {
         encapped_key,
         ciphertext: body.to_vec(),
         ttl_secs: q.ttl,
         max_downloads: q.max,
+        revoke_hash,
     };
-    mb.deposit(deposit, now_unix())
-        .map_err(|e| (status_for(&e), e.to_string()))
+    mb.deposit(deposit, now_unix()).map_err(err_response)
+}
+
+/// Revoke (delete) an entry, authorized by the sender's revoke token supplied in
+/// the `x-arvolo-revoke-token` header.
+async fn revoke_handler(
+    State(state): State<AppState>,
+    AxumPath(claim): AxumPath<String>,
+    headers: HeaderMap,
+) -> Result<String, (StatusCode, String)> {
+    let token = headers
+        .get(REVOKE_TOKEN_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .ok_or((
+            StatusCode::BAD_REQUEST,
+            format!("missing {REVOKE_TOKEN_HEADER} header"),
+        ))?;
+    state.mailbox.revoke(&claim, token).map_err(err_response)?;
+    Ok("revoked".into())
 }
 
 async fn fetch_handler(
     State(state): State<AppState>,
     AxumPath(claim): AxumPath<String>,
 ) -> Result<Response, (StatusCode, String)> {
-    match state.mailbox.fetch(&claim, now_unix()) {
-        Ok(c) => {
-            let mut resp = c.ciphertext.into_response();
-            let encoded = data_encoding::BASE32_NOPAD.encode(&c.encapped_key);
-            if let Ok(val) = encoded.parse() {
-                resp.headers_mut().insert(ENCAPPED_KEY_HEADER, val);
-            }
-            Ok(resp)
-        }
-        Err(e) => Err((status_for(&e), e.to_string())),
+    // Metadata decision under the DB lock (fast); the blob file is then read
+    // off-lock and off the async worker via tokio::fs, so one large/slow download
+    // can't hold the SQLite mutex and stall every other relay request.
+    let plan = state
+        .mailbox
+        .fetch_plan(&claim, now_unix())
+        .map_err(err_response)?;
+    let ciphertext = tokio::fs::read(&plan.blob_path).await.map_err(|e| {
+        tracing::error!(error = %e, "read blob file");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal error".to_string(),
+        )
+    })?;
+    if plan.burn {
+        let _ = tokio::fs::remove_file(&plan.blob_path).await;
     }
+    let mut resp = ciphertext.into_response();
+    let encoded = data_encoding::BASE32_NOPAD.encode(&plan.encapped_key);
+    if let Ok(val) = encoded.parse() {
+        resp.headers_mut().insert(ENCAPPED_KEY_HEADER, val);
+    }
+    Ok(resp)
 }
 
 /// Seed (backfill) a P2P blob into the relay's store. Body = the sender's blob
@@ -564,6 +810,25 @@ async fn seed_handler(
 ) -> Result<String, (StatusCode, String)> {
     let req = SeedRequest::decode(body.trim())
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("bad seed request: {e}")))?;
+    if req.chunks.len() > MAX_SEED_CHUNKS_PER_REQ {
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!("too many chunks (max {MAX_SEED_CHUNKS_PER_REQ})"),
+        ));
+    }
+    // Aggregate disk-footprint guard for the unauthenticated seed path: refuse if
+    // storing these chunks would exceed the total pending-seed cap.
+    if state
+        .mailbox
+        .seeded_count()
+        .saturating_add(req.chunks.len() as i64)
+        > max_seeded_rows()
+    {
+        return Err((
+            StatusCode::INSUFFICIENT_STORAGE,
+            "relay at seed capacity".into(),
+        ));
+    }
     state
         .blobs
         .seed_chunks(req.sender, &req.chunks)
@@ -574,7 +839,7 @@ async fn seed_handler(
         state
             .mailbox
             .record_seed(&req.token, &hash.to_string(), exp)
-            .map_err(|e| (status_for(&e), e.to_string()))?;
+            .map_err(err_response)?;
     }
     Ok("ok".into())
 }

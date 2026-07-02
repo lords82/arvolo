@@ -254,6 +254,72 @@ pub fn open_chunk(
         .map_err(|_| anyhow!("open chunk {index} (wrong key/index/total or tampered)"))
 }
 
+// ---- password-wrapped payload (E2E link password) -------------------------
+//
+// An optional OUTER layer so that holding the link (ticket) is not enough to
+// decrypt: the payload is additionally wrapped under a key derived from a shared
+// password via Argon2id. The relay only ever stores the wrapped bytes; the salt
+// travels in the ticket (it is not secret) and the password is shared
+// out-of-band. Without the password the inner ciphertext cannot be recovered, so
+// even the intended recipient cannot decrypt — the relay can never bypass it.
+
+use argon2::Argon2;
+
+/// Length of the random salt used for password key derivation.
+pub const PW_SALT_LEN: usize = 16;
+
+/// AAD tag binding the password-wrap layer to this protocol/version.
+const PW_AAD: &[u8] = b"arvolo/pw/v1";
+
+/// A fresh random salt for password wrapping.
+pub fn random_pw_salt() -> [u8; PW_SALT_LEN] {
+    use rand::RngCore;
+    let mut s = [0u8; PW_SALT_LEN];
+    rand::rng().fill_bytes(&mut s);
+    s
+}
+
+/// Derive a 32-byte wrap key from `password` and `salt` (Argon2id, default cost).
+fn pw_key(password: &str, salt: &[u8]) -> Result<[u8; 32]> {
+    let mut key = [0u8; CHUNK_KEY_LEN];
+    Argon2::default()
+        .hash_password_into(password.as_bytes(), salt, &mut key)
+        .map_err(|e| anyhow!("password key derivation: {e}"))?;
+    Ok(key)
+}
+
+/// Wrap `plaintext` under a key derived from `password` + `salt`. `salt` must be
+/// random per payload (see [`random_pw_salt`]) and is stored/sent alongside — it
+/// is not secret. A fresh salt yields a unique key, so a fixed nonce is safe.
+pub fn wrap_with_password(password: &str, salt: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
+    let key = pw_key(password, salt)?;
+    let cipher = ChunkCipher::new(Key::from_slice(&key));
+    cipher
+        .encrypt(
+            Nonce::from_slice(&[0u8; 12]),
+            Payload {
+                msg: plaintext,
+                aad: PW_AAD,
+            },
+        )
+        .map_err(|_| anyhow!("wrap payload with password"))
+}
+
+/// Reverse of [`wrap_with_password`]. Fails on the wrong password or tampering.
+pub fn unwrap_with_password(password: &str, salt: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>> {
+    let key = pw_key(password, salt)?;
+    let cipher = ChunkCipher::new(Key::from_slice(&key));
+    cipher
+        .decrypt(
+            Nonce::from_slice(&[0u8; 12]),
+            Payload {
+                msg: ciphertext,
+                aad: PW_AAD,
+            },
+        )
+        .map_err(|_| anyhow!("wrong password or tampered payload"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -340,6 +406,39 @@ mod tests {
         let mut ct = seal_chunk(&key, 0, 1, b"payload").unwrap();
         ct[0] ^= 0xff;
         assert!(open_chunk(&key, 0, 1, &ct).is_err());
+    }
+
+    #[test]
+    fn password_wrap_roundtrip() {
+        let salt = random_pw_salt();
+        let msg = b"inner hpke ciphertext";
+        let wrapped = wrap_with_password("correct horse", &salt, msg).unwrap();
+        assert_ne!(&wrapped[..], &msg[..]);
+        assert_eq!(
+            unwrap_with_password("correct horse", &salt, &wrapped).unwrap(),
+            msg
+        );
+    }
+
+    #[test]
+    fn password_wrong_fails() {
+        let salt = random_pw_salt();
+        let wrapped = wrap_with_password("right", &salt, b"secret").unwrap();
+        assert!(unwrap_with_password("wrong", &salt, &wrapped).is_err());
+    }
+
+    #[test]
+    fn password_wrong_salt_fails() {
+        let wrapped = wrap_with_password("pw", &random_pw_salt(), b"secret").unwrap();
+        assert!(unwrap_with_password("pw", &random_pw_salt(), &wrapped).is_err());
+    }
+
+    #[test]
+    fn password_tampered_fails() {
+        let salt = random_pw_salt();
+        let mut wrapped = wrap_with_password("pw", &salt, b"secret").unwrap();
+        wrapped[0] ^= 0xff;
+        assert!(unwrap_with_password("pw", &salt, &wrapped).is_err());
     }
 
     #[test]

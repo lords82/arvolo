@@ -222,6 +222,19 @@ async fn rz_claim_put_get_and_conflict() {
 }
 
 #[tokio::test]
+async fn rz_value_too_large_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app(dir.path()).await;
+    // A rendezvous value must stay tiny; oversize bodies are refused (413) so the
+    // unauthenticated rz table can't be stuffed with large blobs.
+    let big = vec![0u8; 64 * 1024 + 1];
+    assert_eq!(
+        rz_post(&app, "big", "ms", &big).await,
+        StatusCode::PAYLOAD_TOO_LARGE
+    );
+}
+
+#[tokio::test]
 async fn rz_ticket_fetch_burns_slot() {
     let dir = tempfile::tempdir().unwrap();
     let app = app(dir.path()).await;

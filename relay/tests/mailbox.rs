@@ -10,6 +10,7 @@ fn deposit(encapped_key: Vec<u8>, ciphertext: Vec<u8>, ttl: u64, max: u32) -> De
         ciphertext,
         ttl_secs: ttl,
         max_downloads: max,
+        revoke_hash: Vec::new(),
     }
 }
 
@@ -89,6 +90,64 @@ fn ttl_expiry_and_reap() {
 fn unknown_claim_not_found() {
     let mb = Mailbox::in_memory().unwrap();
     assert_eq!(mb.fetch("nope", 1), Err(MailboxError::NotFound));
+}
+
+/// Revocation: the sender's token (via its BLAKE3 hash) deletes the entry; a
+/// wrong token is refused, and a non-revocable entry can't be revoked.
+#[test]
+fn revoke_with_token() {
+    let token = "sender-secret-token";
+    let revoke_hash = blake3::hash(token.as_bytes()).as_bytes().to_vec();
+    let mb = Mailbox::in_memory().unwrap();
+
+    let dep = Deposit {
+        encapped_key: vec![1],
+        ciphertext: b"revoke me".to_vec(),
+        ttl_secs: 3600,
+        max_downloads: 5,
+        revoke_hash,
+    };
+    let claim = mb.deposit(dep, 1_000).unwrap();
+
+    // Wrong token is refused and the entry stays fetchable.
+    assert_eq!(mb.revoke(&claim, "wrong"), Err(MailboxError::Forbidden));
+    assert!(mb.fetch(&claim, 1_010).is_ok());
+
+    // Correct token deletes it; afterwards it's a clean not-found.
+    assert!(mb.revoke(&claim, token).is_ok());
+    assert_eq!(mb.fetch(&claim, 1_020), Err(MailboxError::NotFound));
+    assert!(mb.is_empty());
+
+    // A second revoke of the now-gone claim is a not-found.
+    assert_eq!(mb.revoke(&claim, token), Err(MailboxError::NotFound));
+}
+
+/// A huge TTL is clamped so entries can't become effectively immortal (and the
+/// `now + ttl` addition can't overflow into a negative expiry).
+#[test]
+fn ttl_is_clamped() {
+    let mb = Mailbox::in_memory().unwrap();
+    // Ask for a near-infinite TTL; the relay caps it at its max (default 30d).
+    let claim = mb
+        .deposit(deposit(vec![1], b"x".to_vec(), u64::MAX, 5), 1_000)
+        .unwrap();
+    let thirty_days = 30 * 24 * 3600;
+    // Just past the clamp it must be gone, not immortal.
+    assert_eq!(
+        mb.fetch(&claim, 1_000 + thirty_days + 1),
+        Err(MailboxError::Expired)
+    );
+}
+
+/// A non-revocable entry (deposited without a revoke hash) can't be revoked.
+#[test]
+fn non_revocable_entry_is_forbidden() {
+    let mb = Mailbox::in_memory().unwrap();
+    let claim = mb
+        .deposit(deposit(vec![1], b"no revoke".to_vec(), 3600, 1), 1_000)
+        .unwrap();
+    assert_eq!(mb.revoke(&claim, "anything"), Err(MailboxError::Forbidden));
+    assert!(mb.fetch(&claim, 1_010).is_ok());
 }
 
 /// Deposited blobs survive a relay restart (SQLite + files on disk).

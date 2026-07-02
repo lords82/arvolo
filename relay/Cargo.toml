@@ -25,6 +25,7 @@ serde = { version = "1", features = ["derive"] }
 rand = "0.9"
 data-encoding = "2"
 rusqlite = { version = "0.37", features = ["bundled"] }
+blake3 = "1"
 
 [dev-dependencies]
 arvolo-core.workspace = true
@@ -33,3 +34,4 @@ tokio = { workspace = true }
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 data-encoding = "2"
+blake3 = "1"
