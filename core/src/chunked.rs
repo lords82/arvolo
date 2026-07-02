@@ -214,7 +214,16 @@ impl ProtocolHandler for ChunkServer {
             let Some(req) = read_frame::<ChunkReq>(&mut recv).await else {
                 break;
             };
-            match self.backend.produce(&req.hash) {
+            // Producing a chunk opens the file and re-encrypts 16 MiB (CPU-bound).
+            // Run it on the blocking pool so concurrent requests (parallel receiver
+            // fetches) don't stall the async runtime's worker threads.
+            let backend = self.backend.clone();
+            let hash = req.hash;
+            let produced = tokio::task::spawn_blocking(move || backend.produce(&hash))
+                .await
+                .ok()
+                .flatten();
+            match produced {
                 Some(ct) => {
                     let _ = write_frame(
                         &mut send,
@@ -542,7 +551,10 @@ impl Drop for Control {
     }
 }
 
-/// A receiver endpoint that fetches chunks (with provider fallback).
+/// A receiver endpoint that fetches chunks (with provider fallback). Cheap to
+/// `clone` (the inner `Endpoint` is `Arc`-backed), so parallel fetch tasks each
+/// hold their own handle.
+#[derive(Clone)]
 pub struct ChunkReceiver {
     endpoint: Endpoint,
 }

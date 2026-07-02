@@ -227,6 +227,39 @@ impl SendSession {
 
 // ---- recv -----------------------------------------------------------------
 
+/// How many chunks to fetch in parallel. Tunable via `ARVOLO_CONCURRENCY`
+/// (default 4, clamped to 1..=16).
+fn fetch_concurrency() -> usize {
+    std::env::var("ARVOLO_CONCURRENCY")
+        .ok()
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .unwrap_or(4)
+        .clamp(1, 16)
+}
+
+/// Remove any `{download}.arvpart.*` per-chunk staging files.
+fn remove_stage_files(download: &Path) {
+    let Some(name) = download.file_name().and_then(|n| n.to_str()) else {
+        return;
+    };
+    let prefix = format!("{name}.arvpart.");
+    let dir = match download.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            if entry
+                .file_name()
+                .to_str()
+                .is_some_and(|f| f.starts_with(&prefix))
+            {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+}
+
 /// Fetch the file described by `ticket` into `out` (default derived from the
 /// ticket). Resumes a partial output, prefers P2P, falls back to the relay, and
 /// releases relay chunks as they're taken. Returns the output path. If `cancel`
@@ -239,8 +272,9 @@ pub async fn recv_chunked(
     cancel: CancellationToken,
     on: impl Fn(RecvEvent) + Send + Sync,
 ) -> Result<PathBuf> {
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
     use std::io::{Read, Seek, SeekFrom, Write};
+    use tokio::task::JoinSet;
 
     let t = ChunkTicket::decode(ticket).context("invalid ticket")?;
     let user_out = out;
@@ -350,82 +384,130 @@ pub async fn recv_chunked(
     // No control channel => the sender is most likely offline; prefer the relay.
     let sender_offline = control.is_none();
 
-    for i in start..t.chunks.len() {
-        if cancel.is_cancelled() {
-            // Partial output is left on disk and can be resumed later.
-            receiver.close().await;
-            return Ok(download);
+    // Fetch up to `concurrency` chunks in parallel (pipelining hides latency),
+    // but commit them to the output **in order** so the file grows contiguously
+    // and the length-based resume above stays correct. Each in-flight fetch
+    // stages its ciphertext in a per-index `.arvpart.{i}` file (BLAKE3-verified
+    // by `fetch_to_file`); the committer then decrypts and positions each chunk.
+    let concurrency = fetch_concurrency();
+    let total = t.chunks.len();
+    let stage_path = |i: usize| PathBuf::from(format!("{}.arvpart.{i}", download.display()));
+    // (source, ordered providers) for a chunk: relay-first when the sender pushed
+    // it to the relay or is offline, else sender-first with relay fallback.
+    let providers_for = |i: usize| {
+        let relay_first = on_relay.lock().unwrap().contains(&(i as u32)) || sender_offline;
+        let mut providers = Vec::new();
+        if relay_first {
+            relay_addr.iter().for_each(|a| providers.push(a.clone()));
+            sender_addr.iter().for_each(|a| providers.push(a.clone()));
+        } else {
+            sender_addr.iter().for_each(|a| providers.push(a.clone()));
+            relay_addr.iter().for_each(|a| providers.push(a.clone()));
         }
-        let on_relay_chunk = on_relay.lock().unwrap().contains(&(i as u32));
-        // Anti-double-send: chunks the sender pushed to the relay are pulled from
-        // the relay; everything else is pulled from the sender (relay fallback).
-        let (source, providers) = {
-            let mut providers = Vec::new();
-            let relay_first = on_relay_chunk || sender_offline;
-            if relay_first {
-                relay_addr.iter().for_each(|a| providers.push(a.clone()));
-                sender_addr.iter().for_each(|a| providers.push(a.clone()));
-            } else {
-                sender_addr.iter().for_each(|a| providers.push(a.clone()));
-                relay_addr.iter().for_each(|a| providers.push(a.clone()));
-            }
-            let source = if relay_first {
-                ChunkSource::Relay
-            } else {
-                ChunkSource::Sender
-            };
-            (source, providers)
+        let source = if relay_first {
+            ChunkSource::Relay
+        } else {
+            ChunkSource::Sender
         };
+        (source, providers)
+    };
 
-        // Stage this chunk's ciphertext in a `.part` file so an interruption
-        // mid-chunk resumes without re-downloading it (intra-chunk resume).
-        let part_path = PathBuf::from(format!("{}.arvpart", download.display()));
-        let mut part = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(&part_path)
-            .with_context(|| format!("open {}", part_path.display()))?;
-        receiver
-            .fetch_to_file(&providers, t.chunks[i], &mut part)
-            .await
-            .with_context(|| format!("fetch chunk {}", i + 1))?;
-        part.seek(SeekFrom::Start(0))?;
-        let mut ct = Vec::new();
-        part.read_to_end(&mut ct)?;
-        // Ciphertext (providers never see plaintext); already BLAKE3-verified.
-        let plain = open_chunk(&key, i as u32, total_chunks, &ct)
-            .with_context(|| format!("decrypt chunk {}", i + 1))?;
-        file.seek(SeekFrom::Start(i as u64 * t.chunk_size as u64))?;
-        file.write_all(&plain)?;
-        drop(part);
-        let _ = std::fs::remove_file(&part_path);
-        on(RecvEvent::Chunk {
-            index: i,
-            total: t.chunks.len(),
-            source,
-            bytes: plain.len() as u64,
-        });
+    let mut set: JoinSet<Result<usize>> = JoinSet::new();
+    let mut spawn_idx = start;
+    let mut next_commit = start;
+    let mut ready: HashSet<usize> = HashSet::new();
+    let mut sources: HashMap<usize, ChunkSource> = HashMap::new();
 
-        if let Some(c) = control.as_mut() {
-            let _ = c.ack(i as u32).await;
+    loop {
+        // Refill the in-flight window with fetch-only tasks.
+        while spawn_idx < total && set.len() < concurrency && !cancel.is_cancelled() {
+            let i = spawn_idx;
+            let (source, providers) = providers_for(i);
+            sources.insert(i, source);
+            let rx = receiver.clone();
+            let hash = t.chunks[i];
+            let sp = stage_path(i);
+            set.spawn(async move {
+                let mut part = std::fs::OpenOptions::new()
+                    .create(true)
+                    .truncate(false)
+                    .read(true)
+                    .write(true)
+                    .open(&sp)
+                    .with_context(|| format!("open {}", sp.display()))?;
+                rx.fetch_to_file(&providers, hash, &mut part)
+                    .await
+                    .with_context(|| format!("fetch chunk {}", i + 1))?;
+                Ok::<usize, anyhow::Error>(i)
+            });
+            spawn_idx += 1;
         }
-        // Free relay-backfilled chunks as we take them. Attempt release for every
-        // chunk: with the sender offline there's no control channel to learn
-        // `on_relay`, yet those are the chunks the relay holds. The relay's
-        // (token, hash) guard makes it a no-op for anything not seeded.
-        if let Some(r) = &t.relay {
-            let _ = client
-                .post(format!(
-                    "{}/v1/release/{}/{}",
-                    r.http.trim_end_matches('/'),
-                    r.token,
-                    t.chunks[i]
-                ))
-                .send()
-                .await;
+
+        if set.is_empty() {
+            break;
         }
+
+        let joined = tokio::select! {
+            _ = cancel.cancelled() => {
+                // Partial stages are left on disk and can be resumed later.
+                set.shutdown().await;
+                receiver.close().await;
+                return Ok(download);
+            }
+            r = set.join_next() => r,
+        };
+        let Some(res) = joined else { break };
+        let done = res.context("fetch task failed")??;
+        ready.insert(done);
+
+        // Commit every chunk whose turn has come, ascending, so writes stay
+        // contiguous (positioned at `i * chunk_size`).
+        while ready.remove(&next_commit) {
+            let i = next_commit;
+            let source = sources[&i];
+            let sp = stage_path(i);
+            let mut ct = Vec::new();
+            std::fs::File::open(&sp)
+                .with_context(|| format!("open {}", sp.display()))?
+                .read_to_end(&mut ct)?;
+            // Ciphertext (providers never see plaintext); already BLAKE3-verified.
+            let plain = open_chunk(&key, i as u32, total_chunks, &ct)
+                .with_context(|| format!("decrypt chunk {}", i + 1))?;
+            file.seek(SeekFrom::Start(i as u64 * t.chunk_size as u64))?;
+            file.write_all(&plain)?;
+            let _ = std::fs::remove_file(&sp);
+            on(RecvEvent::Chunk {
+                index: i,
+                total,
+                source,
+                bytes: plain.len() as u64,
+            });
+            if let Some(c) = control.as_mut() {
+                let _ = c.ack(i as u32).await;
+            }
+            // Free relay-backfilled chunks as we take them. Attempt release for
+            // every chunk: with the sender offline there's no control channel to
+            // learn `on_relay`, yet those are the chunks the relay holds. The
+            // relay's (token, hash) guard makes it a no-op for anything not seeded.
+            if let Some(r) = &t.relay {
+                let _ = client
+                    .post(format!(
+                        "{}/v1/release/{}/{}",
+                        r.http.trim_end_matches('/'),
+                        r.token,
+                        t.chunks[i]
+                    ))
+                    .send()
+                    .await;
+            }
+            next_commit += 1;
+        }
+    }
+    // Cancelled before completing (e.g. the token was already tripped): leave the
+    // partial output as-is for a later resume, without finalizing its size.
+    if cancel.is_cancelled() && next_commit < total {
+        receiver.close().await;
+        return Ok(download);
     }
     if let Some(c) = control {
         let _ = c.finish().await;
@@ -433,6 +515,9 @@ pub async fn recv_chunked(
     file.set_len(t.total_size)?;
     drop(file);
     receiver.close().await;
+    // Tidy up any leftover per-chunk stage files (e.g. an index committed but its
+    // removal was interrupted on a previous run).
+    remove_stage_files(&download);
 
     if t.archive {
         // Unpack the tar into the target directory, then drop the temp archive.

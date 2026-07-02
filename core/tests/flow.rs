@@ -248,3 +248,150 @@ async fn sealed_to_recipient_only_intended_can_decrypt() {
     send_cancel.cancel();
     let _ = serve.await;
 }
+
+#[tokio::test]
+async fn parallel_fetch_preserves_integrity_and_order() {
+    // 3 chunks with a window of 2 forces refill and out-of-order completion,
+    // yet chunks must be committed to disk in order (byte-identical output).
+    std::env::set_var("ARVOLO_CONCURRENCY", "2");
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("big.bin");
+    let out = dir.path().join("big.out");
+    // ~40 MiB -> 3 chunks (16 + 16 + 8).
+    let data: Vec<u8> = (0..40 * 1024 * 1024u64)
+        .map(|i| (i * 131 + 7) as u8)
+        .collect();
+    std::fs::write(&src, &data).unwrap();
+
+    let session = flow::prepare_send(&src, "big.bin", false, None, None, RelayChoice::Disabled)
+        .await
+        .expect("prepare_send");
+    assert_eq!(session.chunks, 3);
+    let ticket = session.ticket.clone();
+    let send_cancel = CancellationToken::new();
+    let serve = {
+        let c = send_cancel.clone();
+        tokio::spawn(async move { session.serve(c, |_| {}).await })
+    };
+
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let ev = events.clone();
+    let saved = flow::recv_chunked(
+        &ticket,
+        Some(out.clone()),
+        None,
+        RelayChoice::Disabled,
+        CancellationToken::new(),
+        move |e| ev.lock().unwrap().push(e),
+    )
+    .await
+    .expect("recv_chunked");
+    assert_eq!(std::fs::read(&saved).unwrap(), data);
+
+    // Chunk events are emitted in ascending (commit) order, one per chunk.
+    let events = events.lock().unwrap().clone();
+    let idxs: Vec<usize> = events
+        .iter()
+        .filter_map(|e| match e {
+            RecvEvent::Chunk { index, .. } => Some(*index),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(idxs, vec![0, 1, 2], "chunks committed in order");
+
+    send_cancel.cancel();
+    let _ = serve.await;
+    std::env::remove_var("ARVOLO_CONCURRENCY");
+}
+
+#[tokio::test]
+async fn resume_after_truncation_with_concurrency() {
+    use std::io::Read;
+    std::env::set_var("ARVOLO_CONCURRENCY", "2");
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("r.bin");
+    let out = dir.path().join("r.out");
+    let data: Vec<u8> = (0..40 * 1024 * 1024u64)
+        .map(|i| (i * 29 + 5) as u8)
+        .collect();
+    std::fs::write(&src, &data).unwrap();
+
+    // Full receive once.
+    let session = flow::prepare_send(&src, "r.bin", false, None, None, RelayChoice::Disabled)
+        .await
+        .unwrap();
+    let ticket = session.ticket.clone();
+    let sc = CancellationToken::new();
+    let serve = {
+        let c = sc.clone();
+        tokio::spawn(async move { session.serve(c, |_| {}).await })
+    };
+    flow::recv_chunked(
+        &ticket,
+        Some(out.clone()),
+        None,
+        RelayChoice::Disabled,
+        CancellationToken::new(),
+        |_| {},
+    )
+    .await
+    .unwrap();
+    assert_eq!(std::fs::read(&out).unwrap(), data);
+    sc.cancel();
+    let _ = serve.await;
+
+    // Truncate to exactly one chunk (16 MiB), then resume from a fresh server.
+    let f = std::fs::OpenOptions::new().write(true).open(&out).unwrap();
+    f.set_len(16 * 1024 * 1024).unwrap();
+    drop(f);
+
+    let session2 = flow::prepare_send(&src, "r.bin", false, None, None, RelayChoice::Disabled)
+        .await
+        .unwrap();
+    let ticket2 = session2.ticket.clone();
+    let sc2 = CancellationToken::new();
+    let serve2 = {
+        let c = sc2.clone();
+        tokio::spawn(async move { session2.serve(c, |_| {}).await })
+    };
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let ev = events.clone();
+    flow::recv_chunked(
+        &ticket2,
+        Some(out.clone()),
+        None,
+        RelayChoice::Disabled,
+        CancellationToken::new(),
+        move |e| ev.lock().unwrap().push(e),
+    )
+    .await
+    .unwrap();
+
+    // Byte-identical, and only the missing chunks (1, 2) were fetched, in order.
+    let mut got = Vec::new();
+    std::fs::File::open(&out)
+        .unwrap()
+        .read_to_end(&mut got)
+        .unwrap();
+    assert_eq!(got, data, "resumed output is byte-identical");
+    let events = events.lock().unwrap().clone();
+    assert!(events.iter().any(|e| matches!(
+        e,
+        RecvEvent::Started {
+            resuming_from: 1,
+            ..
+        }
+    )));
+    let idxs: Vec<usize> = events
+        .iter()
+        .filter_map(|e| match e {
+            RecvEvent::Chunk { index, .. } => Some(*index),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(idxs, vec![1, 2], "only missing chunks fetched, in order");
+
+    sc2.cancel();
+    let _ = serve2.await;
+    std::env::remove_var("ARVOLO_CONCURRENCY");
+}
