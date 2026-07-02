@@ -8,8 +8,8 @@
 #   ARVOLO_VERSION       tag to install, e.g. v0.1.0 (default: latest published)
 #   ARVOLO_INSTALL_DIR   install directory (default: /usr/local/bin, else ~/.local/bin)
 #
-# POSIX sh, no bashisms. Prebuilt binaries currently cover Linux x86_64 and
-# macOS arm64; other platforms fall back to `cargo install`.
+# POSIX sh, no bashisms. Prebuilt binaries currently cover Linux x86_64,
+# Linux aarch64, and macOS arm64; other platforms fall back to `cargo install`.
 set -eu
 
 REPO="lords82/arvolo"
@@ -35,6 +35,7 @@ case "$os" in
   Linux)
     case "$arch" in
       x86_64 | amd64) label="linux-x86_64" ;;
+      aarch64 | arm64) label="linux-aarch64" ;;
       *) cargo_fallback "$os/$arch" ;;
     esac ;;
   Darwin)

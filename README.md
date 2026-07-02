@@ -20,7 +20,7 @@ residency and digital-sovereignty requirements straightforward to meet.
 
 ## Install
 
-**One-liner** (Linux x86_64, macOS arm64):
+**One-liner** (Linux x86_64/aarch64, macOS arm64):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/lords82/arvolo/main/install.sh | sh
