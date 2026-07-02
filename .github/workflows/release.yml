@@ -14,6 +14,9 @@ jobs:
   build:
     name: build (${{ matrix.label }})
     runs-on: ${{ matrix.os }}
+    # Windows is a best-effort prebuilt (install.sh falls back to cargo there), so
+    # a Windows build failure must NOT block publishing the Linux/macOS release.
+    continue-on-error: ${{ matrix.label == 'windows-x86_64' }}
     strategy:
       fail-fast: false
       matrix:
@@ -39,7 +42,7 @@ jobs:
           path: arvolo-${{ github.ref_name }}-*
 
   release:
-    name: publish (draft)
+    name: publish
     needs: build
     runs-on: ubuntu-latest
     steps:
@@ -50,13 +53,14 @@ jobs:
       # Checksums so `install.sh` can verify downloads.
       - name: Checksums
         run: (cd dist && sha256sum arvolo-* > SHA256SUMS)
-      # Created as a DRAFT: review the built binaries, then publish from the
-      # GitHub Releases page.
+      # Published directly (non-draft) and marked latest, so `install.sh`'s
+      # `releases/latest` lookup resolves as soon as a vX.Y.Z tag is pushed.
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*
           generate_release_notes: true
-          draft: true
+          draft: false
+          make_latest: true
 
   docker:
     name: relay image (ghcr)
