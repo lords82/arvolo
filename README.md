@@ -60,16 +60,23 @@ docker run -d --name arvolo-relay -p 8787:8787 -v arvolo-data:/data \
 
 ```sh
 # sender (relay is used only to bootstrap the code exchange, never for your data)
-arvolo send --code --relay relay.example.com ./photo.jpg   # https assumed; --use-http for plaintext
-#   ->  4821-crater-mango@https://relay.example.com
+arvolo send --code --relay relay.example.com ./photo.jpg
+#   ->  4821-crater-mango@relay.example.com
 
 # receiver
-arvolo recv 4821-crater-mango@https://relay.example.com
+arvolo recv 4821-crater-mango@relay.example.com
 ```
 
-With a configured default relay (see [Config](#config)) the code is just
+The relay address defaults to `https://` — just pass the host. With a configured
+default relay (see [Config](#config)) the code is even shorter, just
 `4821-crater-mango`. Plain `arvolo send ./file` (no `--code`) prints a
 self-contained `arvc…` ticket instead — no relay needed at all.
+
+Relay without TLS (LAN / dev)? Add `--use-http`:
+
+```sh
+arvolo send --code --relay relay.local:8787 --use-http ./photo.jpg
+```
 
 **Offline mailbox** — recipient is away; encrypt to their identity and leave it
 on a relay until they fetch it:
@@ -104,8 +111,10 @@ Run `arvolo <cmd> --help` for the full flag list.
 `~/.config/arvolo/config.toml`:
 
 ```toml
-relay = "https://relay.example.com"   # default relay for --code / recv <code> / send-offline
+relay = "relay.example.com"   # default relay for --code / recv <code> / send-offline (https assumed)
 ```
+
+For a relay without TLS, write the scheme explicitly: `relay = "http://relay.local:8787"`.
 
 Contacts live in `~/.config/arvolo/contacts.toml` (managed via `arvolo contacts`).
 

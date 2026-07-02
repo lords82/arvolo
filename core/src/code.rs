@@ -43,6 +43,28 @@ pub fn parse_code(code: &str) -> Result<(String, String, Option<String>)> {
     Ok((nameplate, secret, relay))
 }
 
+/// Ensure a relay base URL carries a scheme. A bare host (`relay.example.com`)
+/// gets `https://` — or `http://` when `use_http` is set (LAN / dev / plaintext).
+/// An address that already has an explicit scheme is left untouched.
+pub fn normalize_relay(raw: &str, use_http: bool) -> String {
+    let r = raw.trim();
+    if r.contains("://") {
+        return r.to_string();
+    }
+    let scheme = if use_http { "http" } else { "https" };
+    format!("{scheme}://{r}")
+}
+
+/// The compact form embedded in a pairing code: `https://` (the default) is
+/// dropped so the code reads `code@host`; a non-default `http://` is kept
+/// explicit so the receiver still knows to skip TLS. Inverse of `normalize_relay`.
+fn compact_relay(relay: &str) -> String {
+    relay
+        .strip_prefix("https://")
+        .map(str::to_string)
+        .unwrap_or_else(|| relay.to_string())
+}
+
 /// `true` if `s` looks like a pairing code (vs. an `arvc…`/`arvm…` ticket).
 pub fn looks_like_code(s: &str) -> bool {
     let head = s.split_once('@').map(|(l, _)| l).unwrap_or(s);
@@ -133,7 +155,7 @@ pub async fn publish_ticket(
     };
 
     let shown = if embed_relay {
-        format!("{secret}@{relay}")
+        format!("{secret}@{}", compact_relay(&relay))
     } else {
         secret
     };
@@ -182,7 +204,9 @@ pub async fn resolve_code(code: &str, default_relay: Option<&str>) -> Result<Str
         .ok_or_else(|| {
             anyhow!("no relay: the code has no @relay and no default relay is configured")
         })?;
-    let relay = relay.trim_end_matches('/').to_string();
+    // A bare host embedded in the code (`code@host`) means https; `http://…` is
+    // kept as-is (see `compact_relay`).
+    let relay = normalize_relay(relay.trim_end_matches('/'), false);
     let client = reqwest::Client::new();
 
     // Wait for the sender's message, then post ours and derive the key.
@@ -219,6 +243,25 @@ mod tests {
         assert_eq!(np, "7");
         assert_eq!(secret, "7-fox-oak");
         assert_eq!(relay.as_deref(), Some("https://relay.example.com:8787"));
+    }
+
+    #[test]
+    fn relay_scheme_roundtrips_through_a_code() {
+        // Bare host defaults to https; the code embeds the compact form, and the
+        // receiver normalizes it back to the same URL.
+        let full = normalize_relay("relay.example.com", false);
+        assert_eq!(full, "https://relay.example.com");
+        assert_eq!(compact_relay(&full), "relay.example.com");
+        assert_eq!(normalize_relay(&compact_relay(&full), false), full);
+
+        // A plaintext relay keeps its scheme both in the code and after resolve.
+        let http = normalize_relay("relay.local:8787", true);
+        assert_eq!(http, "http://relay.local:8787");
+        assert_eq!(compact_relay(&http), "http://relay.local:8787");
+        assert_eq!(normalize_relay(&compact_relay(&http), false), http);
+
+        // An explicit scheme is never rewritten by the flag.
+        assert_eq!(normalize_relay("http://relay.local", false), "http://relay.local");
     }
 
     #[test]

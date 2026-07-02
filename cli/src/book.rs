@@ -37,17 +37,7 @@ fn load_config() -> Config {
         .unwrap_or_default()
 }
 
-/// Ensure a relay base URL carries a scheme. A bare host (`relay.example.com`)
-/// gets `https://` — or `http://` when `use_http` is set (LAN / dev / plaintext).
-/// An address that already has an explicit scheme is left untouched.
-pub fn normalize_relay(raw: &str, use_http: bool) -> String {
-    let r = raw.trim();
-    if r.contains("://") {
-        return r.to_string();
-    }
-    let scheme = if use_http { "http" } else { "https" };
-    format!("{scheme}://{r}")
-}
+pub use arvolo_core::code::normalize_relay;
 
 /// The default relay: the `ARVOLO_RELAY` env var wins, else the config file's
 /// `relay` key. Used so `--relay`/`ARVOLO_RELAY` need not be repeated. The value
