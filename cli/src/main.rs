@@ -49,7 +49,8 @@ enum Command {
         #[arg(required = true, num_args = 1..)]
         paths: Vec<PathBuf>,
         /// Also seed the file to a relay so the recipient can finish even if you
-        /// go offline (backfill). Relay base URL, e.g. http://relay:8787
+        /// go offline (backfill). Relay host or URL, e.g. relay.example.com
+        /// (https assumed; pass --use-http for plaintext).
         #[arg(long)]
         seed_relay: Option<String>,
         /// Show a short pairing code (e.g. 4821-crater-mango) instead of the long
@@ -57,9 +58,14 @@ enum Command {
         #[arg(long)]
         code: bool,
         /// Rendezvous relay for --code. When given, it is embedded in the code so
-        /// the receiver needs no configuration.
+        /// the receiver needs no configuration. Host or URL, e.g.
+        /// relay.example.com (https assumed; pass --use-http for plaintext).
         #[arg(long)]
         relay: Option<String>,
+        /// Treat bare relay addresses as `http://` instead of `https://`
+        /// (LAN / dev / plaintext relays). Explicit schemes are always kept.
+        #[arg(long)]
+        use_http: bool,
         /// Encrypt so only this recipient can receive (a saved contact name or a
         /// public id). Authenticates you as the sender.
         #[arg(long)]
@@ -88,9 +94,14 @@ enum Command {
         /// Recipient: a saved contact name or a public id (from their `arvolo id`).
         #[arg(long)]
         to: String,
-        /// Relay base URL (defaults to ARVOLO_RELAY / config `relay`).
+        /// Relay host or URL, e.g. relay.example.com (https assumed; pass
+        /// --use-http for plaintext). Defaults to ARVOLO_RELAY / config `relay`.
         #[arg(long)]
         relay: Option<String>,
+        /// Treat a bare relay address as `http://` instead of `https://`
+        /// (LAN / dev / plaintext relays). Explicit schemes are always kept.
+        #[arg(long)]
+        use_http: bool,
         /// Time-to-live in seconds (default 7 days).
         #[arg(long, default_value_t = 7 * 24 * 3600)]
         ttl: u64,
@@ -148,9 +159,10 @@ async fn main() -> Result<()> {
             seed_relay,
             code,
             relay,
+            use_http,
             to,
             qr,
-        } => send(paths, seed_relay, code, relay, to, qr).await,
+        } => send(paths, seed_relay, code, relay, use_http, to, qr).await,
         Command::Recv { ticket, out } => recv(ticket, out).await,
         Command::Id => id(),
         Command::Contacts { action } => contacts_cmd(action),
@@ -158,11 +170,12 @@ async fn main() -> Result<()> {
             path,
             to,
             relay,
+            use_http,
             ttl,
             max,
             password,
             qr,
-        } => send_offline(path, to, relay, ttl, max, password, qr).await,
+        } => send_offline(path, to, relay, use_http, ttl, max, password, qr).await,
         Command::RecvOffline {
             ticket,
             out,
@@ -328,14 +341,19 @@ fn resolve_payload(paths: &[PathBuf]) -> Result<(PathBuf, String, bool, Option<P
     Ok((temp.clone(), name, true, Some(temp)))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn send(
     paths: Vec<PathBuf>,
     seed_relay: Option<String>,
     code_mode: bool,
     relay: Option<String>,
+    use_http: bool,
     to: Option<String>,
     qr: bool,
 ) -> Result<()> {
+    // A bare relay host gets a scheme (https by default, http with --use-http).
+    let seed_relay = seed_relay.map(|r| book::normalize_relay(&r, use_http));
+    let relay = relay.map(|r| book::normalize_relay(&r, use_http));
     let (payload, name, archive, temp) = resolve_payload(&paths)?;
     if archive {
         eprintln!("Packing {} item(s) into an archive…", paths.len());
@@ -410,7 +428,7 @@ async fn send_with_code(
         Some(r) => (r, true),
         None => match book::default_relay() {
             Some(r) => (r, false),
-            None => anyhow::bail!("--code needs a relay: pass --relay <url>, set ARVOLO_RELAY, or configure `relay` in config.toml"),
+            None => anyhow::bail!("--code needs a relay: pass --relay <host>, set ARVOLO_RELAY, or configure `relay` in config.toml"),
         },
     };
 
@@ -573,6 +591,7 @@ async fn send_offline(
     path: PathBuf,
     to: String,
     relay: Option<String>,
+    use_http: bool,
     ttl: u64,
     max: u32,
     password: Option<String>,
@@ -581,8 +600,9 @@ async fn send_offline(
     let me = my_identity()?;
     let recipient = book::resolve_recipient(&to)?;
     let relay = relay
+        .map(|r| book::normalize_relay(&r, use_http))
         .or_else(book::default_relay)
-        .context("no relay: pass --relay <url>, set ARVOLO_RELAY, or configure `relay`")?;
+        .context("no relay: pass --relay <host>, set ARVOLO_RELAY, or configure `relay`")?;
     let deposited = flow::deposit_offline(
         &path,
         &recipient,

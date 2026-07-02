@@ -37,15 +37,28 @@ fn load_config() -> Config {
         .unwrap_or_default()
 }
 
-/// The default relay: the `ARVOLO_RELAY` env var wins, else the config file's
-/// `relay` key. Used so `--relay`/`ARVOLO_RELAY` need not be repeated.
-pub fn default_relay() -> Option<String> {
-    if let Ok(r) = std::env::var("ARVOLO_RELAY") {
-        if !r.trim().is_empty() {
-            return Some(r);
-        }
+/// Ensure a relay base URL carries a scheme. A bare host (`relay.example.com`)
+/// gets `https://` — or `http://` when `use_http` is set (LAN / dev / plaintext).
+/// An address that already has an explicit scheme is left untouched.
+pub fn normalize_relay(raw: &str, use_http: bool) -> String {
+    let r = raw.trim();
+    if r.contains("://") {
+        return r.to_string();
     }
-    load_config().relay.filter(|s| !s.trim().is_empty())
+    let scheme = if use_http { "http" } else { "https" };
+    format!("{scheme}://{r}")
+}
+
+/// The default relay: the `ARVOLO_RELAY` env var wins, else the config file's
+/// `relay` key. Used so `--relay`/`ARVOLO_RELAY` need not be repeated. The value
+/// is normalized to a full URL (a bare host gets `https://`); to use plaintext,
+/// write an explicit `http://…` in the env var or config file.
+pub fn default_relay() -> Option<String> {
+    let raw = std::env::var("ARVOLO_RELAY")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| load_config().relay.filter(|s| !s.trim().is_empty()))?;
+    Some(normalize_relay(&raw, false))
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -163,6 +176,17 @@ pub fn contact_list() -> Vec<(String, String)> {
 mod tests {
     use super::*;
     use arvolo_core::crypto::Identity;
+
+    #[test]
+    fn relay_scheme_defaults_to_https() {
+        // Bare host → https, unless --use-http is asked for.
+        assert_eq!(normalize_relay("relay.example.com", false), "https://relay.example.com");
+        assert_eq!(normalize_relay("relay.example.com", true), "http://relay.example.com");
+        assert_eq!(normalize_relay("  relay:8787 ", false), "https://relay:8787");
+        // An explicit scheme always wins over the flag.
+        assert_eq!(normalize_relay("http://relay.local", false), "http://relay.local");
+        assert_eq!(normalize_relay("https://relay.example.com", true), "https://relay.example.com");
+    }
 
     #[test]
     fn contacts_and_config_roundtrip() {

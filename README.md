@@ -60,7 +60,7 @@ docker run -d --name arvolo-relay -p 8787:8787 -v arvolo-data:/data \
 
 ```sh
 # sender (relay is used only to bootstrap the code exchange, never for your data)
-arvolo send --code --relay https://relay.example.com ./photo.jpg
+arvolo send --code --relay relay.example.com ./photo.jpg   # https assumed; --use-http for plaintext
 #   ->  4821-crater-mango@https://relay.example.com
 
 # receiver
@@ -86,9 +86,10 @@ arvolo recv-offline arvm…                             # recipient fetches + de
 |---|---|
 | `arvolo send <paths…>` | Serve one or more files/folders P2P (multiple paths or a folder are packed into one archive). Prints an `arvc…` ticket. |
 | &nbsp;&nbsp;`--code` | Show a short pairing code instead of the ticket (needs a relay). |
-| &nbsp;&nbsp;`--relay <url>` | Rendezvous relay for `--code`; embedded in the code so the receiver needs no config. |
+| &nbsp;&nbsp;`--relay <host>` | Rendezvous relay for `--code`; embedded in the code so the receiver needs no config. `https://` is assumed for a bare host. |
+| &nbsp;&nbsp;`--use-http` | Treat bare relay hosts as `http://` instead of `https://` (LAN / dev). An explicit scheme is always kept. |
 | &nbsp;&nbsp;`--to <name\|id>` | Encrypt so **only** this recipient can receive, and authenticate you as sender. |
-| &nbsp;&nbsp;`--seed-relay <url>` | Also seed to a relay so the transfer finishes even if you go offline (lazy backfill). |
+| &nbsp;&nbsp;`--seed-relay <host>` | Also seed to a relay so the transfer finishes even if you go offline (lazy backfill). |
 | &nbsp;&nbsp;`--qr` | Also render the ticket/code as a scannable QR. |
 | `arvolo recv <ticket\|code> [-o out]` | Receive from an `arvc…` ticket **or** a pairing code; resumes if interrupted; unpacks folders. |
 | `arvolo id` | Show your public id (created on first use). |
