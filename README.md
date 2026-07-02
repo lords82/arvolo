@@ -5,6 +5,14 @@ Secure, cross-platform file sending. **P2P-first** when both devices are online;
 away. Every transfer is **end-to-end encrypted** and the relay is **zero-knowledge**
 (it only ever holds ciphertext).
 
+**Your data never leaves your infrastructure — or the EU.** Files travel P2P
+directly between devices; when a relay is needed it holds only ciphertext and you
+**self-host it** (on your own servers, in your own datacenter, on EU soil). No
+third-party cloud, no US provider, nothing to subpoena under the CLOUD Act. Unlike
+WeTransfer, Dropbox, or other US SaaS, there is **no vendor in the middle** that
+can read, retain, or be compelled to hand over your files — which makes GDPR data
+residency and digital-sovereignty requirements straightforward to meet.
+
 > Status: **working CLI** (v0.1). P2P + relay-backfill transfer with resume,
 > per-chunk E2E encryption, short human pairing codes, send-to-a-contact, folders,
 > and an expiring zero-knowledge mailbox. Desktop GUI, browser link-mode and
