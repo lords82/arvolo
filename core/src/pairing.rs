@@ -5,10 +5,10 @@
 //! different key on each side, so it never matches — and the code itself never
 //! travels on the wire. Zero registration; ideal for one-shot sends.
 //!
-//! **Status: not yet wired.** This is a tested building block for the planned
-//! ephemeral code/QR pairing mode (roadmap M1.2); no CLI flow calls it today.
-//! Kept because it's a correct, self-contained primitive to build that feature
-//! on — not dead code to remove.
+//! Powers the short-code pairing flow (`arvolo send --code` / `arvolo recv
+//! <code>`): [`crate::code`] exchanges the encrypted ticket over a relay
+//! rendezvous keyed on this PAKE, so the relay stays zero-knowledge and a short
+//! code is safe. The QR variant of the same mode is still planned (roadmap M1.2).
 
 use anyhow::{anyhow, Result};
 use spake2::{Ed25519Group, Identity as PakeId, Password, Spake2};

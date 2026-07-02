@@ -292,6 +292,13 @@ fn pw_key(password: &str, salt: &[u8]) -> Result<[u8; 32]> {
 /// random per payload (see [`random_pw_salt`]) and is stored/sent alongside — it
 /// is not secret. A fresh salt yields a unique key, so a fixed nonce is safe.
 pub fn wrap_with_password(password: &str, salt: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
+    // The all-zero nonce below is safe ONLY because the key is unique per payload,
+    // which holds iff the salt is random and unique (see `random_pw_salt`). Guard
+    // against a degenerate (empty/too-short) salt that would break that invariant.
+    debug_assert!(
+        salt.len() >= PW_SALT_LEN,
+        "password-wrap salt must be >= PW_SALT_LEN and unique per payload"
+    );
     let key = pw_key(password, salt)?;
     let cipher = ChunkCipher::new(Key::from_slice(&key));
     cipher
@@ -307,6 +314,10 @@ pub fn wrap_with_password(password: &str, salt: &[u8], plaintext: &[u8]) -> Resu
 
 /// Reverse of [`wrap_with_password`]. Fails on the wrong password or tampering.
 pub fn unwrap_with_password(password: &str, salt: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>> {
+    debug_assert!(
+        salt.len() >= PW_SALT_LEN,
+        "password-wrap salt must be >= PW_SALT_LEN and unique per payload"
+    );
     let key = pw_key(password, salt)?;
     let cipher = ChunkCipher::new(Key::from_slice(&key));
     cipher

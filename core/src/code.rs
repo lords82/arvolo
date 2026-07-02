@@ -82,12 +82,15 @@ fn gen_secret() -> (String, String) {
     (nameplate, secret)
 }
 
-/// Derive the 32-byte ticket-encryption key from the SPAKE2 shared secret.
+/// Derive the 32-byte ticket-encryption key from the SPAKE2 shared secret via a
+/// KDF (BLAKE3 in key-derivation mode) with a domain-separated context.
+///
+/// This replaces a raw truncate-to-32-bytes of the PAKE output: truncation would
+/// silently **zero-pad** if the group ever yielded fewer than 32 bytes (reducing
+/// key entropy) and skips domain separation. `derive_key` always produces a full
+/// 32-byte key bound to this context regardless of the input length.
 fn key32(pake_key: &[u8]) -> [u8; CHUNK_KEY_LEN] {
-    let mut k = [0u8; CHUNK_KEY_LEN];
-    let n = pake_key.len().min(CHUNK_KEY_LEN);
-    k[..n].copy_from_slice(&pake_key[..n]);
-    k
+    blake3::derive_key("arvolo/code/ticket-key/v1", pake_key)
 }
 
 fn rz_url(relay: &str, slot: &str, key: &str) -> String {
@@ -261,7 +264,10 @@ mod tests {
         assert_eq!(normalize_relay(&compact_relay(&http), false), http);
 
         // An explicit scheme is never rewritten by the flag.
-        assert_eq!(normalize_relay("http://relay.local", false), "http://relay.local");
+        assert_eq!(
+            normalize_relay("http://relay.local", false),
+            "http://relay.local"
+        );
     }
 
     #[test]
