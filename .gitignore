@@ -1,7 +1,9 @@
 /target
 **/*.rs.bk
 Cargo.lock.orig
-docs/ROADMAP-FUTURE.md
+# Enterprise/commercial planning — keep local-only, never on the public repo
+docs/ROADMAP-ENTERPRISE.md
+docs/IDENTITY-ENTERPRISE.md
 
 # editors / OS
 .DS_Store
