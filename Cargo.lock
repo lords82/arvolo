@@ -176,7 +176,7 @@ checksum = "f02882884d3e1bc524fb12c79f107f6ad0e1cfd498c536ffb494301740995dfe"
 
 [[package]]
 name = "arvolo-cli"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "arvolo-core",
@@ -196,7 +196,7 @@ dependencies = [
 
 [[package]]
 name = "arvolo-core"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "argon2",
@@ -223,7 +223,7 @@ dependencies = [
 
 [[package]]
 name = "arvolo-relay"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "arvolo-core",
