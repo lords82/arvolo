@@ -34,6 +34,20 @@ use serde::Deserialize;
 pub struct AppState {
     pub mailbox: Arc<Mailbox>,
     pub blobs: Arc<BlobNode>,
+    /// Per-process secret keying the inbox session-token MAC. Random at startup:
+    /// a restart just forces clients to re-run the (cheap) auth handshake.
+    pub auth_secret: Arc<[u8; 32]>,
+}
+
+impl AppState {
+    /// Build state with a fresh random inbox-auth secret.
+    pub fn new(mailbox: Arc<Mailbox>, blobs: Arc<BlobNode>) -> Self {
+        Self {
+            mailbox,
+            blobs,
+            auth_secret: Arc::new(rand::random()),
+        }
+    }
 }
 
 /// Default cap on a single deposited blob. The relay buffers the whole body in
@@ -54,6 +68,31 @@ pub const DEFAULT_MAX_SEEDED_ROWS: i64 = 50_000;
 pub const MAX_RZ_VALUE_BYTES: usize = 64 * 1024; // 64 KiB
 /// Default cap on the number of live rendezvous rows (disk-fill guard).
 pub const DEFAULT_MAX_RZ_ROWS: i64 = 100_000;
+/// Cap on a single sealed inbox offer (metadata + an `arvc` ticket whose size
+/// grows with chunk count — a big file's ticket is a few hundred KiB).
+pub const MAX_INBOX_VALUE_BYTES: usize = 512 * 1024; // 512 KiB
+/// Default cap on the total number of live inbox rows (disk-fill guard).
+/// Override with `ARVOLO_MAX_INBOX_ROWS`.
+pub const DEFAULT_MAX_INBOX_ROWS: i64 = 100_000;
+/// Cap on pending offers a single inbox slot may hold, so one victim's inbox
+/// can't be flooded (and so a slow reader can't accumulate unbounded rows).
+pub const MAX_INBOX_PER_SLOT: i64 = 64;
+/// Default TTL (seconds) for a deposited offer when the client doesn't request
+/// one: long enough for a client that is briefly away to come back, short enough
+/// that an unaccepted offer vanishes.
+pub const INBOX_TTL_SECS: u64 = 600;
+/// Upper bound on a caller-requested offer TTL (`?ttl=`). An offline offer must
+/// survive as long as the mailbox blob it points at (up to the blob TTL cap), so
+/// this mirrors the deposit TTL cap rather than the short live-offer default.
+pub const INBOX_MAX_TTL_SECS: u64 = 30 * 24 * 3600; // 30 days
+/// TTL (seconds) of a presence beacon: a listening client refreshes well within
+/// this, so a stale beacon means the client went away. Kept short so a departed
+/// client stops showing "online" quickly (the send-side watchdog covers the brief
+/// window where a just-quit client still looks online).
+pub const PRESENCE_TTL_SECS: u64 = 30;
+/// Default cap on the number of live presence beacon rows (disk-fill guard).
+/// Override with `ARVOLO_MAX_PRESENCE_ROWS`.
+pub const DEFAULT_MAX_PRESENCE_ROWS: i64 = 100_000;
 /// Default cap on a blob's TTL (seconds). Prevents effectively-immortal entries
 /// permanently occupying storage — and the i64 overflow a near-`u64::MAX` TTL
 /// would cause (`now + ttl` wraps negative → the entry never expires). Override
@@ -82,6 +121,17 @@ fn max_rz_rows() -> i64 {
     env_usize("ARVOLO_MAX_RZ_ROWS", DEFAULT_MAX_RZ_ROWS as usize) as i64
 }
 
+fn max_inbox_rows() -> i64 {
+    env_usize("ARVOLO_MAX_INBOX_ROWS", DEFAULT_MAX_INBOX_ROWS as usize) as i64
+}
+
+fn max_presence_rows() -> i64 {
+    env_usize(
+        "ARVOLO_MAX_PRESENCE_ROWS",
+        DEFAULT_MAX_PRESENCE_ROWS as usize,
+    ) as i64
+}
+
 fn max_ttl_secs() -> u64 {
     env_usize("ARVOLO_MAX_TTL", DEFAULT_MAX_TTL_SECS as usize) as u64
 }
@@ -95,6 +145,10 @@ const ENCAPPED_KEY_HEADER: &str = "x-arvolo-encapped-key";
 const REVOKE_HASH_HEADER: &str = "x-arvolo-revoke-hash";
 /// The revoke token itself, sent on a DELETE to authorize revocation.
 const REVOKE_TOKEN_HEADER: &str = "x-arvolo-revoke-token";
+/// Base32 BLAKE3 hash of an inbox offer's retract token, sent at inbox POST.
+const INBOX_POSTER_HASH_HEADER: &str = "x-arvolo-poster-hash";
+/// The inbox offer's retract token, sent on a DELETE to retract one's own offer.
+const INBOX_POSTER_TOKEN_HEADER: &str = "x-arvolo-poster-token";
 
 /// What the sender deposits: an opaque, end-to-end-encrypted blob.
 #[derive(Clone)]
@@ -214,12 +268,28 @@ impl Mailbox {
                 value       BLOB NOT NULL,
                 expires_at  INTEGER NOT NULL,
                 PRIMARY KEY (slot, key)
+            );
+            CREATE TABLE IF NOT EXISTS inbox (
+                slot        TEXT NOT NULL,
+                id          TEXT NOT NULL,
+                value       BLOB NOT NULL,
+                expires_at  INTEGER NOT NULL,
+                poster_hash BLOB,
+                PRIMARY KEY (slot, id)
+            );
+            CREATE INDEX IF NOT EXISTS inbox_by_slot ON inbox (slot, expires_at);
+            CREATE TABLE IF NOT EXISTS beacon (
+                slot        TEXT PRIMARY KEY,
+                expires_at  INTEGER NOT NULL
             );",
         )
         .map_err(backend)?;
         // Migrate pre-0.2 databases that predate the revoke_hash column. Adding a
         // column that already exists errors; that case means we're up to date.
         let _ = conn.execute("ALTER TABLE entries ADD COLUMN revoke_hash BLOB", []);
+        // Migrate databases whose inbox predates the poster_hash column (lets an
+        // offer's poster retract it — e.g. a live offer superseded by a fallback).
+        let _ = conn.execute("ALTER TABLE inbox ADD COLUMN poster_hash BLOB", []);
         Ok(Self {
             conn: Mutex::new(conn),
             blob_dir,
@@ -566,6 +636,176 @@ impl Mailbox {
             )
             .unwrap_or(0)
     }
+
+    // ---- inbox (presence: offers to online peers) -------------------------
+
+    /// Queue a sealed offer `value` in `slot` under `id`, expiring at `expires_at`.
+    /// `poster_hash` (BLAKE3 of the poster's retract token, empty ⇒ not retractable)
+    /// lets the original poster later delete this offer.
+    pub fn inbox_put(
+        &self,
+        slot: &str,
+        id: &str,
+        value: &[u8],
+        expires_at: u64,
+        poster_hash: &[u8],
+    ) -> Result<(), MailboxError> {
+        let poster_hash: Option<&[u8]> = if poster_hash.is_empty() {
+            None
+        } else {
+            Some(poster_hash)
+        };
+        self.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT OR REPLACE INTO inbox (slot, id, value, expires_at, poster_hash)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![slot, id, value, expires_at as i64, poster_hash],
+            )
+            .map_err(backend)?;
+        Ok(())
+    }
+
+    /// Delete an offer if `token`'s BLAKE3 hash matches the stored poster hash.
+    /// Returns whether a row was deleted. Lets a sender retract its own offer
+    /// (e.g. a live offer replaced by an offline fallback) without the recipient's
+    /// session — while a stranger, lacking the token, cannot.
+    pub fn inbox_delete_by_poster(&self, slot: &str, id: &str, token: &str) -> bool {
+        let conn = self.conn.lock().unwrap();
+        let stored: Option<Vec<u8>> = conn
+            .query_row(
+                "SELECT poster_hash FROM inbox WHERE slot = ?1 AND id = ?2",
+                params![slot, id],
+                |r| r.get::<_, Option<Vec<u8>>>(0),
+            )
+            .ok()
+            .flatten();
+        let Some(stored) = stored else {
+            return false;
+        };
+        let presented = blake3::hash(token.as_bytes());
+        if stored.len() != presented.as_bytes().len()
+            || !constant_time_eq(&stored, presented.as_bytes())
+        {
+            return false;
+        }
+        conn.execute(
+            "DELETE FROM inbox WHERE slot = ?1 AND id = ?2",
+            params![slot, id],
+        )
+        .map(|n| n > 0)
+        .unwrap_or(false)
+    }
+
+    /// All unexpired offers queued in `slot`, as `(id, value)` pairs.
+    pub fn inbox_list(&self, slot: &str, now: u64) -> Vec<(String, Vec<u8>)> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = match conn.prepare(
+            "SELECT id, value FROM inbox WHERE slot = ?1 AND expires_at > ?2 ORDER BY expires_at",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let rows = stmt.query_map(params![slot, now as i64], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?))
+        });
+        match rows {
+            Ok(it) => it.filter_map(Result::ok).collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// Delete a single offer from a slot (the recipient's ack after handling).
+    pub fn inbox_delete(&self, slot: &str, id: &str) {
+        let _ = self.conn.lock().unwrap().execute(
+            "DELETE FROM inbox WHERE slot = ?1 AND id = ?2",
+            params![slot, id],
+        );
+    }
+
+    /// Total number of inbox rows (global disk-fill guard).
+    pub fn inbox_count(&self) -> i64 {
+        self.conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM inbox", [], |r| r.get::<_, i64>(0))
+            .unwrap_or(0)
+    }
+
+    /// Number of unexpired offers already queued in one slot (per-slot flood guard).
+    pub fn inbox_count_slot(&self, slot: &str, now: u64) -> i64 {
+        self.conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM inbox WHERE slot = ?1 AND expires_at > ?2",
+                params![slot, now as i64],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap_or(0)
+    }
+
+    /// Delete all expired inbox rows; returns how many.
+    pub fn inbox_reap(&self, now: u64) -> usize {
+        self.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "DELETE FROM inbox WHERE expires_at <= ?1",
+                params![now as i64],
+            )
+            .unwrap_or(0)
+    }
+
+    // ---- presence beacons -------------------------------------------------
+
+    /// Refresh (or create) a presence beacon for `slot`, expiring at `expires_at`.
+    pub fn beacon_put(&self, slot: &str, expires_at: u64) -> Result<(), MailboxError> {
+        self.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT OR REPLACE INTO beacon (slot, expires_at) VALUES (?1, ?2)",
+                params![slot, expires_at as i64],
+            )
+            .map_err(backend)?;
+        Ok(())
+    }
+
+    /// Is there a live (unexpired) beacon for `slot`?
+    pub fn beacon_alive(&self, slot: &str, now: u64) -> bool {
+        self.conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT 1 FROM beacon WHERE slot = ?1 AND expires_at > ?2",
+                params![slot, now as i64],
+                |_| Ok(()),
+            )
+            .is_ok()
+    }
+
+    /// Number of beacon rows (disk-fill guard).
+    pub fn beacon_count(&self) -> i64 {
+        self.conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM beacon", [], |r| r.get::<_, i64>(0))
+            .unwrap_or(0)
+    }
+
+    /// Delete all expired beacon rows; returns how many.
+    pub fn beacon_reap(&self, now: u64) -> usize {
+        self.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "DELETE FROM beacon WHERE expires_at <= ?1",
+                params![now as i64],
+            )
+            .unwrap_or(0)
+    }
 }
 
 /// Current unix time in seconds.
@@ -622,6 +862,19 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/rz/{slot}/{key}",
             post(rz_post_handler).get(rz_get_handler),
+        )
+        .route(
+            "/v1/inbox/{slot}",
+            post(inbox_post_handler).get(inbox_get_handler),
+        )
+        .route("/v1/inbox/{slot}/session", post(inbox_session_handler))
+        .route(
+            "/v1/inbox/{slot}/{id}",
+            axum::routing::delete(inbox_delete_handler),
+        )
+        .route(
+            "/v1/presence/{slot}",
+            post(presence_post_handler).get(presence_get_handler),
         )
         .route("/healthz", get(|| async { "ok" }))
         // Applied after the routes so it wraps them all: bounds every request
@@ -687,6 +940,235 @@ async fn rz_get_handler(
         }
         None => Err((StatusCode::NOT_FOUND, "not yet".into())),
     }
+}
+
+/// How long a client may ask the relay to hold a GET open (long-poll), and the
+/// poll granularity while it waits.
+const INBOX_MAX_WAIT_SECS: u64 = 30;
+const INBOX_POLL_MS: u64 = 500;
+/// Lifetime of an inbox read/delete session token.
+const INBOX_SESSION_TTL: u64 = 3600;
+/// Length of the proof-of-possession nonce.
+const INBOX_NONCE_LEN: usize = 16;
+
+#[derive(Deserialize)]
+struct InboxWait {
+    #[serde(default)]
+    wait: u64,
+}
+
+/// MAC binding a session nonce to its slot and expiry, keyed by the relay's
+/// per-process secret. BLAKE3 keyed hash → 32 bytes.
+fn inbox_mac(secret: &[u8; 32], slot: &str, nonce: &[u8], exp: u64) -> [u8; 32] {
+    let mut input = Vec::with_capacity(slot.len() + nonce.len() + 8);
+    input.extend_from_slice(slot.as_bytes());
+    input.extend_from_slice(nonce);
+    input.extend_from_slice(&exp.to_le_bytes());
+    *blake3::keyed_hash(secret, &input).as_bytes()
+}
+
+/// Verify the `Authorization: Bearer <token>` proves ownership of `slot`:
+/// the token's MAC must match one we issued for this slot, and be unexpired.
+fn inbox_authorized(headers: &HeaderMap, slot: &str, secret: &[u8; 32]) -> bool {
+    let Some(auth) = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+    else {
+        return false;
+    };
+    let Some(token) = auth
+        .strip_prefix("Bearer ")
+        .or_else(|| auth.strip_prefix("bearer "))
+    else {
+        return false;
+    };
+    let Some((nonce, exp, mac)) = arvolo_core::presence::decode_session_token(token.trim()) else {
+        return false;
+    };
+    if now_unix() >= exp {
+        return false;
+    }
+    let expected = inbox_mac(secret, slot, &nonce, exp);
+    mac.len() == expected.len() && constant_time_eq(&mac, &expected)
+}
+
+/// Issue a proof-of-possession session: seal a random nonce to the presented
+/// public key (only its owner can open it) and return the sealed nonce plus a
+/// MAC binding it to this slot. The client echoes the opened nonce back as a
+/// bearer token on subsequent read/delete requests.
+async fn inbox_session_handler(
+    State(state): State<AppState>,
+    AxumPath(slot): AxumPath<String>,
+    body: Bytes,
+) -> Result<Bytes, (StatusCode, String)> {
+    let pubid = arvolo_core::crypto::PublicId::from_bytes(&body)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "invalid public id".into()))?;
+    // Bind the request to the slot: only the key whose hash *is* this slot may
+    // authenticate for it.
+    if arvolo_core::presence::slot_for(&body) != slot {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "public id does not match slot".into(),
+        ));
+    }
+    let nonce: [u8; INBOX_NONCE_LEN] = rand::random();
+    let sealed = arvolo_core::presence::seal_session_nonce(&pubid, &nonce)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let exp = now_unix().saturating_add(INBOX_SESSION_TTL);
+    let mac = inbox_mac(&state.auth_secret, &slot, &nonce, exp);
+    let challenge = arvolo_core::presence::SessionChallenge {
+        encapped_key: sealed.encapped_key,
+        ciphertext: sealed.ciphertext,
+        exp,
+        mac: mac.to_vec(),
+    };
+    let bytes = arvolo_core::presence::encode_session_challenge(&challenge)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Bytes::from(bytes))
+}
+
+/// Optional `?ttl=` on an inbox deposit: an offline offer (pointing at a mailbox
+/// blob) must outlive the short live-offer default, up to the blob TTL.
+#[derive(Deserialize)]
+struct InboxDepositQuery {
+    ttl: Option<u64>,
+}
+
+/// Deposit a sealed offer in a recipient's inbox slot. Returns the relay-assigned
+/// id (the recipient deletes by it after handling). An optional
+/// `x-arvolo-poster-hash` header (base32 BLAKE3 of a retract token) lets the
+/// poster later delete this offer.
+async fn inbox_post_handler(
+    State(state): State<AppState>,
+    AxumPath(slot): AxumPath<String>,
+    Query(q): Query<InboxDepositQuery>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<String, (StatusCode, String)> {
+    if body.len() > MAX_INBOX_VALUE_BYTES {
+        return Err((StatusCode::PAYLOAD_TOO_LARGE, "offer too large".into()));
+    }
+    let now = now_unix();
+    // Global disk-fill guard, then per-slot flood guard (one victim's inbox can't
+    // be filled without bound, and the sender can't drown real offers).
+    if state.mailbox.inbox_count() >= max_inbox_rows() {
+        return Err((StatusCode::INSUFFICIENT_STORAGE, "relay at capacity".into()));
+    }
+    if state.mailbox.inbox_count_slot(&slot, now) >= MAX_INBOX_PER_SLOT {
+        return Err((StatusCode::INSUFFICIENT_STORAGE, "inbox full".into()));
+    }
+    let poster_hash = headers
+        .get(INBOX_POSTER_HASH_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| {
+            // The base32 alphabet is uppercase; accept a lowercased header too.
+            data_encoding::BASE32_NOPAD
+                .decode(s.trim().to_uppercase().as_bytes())
+                .ok()
+        })
+        .unwrap_or_default();
+    let id = random_claim();
+    // Clamp a caller-requested TTL to the cap; default to the short live-offer TTL.
+    let ttl = q.ttl.unwrap_or(INBOX_TTL_SECS).min(INBOX_MAX_TTL_SECS);
+    let exp = now.saturating_add(ttl);
+    state
+        .mailbox
+        .inbox_put(&slot, &id, &body, exp, &poster_hash)
+        .map_err(err_response)?;
+    Ok(id)
+}
+
+/// Refresh a presence beacon: mark this slot's owner online for `PRESENCE_TTL_SECS`.
+/// Unauthenticated by design — a spoofed "online" only triggers the sender's
+/// offline fallback, and no one can force another slot offline (there is no delete).
+async fn presence_post_handler(
+    State(state): State<AppState>,
+    AxumPath(slot): AxumPath<String>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    if state.mailbox.beacon_count() >= max_presence_rows()
+        && !state.mailbox.beacon_alive(&slot, now_unix())
+    {
+        // At capacity and this is a new slot — refuse (refreshing an existing
+        // beacon is always allowed so live clients don't drop offline).
+        return Err((StatusCode::INSUFFICIENT_STORAGE, "relay at capacity".into()));
+    }
+    let exp = now_unix().saturating_add(PRESENCE_TTL_SECS);
+    state.mailbox.beacon_put(&slot, exp).map_err(err_response)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Is the owner of this slot currently online? 200 if a live beacon exists, else 404.
+async fn presence_get_handler(
+    State(state): State<AppState>,
+    AxumPath(slot): AxumPath<String>,
+) -> StatusCode {
+    if state.mailbox.beacon_alive(&slot, now_unix()) {
+        StatusCode::OK
+    } else {
+        StatusCode::NOT_FOUND
+    }
+}
+
+/// Long-poll a recipient's inbox. Returns immediately with any queued offers;
+/// otherwise holds the connection up to `?wait=<secs>` (capped) before returning
+/// an empty body. Reading does **not** burn — the recipient acks with DELETE.
+async fn inbox_get_handler(
+    State(state): State<AppState>,
+    AxumPath(slot): AxumPath<String>,
+    Query(q): Query<InboxWait>,
+    headers: HeaderMap,
+) -> Result<Bytes, (StatusCode, String)> {
+    if !inbox_authorized(&headers, &slot, &state.auth_secret) {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "inbox read requires a session".into(),
+        ));
+    }
+    let deadline = now_unix().saturating_add(q.wait.min(INBOX_MAX_WAIT_SECS));
+    loop {
+        let rows = state.mailbox.inbox_list(&slot, now_unix());
+        if !rows.is_empty() {
+            let items: Vec<arvolo_core::presence::InboxItem> = rows
+                .into_iter()
+                .map(|(id, blob)| arvolo_core::presence::InboxItem { id, blob })
+                .collect();
+            let bytes = arvolo_core::presence::encode_inbox_items(&items)
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            return Ok(Bytes::from(bytes));
+        }
+        if now_unix() >= deadline {
+            return Ok(Bytes::new());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(INBOX_POLL_MS)).await;
+    }
+}
+
+/// Delete an offer. Authorized either by the recipient's session token (their ack
+/// after handling) or by the poster's retract token (the sender withdrawing its
+/// own offer — e.g. a live offer superseded by an offline fallback).
+async fn inbox_delete_handler(
+    State(state): State<AppState>,
+    AxumPath((slot, id)): AxumPath<(String, String)>,
+    headers: HeaderMap,
+) -> StatusCode {
+    // Poster retract: present the token whose hash we stored at POST.
+    if let Some(token) = headers
+        .get(INBOX_POSTER_TOKEN_HEADER)
+        .and_then(|v| v.to_str().ok())
+    {
+        if state
+            .mailbox
+            .inbox_delete_by_poster(&slot, &id, token.trim())
+        {
+            return StatusCode::NO_CONTENT;
+        }
+    }
+    // Recipient ack: owner of the slot, proven by a session token.
+    if !inbox_authorized(&headers, &slot, &state.auth_secret) {
+        return StatusCode::UNAUTHORIZED;
+    }
+    state.mailbox.inbox_delete(&slot, &id);
+    StatusCode::NO_CONTENT
 }
 
 fn status_for(e: &MailboxError) -> StatusCode {

@@ -15,9 +15,11 @@ pub mod code;
 pub mod crypto;
 pub mod flow;
 pub mod hash;
+pub mod manager;
 pub mod node;
 pub mod offline;
 pub mod pairing;
+pub mod presence;
 pub mod transfer;
 pub mod wordlist;
 

@@ -1,13 +1,13 @@
 //! Local config + contacts (address book), stored under ~/.config/arvolo.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use arvolo_core::crypto::PublicId;
 use serde::{Deserialize, Serialize};
 
-fn config_dir() -> PathBuf {
+pub fn config_dir() -> PathBuf {
     if let Ok(p) = std::env::var("ARVOLO_CONFIG_DIR") {
         return PathBuf::from(p);
     }
@@ -23,6 +23,9 @@ fn contacts_path() -> PathBuf {
 }
 fn seen_path() -> PathBuf {
     config_dir().join("seen.toml")
+}
+fn verified_path() -> PathBuf {
+    config_dir().join("verified.toml")
 }
 
 #[derive(Default, Deserialize)]
@@ -102,10 +105,12 @@ pub fn resolve_name(id_b32: &str) -> Option<String> {
 }
 
 /// What we know about a sender before recording this receipt: their contact name
-/// (if saved) and whether we've received from them before (TOFU).
+/// (if saved), whether we've received from them before (TOFU), and whether the
+/// user has verified their identity out-of-band.
 pub struct SenderStatus {
     pub name: Option<String>,
     pub seen_before: bool,
+    pub verified: bool,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -121,12 +126,62 @@ fn load_seen() -> Seen {
         .unwrap_or_default()
 }
 
-/// Contact name + whether this sender id has been seen before. Read-only.
+/// Contact name + whether this sender id has been seen before + verified. Read-only.
 pub fn sender_status(id_b32: &str) -> SenderStatus {
     SenderStatus {
         name: resolve_name(id_b32),
         seen_before: load_seen().seen.contains_key(id_b32),
+        verified: is_verified(id_b32),
     }
+}
+
+#[derive(Default, Serialize, Deserialize)]
+struct Verified {
+    #[serde(default)]
+    verified: BTreeSet<String>,
+}
+
+fn load_verified() -> Verified {
+    std::fs::read_to_string(verified_path())
+        .ok()
+        .and_then(|s| toml::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn save_verified(v: &Verified) -> Result<()> {
+    std::fs::create_dir_all(config_dir()).ok();
+    let text = toml::to_string_pretty(v).context("serialize verified")?;
+    std::fs::write(verified_path(), text).context("write verified")
+}
+
+/// Has the user verified this identity's fingerprint out-of-band?
+pub fn is_verified(id_b32: &str) -> bool {
+    load_verified().verified.contains(id_b32)
+}
+
+/// Mark a contact (by name) verified, after the user compared its fingerprint
+/// out-of-band. Errors if the name isn't a saved contact.
+pub fn mark_verified(name: &str) -> Result<String> {
+    let id = load_contacts()
+        .contacts
+        .get(name)
+        .cloned()
+        .with_context(|| format!("no such contact '{name}'"))?;
+    let mut v = load_verified();
+    v.verified.insert(id.clone());
+    save_verified(&v)?;
+    Ok(id)
+}
+
+/// Remove a contact's verified mark (by name).
+pub fn unmark_verified(name: &str) -> Result<()> {
+    if let Some(id) = load_contacts().contacts.get(name) {
+        let mut v = load_verified();
+        if v.verified.remove(id) {
+            save_verified(&v)?;
+        }
+    }
+    Ok(())
 }
 
 /// Record a receipt from `id_b32` (TOFU ledger): increments its counter. Best

@@ -14,10 +14,10 @@ async fn spawn_relay() -> String {
     let node = BlobNode::spawn(dir.path(), RelayChoice::Disabled)
         .await
         .expect("blob node");
-    let state = AppState {
-        mailbox: Arc::new(Mailbox::in_memory().expect("mailbox")),
-        blobs: Arc::new(node),
-    };
+    let state = AppState::new(
+        Arc::new(Mailbox::in_memory().expect("mailbox")),
+        Arc::new(node),
+    );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     // Keep the temp dir alive for the server's lifetime.

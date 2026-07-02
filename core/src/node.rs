@@ -127,9 +127,19 @@ pub fn decode_ticket(ticket: &str) -> Result<EndpointAddr> {
 
 /// Generate a fresh random node secret key.
 pub(crate) fn generate_secret_key() -> SecretKey {
-    // Random 32 bytes -> ed25519 secret. `from_bytes` accepts any 32 bytes.
-    let bytes: [u8; 32] = rand::random();
-    SecretKey::from_bytes(&bytes)
+    SecretKey::from_bytes(&random_node_seed())
+}
+
+/// A fresh random 32-byte seed for a node secret key. Kept as raw bytes so a
+/// send can persist it and later rebind the *same* node id (stable transport
+/// identity for the life of one transfer; see `flow::resume_send`).
+pub(crate) fn random_node_seed() -> [u8; 32] {
+    rand::random()
+}
+
+/// Rebuild a node secret key from a persisted [`random_node_seed`].
+pub(crate) fn secret_key_from_seed(seed: &[u8; 32]) -> SecretKey {
+    SecretKey::from_bytes(seed)
 }
 
 /// Build an [`EndpointAddr`] dialable on the same host (loopback + bound ports).

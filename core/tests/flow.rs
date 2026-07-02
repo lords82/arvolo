@@ -177,6 +177,37 @@ async fn archive_roundtrip_packs_and_extracts() {
     let _ = serve.await;
 }
 
+#[test]
+fn pack_tar_is_deterministic_and_content_sensitive() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("folder");
+    std::fs::create_dir_all(src.join("sub")).unwrap();
+    std::fs::write(src.join("a.txt"), b"hello alpha").unwrap();
+    std::fs::write(src.join("z.txt"), b"zed").unwrap();
+    std::fs::write(src.join("sub/b.bin"), vec![7u8; 1000]).unwrap();
+
+    // Same inputs pack to byte-identical bytes — the property resume relies on.
+    let t1 = dir.path().join("1.tar");
+    let t2 = dir.path().join("2.tar");
+    flow::pack_tar(std::slice::from_ref(&src), &t1).unwrap();
+    flow::pack_tar(std::slice::from_ref(&src), &t2).unwrap();
+    assert_eq!(
+        std::fs::read(&t1).unwrap(),
+        std::fs::read(&t2).unwrap(),
+        "identical inputs must pack identically"
+    );
+
+    // A changed file changes the bytes (so resume detects it via hash mismatch).
+    std::fs::write(src.join("a.txt"), b"hello ALPHA").unwrap();
+    let t3 = dir.path().join("3.tar");
+    flow::pack_tar(std::slice::from_ref(&src), &t3).unwrap();
+    assert_ne!(
+        std::fs::read(&t1).unwrap(),
+        std::fs::read(&t3).unwrap(),
+        "changed content must change the archive"
+    );
+}
+
 #[tokio::test]
 async fn sealed_to_recipient_only_intended_can_decrypt() {
     use arvolo_core::crypto::Identity;

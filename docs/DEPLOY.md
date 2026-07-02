@@ -94,6 +94,39 @@ sudo systemctl enable --now arvolo-relay
 sudo systemctl reload caddy
 ```
 
+### Abuse hardening (optional)
+
+The relay already bounds every endpoint (body-size, entry/row/TTL caps; inbox
+offers are ≤512 KiB, ≤64 per slot, capped globally by `ARVOLO_MAX_INBOX_ROWS`).
+Inbox **reads and deletes** require a proof-of-possession session token, so only
+the slot owner can drain or enumerate their inbox.
+
+Inbox **deposit** (`POST /v1/inbox/{slot}`) stays open by design — anyone must be
+able to offer you a file — so a peer who knows your public id can post junk
+offers up to the per-slot cap. An online client drains undecryptable offers on
+every poll, so the impact is a transient nuisance, not data loss. To blunt it
+further, rate-limit the deposit path at the proxy. With the
+[caddy-ratelimit](https://github.com/mholt/caddy-ratelimit) module:
+
+```
+mailbox.example.com {
+    @inbox_deposit {
+        method POST
+        path /v1/inbox/*
+        not path /v1/inbox/*/session
+    }
+    rate_limit @inbox_deposit {
+        key    {client_ip}
+        events 30
+        window 1m
+    }
+    reverse_proxy 127.0.0.1:8787
+}
+```
+
+(nginx equivalent: a `limit_req_zone` keyed on `$binary_remote_addr` scoped to a
+`location /v1/inbox/`.) Tune the budget to your expected legitimate offer rate.
+
 ## 4. The NAT relay (`iroh-relay`)
 
 `iroh-relay` can terminate TLS itself (Let's Encrypt) or run behind a proxy. See

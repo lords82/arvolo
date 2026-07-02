@@ -35,3 +35,4 @@ tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 data-encoding = "2"
 blake3 = "1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }

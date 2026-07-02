@@ -17,10 +17,10 @@ async fn app(store_dir: &Path) -> axum::Router {
     let node = BlobNode::spawn(store_dir, RelayChoice::Disabled)
         .await
         .expect("blob node");
-    let state = AppState {
-        mailbox: Arc::new(Mailbox::in_memory().expect("mailbox")),
-        blobs: Arc::new(node),
-    };
+    let state = AppState::new(
+        Arc::new(Mailbox::in_memory().expect("mailbox")),
+        Arc::new(node),
+    );
     router(state)
 }
 

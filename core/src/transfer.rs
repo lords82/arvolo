@@ -5,7 +5,7 @@
 //! relay choice and advertises our ALPNs.
 
 use anyhow::Result;
-use iroh::{Endpoint, RelayMode};
+use iroh::{Endpoint, RelayMode, SecretKey};
 
 use crate::chunked::{CHUNK_ALPN, CTRL_ALPN};
 use crate::node::generate_secret_key;
@@ -32,9 +32,16 @@ impl RelayChoice {
     }
 }
 
-/// Bind an endpoint that speaks our chunk + control ALPNs, with the given relay.
+/// Bind an endpoint that speaks our chunk + control ALPNs, with the given relay
+/// and a fresh random node id.
 pub async fn bind_endpoint(relay: RelayChoice) -> Result<Endpoint> {
-    let builder = match relay {
+    bind_endpoint_with_key(relay, generate_secret_key()).await
+}
+
+/// Like [`bind_endpoint`] but with a caller-supplied transport `secret` — so a
+/// resumed send can rebind the exact same node id its ticket was issued under.
+pub async fn bind_endpoint_with_key(relay: RelayChoice, secret: SecretKey) -> Result<Endpoint> {
+    let mut builder = match relay {
         RelayChoice::N0Default => Endpoint::builder(),
         RelayChoice::Disabled => Endpoint::empty_builder(RelayMode::Disabled),
         RelayChoice::Custom(url) => {
@@ -44,10 +51,29 @@ pub async fn bind_endpoint(relay: RelayChoice) -> Result<Endpoint> {
             Endpoint::empty_builder(RelayMode::Custom(iroh::RelayMap::from(parsed)))
         }
     };
+    // With `ARVOLO_IPV4_ONLY=1`, keep the IPv6 socket on loopback so iroh never
+    // discovers or advertises a public IPv6 address. Useful when one peer has a
+    // routable IPv6 the other can't reach (a dual-stack server ↔ IPv4-only client):
+    // otherwise a dead IPv6 candidate is advertised and dialing it wastes the
+    // connection window before falling back. Direct IPv4 + relay still work.
+    if ipv4_only() {
+        use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
+        builder = builder
+            .bind_addr_v4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0))
+            .bind_addr_v6(SocketAddrV6::new(Ipv6Addr::LOCALHOST, 0, 0, 0));
+    }
     builder
-        .secret_key(generate_secret_key())
+        .secret_key(secret)
         .alpns(vec![CHUNK_ALPN.to_vec(), CTRL_ALPN.to_vec()])
         .bind()
         .await
         .map_err(|e| anyhow::anyhow!("bind endpoint: {e}"))
+}
+
+/// Whether to run the iroh endpoint IPv4-only (`ARVOLO_IPV4_ONLY` truthy).
+fn ipv4_only() -> bool {
+    matches!(
+        std::env::var("ARVOLO_IPV4_ONLY").ok().as_deref(),
+        Some("1") | Some("true") | Some("yes")
+    )
 }

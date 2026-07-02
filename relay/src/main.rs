@@ -35,10 +35,7 @@ async fn main() -> Result<()> {
             .map_err(|e| anyhow::anyhow!("start blob node: {e}"))?,
     );
     tracing::info!(%blobstore, "blob-store node ready (backfill)");
-    let state = AppState {
-        mailbox: mailbox.clone(),
-        blobs: blob_node,
-    };
+    let state = AppState::new(mailbox.clone(), blob_node);
 
     // Background reaper: delete expired mailbox blobs AND expired seeded blobs.
     {
@@ -64,6 +61,16 @@ async fn main() -> Result<()> {
                 // Expired pairing rendezvous slots.
                 match state.mailbox.rz_reap(now) {
                     n if n > 0 => tracing::info!(removed = n, "reaped expired rendezvous rows"),
+                    _ => {}
+                }
+                // Expired (unaccepted) inbox offers.
+                match state.mailbox.inbox_reap(now) {
+                    n if n > 0 => tracing::info!(removed = n, "reaped expired inbox offers"),
+                    _ => {}
+                }
+                // Stale presence beacons.
+                match state.mailbox.beacon_reap(now) {
+                    n if n > 0 => tracing::info!(removed = n, "reaped stale presence beacons"),
                     _ => {}
                 }
             }

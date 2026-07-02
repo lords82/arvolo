@@ -40,6 +40,16 @@ pub enum SendEvent {
         ticket: String,
         has_relay: bool,
     },
+    /// A receiver's control channel connected — it has started pulling. Lets a
+    /// single-recipient sender tell "nobody showed up" from "transfer underway".
+    ReceiverConnected,
+    /// Send progress, from the receiver's chunk acks. `transferred` is a byte
+    /// estimate (delivered chunks × chunk size, capped at the total).
+    Progress { transferred: u64, total: u64 },
+    /// A receiver disconnected having fetched **every** chunk — the file reached
+    /// it in full. (A ticket may serve several receivers, so this can fire more
+    /// than once; a single-recipient sender can stop on the first.)
+    Delivered,
     /// The receiver dropped; we're backfilling the undelivered tail to the relay.
     ReceiverDropped { missing: usize },
     /// The undelivered tail is now on the relay; the sender can go offline.
@@ -94,6 +104,21 @@ pub struct SendSession {
     sender: ChunkSender,
     relay: Option<RelayRelease>,
     client: reqwest::Client,
+}
+
+impl SendSession {
+    /// The raw per-transfer content key. The CLI persists this so an interrupted
+    /// send can be resumed (its ticket stays valid). Capability secret — store
+    /// it protected.
+    pub fn content_key(&self) -> [u8; crate::crypto::CHUNK_KEY_LEN] {
+        self.sender.key()
+    }
+
+    /// The transport secret seed this send is bound under. The CLI persists it so
+    /// a resumed send rebinds the *same* node id and the old ticket reconnects.
+    pub fn node_seed(&self) -> [u8; 32] {
+        self.sender.node_seed()
+    }
 }
 
 /// Split and serve `path`; with `seed_relay` set, learn the relay's address +
@@ -175,6 +200,63 @@ pub async fn prepare_send(
     })
 }
 
+/// Re-serve a file under a *previously used* content `key` and transport
+/// `node_seed`, so a ticket handed out by an earlier [`prepare_send`] stays
+/// valid after the sender restarted.
+///
+/// Two things must be reproduced for the *old* ticket to reconnect: the chunk
+/// hashes and the node id. [`crate::crypto::seal_chunk`] is deterministic in
+/// `(key, index)`, so the same key over the same bytes yields identical hashes;
+/// and rebinding the same `node_seed` yields the same node id (which discovery
+/// re-resolves to the new address). `expected` is that original ticket: we
+/// recompute the hashes and require them to match, rejecting a changed/wrong
+/// file up front instead of failing mid-transfer with "chunk not available".
+///
+/// Resume is pure P2P (no relay seeding); recovering an interrupted transfer is
+/// independent of `--seed-relay`.
+pub async fn resume_send(
+    path: &Path,
+    key: [u8; crate::crypto::CHUNK_KEY_LEN],
+    node_seed: Option<[u8; 32]>,
+    expected: &ChunkTicket,
+    relay: RelayChoice,
+) -> Result<SendSession> {
+    anyhow::ensure!(path.is_file(), "{} is not a file", path.display());
+    // `Some` rebinds the original node id so the *old* ticket reconnects; `None`
+    // (e.g. resuming from a plain ticket, which carries no transport secret) uses
+    // a fresh id — the caller then serves the reprinted ticket.
+    let node_seed = node_seed.unwrap_or_else(crate::node::random_node_seed);
+    let sender = ChunkSender::serve_resume(path, relay, key, node_seed)
+        .await
+        .context("start sender")?;
+
+    anyhow::ensure!(
+        sender.chunks() == expected.chunks.as_slice(),
+        "file no longer matches the ticket (changed, truncated, or wrong file) — \
+         cannot resume this send; start a new one"
+    );
+
+    let ticket = ChunkTicket {
+        total_size: sender.total_size(),
+        chunk_size: sender.chunk_size(),
+        chunks: sender.chunks().to_vec(),
+        providers: vec![sender.addr()],
+        relay: None,
+        key: expected.key.clone(),
+        name: expected.name.clone(),
+        archive: expected.archive,
+    };
+    Ok(SendSession {
+        ticket: ticket.encode()?,
+        chunks: sender.chunks().len(),
+        total_size: sender.total_size(),
+        has_relay: false,
+        sender,
+        relay: None,
+        client: reqwest::Client::new(),
+    })
+}
+
 impl SendSession {
     /// Serve until `cancel` fires. On each receiver drop, backfill the
     /// undelivered tail to the relay (if configured) and keep serving.
@@ -190,12 +272,31 @@ impl SendSession {
             has_relay: self.has_relay,
         });
 
+        // Poll the receiver's chunk-ack count and surface byte progress on change.
+        let chunk_size = self.sender.chunk_size() as u64;
+        let mut last_delivered = 0usize;
+        let mut ticker = tokio::time::interval(std::time::Duration::from_millis(500));
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => break,
+                _ = ticker.tick() => {
+                    let d = self.sender.delivered_count();
+                    if d != last_delivered {
+                        last_delivered = d;
+                        let transferred = (d as u64).saturating_mul(chunk_size).min(self.total_size);
+                        on(SendEvent::Progress { transferred, total: self.total_size });
+                    }
+                }
+                _ = self.sender.receiver_connected() => {
+                    on(SendEvent::ReceiverConnected);
+                }
                 undelivered = self.sender.receiver_gone() => {
+                    // Empty tail ⇒ that receiver fetched the whole file.
+                    if undelivered.is_empty() {
+                        on(SendEvent::Delivered);
+                        continue;
+                    }
                     let Some(r) = &self.relay else { continue };
-                    if undelivered.is_empty() { continue; }
                     on(SendEvent::ReceiverDropped { missing: undelivered.len() });
                     let chunks: Vec<_> =
                         undelivered.iter().map(|&i| self.sender.chunks()[i]).collect();
@@ -742,26 +843,98 @@ pub fn default_out(seed: &str) -> PathBuf {
 /// Pack files and/or directories into a tar archive at `dest` (each top-level
 /// input keeps its base name inside the archive). Used to send folders/multiple
 /// files as one transfer; the receiver unpacks it (see [`recv_chunked`]).
+/// Pack `paths` into a tar at `dest` *deterministically*: entries are emitted in
+/// a stable sorted order with normalized metadata (mtime/uid/gid zeroed, fixed
+/// mode), so the same inputs always yield byte-identical output. That is what
+/// lets an interrupted archive send be resumed — repacking reproduces the exact
+/// chunk hashes the original ticket promised (verified on resume). Symlinks are
+/// followed to their target; broken or special files are skipped.
 pub fn pack_tar(paths: &[PathBuf], dest: &Path) -> Result<()> {
-    let file = std::fs::File::create(dest)
-        .with_context(|| format!("create archive {}", dest.display()))?;
-    let mut builder = tar::Builder::new(file);
+    // Gather every regular file (name-in-archive → source) plus the directory
+    // entries (so empty dirs survive), then sort for a stable layout.
+    let mut files: Vec<(String, PathBuf)> = Vec::new();
+    let mut dirs: Vec<String> = Vec::new();
     for p in paths {
         let base = p
             .file_name()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "file".to_string());
         if p.is_dir() {
-            builder
-                .append_dir_all(&base, p)
-                .with_context(|| format!("archive dir {}", p.display()))?;
+            collect_dir(p, &base, &mut files, &mut dirs)?;
         } else {
-            builder
-                .append_path_with_name(p, &base)
-                .with_context(|| format!("archive file {}", p.display()))?;
+            files.push((base, p.clone()));
         }
     }
+    files.sort();
+    dirs.sort();
+    dirs.dedup();
+
+    let out = std::fs::File::create(dest)
+        .with_context(|| format!("create archive {}", dest.display()))?;
+    let mut builder = tar::Builder::new(out);
+    builder.mode(tar::HeaderMode::Deterministic);
+
+    for d in &dirs {
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Directory);
+        header.set_size(0);
+        header.set_mode(0o755);
+        header.set_mtime(0);
+        header.set_uid(0);
+        header.set_gid(0);
+        builder
+            .append_data(&mut header, format!("{d}/"), std::io::empty())
+            .with_context(|| format!("archive dir {d}"))?;
+    }
+    for (name, src) in &files {
+        let data = std::fs::File::open(src).with_context(|| format!("open {}", src.display()))?;
+        let len = data
+            .metadata()
+            .with_context(|| format!("stat {}", src.display()))?
+            .len();
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Regular);
+        header.set_size(len);
+        header.set_mode(0o644);
+        header.set_mtime(0);
+        header.set_uid(0);
+        header.set_gid(0);
+        builder
+            .append_data(&mut header, name, data)
+            .with_context(|| format!("archive file {name}"))?;
+    }
     builder.finish().context("finish archive")?;
+    Ok(())
+}
+
+/// Recursively collect a directory's regular files and subdirectories in sorted
+/// order (following symlinks to their targets), for deterministic packing.
+fn collect_dir(
+    dir: &Path,
+    prefix: &str,
+    files: &mut Vec<(String, PathBuf)>,
+    dirs: &mut Vec<String>,
+) -> Result<()> {
+    dirs.push(prefix.to_string());
+    let mut entries: Vec<_> = std::fs::read_dir(dir)
+        .with_context(|| format!("read dir {}", dir.display()))?
+        .filter_map(|e| e.ok())
+        .collect();
+    entries.sort_by_key(|e| e.file_name());
+    for e in entries {
+        let path = e.path();
+        let child = format!("{prefix}/{}", e.file_name().to_string_lossy());
+        // `metadata` (not `symlink_metadata`) follows symlinks; skip anything
+        // that isn't a plain file or directory (broken links, sockets, …).
+        let Ok(md) = std::fs::metadata(&path) else {
+            continue;
+        };
+        if md.is_dir() {
+            collect_dir(&path, &child, files, dirs)?;
+        } else if md.is_file() {
+            files.push((child, path));
+        }
+    }
     Ok(())
 }
 

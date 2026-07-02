@@ -30,6 +30,13 @@ pub struct Identity {
 #[derive(Clone)]
 pub struct PublicId(<KemAlg as KemTrait>::PublicKey);
 
+impl std::fmt::Debug for PublicId {
+    /// Debug as the human fingerprint — never dump raw key bytes into logs.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "PublicId({})", self.fingerprint())
+    }
+}
+
 /// HPKE output: the encapsulated key plus the AEAD ciphertext.
 pub struct Sealed {
     pub encapped_key: Vec<u8>,
@@ -171,6 +178,44 @@ pub fn open(
         aad,
     )
     .map_err(|e| anyhow!("hpke open (wrong recipient, sender, or tampered): {e}"))
+}
+
+/// Encrypt `plaintext` toward `recipient` **without** authenticating a sender
+/// (HPKE base mode). Used for anonymous challenges — e.g. the relay sealing a
+/// proof-of-possession nonce to an inbox owner it can't (and needn't) identify.
+pub fn seal_anon(plaintext: &[u8], recipient: &PublicId, aad: &[u8]) -> Result<Sealed> {
+    let mode = OpModeS::<KemAlg>::Base;
+    let (encapped, ciphertext) = hpke::single_shot_seal::<AeadAlg, KdfAlg, KemAlg, _>(
+        &mode,
+        &recipient.0,
+        INFO,
+        plaintext,
+        aad,
+        &mut rand::rng(),
+    )
+    .map_err(|e| anyhow!("hpke seal_anon: {e}"))?;
+    Ok(Sealed {
+        encapped_key: encapped.to_bytes().to_vec(),
+        ciphertext,
+    })
+}
+
+/// Decrypt a base-mode [`Sealed`] addressed to `recipient` (no sender to verify).
+/// Succeeding proves possession of `recipient`'s private key — the basis of the
+/// inbox proof-of-possession handshake.
+pub fn open_anon(sealed: &Sealed, recipient: &Identity, aad: &[u8]) -> Result<Vec<u8>> {
+    let mode = OpModeR::<KemAlg>::Base;
+    let encapped = <KemAlg as KemTrait>::EncappedKey::from_bytes(&sealed.encapped_key)
+        .map_err(|e| anyhow!("invalid encapped key: {e}"))?;
+    hpke::single_shot_open::<AeadAlg, KdfAlg, KemAlg>(
+        &mode,
+        &recipient.sk,
+        &encapped,
+        INFO,
+        &sealed.ciphertext,
+        aad,
+    )
+    .map_err(|e| anyhow!("hpke open_anon (wrong recipient or tampered): {e}"))
 }
 
 // ---- chunk stream encryption ----------------------------------------------

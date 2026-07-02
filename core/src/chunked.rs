@@ -31,7 +31,7 @@ use tokio::sync::{mpsc, Mutex as AsyncMutex};
 
 use crate::backfill::RelayRelease;
 use crate::node::{decode_ticket, encode_ticket, local_addr_of};
-use crate::transfer::{bind_endpoint, RelayChoice};
+use crate::transfer::{bind_endpoint, bind_endpoint_with_key, RelayChoice};
 
 /// Chunk size: 16 MiB.
 pub const CHUNK_SIZE: u32 = 16 * 1024 * 1024;
@@ -332,6 +332,8 @@ struct CtrlHandler {
     delivered: Arc<Mutex<HashSet<u32>>>,
     on_relay: Arc<Mutex<HashSet<u32>>>,
     gone_tx: mpsc::UnboundedSender<Vec<usize>>,
+    /// Signalled once per receiver, when its control channel connects.
+    connected_tx: mpsc::UnboundedSender<()>,
 }
 
 impl ProtocolHandler for CtrlHandler {
@@ -346,6 +348,7 @@ impl ProtocolHandler for CtrlHandler {
         if dbg {
             eprintln!("[ctrl] receiver connected");
         }
+        let _ = self.connected_tx.send(());
         // On connect, tell the receiver which chunks are already on the relay.
         let snapshot: Vec<u32> = self.on_relay.lock().unwrap().iter().copied().collect();
         if !snapshot.is_empty() {
@@ -395,20 +398,41 @@ pub struct ChunkSender {
     chunks: Vec<Hash>,
     total_size: u64,
     key: [u8; crate::crypto::CHUNK_KEY_LEN],
+    node_seed: [u8; 32],
     delivered: Arc<Mutex<HashSet<u32>>>,
     on_relay: Arc<Mutex<HashSet<u32>>>,
     gone_rx: AsyncMutex<mpsc::UnboundedReceiver<Vec<usize>>>,
+    connected_rx: AsyncMutex<mpsc::UnboundedReceiver<()>>,
 }
 
 impl ChunkSender {
+    /// Serve `path` under a fresh random per-transfer content key and node id.
     pub async fn serve(path: &Path, relay: RelayChoice) -> Result<Self> {
+        Self::serve_resume(
+            path,
+            relay,
+            crate::crypto::random_chunk_key(),
+            crate::node::random_node_seed(),
+        )
+        .await
+    }
+
+    /// Serve `path` under an explicit content `key` and transport `node_seed`.
+    /// Used to *resume* a previous send: the same key over the same (unchanged)
+    /// file reproduces identical chunk hashes, and the same seed reproduces the
+    /// same node id — so the ticket the original session handed out stays valid.
+    pub async fn serve_resume(
+        path: &Path,
+        relay: RelayChoice,
+        key: [u8; crate::crypto::CHUNK_KEY_LEN],
+        node_seed: [u8; 32],
+    ) -> Result<Self> {
         // Compute the chunk hashes by streaming the file (bounded memory), WITHOUT
         // storing any ciphertext — chunks are regenerated on demand while serving.
         let total_size = std::fs::metadata(path)
             .with_context(|| format!("stat {}", path.display()))?
             .len();
         let total_chunks = (total_size as usize).div_ceil(CHUNK_SIZE as usize) as u32;
-        let key = crate::crypto::random_chunk_key();
         let mut chunks = Vec::new();
         let mut index: HashMap<Hash, u32> = HashMap::new();
         {
@@ -438,16 +462,19 @@ impl ChunkSender {
         };
 
         let use_relay = !matches!(relay, RelayChoice::Disabled);
-        let endpoint = bind_endpoint(relay).await?;
+        let endpoint =
+            bind_endpoint_with_key(relay, crate::node::secret_key_from_seed(&node_seed)).await?;
 
         let delivered = Arc::new(Mutex::new(HashSet::new()));
         let on_relay = Arc::new(Mutex::new(HashSet::new()));
         let (gone_tx, gone_rx) = mpsc::unbounded_channel();
+        let (connected_tx, connected_rx) = mpsc::unbounded_channel();
         let handler = CtrlHandler {
             total: chunks.len(),
             delivered: delivered.clone(),
             on_relay: on_relay.clone(),
             gone_tx,
+            connected_tx,
         };
         let router = Router::builder(endpoint.clone())
             .accept(CHUNK_ALPN, chunk_server)
@@ -466,14 +493,21 @@ impl ChunkSender {
             chunks,
             total_size,
             key,
+            node_seed,
             delivered,
             on_relay,
             gone_rx: AsyncMutex::new(gone_rx),
+            connected_rx: AsyncMutex::new(connected_rx),
         })
     }
 
     pub fn addr(&self) -> EndpointAddr {
         self.addr.clone()
+    }
+    /// The transport secret seed this sender is bound under. Persisted by the CLI
+    /// so a resumed send can rebind the *same* node id (see `flow::resume_send`).
+    pub fn node_seed(&self) -> [u8; 32] {
+        self.node_seed
     }
     pub fn chunks(&self) -> &[Hash] {
         &self.chunks
@@ -491,6 +525,14 @@ impl ChunkSender {
     }
     pub fn delivered_count(&self) -> usize {
         self.delivered.lock().unwrap().len()
+    }
+
+    /// Resolves when a receiver's control channel connects (once per receiver).
+    /// Never fires if no receiver shows up — used to distinguish "nobody home"
+    /// from an in-progress transfer.
+    pub async fn receiver_connected(&self) {
+        let mut rx = self.connected_rx.lock().await;
+        let _ = rx.recv().await;
     }
 
     /// Resolves when a connected receiver disconnects, yielding the chunk
