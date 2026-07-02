@@ -170,12 +170,27 @@ mod tests {
     #[test]
     fn relay_scheme_defaults_to_https() {
         // Bare host → https, unless --use-http is asked for.
-        assert_eq!(normalize_relay("relay.example.com", false), "https://relay.example.com");
-        assert_eq!(normalize_relay("relay.example.com", true), "http://relay.example.com");
-        assert_eq!(normalize_relay("  relay:8787 ", false), "https://relay:8787");
+        assert_eq!(
+            normalize_relay("relay.example.com", false),
+            "https://relay.example.com"
+        );
+        assert_eq!(
+            normalize_relay("relay.example.com", true),
+            "http://relay.example.com"
+        );
+        assert_eq!(
+            normalize_relay("  relay:8787 ", false),
+            "https://relay:8787"
+        );
         // An explicit scheme always wins over the flag.
-        assert_eq!(normalize_relay("http://relay.local", false), "http://relay.local");
-        assert_eq!(normalize_relay("https://relay.example.com", true), "https://relay.example.com");
+        assert_eq!(
+            normalize_relay("http://relay.local", false),
+            "http://relay.local"
+        );
+        assert_eq!(
+            normalize_relay("https://relay.example.com", true),
+            "https://relay.example.com"
+        );
     }
 
     #[test]
