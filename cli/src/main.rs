@@ -16,6 +16,7 @@
 
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -43,6 +44,38 @@ pub(crate) mod testlock {
     pub static ENV: Mutex<()> = Mutex::new(());
 }
 
+/// Process-global verbosity, set once from the `-v/--verbose` count in `main`.
+/// Read by [`verbosity`] and the [`vprintln!`] macro so command functions and
+/// their event callbacks can narrate extra detail without threading a flag
+/// through every signature.
+static VERBOSITY: AtomicU8 = AtomicU8::new(0);
+
+/// How many `-v` the user passed (0 = quiet, 1 = steps, 2+ = network internals).
+fn verbosity() -> u8 {
+    VERBOSITY.load(Ordering::Relaxed)
+}
+
+/// `eprintln!` that only fires at `-v` or higher — a step explanation for users
+/// who want to follow (or debug) what a command is doing. Prefixed so verbose
+/// narration is easy to tell apart from normal output.
+macro_rules! vprintln {
+    ($($arg:tt)*) => {
+        if crate::verbosity() >= 1 {
+            eprintln!("· {}", format!($($arg)*));
+        }
+    };
+}
+
+/// Like [`vprintln!`] but only at `-vv` or higher — finer-grained detail (e.g.
+/// per-source transitions) that would be too chatty at a single `-v`.
+macro_rules! vvprintln {
+    ($($arg:tt)*) => {
+        if crate::verbosity() >= 2 {
+            eprintln!("·· {}", format!($($arg)*));
+        }
+    };
+}
+
 #[derive(Parser)]
 #[command(
     name = "arvolo",
@@ -50,8 +83,46 @@ pub(crate) mod testlock {
     about = "arvolo — secure cross-platform file sending"
 )]
 struct Cli {
+    /// Explain each step as it happens, in arvolo's own words. `-v` narrates the
+    /// transfer (relay chosen, ticket, receiver connected, chunk sources) and
+    /// silences iroh's low-level networking noise; `-vv` adds finer detail (e.g.
+    /// when chunks switch between the sender and the relay), still without iroh.
+    /// `-vvv` opens iroh's raw logs for deep network debugging. An explicit
+    /// `RUST_LOG` always wins.
+    #[arg(short, long, global = true, action = clap::ArgAction::Count)]
+    verbose: u8,
     #[command(subcommand)]
     command: Command,
+}
+
+/// Build the tracing filter from the `-v` count, unless `RUST_LOG` is set (an
+/// explicit filter always wins).
+///
+/// The transfer narration at `-v`/`-vv` is printed by the CLI itself (see
+/// [`vprintln!`]), not by tracing — so tracing's job here is the opposite of
+/// noisy: keep iroh's chatty transport logs (relay probing, the IPv6
+/// "no route to host" warning, per-datagram errors) from drowning that
+/// narration. iroh is muted at `-v`/`-vv` and only comes back at `-vvv`, where
+/// you're explicitly asking for the raw networking firehose.
+fn init_tracing(verbose: u8) {
+    let default = match verbose {
+        // No flag: unchanged — warnings from every crate (incl. iroh) surface.
+        0 => "warn",
+        // -v / -vv: arvolo's narration carries the story; drop iroh below warn so
+        // its transport chatter doesn't bury it. Genuine iroh *errors* still pass.
+        1 | 2 => {
+            "warn,iroh=error,iroh_quinn=error,iroh_quinn_udp=error,\
+             iroh_quinn_proto=error,iroh_relay=error,iroh_net=error,iroh_base=error"
+        }
+        // -vvv+: raw iroh networking logs for deep debugging.
+        _ => "info,iroh=debug",
+    };
+    let filter =
+        tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| default.into());
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .init();
 }
 
 #[derive(Subcommand)]
@@ -262,13 +333,11 @@ enum SessionAction {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
-        )
-        .init();
+    let cli = Cli::parse();
+    VERBOSITY.store(cli.verbose, Ordering::Relaxed);
+    init_tracing(cli.verbose);
 
-    match Cli::parse().command {
+    match cli.command {
         Command::Send {
             paths,
             resume_ticket,
@@ -723,10 +792,14 @@ fn human_duration(secs: u64) -> String {
 
 /// Resolve the relay to use for presence, requiring one (offers can't work P2P).
 fn require_relay(relay: Option<String>, use_http: bool) -> Result<String> {
-    relay
+    let resolved = relay
         .map(|r| book::normalize_relay(&r, use_http))
         .or_else(book::default_relay)
-        .context("a relay is required: pass --relay <host>, set ARVOLO_RELAY, or configure `relay`")
+        .context(
+            "a relay is required: pass --relay <host>, set ARVOLO_RELAY, or configure `relay`",
+        )?;
+    vprintln!("using relay: {resolved}");
+    Ok(resolved)
 }
 
 /// Ask the user y/n on stdin (blocking), defaulting to no on EOF/error.
@@ -761,6 +834,14 @@ async fn listen(
     let manager = TransferManager::new(me, Some(relay.clone()), download_dir.clone());
     let mut events = manager.subscribe();
     let inbox = manager.spawn_inbox()?;
+    vprintln!("inbox poller started — publishing presence and watching for offers on the relay");
+    if yes {
+        vprintln!("auto-accepting ALL offers (--yes)");
+    } else if auto_accept_verified {
+        vprintln!("auto-accepting offers from verified contacts only");
+    } else if auto_accept_contacts {
+        vprintln!("auto-accepting offers from saved contacts");
+    }
 
     eprintln!("Listening as {my_id}");
     eprintln!("Fingerprint: {}", manager.public_id().fingerprint());
@@ -864,17 +945,28 @@ async fn push(
     );
     let relay = require_relay(relay, use_http)?;
     let recipient = book::resolve_recipient(&to)?;
+    vprintln!(
+        "recipient {to} resolved (fingerprint {})",
+        recipient.fingerprint()
+    );
     let me = my_identity()?;
     let (payload, name, archive, temp) = resolve_payload(&paths)?;
     if archive {
         eprintln!("Packing {} item(s) into an archive…", paths.len());
     }
+    vprintln!(
+        "payload: {} ({}){}",
+        name,
+        human_size(std::fs::metadata(&payload).map(|m| m.len()).unwrap_or(0)),
+        if archive { ", packed archive" } else { "" }
+    );
 
     let manager = TransferManager::new(me, Some(relay.clone()), PathBuf::from("."));
     let mut events = manager.subscribe();
 
     // `send_to` decides live-vs-mailbox itself (with a presence grace window and a
     // watchdog); the up-front check is only a hint for the opening line.
+    vprintln!("checking {to}'s presence on the relay…");
     if manager.is_online(&recipient).await {
         eprintln!("{to} looks online — trying a direct transfer…");
     } else {
@@ -988,9 +1080,25 @@ async fn send(
     // A bare relay host gets a scheme (https by default, http with --use-http).
     let seed_relay = seed_relay.map(|r| book::normalize_relay(&r, use_http));
     let relay = relay.map(|r| book::normalize_relay(&r, use_http));
+    if let Some(r) = &seed_relay {
+        vprintln!("seed relay (backfill): {r}");
+    }
     let (payload, name, archive, temp) = resolve_payload(&paths)?;
     if archive {
         eprintln!("Packing {} item(s) into an archive…", paths.len());
+    }
+    vprintln!(
+        "payload: {} ({}){}",
+        name,
+        human_size(std::fs::metadata(&payload).map(|m| m.len()).unwrap_or(0)),
+        if archive { ", packed archive" } else { "" }
+    );
+    if to.is_some() {
+        vprintln!(
+            "sealing the content key to the recipient (--to); you are authenticated as sender"
+        );
+    } else {
+        vprintln!("plain ticket: the ticket itself is the capability (anonymous, unauthenticated)");
     }
     // Resolve --to into a (sender identity, recipient) pair we can borrow from.
     let to_owned: Option<(Identity, PublicId)> = match &to {
@@ -1040,13 +1148,16 @@ async fn send(
 /// ticket when it's ready. Shared by fresh sends and both resume paths.
 async fn serve_session(session: flow::SendSession, qr: bool) -> Result<()> {
     let cancel = cancel_on_ctrl_c();
+    // Last progress percent we narrated, so `-v` shows a few milestones instead
+    // of one line per ack. Shared because `serve`'s callback is `Fn`, not `FnMut`.
+    let last_pct = Arc::new(AtomicU8::new(u8::MAX));
     session
         .serve(cancel, move |ev| match ev {
             SendEvent::Ready {
                 chunks,
+                total_size,
                 ticket,
                 has_relay,
-                ..
             } => {
                 println!("\nFile ready ({chunks} chunks). On the other device:\n");
                 println!("    arvolo recv {ticket}\n");
@@ -1056,9 +1167,25 @@ async fn serve_session(session: flow::SendSession, qr: bool) -> Result<()> {
                 if has_relay {
                     println!("P2P-first; if the receiver drops, only the missing chunks are backfilled to the relay.");
                 }
+                vprintln!(
+                    "serving {chunks} chunk(s), {} total; waiting for a receiver to connect",
+                    human_size(total_size)
+                );
                 println!("Ctrl-C to stop.");
             }
-            SendEvent::ReceiverConnected => {}
+            SendEvent::ReceiverConnected => vprintln!("receiver connected — chunk pull started"),
+            SendEvent::Progress { transferred, total } if total > 0 => {
+                let pct = (transferred * 100 / total) as u8;
+                // Narrate every ~10% step, once each.
+                if verbosity() >= 1 && pct / 10 != last_pct.load(Ordering::Relaxed) / 10 {
+                    last_pct.store(pct, Ordering::Relaxed);
+                    vprintln!(
+                        "acked {pct}% ({}/{})",
+                        human_size(transferred),
+                        human_size(total)
+                    );
+                }
+            }
             SendEvent::Progress { .. } => {}
             SendEvent::Delivered => eprintln!("✓ A receiver got the whole file."),
             SendEvent::ReceiverDropped { missing } => {
@@ -1163,6 +1290,14 @@ async fn send_with_code(
         },
     };
 
+    vprintln!(
+        "rendezvous relay: {relay_url} ({})",
+        if embed {
+            "embedded in the code — receiver needs no config"
+        } else {
+            "shared default — not embedded"
+        }
+    );
     eprintln!("Splitting and serving chunks…");
     let session = flow::prepare_send(
         &payload,
@@ -1173,6 +1308,11 @@ async fn send_with_code(
         RelayChoice::from_env(),
     )
     .await?;
+    vprintln!(
+        "serving {} chunk(s), {}; publishing the encrypted ticket under the pairing code…",
+        session.chunks,
+        human_size(session.total_size)
+    );
     let (shown_code, complete) = code::publish_ticket(&session.ticket, &relay_url, embed)
         .await
         .context("start pairing")?;
@@ -1202,7 +1342,7 @@ async fn send_with_code(
             }
             SendEvent::BackfillFailed { reason } => eprintln!("Relay backfill failed: {reason}"),
             SendEvent::Delivered => eprintln!("✓ A receiver got the whole file."),
-            SendEvent::ReceiverConnected => {}
+            SendEvent::ReceiverConnected => vprintln!("receiver connected — chunk pull started"),
             SendEvent::Progress { .. } => {}
             SendEvent::Ready { .. } => {} // code already printed
         })
@@ -1221,10 +1361,17 @@ async fn recv(ticket: String, out: Option<PathBuf>) -> Result<()> {
     let ticket = if code::looks_like_code(&ticket) {
         eprintln!("Pairing… (waiting for the sender)");
         let default_relay = book::default_relay();
+        vprintln!(
+            "input looks like a pairing code — resolving to a ticket over rendezvous relay {}",
+            default_relay.as_deref().unwrap_or("(embedded in code)")
+        );
         code::resolve_code(&ticket, default_relay.as_deref())
             .await
             .context("pairing")?
     } else {
+        vprintln!(
+            "input is a full ticket — connecting to the sender P2P (relay-assisted if needed)"
+        );
         ticket
     };
     // Our identity is needed to open a ticket sealed to us (--to); harmless
@@ -1235,6 +1382,9 @@ async fn recv(ticket: String, out: Option<PathBuf>) -> Result<()> {
     let tty = std::io::stderr().is_terminal();
     let bar: Arc<Mutex<Option<ProgressBar>>> = Arc::new(Mutex::new(None));
     let b = bar.clone();
+    // Last chunk source we narrated at -vv (0 = none, 1 = sender, 2 = relay), so
+    // we log only when delivery flips between P2P and the relay, not every chunk.
+    let last_src = Arc::new(AtomicU8::new(0));
     flow::recv_chunked(
         &ticket,
         out,
@@ -1294,12 +1444,26 @@ async fn recv(ticket: String, out: Option<PathBuf>) -> Result<()> {
                     source,
                     bytes,
                 } => {
+                    let src = match source {
+                        ChunkSource::Relay => "relay",
+                        ChunkSource::Sender => "sender",
+                    };
+                    // At -vv, announce only when the source flips (P2P ↔ relay).
+                    let code = if matches!(source, ChunkSource::Relay) {
+                        2
+                    } else {
+                        1
+                    };
+                    if last_src.swap(code, Ordering::Relaxed) != code {
+                        let line =
+                            format!("chunk {}/{total}: now pulling from the {src}", index + 1);
+                        match slot.as_ref() {
+                            Some(pb) if verbosity() >= 2 => pb.println(format!("·· {line}")),
+                            _ => vvprintln!("{line}"),
+                        }
+                    }
                     if let Some(pb) = slot.as_ref() {
                         pb.inc(bytes);
-                        let src = match source {
-                            ChunkSource::Relay => "relay",
-                            ChunkSource::Sender => "sender",
-                        };
                         pb.set_message(format!("chunk {}/{total} from {src}", index + 1));
                     }
                 }
@@ -1339,6 +1503,16 @@ async fn send_offline(
         .map(|r| book::normalize_relay(&r, use_http))
         .or_else(book::default_relay)
         .context("no relay: pass --relay <host>, set ARVOLO_RELAY, or configure `relay`")?;
+    vprintln!("using relay: {relay}");
+    vprintln!(
+        "mode: {} — TTL {}",
+        if link {
+            "public browser link (--link)"
+        } else {
+            "sealed to recipient (--to)"
+        },
+        human_duration(ttl)
+    );
 
     // Link mode: a public, browser-openable download URL (no recipient). A link
     // has NO download cap by default (it expires only when its session is
@@ -1353,6 +1527,7 @@ async fn send_offline(
             "--password is not yet supported with --link (the browser page can't unwrap it)"
         );
         let max = max.unwrap_or(deposits::UNLIMITED);
+        vprintln!("encrypting locally and uploading to the relay (key stays in the link's #fragment; the relay only sees ciphertext)…");
         let out = arvolo_core::link::deposit_link(&path, &relay, ttl, max).await?;
         let rec = deposits::save(
             deposits::KIND_LINK,
@@ -1394,6 +1569,18 @@ async fn send_offline(
     let to = to.context("--to <name|id> is required (or pass --link for a public link)")?;
     let max = max.unwrap_or(1);
     let recipient = book::resolve_recipient(&to)?;
+    vprintln!(
+        "recipient {to} resolved (fingerprint {})",
+        recipient.fingerprint()
+    );
+    vprintln!(
+        "HPKE-sealing to the recipient and depositing on the relay ({max} download(s){})…",
+        if password.is_some() {
+            ", password-protected"
+        } else {
+            ""
+        }
+    );
     let deposited = flow::deposit_offline(
         &path,
         &recipient,
@@ -1449,9 +1636,19 @@ async fn recv_offline(
     password: Option<String>,
 ) -> Result<()> {
     let me = my_identity()?;
+    if let Ok(t) = arvolo_core::offline::OfflineTicket::decode(&ticket) {
+        vprintln!(
+            "fetching ciphertext from relay {} and unsealing with your identity…",
+            t.relay
+        );
+    }
+    if password.is_some() {
+        vprintln!("deriving the decryption key from the supplied password");
+    }
     // A successful fetch means HPKE auth passed, so the sender in the ticket is
     // genuine — surface it (offline tickets are always sealed to a recipient).
     let (path, n) = flow::fetch_offline(&ticket, out, &me, password.as_deref()).await?;
+    vprintln!("HPKE authentication passed — the sender in the ticket is genuine");
     if let Ok(t) = arvolo_core::offline::OfflineTicket::decode(&ticket) {
         print_sender_banner(Some(&t.sender));
     }
@@ -1462,6 +1659,7 @@ async fn recv_offline(
 async fn revoke(ticket: String, token: String) -> Result<()> {
     let t = arvolo_core::offline::OfflineTicket::decode(&ticket)
         .context("not a valid offline ticket (arvm…)")?;
+    vprintln!("asking relay {} to delete claim {}…", t.relay, t.claim);
     flow::revoke_offline(&t.relay, &t.claim, &token).await?;
     println!("Revoked — the blob is no longer available on the relay.");
     Ok(())
@@ -1482,6 +1680,7 @@ fn parse_dl_link(link: &str) -> Result<(String, String)> {
 
 async fn revoke_link(link: String, token: String) -> Result<()> {
     let (relay, claim) = parse_dl_link(&link)?;
+    vprintln!("asking relay {relay} to delete claim {claim}…");
     flow::revoke_offline(&relay, &claim, &token).await?;
     println!("Link revoked — the file is deleted from the relay and the link no longer works.");
     Ok(())
