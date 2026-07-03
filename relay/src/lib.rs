@@ -37,12 +37,30 @@ pub struct AppState {
     /// Per-process secret keying the inbox session-token MAC. Random at startup:
     /// a restart just forces clients to re-run the (cheap) auth handshake.
     pub auth_secret: Arc<[u8; 32]>,
+    /// Whether this relay offers public **browser download links** (`--link`).
+    /// When an administrator disables it, the `/dl` page is not served and
+    /// link deposits (HPKE-less blobs) are refused. Defaults to enabled.
+    pub links_enabled: bool,
+}
+
+/// Whether the relay administrator has disabled public download links, via
+/// `ARVOLO_DISABLE_LINKS` (set to `1`/`true`/`yes`/`on`).
+pub fn links_disabled_from_env() -> bool {
+    matches!(
+        std::env::var("ARVOLO_DISABLE_LINKS")
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "1" | "true" | "yes" | "on"
+    )
 }
 
 impl AppState {
     /// Build state with a fresh random inbox-auth secret.
     pub fn new(mailbox: Arc<Mailbox>, blobs: Arc<BlobNode>) -> Self {
         Self {
+            links_enabled: true,
             mailbox,
             blobs,
             auth_secret: Arc::new(rand::random()),
@@ -938,7 +956,30 @@ const DL_CSP: &str = "default-src 'none'; script-src 'self'; style-src 'unsafe-i
      connect-src 'self'; img-src 'self' data:; worker-src 'self'; frame-src 'self'; \
      frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
 
-async fn dl_page_handler() -> impl IntoResponse {
+/// Shown (with 403) when the administrator has disabled download links.
+const DL_DISABLED_HTML: &str = "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
+<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>arvolo</title></head>\
+<body style=\"font-family:system-ui,sans-serif;background:#0b0d10;color:#e7ebf0;display:grid;\
+place-items:center;min-height:100vh;margin:0;padding:24px\"><main style=\"max-width:420px;text-align:center\">\
+<h1 style=\"font-size:17px;margin:0 0 8px\">Download links are turned off</h1>\
+<p style=\"color:#8b95a3;font-size:13px;line-height:1.5\">The administrator of this relay has disabled \
+public browser download links. Ask the sender to share the file another way.</p></main></body></html>";
+
+const LINKS_DISABLED_MSG: &str = "public download links are disabled by this relay's administrator";
+
+fn links_disabled_page() -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        DL_DISABLED_HTML,
+    )
+        .into_response()
+}
+
+async fn dl_page_handler(State(state): State<AppState>) -> Response {
+    if !state.links_enabled {
+        return links_disabled_page();
+    }
     (
         [
             (axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8"),
@@ -947,9 +988,13 @@ async fn dl_page_handler() -> impl IntoResponse {
         ],
         DL_HTML,
     )
+        .into_response()
 }
 
-async fn dl_js_handler() -> impl IntoResponse {
+async fn dl_js_handler(State(state): State<AppState>) -> Response {
+    if !state.links_enabled {
+        return (StatusCode::FORBIDDEN, LINKS_DISABLED_MSG).into_response();
+    }
     (
         [
             (
@@ -961,11 +1006,15 @@ async fn dl_js_handler() -> impl IntoResponse {
         ],
         DL_JS,
     )
+        .into_response()
 }
 
 /// The streaming download service worker. Served from the root path so its
 /// default scope (`/`) covers the `/dl/stream/{id}` requests it must intercept.
-async fn dl_sw_handler() -> impl IntoResponse {
+async fn dl_sw_handler(State(state): State<AppState>) -> Response {
+    if !state.links_enabled {
+        return (StatusCode::FORBIDDEN, LINKS_DISABLED_MSG).into_response();
+    }
     (
         [
             (
@@ -980,6 +1029,16 @@ async fn dl_sw_handler() -> impl IntoResponse {
         ],
         DL_SW,
     )
+        .into_response()
+}
+
+/// Advertise this relay's optional features so a client can fail fast. Currently
+/// just `links` (public browser download links).
+async fn features_handler(State(state): State<AppState>) -> impl IntoResponse {
+    (
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        format!("{{\"links\":{}}}", state.links_enabled),
+    )
 }
 
 /// Build the relay HTTP router over the shared [`AppState`].
@@ -990,6 +1049,7 @@ async fn dl_sw_handler() -> impl IntoResponse {
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/v1/deposit", post(deposit_handler))
+        .route("/v1/features", get(features_handler))
         .route("/v1/fetch/{claim}", get(fetch_handler))
         .route("/v1/entry/{claim}", axum::routing::delete(revoke_handler))
         .route("/v1/entry/{claim}/status", get(entry_status_handler))
@@ -1397,6 +1457,13 @@ async fn deposit_handler(
             StatusCode::BAD_REQUEST,
             format!("missing/invalid {ENCAPPED_KEY_HEADER} header (base32)"),
         ))?;
+
+    // A link deposit carries no HPKE recipient (empty encapped key). If the
+    // administrator disabled links, refuse it here too (defense in depth beside
+    // the /dl page and /v1/features advertisement).
+    if !state.links_enabled && encapped_key.is_empty() {
+        return Err((StatusCode::FORBIDDEN, LINKS_DISABLED_MSG.to_string()));
+    }
 
     // Optional revoke-hash: base32 BLAKE3 of the sender's revoke token.
     let revoke_hash = headers

@@ -196,6 +196,7 @@ route so no handler can buffer an unbounded body.
 | POST / GET | `/v1/presence/{slot}` | none | Publish / read a **presence beacon** (is this identity online right now?). |
 | GET | `/dl/{claim}` | none | The browser **download page** (static HTML, strict CSP). |
 | GET | `/dl.js`, `/arvolo-sw.js` | none | The download script and streaming service worker (embedded in the binary). |
+| GET | `/v1/features` | none | Advertise optional features so a client can fail fast, e.g. `{"links":true}`. |
 | GET | `/healthz` | none | Liveness. |
 
 ### 6.2 Slots (opaque per-identity addresses)
@@ -353,6 +354,15 @@ same end-to-end property as every other path.
 **Download caps.** A link has **no download limit by default** (`max` unlimited),
 so it works for many recipients and tolerates retries; `--max N` sets a burn count.
 A link expires only when its session is removed (§8) or the TTL lapses.
+
+**Disabling links per relay.** A relay administrator can turn public download
+links off entirely by starting the relay with `ARVOLO_DISABLE_LINKS=1`. Then the
+relay (a) reports `{"links":false}` on `/v1/features`, (b) serves `403` for the
+`/dl` page, script, and service worker, and (c) refuses HPKE-less (link) deposits
+with `403`. The client checks `/v1/features` **before** encrypting, so
+`send-offline --link` fails immediately with a message explaining the
+administrator disabled the feature; recipient-sealed sends (`--to`) are
+unaffected. An older relay without `/v1/features` is treated as allowing links.
 
 ---
 

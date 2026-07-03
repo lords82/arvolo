@@ -11,12 +11,17 @@ use arvolo_core::transfer::RelayChoice;
 use arvolo_relay::{router, AppState, Mailbox};
 
 async fn spawn_relay() -> String {
+    spawn_relay_with(true).await
+}
+
+async fn spawn_relay_with(links_enabled: bool) -> String {
     let dir = tempfile::tempdir().unwrap();
     let node = BlobNode::spawn(dir.path(), RelayChoice::Disabled)
         .await
         .expect("blob node");
     let mailbox = Arc::new(Mailbox::in_memory().expect("mailbox"));
-    let state = AppState::new(mailbox, Arc::new(node));
+    let mut state = AppState::new(mailbox, Arc::new(node));
+    state.links_enabled = links_enabled;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -118,4 +123,47 @@ async fn link_deposit_fetch_decrypt_roundtrip() {
         .await
         .unwrap();
     assert!(!second.status().is_success(), "one-time link is consumed");
+}
+
+#[tokio::test]
+async fn links_can_be_disabled_by_the_relay() {
+    use arvolo_core::link::{deposit_link, relay_allows_links};
+
+    let relay = spawn_relay_with(false).await;
+    let c = reqwest::Client::new();
+
+    // Advertised as off, so a client can fail fast.
+    assert!(!relay_allows_links(&relay).await.unwrap());
+    let feats = c.get(format!("{relay}/v1/features")).send().await.unwrap();
+    assert!(feats.text().await.unwrap().contains("\"links\":false"));
+
+    // The download page is refused (403) rather than served.
+    let page = c.get(format!("{relay}/dl/anyclaim")).send().await.unwrap();
+    assert_eq!(page.status(), reqwest::StatusCode::FORBIDDEN);
+    assert!(page
+        .text()
+        .await
+        .unwrap()
+        .to_lowercase()
+        .contains("administrator"));
+
+    // A link deposit fails fast (before uploading) with the admin explanation.
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("f.bin");
+    std::fs::write(&src, b"data").unwrap();
+    let err = deposit_link(&src, &relay, 3600, 1)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("administrator"), "clear admin message: {err}");
+
+    // Defense in depth: even a raw HPKE-less deposit is refused at the relay.
+    let raw = c
+        .post(format!("{relay}/v1/deposit?ttl=3600&max=1"))
+        .header("x-arvolo-encapped-key", "")
+        .body(b"ciphertext".to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(raw.status(), reqwest::StatusCode::FORBIDDEN);
 }

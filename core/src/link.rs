@@ -46,6 +46,7 @@ pub const LINK_CHUNK_SIZE: u32 = 1024 * 1024;
 const META_INDEX: u32 = u32::MAX;
 
 /// The outcome of depositing a download link.
+#[derive(Debug)]
 pub struct LinkOutcome {
     /// The full browser URL to share: `{relay}/dl/{claim}#{key}`.
     pub link: String,
@@ -175,6 +176,24 @@ pub fn decrypt_link(blob: &[u8], key: &[u8; CHUNK_KEY_LEN]) -> Result<(String, V
     Ok((name, out))
 }
 
+/// Whether the relay offers public download links. Queries `GET /v1/features`.
+/// An older relay without the endpoint (404 / unreachable / unparsable) is
+/// treated as **allowing** links, so we never block on a relay that predates the
+/// feature flag; a relay that explicitly reports `"links":false` disables them.
+pub async fn relay_allows_links(relay: &str) -> Result<bool> {
+    let url = format!("{}/v1/features", relay.trim_end_matches('/'));
+    let resp = match reqwest::Client::new().get(&url).send().await {
+        Ok(r) if r.status().is_success() => r,
+        _ => return Ok(true),
+    };
+    let body = resp.text().await.unwrap_or_default();
+    // Minimal parse (no JSON dep): only an explicit false disables.
+    Ok(!body
+        .split_whitespace()
+        .collect::<String>()
+        .contains("\"links\":false"))
+}
+
 /// Encrypt `path` into a link container and deposit it on the relay, returning
 /// the shareable browser URL (`{relay}/dl/{claim}#{key}`) and a sender-only
 /// revoke token. Unlike [`crate::flow::deposit_offline`], the payload is NOT
@@ -182,6 +201,14 @@ pub fn decrypt_link(blob: &[u8], key: &[u8; CHUNK_KEY_LEN]) -> Result<(String, V
 /// download it — the link *is* the capability. The relay still only sees
 /// ciphertext.
 pub async fn deposit_link(path: &Path, relay: &str, ttl: u64, max: u32) -> Result<LinkOutcome> {
+    // Fail fast (before encrypting/uploading) if the relay administrator has
+    // turned links off — with a message that says exactly that.
+    anyhow::ensure!(
+        relay_allows_links(relay).await?,
+        "this relay has public download links disabled by its administrator — \
+         send it sealed to a recipient with --to, or use a different relay"
+    );
+
     let (blob, key, name, size) = encrypt_link(path)?;
 
     // Sender-held revoke secret; the relay stores only its BLAKE3 hash.

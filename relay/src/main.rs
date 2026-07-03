@@ -35,7 +35,12 @@ async fn main() -> Result<()> {
             .map_err(|e| anyhow::anyhow!("start blob node: {e}"))?,
     );
     tracing::info!(%blobstore, "blob-store node ready (backfill)");
-    let state = AppState::new(mailbox.clone(), blob_node);
+    let mut state = AppState::new(mailbox.clone(), blob_node);
+    state.links_enabled = !arvolo_relay::links_disabled_from_env();
+    tracing::info!(
+        links_enabled = state.links_enabled,
+        "browser download links"
+    );
 
     // Background reaper: delete expired mailbox blobs AND expired seeded blobs.
     {
