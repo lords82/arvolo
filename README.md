@@ -13,10 +13,12 @@ WeTransfer, Dropbox, or other US SaaS, there is **no vendor in the middle** that
 can read, retain, or be compelled to hand over your files — which makes GDPR data
 residency and digital-sovereignty requirements straightforward to meet.
 
-> Status: **working CLI** (v0.1). P2P + relay-backfill transfer with resume,
+> Status: **working CLI** (v0.6). P2P + relay-backfill transfer with resume,
 > per-chunk E2E encryption, short human pairing codes, send-to-a-contact, folders,
-> and an expiring zero-knowledge mailbox. Desktop GUI, browser link-mode and
-> federation are planned (see Roadmap).
+> and an expiring zero-knowledge mailbox. Plus an **always-open client**
+> (`listen`/`push`) that receives pushed files with a live watchdog, and
+> **browser download links** — share a URL that decrypts in any browser, no
+> install. Desktop GUI, relay federation, and mobile are planned (see Roadmap).
 
 ## Install
 
@@ -87,6 +89,33 @@ arvolo send-offline ./report.pdf --to <id-or-contact> # sender deposits (HPKE E2
 arvolo recv-offline arvm…                             # recipient fetches + decrypts (burns on read)
 ```
 
+**Always-open client** — stay online and receive files contacts push to you; each
+incoming offer shows sender, name, and size, and accepted transfers download
+transparently (no ticket to copy):
+
+```sh
+# receiver: stay online (auto-accept files from saved contacts)
+arvolo listen --auto-accept-contacts
+
+# sender: push straight to a contact — live P2P if they're online, else it lands
+# in the mailbox and is delivered when they return
+arvolo push ./photo.jpg --to alice
+```
+
+**Browser download link** — share a URL anyone can open in a browser to download
+and decrypt the file, **no arvolo install and no account**. The key lives only in
+the link's `#fragment`, so the relay stays zero-knowledge:
+
+```sh
+arvolo send-offline ./report.pdf --link
+#   ->  https://relay.example.com/dl/<claim>#<key>
+
+# The link is tracked as a local session; cancel it (and delete the file from the
+# relay) anytime:
+arvolo sessions list
+arvolo sessions rm <id>
+```
+
 ## Commands
 
 | Command | What it does |
@@ -100,9 +129,15 @@ arvolo recv-offline arvm…                             # recipient fetches + de
 | &nbsp;&nbsp;`--qr` | Also render the ticket/code as a scannable QR. |
 | `arvolo recv <ticket\|code> [-o out]` | Receive from an `arvc…` ticket **or** a pairing code; resumes if interrupted; unpacks folders. |
 | `arvolo id` | Show your public id (created on first use). |
-| `arvolo contacts add\|list\|remove` | Address book of recipients, used by `--to`. |
-| `arvolo send-offline <file> --to <name\|id> [--relay --ttl --max --qr]` | Encrypt (HPKE) and deposit on a relay for an offline recipient. |
+| `arvolo contacts add\|list\|verify\|remove` | Address book of recipients (used by `--to`); TOFU + out-of-band fingerprint verification. |
+| `arvolo send-offline <file> --to <name\|id> [--relay --ttl --max --password --qr]` | Encrypt (HPKE) and deposit on a relay for an offline recipient. |
+| &nbsp;&nbsp;`--link` | Instead, produce a **browser download link** (public capability, decrypts client-side). `--to` is not used; **no download cap** by default. |
 | `arvolo recv-offline <arvm…> [-o out]` | Fetch + decrypt an offline ticket. |
+| `arvolo listen [--download-dir --auto-accept-contacts --auto-accept-verified]` | Stay online and receive files contacts push to you (offers, live watchdog, transparent download). |
+| `arvolo push <paths…> --to <name\|id>` | Push to a contact: live P2P if online, else deposited to the mailbox and delivered on their return. |
+| `arvolo sessions list\|rm <id>` | List relay deposits (link / sealed) with live relay status + resumable sends; `rm` **revokes on the relay**, deleting the file/link. |
+| `arvolo revoke <arvm…> --token <t>` / `revoke-link <url> --token <t>` | Delete a deposited ticket / download link from the relay. |
+| `arvolo transfers list\|clear` | Show or clear the history of past transfers. |
 
 Run `arvolo <cmd> --help` for the full flag list.
 
@@ -132,16 +167,33 @@ Contacts live in `~/.config/arvolo/contacts.toml` (managed via `arvolo contacts`
 - **P2P transport** over [iroh](https://www.iroh.computer/) QUIC (dial by key, not
   IP; automatic hole-punching with relay fallback).
 - **Per-chunk E2E encryption**: files are split into 16 MiB chunks, each sealed
-  with ChaCha20-Poly1305 under a per-transfer key; the content key travels only in
-  the ticket/code. The sender encrypts **on the fly** and stores nothing — sending
-  a file uses bounded memory and **no extra disk**, regardless of file size.
+  with AES-256-GCM under a per-transfer key; the content key travels only in the
+  ticket/code. The sender encrypts **on the fly** and stores nothing — sending a
+  file uses bounded memory and **no extra disk**, regardless of file size.
+- **One AEAD everywhere**: AES-256-GCM is used for HPKE, the chunk stream, and the
+  password wrap — the same cipher the browser decrypts natively via WebCrypto for
+  download links. Equivalent strength to ChaCha20-Poly1305 and hardware-accelerated
+  (AES-NI); the nonce discipline guarantees a `(key, nonce)` pair is never reused.
 - **Zero-knowledge relay**: for lazy backfill (sender may go offline) or the
   offline mailbox, the relay holds only **ciphertext** addressed by BLAKE3 hash,
   and auto-deletes on release / TTL / burn-after-read.
 - **Short-code pairing** (magic-wormhole style): a SPAKE2 PAKE over a relay
   rendezvous exchanges the ticket, so two short words are safe (no offline
   dictionary attack) and the relay never sees the ticket in the clear.
+- **Always-open client**: `listen` keeps a client online; senders `push` offers
+  through a zero-knowledge inbox (proof-of-possession session auth) and presence
+  beacons, with a two-phase watchdog that delivers **live P2P** when the recipient
+  is online and falls back to the **mailbox** when they aren't.
+- **Browser download links**: `send-offline --link` deposits a chunked AES-256-GCM
+  container; the relay serves a self-contained page that fetches the ciphertext and
+  decrypts it in the browser (key only in the URL `#fragment`), streaming to disk
+  without buffering the whole file. Each link is a local **session** whose removal
+  revokes the blob on the relay.
 - **Resume**: interrupted receives resume — both across chunks and *within* a chunk.
+
+For the full wire protocol (ticket formats, relay HTTP API, and every flow), see
+[`docs/PROTOCOL.md`](docs/PROTOCOL.md); for the security rationale, see
+[`docs/TECHNICAL-OVERVIEW.md`](docs/TECHNICAL-OVERVIEW.md).
 
 **Self-host everything** (production, no third party): run `arvolo-relay` and your
 own iroh relay on a VPS, point clients with `ARVOLO_IROH_RELAY` and a configured
@@ -160,9 +212,10 @@ Build & test: `cargo build && cargo test`.
 
 ## Roadmap
 
-Planned next: desktop GUI, browser link-mode (Firefox Send heir), relay
-federation (short codes across independent relays), mobile. Post-MVP ideas are
-tracked in [`docs/ROADMAP-FUTURE.md`](docs/ROADMAP-FUTURE.md).
+Shipped recently: the always-open client (`listen`/`push`) and browser download
+links (the Firefox Send heir). Planned next: desktop GUI, relay federation (short
+codes across independent relays), and mobile. Post-MVP ideas are tracked in
+[`docs/ROADMAP-FUTURE.md`](docs/ROADMAP-FUTURE.md).
 
 ## Licensing
 
