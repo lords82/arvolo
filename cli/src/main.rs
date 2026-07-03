@@ -1509,10 +1509,18 @@ async fn push_via_daemon(
 ) -> Result<()> {
     use ipc::protocol::EventDto;
 
+    // The daemon resolves paths on *its own* cwd (e.g. `/` under systemd), not
+    // ours — so absolutize here, relative to the client's cwd, and validate the
+    // files exist now with a clear error instead of a confusing daemon-side one.
     let paths_s: Vec<String> = paths
         .iter()
-        .map(|p| p.to_string_lossy().into_owned())
-        .collect();
+        .map(|p| {
+            std::fs::canonicalize(p)
+                .with_context(|| format!("{}", p.display()))
+                .map(|abs| abs.to_string_lossy().into_owned())
+        })
+        .collect::<Result<Vec<_>>>()
+        .context("no such file or folder to push")?;
     // Subscribe before submitting so an early terminal event isn't missed.
     let mut events = daemon_events().await?;
     eprintln!("Handing off to the daemon (sending to {to})…");
