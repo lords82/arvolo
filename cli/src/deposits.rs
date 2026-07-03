@@ -167,7 +167,9 @@ mod tests {
 
     #[test]
     fn deposit_record_roundtrips_and_lists() {
-        let _guard = crate::testlock::ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::testlock::ENV
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("ARVOLO_CONFIG_DIR", dir.path());
 
