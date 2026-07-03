@@ -89,7 +89,10 @@ static IPV4_ONLY_AUTO: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
 /// True if the host has no usable IPv6 route. Probes by `connect`-ing a UDP
 /// socket to a global IPv6 address: `connect` sends no packets, it only checks
-/// the routing table, so this is side-effect-free and instant.
+/// the routing table. A bind/connect alone is not enough (macOS defers the route
+/// check to send time), so we probe with a single tiny datagram: no route → the
+/// send errors immediately. The one stray empty UDP packet to a public DNS server
+/// is harmless.
 fn no_ipv6_route() -> bool {
     use std::net::{Ipv6Addr, SocketAddrV6, UdpSocket};
     let Ok(sock) = UdpSocket::bind(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 0, 0, 0)) else {
@@ -102,5 +105,11 @@ fn no_ipv6_route() -> bool {
         0,
         0,
     );
-    sock.connect(target).is_err()
+    if sock.connect(target).is_err() {
+        return true;
+    }
+    // The actual routing decision happens on send; no route -> immediate error.
+    // A one-byte datagram forces the check (a zero-length send is a no-op on some
+    // platforms). The stray byte to a public DNS server's QUIC port is harmless.
+    sock.send(&[0u8]).is_err()
 }
