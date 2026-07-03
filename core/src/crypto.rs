@@ -5,16 +5,23 @@
 //! closing the gap of encrypt-only schemes like plain `age`. A relay or mailbox
 //! only ever sees ciphertext.
 //!
-//! Ciphersuite: X25519-HKDF-SHA256 KEM, HKDF-SHA256 KDF, ChaCha20-Poly1305 AEAD.
+//! Ciphersuite: X25519-HKDF-SHA256 KEM, HKDF-SHA256 KDF, AES-256-GCM AEAD.
+//!
+//! AES-256-GCM (rather than ChaCha20-Poly1305) so the exact same cipher can be
+//! decrypted natively in a browser via WebCrypto for the download-link path,
+//! keeping one AEAD across the whole codebase. It is equivalent in strength
+//! (256-bit AEAD) and hardware-accelerated (AES-NI) on our targets. The nonce
+//! discipline below (fresh key per transfer / per password salt) guarantees
+//! (key, nonce) is never reused — the one invariant AES-GCM depends on.
 
 use anyhow::{anyhow, Context, Result};
 use hpke::{
-    aead::ChaCha20Poly1305, kdf::HkdfSha256, kem::X25519HkdfSha256, Deserializable,
-    Kem as KemTrait, OpModeR, OpModeS, Serializable,
+    aead::AesGcm256, kdf::HkdfSha256, kem::X25519HkdfSha256, Deserializable, Kem as KemTrait,
+    OpModeR, OpModeS, Serializable,
 };
 
 type KemAlg = X25519HkdfSha256;
-type AeadAlg = ChaCha20Poly1305;
+type AeadAlg = AesGcm256;
 type KdfAlg = HkdfSha256;
 
 const INFO: &[u8] = b"arvolo/hpke/v1";
@@ -226,10 +233,10 @@ pub fn open_anon(sealed: &Sealed, recipient: &Identity, aad: &[u8]) -> Result<Ve
 // only inside the ticket (out-of-band). Each chunk is sealed INDEPENDENTLY with
 // a nonce derived from its index, so out-of-order multi-source fetch and resume
 // keep working — every ciphertext chunk is self-verifying (AEAD tag) and the
-// ticket's BLAKE3 hashes address the ciphertext. ChaCha20-Poly1305 AEAD.
+// ticket's BLAKE3 hashes address the ciphertext. AES-256-GCM AEAD.
 
-use chacha20poly1305::aead::{Aead, KeyInit, Payload};
-use chacha20poly1305::{ChaCha20Poly1305 as ChunkCipher, Key, Nonce};
+use aes_gcm::aead::{Aead, KeyInit, Payload};
+use aes_gcm::{Aes256Gcm as ChunkCipher, Key, Nonce};
 
 /// Length of a chunk content key.
 pub const CHUNK_KEY_LEN: usize = 32;
@@ -259,14 +266,14 @@ fn chunk_aad(index: u32, total_chunks: u32) -> [u8; 8] {
     aad
 }
 
-/// Encrypt one chunk. Output is `plaintext.len() + 16` bytes (Poly1305 tag).
+/// Encrypt one chunk. Output is `plaintext.len() + 16` bytes (GCM tag).
 pub fn seal_chunk(
     key: &[u8; CHUNK_KEY_LEN],
     index: u32,
     total_chunks: u32,
     plaintext: &[u8],
 ) -> Result<Vec<u8>> {
-    let cipher = ChunkCipher::new(Key::from_slice(key));
+    let cipher = ChunkCipher::new(Key::<ChunkCipher>::from_slice(key));
     let aad = chunk_aad(index, total_chunks);
     cipher
         .encrypt(
@@ -286,7 +293,7 @@ pub fn open_chunk(
     total_chunks: u32,
     ciphertext: &[u8],
 ) -> Result<Vec<u8>> {
-    let cipher = ChunkCipher::new(Key::from_slice(key));
+    let cipher = ChunkCipher::new(Key::<ChunkCipher>::from_slice(key));
     let aad = chunk_aad(index, total_chunks);
     cipher
         .decrypt(
@@ -345,7 +352,7 @@ pub fn wrap_with_password(password: &str, salt: &[u8], plaintext: &[u8]) -> Resu
         "password-wrap salt must be >= PW_SALT_LEN and unique per payload"
     );
     let key = pw_key(password, salt)?;
-    let cipher = ChunkCipher::new(Key::from_slice(&key));
+    let cipher = ChunkCipher::new(Key::<ChunkCipher>::from_slice(&key));
     cipher
         .encrypt(
             Nonce::from_slice(&[0u8; 12]),
@@ -364,7 +371,7 @@ pub fn unwrap_with_password(password: &str, salt: &[u8], ciphertext: &[u8]) -> R
         "password-wrap salt must be >= PW_SALT_LEN and unique per payload"
     );
     let key = pw_key(password, salt)?;
-    let cipher = ChunkCipher::new(Key::from_slice(&key));
+    let cipher = ChunkCipher::new(Key::<ChunkCipher>::from_slice(&key));
     cipher
         .decrypt(
             Nonce::from_slice(&[0u8; 12]),
