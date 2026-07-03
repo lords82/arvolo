@@ -195,13 +195,41 @@ pub fn record_seen(id_b32: &str) {
     }
 }
 
-/// Add or update a contact (validates the id).
-pub fn contact_add(name: &str, id: &str) -> Result<()> {
+/// A saved contact's key (id) changed under an existing name — a possible
+/// after-the-fact MITM (or an innocent reinstall). Surfaced so the user
+/// re-verifies out-of-band before trusting the new key.
+pub struct KeyChange {
+    pub old_fingerprint: String,
+    pub new_fingerprint: String,
+}
+
+/// Add or update a contact (validates the id). If the name already exists with a
+/// *different* id, reports the key change and drops the contact's verified mark
+/// (the new key is untrusted until re-verified).
+pub fn contact_add(name: &str, id: &str) -> Result<Option<KeyChange>> {
     decode_id(id).context("invalid public id")?;
+    let new_id = id.trim().to_lowercase();
     let mut c = load_contacts();
-    c.contacts
-        .insert(name.to_string(), id.trim().to_lowercase());
-    save_contacts(&c)
+
+    let key_change = match c.contacts.get(name) {
+        Some(old_id) if *old_id != new_id => {
+            let change = KeyChange {
+                old_fingerprint: fingerprint_of(old_id).unwrap_or_default(),
+                new_fingerprint: fingerprint_of(&new_id).unwrap_or_default(),
+            };
+            // The old key was possibly verified; the new one is not — clear it.
+            let mut v = load_verified();
+            if v.verified.remove(old_id) {
+                save_verified(&v)?;
+            }
+            Some(change)
+        }
+        _ => None,
+    };
+
+    c.contacts.insert(name.to_string(), new_id);
+    save_contacts(&c)?;
+    Ok(key_change)
 }
 
 /// Remove a contact; returns whether it existed.
@@ -295,7 +323,27 @@ mod tests {
             "sender is seen after recording a receipt"
         );
 
-        assert_eq!(contact_list(), vec![("alice".into(), id_b32)]);
+        assert_eq!(contact_list(), vec![("alice".into(), id_b32.clone())]);
+
+        // Verify + key-change detection: re-adding the same name under a *new* id
+        // reports a key change and drops the verified mark.
+        mark_verified("alice").unwrap();
+        assert!(is_verified(&id_b32), "alice is verified");
+        // Same id again → no key change, verified preserved.
+        assert!(contact_add("alice", &id_b32).unwrap().is_none());
+        assert!(is_verified(&id_b32), "re-adding the same id keeps verified");
+        // A different id → key change reported, verified cleared.
+        let new_id = Identity::generate().public();
+        let new_b32 = data_encoding::BASE32_NOPAD
+            .encode(&new_id.to_bytes())
+            .to_lowercase();
+        let change = contact_add("alice", &new_b32).unwrap();
+        assert!(change.is_some(), "key change is reported");
+        let change = change.unwrap();
+        assert_ne!(change.old_fingerprint, change.new_fingerprint);
+        assert!(!is_verified(&id_b32), "old key's verified mark is cleared");
+        assert!(!is_verified(&new_b32), "the new key is not auto-verified");
+
         assert!(contact_remove("alice").unwrap());
         assert!(contact_list().is_empty());
 

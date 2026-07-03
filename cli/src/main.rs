@@ -348,8 +348,19 @@ fn transfers_cmd(action: TransferAction) -> Result<()> {
 async fn contacts_cmd(action: ContactAction) -> Result<()> {
     match action {
         ContactAction::Add { name, id } => {
-            book::contact_add(&name, &id)?;
+            let key_change = book::contact_add(&name, &id)?;
             println!("Saved contact '{name}'.");
+            if let Some(kc) = key_change {
+                eprintln!(
+                    "\n⚠  The key for '{name}' CHANGED — this could be a reinstall, or a MITM."
+                );
+                eprintln!("      was fingerprint: {}", kc.old_fingerprint);
+                eprintln!("      now fingerprint: {}", kc.new_fingerprint);
+                eprintln!(
+                    "   The 'verified' mark was cleared. Confirm the new fingerprint out-of-band,"
+                );
+                eprintln!("   then: arvolo contacts verify {name}");
+            }
         }
         ContactAction::List => {
             let list = book::contact_list();
