@@ -1,0 +1,121 @@
+//! Browser download-link path over a real relay: the relay serves the static
+//! `/dl` page + script, and a deposited link container round-trips through the
+//! public `/v1/fetch/{claim}` endpoint and decrypts byte-identically — exactly
+//! what the in-browser decoder does, but exercised from Rust.
+
+use std::sync::Arc;
+
+use arvolo_core::backfill::BlobNode;
+use arvolo_core::link::{decode_key, decrypt_link, deposit_link};
+use arvolo_core::transfer::RelayChoice;
+use arvolo_relay::{router, AppState, Mailbox};
+
+async fn spawn_relay() -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let node = BlobNode::spawn(dir.path(), RelayChoice::Disabled)
+        .await
+        .expect("blob node");
+    let mailbox = Arc::new(Mailbox::in_memory().expect("mailbox"));
+    let state = AppState::new(mailbox, Arc::new(node));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _dir = dir;
+        axum::serve(listener, router(state)).await.unwrap();
+    });
+    format!("http://{addr}")
+}
+
+#[tokio::test]
+async fn dl_page_and_script_are_served_from_the_relay() {
+    let relay = spawn_relay().await;
+    let c = reqwest::Client::new();
+
+    let page = c.get(format!("{relay}/dl/anyclaim")).send().await.unwrap();
+    assert!(page.status().is_success());
+    let ct = page
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(ct.contains("text/html"), "page content-type: {ct}");
+    assert!(
+        page.headers().get("content-security-policy").is_some(),
+        "download page must carry a CSP"
+    );
+    let body = page.text().await.unwrap();
+    assert!(body.contains("arvolo"), "branded page");
+    assert!(body.contains("/dl.js"), "page references its script");
+
+    let js = c.get(format!("{relay}/dl.js")).send().await.unwrap();
+    assert!(js.status().is_success());
+    let js_ct = js
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(js_ct.contains("javascript"), "script content-type: {js_ct}");
+
+    // The streaming service worker is served from the root with a root scope.
+    let sw = c.get(format!("{relay}/arvolo-sw.js")).send().await.unwrap();
+    assert!(sw.status().is_success());
+    assert_eq!(
+        sw.headers()
+            .get("service-worker-allowed")
+            .and_then(|v| v.to_str().ok()),
+        Some("/"),
+        "service worker must be allowed a root scope"
+    );
+    assert!(sw.text().await.unwrap().contains("ReadableStream"));
+}
+
+#[tokio::test]
+async fn link_deposit_fetch_decrypt_roundtrip() {
+    let relay = spawn_relay().await;
+
+    // A payload spanning several 1 MiB chunks plus a partial tail.
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("quarterly report.pdf");
+    let bytes: Vec<u8> = (0..(1024 * 1024 * 2 + 4242u32))
+        .map(|i| (i % 251) as u8)
+        .collect();
+    std::fs::write(&src, &bytes).unwrap();
+
+    let out = deposit_link(&src, &relay, 3600, 1).await.expect("deposit");
+    assert!(
+        out.link.contains("/dl/"),
+        "link points at the page: {}",
+        out.link
+    );
+    assert_eq!(out.name, "quarterly report.pdf");
+    assert_eq!(out.size, bytes.len() as u64);
+
+    // Recover the key from the URL fragment (what the browser reads from `#`).
+    let frag = out.link.rsplit_once('#').unwrap().1;
+    let key = decode_key(frag).unwrap();
+
+    // Fetch the ciphertext over the same public HTTP endpoint the browser uses.
+    let blob = reqwest::get(format!("{relay}/v1/fetch/{}", out.claim))
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+
+    // Decrypt exactly as the in-browser decoder would.
+    let (name, data) = decrypt_link(&blob, &key).expect("decrypt");
+    assert_eq!(name, "quarterly report.pdf");
+    assert_eq!(data, bytes, "recovered bytes are identical");
+
+    // Burn-after-read: a second fetch is gone (one-time link).
+    let second = reqwest::get(format!("{relay}/v1/fetch/{}", out.claim))
+        .await
+        .unwrap();
+    assert!(!second.status().is_success(), "one-time link is consumed");
+}

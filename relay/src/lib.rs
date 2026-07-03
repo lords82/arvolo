@@ -923,6 +923,65 @@ fn default_max() -> u32 {
     1
 }
 
+/// The browser secure-download page, its script, and the streaming service
+/// worker. Decryption happens entirely client-side; the relay only serves
+/// ciphertext.
+const DL_HTML: &str = include_str!("web/dl.html");
+const DL_JS: &str = include_str!("web/dl.js");
+const DL_SW: &str = include_str!("web/arvolo-sw.js");
+
+/// A strict Content-Security-Policy for the download page: no external
+/// resources at all, only same-origin script/worker/frame and same-origin fetch
+/// (to `/v1/fetch/{claim}`). `worker-src`/`frame-src` are for the streaming
+/// service worker and the hidden download iframe it drives. No inline script.
+const DL_CSP: &str = "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; \
+     connect-src 'self'; img-src 'self' data:; worker-src 'self'; frame-src 'self'; \
+     frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
+
+async fn dl_page_handler() -> impl IntoResponse {
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (axum::http::header::CONTENT_SECURITY_POLICY, DL_CSP),
+            (axum::http::header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        ],
+        DL_HTML,
+    )
+}
+
+async fn dl_js_handler() -> impl IntoResponse {
+    (
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                "application/javascript; charset=utf-8",
+            ),
+            (axum::http::header::CONTENT_SECURITY_POLICY, DL_CSP),
+            (axum::http::header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        ],
+        DL_JS,
+    )
+}
+
+/// The streaming download service worker. Served from the root path so its
+/// default scope (`/`) covers the `/dl/stream/{id}` requests it must intercept.
+async fn dl_sw_handler() -> impl IntoResponse {
+    (
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                "application/javascript; charset=utf-8",
+            ),
+            (
+                axum::http::HeaderName::from_static("service-worker-allowed"),
+                "/",
+            ),
+            (axum::http::header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        ],
+        DL_SW,
+    )
+}
+
 /// Build the relay HTTP router over the shared [`AppState`].
 ///
 /// A global request-body limit (`max_blob_bytes()`) is applied so the relay
@@ -955,6 +1014,10 @@ pub fn router(state: AppState) -> Router {
             "/v1/presence/{slot}",
             post(presence_post_handler).get(presence_get_handler),
         )
+        // Browser secure-download page (E2E: decrypts client-side).
+        .route("/dl/{claim}", get(dl_page_handler))
+        .route("/dl.js", get(dl_js_handler))
+        .route("/arvolo-sw.js", get(dl_sw_handler))
         .route("/healthz", get(|| async { "ok" }))
         // Applied after the routes so it wraps them all: bounds every request
         // body, so no handler can buffer an unbounded body into memory.

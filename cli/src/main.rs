@@ -31,8 +31,17 @@ use indicatif::{ProgressBar, ProgressStyle};
 use tokio_util::sync::CancellationToken;
 
 mod book;
+mod deposits;
 mod history;
 mod sessions;
+
+/// Serializes tests that mutate the process-global `ARVOLO_CONFIG_DIR`, which
+/// several stores read; without this they race under the parallel test runner.
+#[cfg(test)]
+pub(crate) mod testlock {
+    use std::sync::Mutex;
+    pub static ENV: Mutex<()> = Mutex::new(());
+}
 
 #[derive(Parser)]
 #[command(
@@ -112,11 +121,22 @@ enum Command {
     /// Show your public id (creates an identity on first use).
     Id,
     /// Encrypt a file for a recipient and deposit it on a relay (offline send).
+    ///
+    /// With `--link`, produces a browser-openable download URL instead: anyone
+    /// with the link can decrypt it in their browser (no arvolo install, no
+    /// account). The key travels only in the link's `#fragment`, so the relay
+    /// stays zero-knowledge. In link mode `--to` is not used (the link is the
+    /// capability).
     SendOffline {
         path: PathBuf,
-        /// Recipient: a saved contact name or a public id (from their `arvolo id`).
+        /// Recipient: a saved contact name or a public id (from their `arvolo
+        /// id`). Required unless `--link` is given.
         #[arg(long)]
-        to: String,
+        to: Option<String>,
+        /// Produce a browser download link (public capability) instead of a
+        /// recipient-sealed ticket.
+        #[arg(long)]
+        link: bool,
         /// Relay host or URL, e.g. relay.example.com (https assumed; pass
         /// --use-http for plaintext). Defaults to ARVOLO_RELAY / config `relay`.
         #[arg(long)]
@@ -128,9 +148,11 @@ enum Command {
         /// Time-to-live in seconds (default 7 days).
         #[arg(long, default_value_t = 7 * 24 * 3600)]
         ttl: u64,
-        /// Max downloads before deletion (default 1 = burn-after-read).
-        #[arg(long, default_value_t = 1)]
-        max: u32,
+        /// Max downloads before the file is deleted. Default: 1 (burn-after-read)
+        /// for a sealed send; **unlimited** for `--link` (a link expires only
+        /// when you remove its session or the TTL lapses).
+        #[arg(long)]
+        max: Option<u32>,
         /// Protect the link with a password (E2E — required to decrypt, even by
         /// the intended recipient). Share it out-of-band, not with the ticket.
         #[arg(long)]
@@ -153,6 +175,15 @@ enum Command {
         /// The offline ticket (`arvm…`) you sent.
         ticket: String,
         /// The revoke token printed when you sent it.
+        #[arg(long)]
+        token: String,
+    },
+    /// Revoke a browser download link (from `send-offline --link`), deleting its
+    /// blob from the relay so the link stops working.
+    RevokeLink {
+        /// The download link you shared (`…/dl/<claim>#…`). The key part is ignored.
+        link: String,
+        /// The revoke token printed when you created the link.
         #[arg(long)]
         token: String,
     },
@@ -265,24 +296,26 @@ async fn main() -> Result<()> {
         Command::Recv { ticket, out } => recv(ticket, out).await,
         Command::Id => id(),
         Command::Contacts { action } => contacts_cmd(action).await,
-        Command::Sessions { action } => sessions_cmd(action),
+        Command::Sessions { action } => sessions_cmd(action).await,
         Command::Transfers { action } => transfers_cmd(action),
         Command::SendOffline {
             path,
             to,
+            link,
             relay,
             use_http,
             ttl,
             max,
             password,
             qr,
-        } => send_offline(path, to, relay, use_http, ttl, max, password, qr).await,
+        } => send_offline(path, to, link, relay, use_http, ttl, max, password, qr).await,
         Command::RecvOffline {
             ticket,
             out,
             password,
         } => recv_offline(ticket, out, password).await,
         Command::Revoke { ticket, token } => revoke(ticket, token).await,
+        Command::RevokeLink { link, token } => revoke_link(link, token).await,
         Command::Listen {
             download_dir,
             relay,
@@ -413,26 +446,97 @@ async fn contacts_cmd(action: ContactAction) -> Result<()> {
     Ok(())
 }
 
-fn sessions_cmd(action: SessionAction) -> Result<()> {
+async fn sessions_cmd(action: SessionAction) -> Result<()> {
     match action {
         SessionAction::List => {
-            let list = sessions::list();
-            if list.is_empty() {
+            let dep_list = deposits::list();
+            let resumable = sessions::list();
+            if dep_list.is_empty() && resumable.is_empty() {
                 eprintln!(
-                    "(no resumable sessions — they're saved automatically when you `arvolo send`)"
+                    "(no sessions yet — saved automatically when you `arvolo send` or `send-offline`)"
                 );
                 return Ok(());
             }
-            eprintln!("Resume with: arvolo send --resume <id>\n");
-            for rec in list {
-                let kind = if rec.archive { "archive" } else { "file" };
-                println!(
-                    "{}\t{}\t{} chunk(s), {} bytes\t{}",
-                    rec.id, rec.name, rec.chunks, rec.total_size, kind
-                );
+
+            // Relay deposits (public links + sealed offline sends). We poll the
+            // relay for each one's live status (bounded, so a dead relay can't
+            // hang the listing).
+            if !dep_list.is_empty() {
+                println!("Relay deposits — `arvolo sessions rm <id>` deletes from the relay:\n");
+                for r in dep_list {
+                    let on_relay = match tokio::time::timeout(
+                        Duration::from_secs(5),
+                        flow::claim_status(&r.relay, &r.claim),
+                    )
+                    .await
+                    {
+                        Ok(Ok(flow::ClaimStatus::Pending)) => "present",
+                        Ok(Ok(flow::ClaimStatus::Gone)) => "gone (downloaded / expired / revoked)",
+                        _ => "unknown (relay unreachable)",
+                    };
+                    let expiry = if r.expired() {
+                        "EXPIRED".to_string()
+                    } else {
+                        format!(
+                            "in {}",
+                            human_duration(r.expires.saturating_sub(now_unix()))
+                        )
+                    };
+                    let kind = if r.kind == deposits::KIND_LINK {
+                        "link"
+                    } else {
+                        "sealed"
+                    };
+                    println!("● {}  [{kind}]  {}  ({})", r.id, r.name, human_size(r.size));
+                    println!("    relay:      {}", r.relay);
+                    if let Some(l) = &r.link {
+                        println!("    link:       {l}");
+                    }
+                    if let Some(rcpt) = &r.recipient {
+                        let disp = book::resolve_name(rcpt).unwrap_or_else(|| rcpt.clone());
+                        println!("    to:         {disp}");
+                    }
+                    println!("    downloads:  {}", r.max_label());
+                    println!(
+                        "    created:    {} ago",
+                        human_duration(now_unix().saturating_sub(r.created))
+                    );
+                    println!("    expires:    {expiry}");
+                    println!("    on relay:   {on_relay}");
+                    println!("    remove:     arvolo sessions rm {}\n", r.id);
+                }
+            }
+
+            // Resumable P2P send sessions.
+            if !resumable.is_empty() {
+                println!("Resumable sends — `arvolo send --resume <id>`:\n");
+                for rec in resumable {
+                    let kind = if rec.archive { "archive" } else { "file" };
+                    println!(
+                        "  {}  {}  {} chunk(s), {} bytes  [{kind}]",
+                        rec.id, rec.name, rec.chunks, rec.total_size
+                    );
+                }
             }
         }
         SessionAction::Rm { id } => {
+            // A relay-deposit session (link / sealed offline): revoke it on the
+            // relay first, then drop the local record — so the file and link
+            // stop existing, not just the local bookkeeping.
+            if let Some(r) = deposits::load(&id) {
+                match flow::revoke_offline(&r.relay, &r.claim, &r.revoke_token).await {
+                    Ok(()) => println!(
+                        "Revoked on the relay — '{}' is deleted; the link/ticket no longer works.",
+                        r.name
+                    ),
+                    Err(e) => {
+                        eprintln!("⚠ relay revoke failed ({e}); removing the local session anyway.")
+                    }
+                }
+                deposits::remove(&id)?;
+                println!("Removed session '{id}'.");
+                return Ok(());
+            }
             sessions::remove(&id)?;
             println!("Removed session '{id}'.");
         }
@@ -587,6 +691,34 @@ fn human_size(bytes: u64) -> String {
     } else {
         format!("{v:.1} {}", UNITS[u])
     }
+}
+
+/// Current unix time in seconds.
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// A compact human duration, largest two units (e.g. "7d", "3h 20m", "45s").
+fn human_duration(secs: u64) -> String {
+    if secs == 0 {
+        return "0s".into();
+    }
+    let units = [("d", 86400u64), ("h", 3600), ("m", 60), ("s", 1)];
+    let mut parts = Vec::new();
+    let mut rem = secs;
+    for (label, size) in units {
+        if rem >= size {
+            parts.push(format!("{}{label}", rem / size));
+            rem %= size;
+        }
+        if parts.len() == 2 {
+            break;
+        }
+    }
+    parts.join(" ")
 }
 
 /// Resolve the relay to use for presence, requiring one (offers can't work P2P).
@@ -1193,20 +1325,75 @@ async fn recv(ticket: String, out: Option<PathBuf>) -> Result<()> {
 #[allow(clippy::too_many_arguments)]
 async fn send_offline(
     path: PathBuf,
-    to: String,
+    to: Option<String>,
+    link: bool,
     relay: Option<String>,
     use_http: bool,
     ttl: u64,
-    max: u32,
+    max: Option<u32>,
     password: Option<String>,
     qr: bool,
 ) -> Result<()> {
     let me = my_identity()?;
-    let recipient = book::resolve_recipient(&to)?;
     let relay = relay
         .map(|r| book::normalize_relay(&r, use_http))
         .or_else(book::default_relay)
         .context("no relay: pass --relay <host>, set ARVOLO_RELAY, or configure `relay`")?;
+
+    // Link mode: a public, browser-openable download URL (no recipient). A link
+    // has NO download cap by default (it expires only when its session is
+    // removed or the TTL lapses); `--max` optionally sets one.
+    if link {
+        anyhow::ensure!(
+            to.is_none(),
+            "--link produces a public link; --to is not used (anyone with the link can download)"
+        );
+        anyhow::ensure!(
+            password.is_none(),
+            "--password is not yet supported with --link (the browser page can't unwrap it)"
+        );
+        let max = max.unwrap_or(deposits::UNLIMITED);
+        let out = arvolo_core::link::deposit_link(&path, &relay, ttl, max).await?;
+        let rec = deposits::save(
+            deposits::KIND_LINK,
+            &relay,
+            &out.claim,
+            &out.revoke_token,
+            &out.name,
+            out.size,
+            max,
+            Some(out.link.clone()),
+            None,
+            ttl,
+        )?;
+        let cap = if max == deposits::UNLIMITED {
+            "no download limit".to_string()
+        } else {
+            format!("{max} download(s)")
+        };
+        println!(
+            "\nEncrypted and deposited ({}, expires in {}). File: {} ({}).",
+            cap,
+            human_duration(ttl),
+            out.name,
+            human_size(out.size),
+        );
+        println!("Anyone with this link can download it in a browser — no arvolo needed:\n");
+        println!("    {}\n", out.link);
+        println!(
+            "Session '{}' saved — cancel the link (and delete it from the relay) with:\n",
+            rec.id
+        );
+        println!("    arvolo sessions rm {}\n", rec.id);
+        if qr {
+            print_qr(&out.link);
+        }
+        return Ok(());
+    }
+
+    let to = to.context("--to <name|id> is required (or pass --link for a public link)")?;
+    let max = max.unwrap_or(1);
+    let recipient = book::resolve_recipient(&to)?;
     let deposited = flow::deposit_offline(
         &path,
         &recipient,
@@ -1218,17 +1405,38 @@ async fn send_offline(
     )
     .await?;
     let encoded = deposited.ticket.encode();
-    println!("\nEncrypted and deposited (expires in {ttl}s, {max} download(s)).");
+    let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("file")
+        .to_string();
+    let rec = deposits::save(
+        deposits::KIND_OFFLINE,
+        &relay,
+        &deposited.ticket.claim,
+        &deposited.revoke_token,
+        &name,
+        size,
+        max,
+        None,
+        Some(to.clone()),
+        ttl,
+    )?;
+    println!(
+        "\nEncrypted and deposited ({max} download(s), expires in {}).",
+        human_duration(ttl)
+    );
     if password.is_some() {
         println!("Password-protected — share the password out-of-band (not with the ticket).");
     }
     println!("Send this ticket to the recipient:\n");
     println!("    arvolo recv-offline {encoded}\n");
-    println!("Keep this revoke token to cancel the delivery later:\n");
     println!(
-        "    arvolo revoke {encoded} --token {}\n",
-        deposited.revoke_token
+        "Session '{}' saved — cancel the delivery (and delete it from the relay) with:\n",
+        rec.id
     );
+    println!("    arvolo sessions rm {}\n", rec.id);
     if qr {
         print_qr(&encoded);
     }
@@ -1256,5 +1464,25 @@ async fn revoke(ticket: String, token: String) -> Result<()> {
         .context("not a valid offline ticket (arvm…)")?;
     flow::revoke_offline(&t.relay, &t.claim, &token).await?;
     println!("Revoked — the blob is no longer available on the relay.");
+    Ok(())
+}
+
+/// Parse a download link (`https://<relay>/dl/<claim>[#key]`) into its relay base
+/// URL and the claim. The `#fragment` (the key) is ignored — revoking needs only
+/// the relay and claim.
+fn parse_dl_link(link: &str) -> Result<(String, String)> {
+    let no_frag = link.split('#').next().unwrap_or(link);
+    let (relay, claim) = no_frag
+        .rsplit_once("/dl/")
+        .context("not an arvolo download link (expected …/dl/<claim>)")?;
+    let claim = claim.trim_matches('/');
+    anyhow::ensure!(!claim.is_empty(), "download link is missing its claim");
+    Ok((relay.trim_end_matches('/').to_string(), claim.to_string()))
+}
+
+async fn revoke_link(link: String, token: String) -> Result<()> {
+    let (relay, claim) = parse_dl_link(&link)?;
+    flow::revoke_offline(&relay, &claim, &token).await?;
+    println!("Link revoked — the file is deleted from the relay and the link no longer works.");
     Ok(())
 }

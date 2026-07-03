@@ -278,6 +278,7 @@ mod tests {
 
     #[test]
     fn contacts_and_config_roundtrip() {
+        let _guard = crate::testlock::ENV.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("ARVOLO_CONFIG_DIR", dir.path());
         std::env::remove_var("ARVOLO_RELAY");

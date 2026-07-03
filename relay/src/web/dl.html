@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>arvolo — secure download</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; display: grid; place-items: center; padding: 24px;
+    font: 15px/1.55 system-ui, -apple-system, Segoe UI, Roboto, Helvetica, sans-serif;
+    color: #e7ebf0;
+    background:
+      radial-gradient(900px 500px at 15% -10%, #16351f 0%, transparent 55%),
+      radial-gradient(800px 500px at 110% 10%, #10233a 0%, transparent 50%),
+      #090b0e;
+  }
+  .wrap { width: min(94vw, 440px); }
+  .brand {
+    display: flex; align-items: center; gap: 9px; justify-content: center;
+    margin-bottom: 16px; letter-spacing: .3px;
+  }
+  .brand .mark {
+    width: 26px; height: 26px; border-radius: 8px; display: grid; place-items: center;
+    background: linear-gradient(135deg, #46d17f, #1f9e5a); color: #06210f;
+    font-weight: 800; font-size: 15px;
+  }
+  .brand b { font-size: 16px; font-weight: 700; }
+  .card {
+    padding: 26px 24px 22px; border-radius: 16px;
+    background: rgba(20,23,28,.86); border: 1px solid #232a33;
+    box-shadow: 0 20px 60px rgba(0,0,0,.45); backdrop-filter: blur(6px);
+  }
+  h1 { font-size: 16px; margin: 0 0 4px; }
+  .sub { color: #8b95a3; font-size: 12.5px; margin: 0 0 20px; }
+  .file {
+    display: flex; gap: 13px; align-items: center; margin: 0 0 18px;
+    padding: 13px 14px; border-radius: 12px;
+    background: #0d1117; border: 1px solid #20262e;
+  }
+  .file .ic { font-size: 24px; filter: grayscale(.1); }
+  .file .name { font-weight: 650; word-break: break-all; line-height: 1.35; }
+  .file .size { color: #8b95a3; font-size: 12px; margin-top: 1px; }
+  button {
+    width: 100%; padding: 13px 16px; border: 0; border-radius: 11px; cursor: pointer;
+    font: inherit; font-weight: 700; color: #06210f;
+    background: linear-gradient(135deg, #4cdd86, #22a862);
+    transition: transform .05s ease, filter .15s ease;
+  }
+  button:hover:not(:disabled) { filter: brightness(1.06); }
+  button:active:not(:disabled) { transform: translateY(1px); }
+  button:disabled { opacity: .5; cursor: default; }
+  .bar { height: 7px; border-radius: 5px; background: #1a1f26; overflow: hidden; margin: 16px 0 6px; display: none; }
+  .bar > i {
+    display: block; height: 100%; width: 0;
+    background: linear-gradient(90deg, #46d17f, #7ef0a9);
+    transition: width .12s linear;
+  }
+  .status { min-height: 18px; font-size: 12.5px; color: #8b95a3; text-align: center; }
+  .status.err { color: #ff6b6b; }
+  .status.ok { color: #57df8c; }
+  .warn {
+    margin: 14px 0 0; padding: 10px 12px; border-radius: 10px; font-size: 12px; line-height: 1.45;
+    background: rgba(214,158,46,.10); border: 1px solid rgba(214,158,46,.35); color: #e6c07a;
+  }
+  .warn b { color: #f0cf8e; }
+  .lock {
+    color: #7c8695; font-size: 11.5px; margin-top: 16px; text-align: center;
+    display: flex; gap: 6px; align-items: baseline; justify-content: center;
+  }
+  code { background: #0d1117; padding: 1px 5px; border-radius: 5px; font-size: 11px; color: #a7b0bd; }
+  footer { text-align: center; margin-top: 16px; font-size: 12px; color: #6b7482; }
+  footer a { color: #8b95a3; text-decoration: none; border-bottom: 1px dashed #3a434f; }
+  footer a:hover { color: #cfd6de; }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="brand"><span class="mark">A</span><b>arvolo</b></div>
+    <main class="card">
+      <h1>Someone shared an encrypted file with you</h1>
+      <p class="sub">It's end-to-end encrypted. It gets decrypted right here in your browser — the server never sees the file or the key.</p>
+      <div class="file">
+        <span class="ic">📦</span>
+        <div>
+          <div class="name" id="name">Encrypted file</div>
+          <div class="size" id="size">tap Download to decrypt</div>
+        </div>
+      </div>
+      <button id="go" disabled>Preparing…</button>
+      <div class="bar" id="bar"><i id="fill"></i></div>
+      <div class="status" id="status"></div>
+      <div class="warn" id="warn" hidden></div>
+      <div class="lock"><span>🛡️</span><span>The decryption key lives only in this link's <code>#fragment</code> — never sent to any server.</span></div>
+    </main>
+    <footer>Secure transfer powered by <a href="https://github.com/lords82/arvolo" target="_blank" rel="noopener noreferrer">arvolo on GitHub ↗</a></footer>
+  </div>
+  <script src="/dl.js"></script>
+</body>
+</html>
