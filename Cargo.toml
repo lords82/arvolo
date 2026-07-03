@@ -3,7 +3,7 @@ resolver = "2"
 members = ["core", "cli", "relay"]
 
 [workspace.package]
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 rust-version = "1.88"
 license = "AGPL-3.0-only"
@@ -19,4 +19,4 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4", features = ["derive"] }
 # Both a path (for local builds) and a version (required so the binary crates
 # can be published to crates.io referencing a released core).
-arvolo-core = { path = "core", version = "0.6.0" }
+arvolo-core = { path = "core", version = "0.7.0" }
