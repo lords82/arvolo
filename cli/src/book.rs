@@ -27,6 +27,9 @@ fn seen_path() -> PathBuf {
 fn verified_path() -> PathBuf {
     config_dir().join("verified.toml")
 }
+fn trusted_path() -> PathBuf {
+    config_dir().join("trusted.toml")
+}
 
 #[derive(Default, Deserialize)]
 struct Config {
@@ -105,12 +108,14 @@ pub fn resolve_name(id_b32: &str) -> Option<String> {
 }
 
 /// What we know about a sender before recording this receipt: their contact name
-/// (if saved), whether we've received from them before (TOFU), and whether the
-/// user has verified their identity out-of-band.
+/// (if saved), whether we've received from them before (TOFU), whether the user
+/// has verified their identity out-of-band, and whether the user trusts them to
+/// auto-download without a prompt.
 pub struct SenderStatus {
     pub name: Option<String>,
     pub seen_before: bool,
     pub verified: bool,
+    pub trusted: bool,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -126,12 +131,14 @@ fn load_seen() -> Seen {
         .unwrap_or_default()
 }
 
-/// Contact name + whether this sender id has been seen before + verified. Read-only.
+/// Contact name + whether this sender id has been seen before + verified + trusted.
+/// Read-only.
 pub fn sender_status(id_b32: &str) -> SenderStatus {
     SenderStatus {
         name: resolve_name(id_b32),
         seen_before: load_seen().seen.contains_key(id_b32),
         verified: is_verified(id_b32),
+        trusted: is_trusted(id_b32),
     }
 }
 
@@ -184,6 +191,55 @@ pub fn unmark_verified(name: &str) -> Result<()> {
     Ok(())
 }
 
+#[derive(Default, Serialize, Deserialize)]
+struct Trusted {
+    #[serde(default)]
+    trusted: BTreeSet<String>,
+}
+
+fn load_trusted() -> Trusted {
+    std::fs::read_to_string(trusted_path())
+        .ok()
+        .and_then(|s| toml::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn save_trusted(t: &Trusted) -> Result<()> {
+    std::fs::create_dir_all(config_dir()).ok();
+    let text = toml::to_string_pretty(t).context("serialize trusted")?;
+    std::fs::write(trusted_path(), text).context("write trusted")
+}
+
+/// Does the user trust this identity to auto-download without a prompt? Distinct
+/// from [`is_verified`]: verified = key authenticity; trusted = auto-accept.
+pub fn is_trusted(id_b32: &str) -> bool {
+    load_trusted().trusted.contains(id_b32)
+}
+
+/// Trust a contact (by name) to auto-download. Errors if the name isn't saved.
+pub fn mark_trusted(name: &str) -> Result<String> {
+    let id = load_contacts()
+        .contacts
+        .get(name)
+        .cloned()
+        .with_context(|| format!("no such contact '{name}'"))?;
+    let mut t = load_trusted();
+    t.trusted.insert(id.clone());
+    save_trusted(&t)?;
+    Ok(id)
+}
+
+/// Remove a contact's trusted mark (by name).
+pub fn unmark_trusted(name: &str) -> Result<()> {
+    if let Some(id) = load_contacts().contacts.get(name) {
+        let mut t = load_trusted();
+        if t.trusted.remove(id) {
+            save_trusted(&t)?;
+        }
+    }
+    Ok(())
+}
+
 /// Record a receipt from `id_b32` (TOFU ledger): increments its counter. Best
 /// effort — a failure to persist must not break a completed transfer.
 pub fn record_seen(id_b32: &str) {
@@ -217,10 +273,15 @@ pub fn contact_add(name: &str, id: &str) -> Result<Option<KeyChange>> {
                 old_fingerprint: fingerprint_of(old_id).unwrap_or_default(),
                 new_fingerprint: fingerprint_of(&new_id).unwrap_or_default(),
             };
-            // The old key was possibly verified; the new one is not — clear it.
+            // The old key was possibly verified/trusted; the new one is neither
+            // until the user re-verifies out-of-band — clear both marks.
             let mut v = load_verified();
             if v.verified.remove(old_id) {
                 save_verified(&v)?;
+            }
+            let mut t = load_trusted();
+            if t.trusted.remove(old_id) {
+                save_trusted(&t)?;
             }
             Some(change)
         }
@@ -328,6 +389,16 @@ mod tests {
 
         assert_eq!(contact_list(), vec![("alice".into(), id_b32.clone())]);
 
+        // Trust ledger: default untrusted; mark/unmark round-trips.
+        assert!(!sender_status(&id_b32).trusted, "untrusted by default");
+        mark_trusted("alice").unwrap();
+        assert!(is_trusted(&id_b32), "alice is trusted after marking");
+        assert!(sender_status(&id_b32).trusted);
+        unmark_trusted("alice").unwrap();
+        assert!(!is_trusted(&id_b32), "trust cleared after unmark");
+        // Re-trust for the key-change check below.
+        mark_trusted("alice").unwrap();
+
         // Verify + key-change detection: re-adding the same name under a *new* id
         // reports a key change and drops the verified mark.
         mark_verified("alice").unwrap();
@@ -346,6 +417,11 @@ mod tests {
         assert_ne!(change.old_fingerprint, change.new_fingerprint);
         assert!(!is_verified(&id_b32), "old key's verified mark is cleared");
         assert!(!is_verified(&new_b32), "the new key is not auto-verified");
+        assert!(
+            !is_trusted(&id_b32),
+            "old key's trust is cleared on key change"
+        );
+        assert!(!is_trusted(&new_b32), "the new key is not auto-trusted");
 
         assert!(contact_remove("alice").unwrap());
         assert!(contact_list().is_empty());

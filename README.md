@@ -129,7 +129,7 @@ arvolo sessions rm <id>
 | &nbsp;&nbsp;`--qr` | Also render the ticket/code as a scannable QR. |
 | `arvolo recv <ticket\|code> [-o out]` | Receive from an `arvc…` ticket **or** a pairing code; resumes if interrupted; unpacks folders. |
 | `arvolo id` | Show your public id (created on first use). |
-| `arvolo contacts add\|list\|verify\|remove` | Address book of recipients (used by `--to`); TOFU + out-of-band fingerprint verification. |
+| `arvolo contacts add\|list\|verify\|remove\|trust\|untrust` | Address book of recipients (used by `--to`); TOFU + out-of-band fingerprint verification. `trust` lets the daemon auto-download that contact's files (default: ask). |
 | `arvolo send-offline <file> --to <name\|id> [--relay --ttl --max --password --qr]` | Encrypt (HPKE) and deposit on a relay for an offline recipient. |
 | &nbsp;&nbsp;`--link` | Instead, produce a **browser download link** (public capability, decrypts client-side). `--to` is not used; **no download cap** by default. |
 | `arvolo recv-offline <arvm…> [-o out]` | Fetch + decrypt an offline ticket. |
@@ -138,6 +138,8 @@ arvolo sessions rm <id>
 | `arvolo sessions list\|rm <id>` | List relay deposits (link / sealed) with live relay status + resumable sends; `rm` **revokes on the relay**, deleting the file/link. |
 | `arvolo revoke <arvm…> --token <t>` / `revoke-link <url> --token <t>` | Delete a deposited ticket / download link from the relay. |
 | `arvolo transfers list\|clear` | Show or clear the history of past transfers. |
+| `arvolo daemon [--download-dir --relay]` | Run the always-on background engine + local control socket (systemd/launchd). See [`docs/DAEMON.md`](docs/DAEMON.md). |
+| `arvolo status [--watch]` / `pending` / `accept <id>` / `reject <id>` / `cancel <id>` | Drive the running daemon: unified in/out view, approve/decline parked offers, cancel a transfer. |
 
 Run `arvolo <cmd> --help` for the full flag list.
 

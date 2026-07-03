@@ -34,6 +34,12 @@ use tokio_util::sync::CancellationToken;
 mod book;
 mod deposits;
 mod history;
+// The daemon speaks over a Unix-domain socket; Windows (a future GUI target)
+// will get a named-pipe transport behind the same protocol later.
+#[cfg(unix)]
+mod ipc;
+#[cfg(unix)]
+mod notify;
 mod sessions;
 
 /// Serializes tests that mutate the process-global `ARVOLO_CONFIG_DIR`, which
@@ -299,6 +305,55 @@ enum Command {
         #[arg(long)]
         use_http: bool,
     },
+    /// Run the always-on background engine: stays online, receives files, and
+    /// exposes a local control socket so `push`/`transfers`/etc. drive one shared
+    /// instance. Meant to run under systemd/launchd. Needs a relay.
+    #[cfg(unix)]
+    Daemon {
+        /// Directory to save accepted downloads into
+        /// (default: <config>/downloads).
+        #[arg(long)]
+        download_dir: Option<PathBuf>,
+        /// Relay host or URL (https assumed; pass --use-http for plaintext).
+        /// Defaults to ARVOLO_RELAY / config `relay`.
+        #[arg(long)]
+        relay: Option<String>,
+        /// Treat a bare relay address as `http://` instead of `https://`.
+        #[arg(long)]
+        use_http: bool,
+    },
+    /// Show all live transfers (in and out) and pending offers from the running
+    /// daemon. Requires `arvolo daemon` to be running.
+    #[cfg(unix)]
+    Status {
+        /// Keep the view open and redraw as transfers progress.
+        #[arg(long)]
+        watch: bool,
+    },
+    /// List incoming offers the daemon has parked awaiting your approval.
+    #[cfg(unix)]
+    Pending,
+    /// Accept a parked offer by its id (see `arvolo pending`) and download it.
+    #[cfg(unix)]
+    Accept {
+        /// The offer id shown by `arvolo pending`.
+        offer_id: String,
+        /// Save to this path instead of the daemon's download dir.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Reject a parked offer by its id.
+    #[cfg(unix)]
+    Reject {
+        /// The offer id shown by `arvolo pending`.
+        offer_id: String,
+    },
+    /// Cancel a running transfer by its id (see `arvolo status`).
+    #[cfg(unix)]
+    Cancel {
+        /// The transfer id shown by `arvolo status`.
+        id: u64,
+    },
 }
 
 #[derive(Subcommand)]
@@ -313,6 +368,10 @@ enum ContactAction {
     Verify { name: String },
     /// Remove a contact's verified mark.
     Unverify { name: String },
+    /// Trust a contact so the daemon auto-downloads their files without asking.
+    Trust { name: String },
+    /// Stop auto-downloading from a contact (their files will ask again).
+    Untrust { name: String },
 }
 
 #[derive(Subcommand)]
@@ -409,6 +468,22 @@ async fn main() -> Result<()> {
             relay,
             use_http,
         } => push(paths, to, relay, use_http).await,
+        #[cfg(unix)]
+        Command::Daemon {
+            download_dir,
+            relay,
+            use_http,
+        } => daemon(download_dir, relay, use_http).await,
+        #[cfg(unix)]
+        Command::Status { watch } => status_cmd(watch).await,
+        #[cfg(unix)]
+        Command::Pending => pending_cmd().await,
+        #[cfg(unix)]
+        Command::Accept { offer_id, out } => accept_cmd(offer_id, out).await,
+        #[cfg(unix)]
+        Command::Reject { offer_id } => reject_cmd(offer_id).await,
+        #[cfg(unix)]
+        Command::Cancel { id } => cancel_cmd(id).await,
     }
 }
 
@@ -474,6 +549,11 @@ async fn contacts_cmd(action: ContactAction) -> Result<()> {
             let client = reqwest::Client::new();
             for (name, id) in list {
                 let verified = if book::is_verified(&id) { " ✓" } else { "" };
+                let trusted = if book::is_trusted(&id) {
+                    " ⬇trusted"
+                } else {
+                    ""
+                };
                 let status = match (&relay, book::resolve_recipient(&id).ok()) {
                     (Some(r), Some(pk)) => {
                         if arvolo_core::presence::check_online(&client, r, &pk)
@@ -488,14 +568,17 @@ async fn contacts_cmd(action: ContactAction) -> Result<()> {
                     _ => "?",
                 };
                 match book::fingerprint_of(&id) {
-                    Some(fp) => println!("{status} {name}{verified}\t{id}\t({fp})"),
-                    None => println!("{status} {name}{verified}\t{id}"),
+                    Some(fp) => println!("{status} {name}{verified}{trusted}\t{id}\t({fp})"),
+                    None => println!("{status} {name}{verified}{trusted}\t{id}"),
                 }
             }
         }
         ContactAction::Remove { name } => {
+            // Clear the ledgers first — they resolve the id via the contact name,
+            // which is gone once removed.
+            book::unmark_verified(&name).ok();
+            book::unmark_trusted(&name).ok();
             if book::contact_remove(&name)? {
-                book::unmark_verified(&name).ok();
                 println!("Removed contact '{name}'.");
             } else {
                 eprintln!("No such contact '{name}'.");
@@ -510,6 +593,21 @@ async fn contacts_cmd(action: ContactAction) -> Result<()> {
         ContactAction::Unverify { name } => {
             book::unmark_verified(&name)?;
             println!("Cleared verified mark for '{name}'.");
+        }
+        ContactAction::Trust { name } => {
+            let id = book::mark_trusted(&name)?;
+            let fp = book::fingerprint_of(&id).unwrap_or_default();
+            println!("Trusting '{name}' — files from them auto-download without a prompt.");
+            eprintln!("   (fingerprint: {fp})");
+            if !book::is_verified(&id) {
+                eprintln!(
+                    "   tip: they're not verified yet — consider `arvolo contacts verify {name}` first."
+                );
+            }
+        }
+        ContactAction::Untrust { name } => {
+            book::unmark_trusted(&name)?;
+            println!("Cleared trust for '{name}' — their files will ask for approval again.");
         }
     }
     Ok(())
@@ -826,6 +924,21 @@ async fn listen(
     auto_accept_verified: bool,
     yes: bool,
 ) -> Result<()> {
+    // If a daemon is already receiving, attach to it as a viewer/approver instead
+    // of standing up a second engine (which would fight over presence/inbox).
+    #[cfg(unix)]
+    {
+        if let Some(client) = daemon_client().await {
+            if download_dir.is_some() {
+                eprintln!(
+                    "note: --download-dir is ignored when attaching to the daemon \
+                     (it saves to its own configured dir)."
+                );
+            }
+            return listen_attached(client, auto_accept_contacts, auto_accept_verified, yes).await;
+        }
+    }
+
     let relay = require_relay(relay, use_http)?;
     let me = my_identity()?;
     let my_id = encode_id(&me.public());
@@ -915,6 +1028,120 @@ async fn listen(
     Ok(())
 }
 
+/// How an attached `listen` decides whether to auto-accept an incoming offer.
+#[cfg(unix)]
+#[derive(Clone, Copy)]
+struct AcceptPolicy {
+    auto_accept_contacts: bool,
+    auto_accept_verified: bool,
+    yes: bool,
+}
+
+/// Decide + act on one offer over the daemon IPC.
+#[cfg(unix)]
+async fn handle_attached_offer(
+    client: &mut ipc::client::DaemonClient,
+    offer: ipc::protocol::OfferDto,
+    policy: AcceptPolicy,
+) {
+    let status = book::sender_status(&offer.from);
+    let who = status.name.clone().unwrap_or_else(|| offer.from.clone());
+    // Trusted senders are auto-downloaded by the daemon itself; don't also prompt
+    // for them here (the daemon already accepted or will).
+    if status.trusted {
+        eprintln!("⬇ auto-downloading {} from trusted {who}", offer.name);
+        return;
+    }
+    eprintln!("\n📨 Incoming file offer:");
+    eprintln!(
+        "   from: {who}{}",
+        if status.verified { " ✓ verified" } else { "" }
+    );
+    eprintln!("   file: {}  ({})", offer.name, human_size(offer.size));
+
+    let accept = if policy.yes {
+        true
+    } else if policy.auto_accept_verified && status.verified {
+        eprintln!("   (auto-accepting: verified contact)");
+        true
+    } else if policy.auto_accept_contacts && status.name.is_some() {
+        eprintln!("   (auto-accepting: saved contact)");
+        true
+    } else {
+        confirm(format!("   Accept from {who}?")).await
+    };
+
+    if accept {
+        match client.accept(offer.id, None).await {
+            Ok(tid) => eprintln!("   ✓ accepted — downloading (transfer {tid})…"),
+            Err(e) => eprintln!("   ✗ could not accept: {e:#}"),
+        }
+    } else {
+        match client.reject(offer.id).await {
+            Ok(()) => eprintln!("   ✗ rejected"),
+            Err(e) => eprintln!("   ✗ could not reject: {e:#}"),
+        }
+    }
+}
+
+#[cfg(unix)]
+async fn listen_attached(
+    mut client: ipc::client::DaemonClient,
+    auto_accept_contacts: bool,
+    auto_accept_verified: bool,
+    yes: bool,
+) -> Result<()> {
+    use ipc::protocol::{EventDto, OfferDto};
+
+    let policy = AcceptPolicy {
+        auto_accept_contacts,
+        auto_accept_verified,
+        yes,
+    };
+
+    let st = client.status().await?;
+    eprintln!("Attached to daemon {}", st.public_id);
+    eprintln!("Relay: {}", st.relay.as_deref().unwrap_or("-"));
+    eprintln!("Ctrl-C to detach (the daemon keeps receiving).\n");
+
+    // Drain any offers already parked before we attached.
+    for o in client.list_pending().await? {
+        handle_attached_offer(&mut client, o, policy).await;
+    }
+
+    let mut events = daemon_events().await?;
+    let cancel = cancel_on_ctrl_c();
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => break,
+            ev = events.next() => {
+                match ev {
+                    Ok(Some(EventDto::OfferReceived { id, from, name, size })) => {
+                        handle_attached_offer(
+                            &mut client,
+                            OfferDto { id, from, name, size },
+                            policy,
+                        ).await;
+                    }
+                    Ok(Some(EventDto::Completed { path: Some(p), .. })) => {
+                        eprintln!("✓ saved {p}");
+                    }
+                    Ok(Some(EventDto::Failed { error, .. })) => {
+                        eprintln!("✗ transfer failed: {error}");
+                    }
+                    Ok(Some(_)) => {}
+                    Ok(None) => {
+                        eprintln!("(daemon closed the connection)");
+                        break;
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Persist a finished transfer to the history store (best-effort).
 fn record_history(manager: &TransferManager, id: u64, status: &str) {
     let Some(t) = manager.get(id) else { return };
@@ -933,6 +1160,416 @@ fn record_history(manager: &TransferManager, id: u64, status: &str) {
     );
 }
 
+/// Run the persistent background engine behind a local control socket.
+#[cfg(unix)]
+async fn daemon(
+    download_dir: Option<PathBuf>,
+    relay: Option<String>,
+    use_http: bool,
+) -> Result<()> {
+    use std::collections::HashMap;
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::{Arc, Mutex};
+
+    let relay = require_relay(relay, use_http)?;
+    let me = my_identity()?;
+    let my_id = encode_id(&me.public());
+    let download_dir = download_dir.unwrap_or_else(|| book::config_dir().join("downloads"));
+    std::fs::create_dir_all(&download_dir).context("create download dir")?;
+
+    let manager = TransferManager::new(me, Some(relay.clone()), download_dir.clone());
+    let inbox = manager.spawn_inbox()?;
+
+    // Single-instance guard: if the socket answers, a daemon is already up.
+    let sock = ipc::socket_path();
+    if let Some(parent) = sock.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    if tokio::net::UnixStream::connect(&sock).await.is_ok() {
+        anyhow::bail!(
+            "a daemon is already running (socket {} answers)",
+            sock.display()
+        );
+    }
+    // Stale socket from a previous crash — bind() would fail on an existing path.
+    if sock.exists() {
+        std::fs::remove_file(&sock).ok();
+    }
+    let listener = tokio::net::UnixListener::bind(&sock)
+        .with_context(|| format!("bind control socket {}", sock.display()))?;
+    // Owner-only: the filesystem permission is the access control.
+    std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o600)).ok();
+
+    // Advisory pidfile for service tooling (not the guard).
+    let pidfile = book::config_dir().join("daemon.pid");
+    std::fs::write(&pidfile, format!("{}\n", std::process::id())).ok();
+
+    // Offers awaiting the user's approval. In M1 every offer parks here (no trust
+    // policy yet); a subscribed front-end lists and accepts/rejects them.
+    let pending: Arc<Mutex<HashMap<String, ipc::protocol::OfferDto>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+
+    // Engine task: park incoming offers and persist finished transfers to history,
+    // whether or not a front-end is attached.
+    {
+        let mut events = manager.subscribe();
+        let manager = manager.clone();
+        let pending = pending.clone();
+        tokio::spawn(async move {
+            loop {
+                match events.recv().await {
+                    Ok(ManagerEvent::OfferReceived {
+                        id,
+                        from,
+                        name,
+                        size,
+                    }) => {
+                        let from_b32 = encode_id(&from);
+                        // Supersede any older parked offer for the same (sender, file).
+                        // A live→mailbox fallback posts a fresh offer and retracts the
+                        // stale live one, but we may already have pulled that stale copy
+                        // into the inbox; accepting it would download nothing. Drop the
+                        // older one(s) and keep only this newest offer.
+                        let superseded: Vec<String> = {
+                            let map = pending.lock().unwrap();
+                            map.values()
+                                .filter(|o| o.from == from_b32 && o.name == name)
+                                .map(|o| o.id.clone())
+                                .collect()
+                        };
+                        for old in &superseded {
+                            pending.lock().unwrap().remove(old);
+                            manager.reject_offer(old).await;
+                        }
+                        let status = book::sender_status(&from_b32);
+                        let who = status.name.clone().unwrap_or_else(|| from_b32.clone());
+                        // Trusted sender → auto-download. Everyone else parks and
+                        // waits for the user's approval (the default).
+                        if status.trusted {
+                            let size_h = human_size(size);
+                            eprintln!("⬇ auto-downloading {name} ({size_h}) from trusted {who}");
+                            // Auto-accept, but still surface a notification so the
+                            // user knows a trusted download is happening.
+                            notify::auto_downloading(&name, &who, &size_h);
+                            if let Err(e) = manager.accept_offer(&id, None).await {
+                                eprintln!("   ✗ could not auto-accept: {e:#}");
+                            }
+                        } else {
+                            let size_h = human_size(size);
+                            eprintln!(
+                                "📨 offer parked: {name} ({size_h}) from {who} — approve with `arvolo accept {id}`"
+                            );
+                            // Nudge the user with a desktop notification (best-effort;
+                            // no-op on headless hosts, where the log line above stands in).
+                            notify::offer_awaiting(&name, &who, &size_h);
+                            pending.lock().unwrap().insert(
+                                id.clone(),
+                                ipc::protocol::OfferDto {
+                                    id,
+                                    from: from_b32,
+                                    name,
+                                    size,
+                                },
+                            );
+                        }
+                    }
+                    Ok(ManagerEvent::Completed { id, path }) => {
+                        if let Some(p) = &path {
+                            eprintln!("✓ saved {}", p.display());
+                        }
+                        record_history(&manager, id, "completed");
+                    }
+                    Ok(ManagerEvent::Deposited { id }) => record_history(&manager, id, "deposited"),
+                    Ok(ManagerEvent::Failed { id, error }) => {
+                        record_history(&manager, id, &format!("failed: {error}"))
+                    }
+                    Ok(ManagerEvent::Cancelled { id }) => record_history(&manager, id, "cancelled"),
+                    Ok(_) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+    }
+
+    eprintln!("arvolo daemon up.");
+    eprintln!("  identity: {my_id}");
+    eprintln!("  relay:    {relay}");
+    eprintln!("  socket:   {}", sock.display());
+    eprintln!("  saving:   {}", download_dir.display());
+
+    let shutdown = daemon_shutdown_signal();
+    let daemon = ipc::server::Daemon {
+        manager,
+        relay: Some(relay),
+        pending,
+    };
+    let result = ipc::server::run(daemon, listener, shutdown).await;
+
+    inbox.cancel();
+    std::fs::remove_file(&sock).ok();
+    std::fs::remove_file(&pidfile).ok();
+    result
+}
+
+/// A cancellation token that fires on SIGINT (Ctrl-C) or SIGTERM (systemd stop).
+#[cfg(unix)]
+fn daemon_shutdown_signal() -> CancellationToken {
+    let token = CancellationToken::new();
+    let t = token.clone();
+    tokio::spawn(async move {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut term = signal(SignalKind::terminate()).ok();
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = async {
+                match term.as_mut() {
+                    Some(s) => { s.recv().await; }
+                    None => std::future::pending::<()>().await,
+                }
+            } => {}
+        }
+        t.cancel();
+    });
+    token
+}
+
+/// Connect to a running daemon and confirm it answers, else `None` (so callers
+/// fall back to running the engine in-process).
+#[cfg(unix)]
+async fn daemon_client() -> Option<ipc::client::DaemonClient> {
+    let mut c = ipc::client::DaemonClient::connect().await.ok()?;
+    c.ping().await.ok()?;
+    Some(c)
+}
+
+/// A fresh subscribed event stream from the daemon.
+#[cfg(unix)]
+async fn daemon_events() -> Result<ipc::client::EventStream> {
+    ipc::client::DaemonClient::connect()
+        .await?
+        .subscribe()
+        .await
+}
+
+/// Print a one-line summary of a transfer DTO.
+#[cfg(unix)]
+fn print_transfer_dto(t: &ipc::protocol::TransferDto) {
+    let arrow = if t.direction == "send" { "→" } else { "←" };
+    let peer = t
+        .peer
+        .as_deref()
+        .map(|id| book::resolve_name(id).unwrap_or_else(|| id.to_string()))
+        .unwrap_or_else(|| "anonymous".into());
+    let progress = if t.total_size > 0 {
+        format!(
+            " {}/{}",
+            human_size(t.transferred),
+            human_size(t.total_size)
+        )
+    } else {
+        String::new()
+    };
+    println!(
+        "  [{}] {arrow} {peer}  {}{progress}  ({})",
+        t.id, t.name, t.status
+    );
+}
+
+/// `arvolo status` — unified live view of transfers + pending offers.
+#[cfg(unix)]
+async fn status_cmd(watch: bool) -> Result<()> {
+    let mut client = daemon_client()
+        .await
+        .context("no daemon running (start `arvolo daemon`)")?;
+
+    let render = |st: &ipc::protocol::StatusDto,
+                  transfers: &[ipc::protocol::TransferDto],
+                  pending: &[ipc::protocol::OfferDto]| {
+        println!(
+            "daemon: {}  relay: {}",
+            st.public_id,
+            st.relay.as_deref().unwrap_or("-")
+        );
+        if transfers.is_empty() {
+            println!("transfers: (none)");
+        } else {
+            println!("transfers:");
+            for t in transfers {
+                print_transfer_dto(t);
+            }
+        }
+        if !pending.is_empty() {
+            println!("pending offers (awaiting approval):");
+            for o in pending {
+                let who = book::resolve_name(&o.from).unwrap_or_else(|| o.from.clone());
+                println!(
+                    "  ? {}  {} ({})  — arvolo accept {}",
+                    who,
+                    o.name,
+                    human_size(o.size),
+                    o.id
+                );
+            }
+        }
+    };
+
+    let st = client.status().await?;
+    let transfers = client.list().await?;
+    let pending = client.list_pending().await?;
+    render(&st, &transfers, &pending);
+
+    if !watch {
+        return Ok(());
+    }
+
+    // Watch mode: redraw on every engine event.
+    let mut events = daemon_events().await?;
+    let cancel = cancel_on_ctrl_c();
+    println!("\n(watching — Ctrl-C to stop)");
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => break,
+            ev = events.next() => {
+                match ev {
+                    Ok(Some(_)) => {
+                        let st = client.status().await?;
+                        let transfers = client.list().await?;
+                        let pending = client.list_pending().await?;
+                        println!("\n---");
+                        render(&st, &transfers, &pending);
+                    }
+                    Ok(None) => break,
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `arvolo pending` — list offers parked awaiting approval.
+#[cfg(unix)]
+async fn pending_cmd() -> Result<()> {
+    let mut client = daemon_client()
+        .await
+        .context("no daemon running (start `arvolo daemon`)")?;
+    let pending = client.list_pending().await?;
+    if pending.is_empty() {
+        eprintln!("(no pending offers)");
+        return Ok(());
+    }
+    for o in pending {
+        let who = book::resolve_name(&o.from).unwrap_or_else(|| o.from.clone());
+        println!("{}  from {who}  {} ({})", o.id, o.name, human_size(o.size));
+    }
+    Ok(())
+}
+
+/// `arvolo accept <offer_id>` — approve a parked offer and download it.
+#[cfg(unix)]
+async fn accept_cmd(offer_id: String, out: Option<PathBuf>) -> Result<()> {
+    let mut client = daemon_client()
+        .await
+        .context("no daemon running (start `arvolo daemon`)")?;
+    let id = client.accept(offer_id, out).await?;
+    eprintln!("✓ accepted — downloading (transfer {id}). Track it with `arvolo status`.");
+    Ok(())
+}
+
+/// `arvolo reject <offer_id>` — decline a parked offer.
+#[cfg(unix)]
+async fn reject_cmd(offer_id: String) -> Result<()> {
+    let mut client = daemon_client()
+        .await
+        .context("no daemon running (start `arvolo daemon`)")?;
+    client.reject(offer_id).await?;
+    eprintln!("✗ rejected.");
+    Ok(())
+}
+
+/// `arvolo cancel <id>` — stop a transfer running in the daemon.
+#[cfg(unix)]
+async fn cancel_cmd(id: u64) -> Result<()> {
+    let mut client = daemon_client()
+        .await
+        .context("no daemon running (start `arvolo daemon`)")?;
+    client.cancel(id).await?;
+    eprintln!("cancelled transfer {id}.");
+    Ok(())
+}
+
+/// Submit a push to the running daemon and render its progress. Ctrl-C detaches
+/// (the daemon keeps sending); it does not cancel.
+#[cfg(unix)]
+async fn push_via_daemon(
+    mut client: ipc::client::DaemonClient,
+    paths: Vec<PathBuf>,
+    to: String,
+) -> Result<()> {
+    use ipc::protocol::EventDto;
+
+    let paths_s: Vec<String> = paths
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+    // Subscribe before submitting so an early terminal event isn't missed.
+    let mut events = daemon_events().await?;
+    eprintln!("Handing off to the daemon (sending to {to})…");
+    let id = client
+        .push(to, paths_s)
+        .await
+        .context("daemon rejected the push")?;
+    eprintln!("queued as transfer {id}. (Ctrl-C detaches; the daemon keeps sending.)\n");
+
+    let cancel = cancel_on_ctrl_c();
+    let mut last_pct = u64::MAX;
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                eprintln!("\n(detached — transfer {id} continues in the daemon; `arvolo cancel {id}` to stop it)");
+                break;
+            }
+            ev = events.next() => {
+                match ev {
+                    Ok(Some(EventDto::Progress { id: eid, transferred, total_size })) if eid == id && total_size > 0 => {
+                        let pct = transferred * 100 / total_size;
+                        if pct != last_pct {
+                            last_pct = pct;
+                            use std::io::Write;
+                            eprint!("\r  {pct}% ({}/{})   ", human_size(transferred), human_size(total_size));
+                            let _ = std::io::stderr().flush();
+                        }
+                    }
+                    Ok(Some(EventDto::Completed { id: eid, .. })) if eid == id => {
+                        eprintln!("\n✓ delivered.");
+                        break;
+                    }
+                    Ok(Some(EventDto::Deposited { id: eid })) if eid == id => {
+                        eprintln!("✓ deposited to the mailbox (delivered when they return).");
+                        break;
+                    }
+                    Ok(Some(EventDto::Failed { id: eid, error })) if eid == id => {
+                        eprintln!("\n✗ failed: {error}");
+                        break;
+                    }
+                    Ok(Some(EventDto::Cancelled { id: eid })) if eid == id => {
+                        eprintln!("\n(cancelled)");
+                        break;
+                    }
+                    Ok(Some(_)) => {}
+                    Ok(None) => {
+                        eprintln!("\n(daemon closed the connection)");
+                        break;
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 async fn push(
     paths: Vec<PathBuf>,
     to: String,
@@ -943,6 +1580,16 @@ async fn push(
         !paths.is_empty(),
         "provide at least one file or folder to push"
     );
+
+    // If a daemon is running, hand the send off to it (concurrent, survives our
+    // exit); otherwise fall back to a one-shot in-process send.
+    #[cfg(unix)]
+    {
+        if let Some(client) = daemon_client().await {
+            return push_via_daemon(client, paths, to).await;
+        }
+    }
+
     let relay = require_relay(relay, use_http)?;
     let recipient = book::resolve_recipient(&to)?;
     vprintln!(

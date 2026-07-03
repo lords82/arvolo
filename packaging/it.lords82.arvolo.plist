@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd LaunchAgent for the arvolo daemon (macOS).
+
+  Install (per-login):
+    cp packaging/it.lords82.arvolo.plist ~/Library/LaunchAgents/it.lords82.arvolo.plist
+    # edit the arvolo path, ARVOLO_RELAY, and HOME below, then:
+    launchctl load ~/Library/LaunchAgents/it.lords82.arvolo.plist
+
+  Logs:   tail -f ~/Library/Logs/arvolo.log
+  Stop:   launchctl unload ~/Library/LaunchAgents/it.lords82.arvolo.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>it.lords82.arvolo</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <!-- Absolute path to the installed binary. -->
+        <string>/usr/local/bin/arvolo</string>
+        <string>daemon</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>ARVOLO_RELAY</key>
+        <string>https://mailbox.example.com</string>
+        <!-- launchd agents start with a minimal env; set HOME so config/identity
+             resolve under your home dir. Replace <you> with your username. -->
+        <key>HOME</key>
+        <string>/Users/&lt;you&gt;</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/&lt;you&gt;/Library/Logs/arvolo.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/&lt;you&gt;/Library/Logs/arvolo.log</string>
+</dict>
+</plist>

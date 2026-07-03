@@ -1,0 +1,164 @@
+//! Client side of the daemon IPC: a thin typed wrapper over the newline-delimited
+//! JSON socket. `connect()` fails cleanly when no daemon is listening, so callers
+//! can fall back to running the engine in-process.
+
+use std::path::PathBuf;
+
+use anyhow::{bail, Context, Result};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::net::UnixStream;
+
+use super::protocol::{
+    EventDto, OfferDto, Request, RequestEnvelope, Response, ServerMessage, StatusDto, TransferDto,
+};
+use super::socket_path;
+
+/// An RPC connection to the running daemon.
+pub struct DaemonClient {
+    reader: BufReader<OwnedReadHalf>,
+    writer: OwnedWriteHalf,
+    next_id: u32,
+}
+
+impl DaemonClient {
+    /// Connect to the daemon control socket. Returns `Err` if it's absent or
+    /// refuses (no daemon running) — the signal for callers to fall back.
+    pub async fn connect() -> Result<Self> {
+        let path = socket_path();
+        let stream = UnixStream::connect(&path)
+            .await
+            .with_context(|| format!("no daemon at {} (start `arvolo daemon`)", path.display()))?;
+        let (read, writer) = stream.into_split();
+        Ok(Self {
+            reader: BufReader::new(read),
+            writer,
+            next_id: 1,
+        })
+    }
+
+    async fn request(&mut self, cmd: Request) -> Result<Response> {
+        let id = self.next_id;
+        self.next_id = self.next_id.wrapping_add(1);
+        let mut line = serde_json::to_string(&RequestEnvelope { id, cmd })?;
+        line.push('\n');
+        self.writer.write_all(line.as_bytes()).await?;
+        self.writer.flush().await?;
+        loop {
+            let mut resp = String::new();
+            let n = self.reader.read_line(&mut resp).await?;
+            if n == 0 {
+                bail!("daemon closed the connection");
+            }
+            if resp.trim().is_empty() {
+                continue;
+            }
+            match serde_json::from_str::<ServerMessage>(resp.trim())? {
+                ServerMessage::Reply { id: rid, result } if rid == id => return Ok(result),
+                // An RPC connection never subscribes, so events/other replies
+                // shouldn't appear; skip defensively rather than error.
+                _ => continue,
+            }
+        }
+    }
+
+    pub async fn ping(&mut self) -> Result<()> {
+        match self.request(Request::Ping).await? {
+            Response::Pong => Ok(()),
+            other => unexpected(other),
+        }
+    }
+
+    pub async fn status(&mut self) -> Result<StatusDto> {
+        match self.request(Request::Status).await? {
+            Response::Status(s) => Ok(s),
+            other => unexpected(other),
+        }
+    }
+
+    pub async fn list(&mut self) -> Result<Vec<TransferDto>> {
+        match self.request(Request::ListTransfers).await? {
+            Response::Transfers(v) => Ok(v),
+            other => unexpected(other),
+        }
+    }
+
+    pub async fn list_pending(&mut self) -> Result<Vec<OfferDto>> {
+        match self.request(Request::ListPending).await? {
+            Response::Pending(v) => Ok(v),
+            other => unexpected(other),
+        }
+    }
+
+    pub async fn push(&mut self, to: String, paths: Vec<String>) -> Result<u64> {
+        match self.request(Request::Push { to, paths }).await? {
+            Response::TransferId(id) => Ok(id),
+            other => unexpected(other),
+        }
+    }
+
+    pub async fn cancel(&mut self, id: u64) -> Result<()> {
+        expect_ok(self.request(Request::Cancel { id }).await?)
+    }
+
+    pub async fn accept(&mut self, offer_id: String, out: Option<PathBuf>) -> Result<u64> {
+        let out = out.map(|p| p.to_string_lossy().into_owned());
+        match self.request(Request::AcceptOffer { offer_id, out }).await? {
+            Response::TransferId(id) => Ok(id),
+            other => unexpected(other),
+        }
+    }
+
+    pub async fn reject(&mut self, offer_id: String) -> Result<()> {
+        expect_ok(self.request(Request::RejectOffer { offer_id }).await?)
+    }
+
+    /// Turn this connection into an event stream. Sends `Subscribe`, consumes the
+    /// `Ok`, then yields pushed events until the daemon closes.
+    pub async fn subscribe(mut self) -> Result<EventStream> {
+        expect_ok(self.request(Request::Subscribe).await?)?;
+        Ok(EventStream {
+            reader: self.reader,
+        })
+    }
+}
+
+/// A live stream of engine events from a subscribed connection.
+pub struct EventStream {
+    reader: BufReader<OwnedReadHalf>,
+}
+
+impl EventStream {
+    /// The next event, or `None` when the daemon closes the connection.
+    pub async fn next(&mut self) -> Result<Option<EventDto>> {
+        loop {
+            let mut line = String::new();
+            let n = self.reader.read_line(&mut line).await?;
+            if n == 0 {
+                return Ok(None);
+            }
+            if line.trim().is_empty() {
+                continue;
+            }
+            match serde_json::from_str::<ServerMessage>(line.trim())? {
+                ServerMessage::Event(ev) => return Ok(Some(ev)),
+                ServerMessage::Reply { .. } => continue,
+            }
+        }
+    }
+}
+
+fn expect_ok(r: Response) -> Result<()> {
+    match r {
+        Response::Ok => Ok(()),
+        Response::Error(e) => bail!(e),
+        other => unexpected(other),
+    }
+}
+
+fn unexpected<T>(r: Response) -> Result<T> {
+    match r {
+        Response::Error(e) => bail!(e),
+        other => bail!("unexpected daemon response: {other:?}"),
+    }
+}

@@ -1,0 +1,29 @@
+# systemd *user* unit for the arvolo daemon (Linux).
+#
+# Install (per-user, uses your ~/.config/arvolo identity):
+#   mkdir -p ~/.config/systemd/user
+#   cp packaging/arvolo.service ~/.config/systemd/user/arvolo.service
+#   # edit ExecStart path + ARVOLO_RELAY below, then:
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now arvolo
+#   loginctl enable-linger "$USER"   # keep it running after you log out
+#
+# Logs:   journalctl --user -u arvolo -f
+# Stop:   systemctl --user stop arvolo     (SIGTERM → clean socket removal)
+
+[Unit]
+Description=arvolo daemon (always-on receive + local control socket)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Absolute path to the installed binary (e.g. ~/.local/bin/arvolo).
+ExecStart=%h/.local/bin/arvolo daemon
+Restart=on-failure
+RestartSec=5
+# Point clients + daemon at your relay (or set it in ~/.config/arvolo/config.toml).
+Environment=ARVOLO_RELAY=https://mailbox.example.com
+
+[Install]
+WantedBy=default.target

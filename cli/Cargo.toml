@@ -26,7 +26,11 @@ data-encoding = "2"
 indicatif = "0.17"
 qrcode = "0.14"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 toml = "0.8"
+# Desktop notifications for the daemon (offer awaiting approval). Cross-platform
+# (D-Bus/macOS/WinRT); best-effort — degrades to a log line when unavailable.
+notify-rust = "4"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 
 [dev-dependencies]
