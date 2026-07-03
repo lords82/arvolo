@@ -149,6 +149,7 @@ Run `arvolo <cmd> --help` for the full flag list.
 
 ```toml
 relay = "relay.example.com"   # default relay for --code / recv <code> / send-offline (https assumed)
+download_dir = "/srv/arvolo/incoming"   # where the daemon saves accepted files (default: <config>/downloads)
 ```
 
 For a relay without TLS, write the scheme explicitly: `relay = "http://relay.local:8787"`.
@@ -160,6 +161,7 @@ Contacts live in `~/.config/arvolo/contacts.toml` (managed via `arvolo contacts`
 | Var | Meaning |
 |---|---|
 | `ARVOLO_RELAY` | Default relay URL (wins over `config.toml`). |
+| `ARVOLO_DOWNLOAD_DIR` | Where the daemon saves accepted files (wins over `config.toml`). |
 | `ARVOLO_IDENTITY` | Path to your identity key (default `~/.config/arvolo/identity.key`). |
 | `ARVOLO_CONFIG_DIR` | Override the config/contacts directory. |
 | `ARVOLO_IROH_RELAY` | Self-hosted **iroh** NAT relay for P2P hole-punching (vs. n0's public relays). |

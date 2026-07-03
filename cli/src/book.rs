@@ -34,6 +34,7 @@ fn trusted_path() -> PathBuf {
 #[derive(Default, Deserialize)]
 struct Config {
     relay: Option<String>,
+    download_dir: Option<String>,
 }
 
 fn load_config() -> Config {
@@ -55,6 +56,17 @@ pub fn default_relay() -> Option<String> {
         .filter(|s| !s.trim().is_empty())
         .or_else(|| load_config().relay.filter(|s| !s.trim().is_empty()))?;
     Some(normalize_relay(&raw, false))
+}
+
+/// The configured download directory for accepted files: the `ARVOLO_DOWNLOAD_DIR`
+/// env var wins, else the config file's `download_dir` key. `None` if neither is
+/// set — callers pick their own default (the daemon uses `<config>/downloads`).
+pub fn default_download_dir() -> Option<PathBuf> {
+    std::env::var("ARVOLO_DOWNLOAD_DIR")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| load_config().download_dir.filter(|s| !s.trim().is_empty()))
+        .map(PathBuf::from)
 }
 
 #[derive(Default, Serialize, Deserialize)]

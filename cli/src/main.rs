@@ -942,7 +942,9 @@ async fn listen(
     let relay = require_relay(relay, use_http)?;
     let me = my_identity()?;
     let my_id = encode_id(&me.public());
-    let download_dir = download_dir.unwrap_or_else(|| PathBuf::from("."));
+    let download_dir = download_dir
+        .or_else(book::default_download_dir)
+        .unwrap_or_else(|| PathBuf::from("."));
 
     let manager = TransferManager::new(me, Some(relay.clone()), download_dir.clone());
     let mut events = manager.subscribe();
@@ -1174,7 +1176,9 @@ async fn daemon(
     let relay = require_relay(relay, use_http)?;
     let me = my_identity()?;
     let my_id = encode_id(&me.public());
-    let download_dir = download_dir.unwrap_or_else(|| book::config_dir().join("downloads"));
+    let download_dir = download_dir
+        .or_else(book::default_download_dir)
+        .unwrap_or_else(|| book::config_dir().join("downloads"));
     std::fs::create_dir_all(&download_dir).context("create download dir")?;
 
     let manager = TransferManager::new(me, Some(relay.clone()), download_dir.clone());

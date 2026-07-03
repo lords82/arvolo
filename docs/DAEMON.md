@@ -24,8 +24,19 @@ arvolo daemon                       # foreground; Ctrl-C or SIGTERM to stop
 arvolo daemon --download-dir ~/Downloads/arvolo
 ```
 
-Downloads default to `~/.config/arvolo/downloads`. A second `arvolo daemon`
-refuses to start while one is already running (single-instance guard).
+Downloads default to `~/.config/arvolo/downloads`. Change the folder with the
+`--download-dir` flag, the `ARVOLO_DOWNLOAD_DIR` env var, or a `download_dir` key
+in `~/.config/arvolo/config.toml` (flag > env > config > default) — handy for a
+service, so accepted files land where you want without editing the unit:
+
+```toml
+# ~/.config/arvolo/config.toml
+relay = "https://mailbox.example.com"
+download_dir = "/srv/arvolo/incoming"
+```
+
+A second `arvolo daemon` refuses to start while one is already running
+(single-instance guard).
 
 Then, from any terminal (or a second machine's account):
 
