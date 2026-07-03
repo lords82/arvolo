@@ -396,10 +396,73 @@ TTLs and row caps (abuse/disk-fill guards); see the constants in
 | Revocability | Revoke token (hash-only at the relay), constant-time checked |
 | Data minimization | Dial keys not IPs; random claims; derived slots; TTL auto-expiry; no PII in identities |
 
-**Honest boundaries** (see [`TECHNICAL-OVERVIEW.md`](TECHNICAL-OVERVIEW.md) §5):
-key↔person binding still needs one out-of-band fingerprint check (TOFU +
-key-change warnings); a relay can observe ciphertext **sizes and timing**; and
-Arvolo protects data in transit and at rest on the relay, not a compromised
-endpoint. A public download link is a **bearer capability** — anyone with the full
-link (including the fragment key) can download the file; use `--max`, a short
-`--ttl`, or revoke it when done.
+### 9.1 Honest boundaries (and why they are universal)
+
+The points below can read like weaknesses, but they are **not specific to
+Arvolo** — they are fundamental limits that *every* end-to-end encrypted system
+shares, because cryptography solves some problems and provably cannot solve
+others. We state them plainly instead of implying magic. See also
+[`TECHNICAL-OVERVIEW.md`](TECHNICAL-OVERVIEW.md) §5.
+
+**1. A key proves math, not a person (key ↔ identity binding).**
+Cryptography guarantees "only the holder of this private key can decrypt." It
+cannot, by itself, prove that key belongs to the human you think it does.
+
+- *Example:* Alice sends you her id `if2x…`. A man-in-the-middle could instead
+  hand you *his* key while claiming to be Alice; every message would still be
+  "perfectly encrypted" — just to the wrong person.
+- *Same everywhere:* this is the classic public-key authentication problem.
+  **Signal** makes you compare **safety numbers**, **WhatsApp** a **security
+  code**, **PGP** uses key-signing / the web of trust, and browsers rely on
+  certificate authorities. All of them default to trust-on-first-use in practice.
+- *Not solvable by math:* the only fix is an **out-of-band trust anchor** — a
+  channel the attacker doesn't control. Arvolo gives you the smallest possible
+  one: a **six-word fingerprint** you compare once (in person, by phone), plus
+  **key-change warnings** if a saved contact's key ever changes (exactly Signal's
+  model). There is no cryptographic way to remove this step.
+
+**2. The relay sees sizes and timing (metadata), never content.**
+The relay only ever holds opaque ciphertext — no plaintext, no keys, not even your
+public id (it sees a derived slot). But it unavoidably sees *how big* a blob is
+and *when* it moves.
+
+- *Example:* an operator can note "a ~4 MB blob appeared at 15:03 and was fetched
+  at 15:07" and infer activity patterns, without ever reading a byte.
+- *Same everywhere:* **Signal**'s servers still see message timing, size, and IPs
+  (Sealed Sender hides the *sender label*, not the timing); **HTTPS/TLS** leaks the
+  size and timing of every page you load; **Tor** exists precisely because hiding
+  metadata is a separate, much harder problem than hiding content.
+- *Not solvable for free:* the only defenses are heavy **traffic padding + cover
+  traffic + mixing**, which cost enormous bandwidth and latency and are out of
+  scope for a file-transfer tool. The mitigation you *do* have is structural:
+  **self-host the relay**, so even this thin metadata stays on your own
+  infrastructure and never reaches a third party.
+
+**3. A compromised endpoint is game over (for everyone).**
+Arvolo protects data **in transit** and **at rest on the relay**. It cannot
+protect a device that is already compromised.
+
+- *Example:* if malware or a keylogger is running on the sender's or recipient's
+  machine, the file is plaintext there by necessity — it has to be, for the user
+  to open it.
+- *Same everywhere:* malware on your phone defeats **Signal**, **WhatsApp**, and
+  **PGP** identically — the decrypted message is on the screen. No end-to-end
+  system claims otherwise.
+- *Not solvable by a transfer protocol:* endpoint security (full-disk encryption,
+  OS hardening, not running malware) is a different layer. E2E encryption secures
+  the channel; it was never meant to secure a broken endpoint, and no protocol can.
+
+**4. A public link is a bearer capability (by design).**
+A download link (`…/dl/<claim>#<key>`) carries its key in the URL. Anyone with the
+**full** link can download the file — the link *is* the credential, exactly as you
+asked for when you chose a "share by link" flow.
+
+- *Example:* paste the link into an insecure chat and whoever reads that chat can
+  fetch the file, just like leaking a password.
+- *Same everywhere:* this is true of **Firefox Send**, **Dropbox / Google Drive
+  "anyone with the link"**, and **magic-wormhole** codes — any "no account needed"
+  share is a bearer token by definition. (A recipient-sealed `arvm` send, by
+  contrast, can *only* be opened by one identity's key.)
+- *Mitigations (not a fix, a choice):* set **`--max N`** (burn after N downloads),
+  a short **`--ttl`**, and **`arvolo sessions rm <id>`** to revoke it the moment
+  you're done — controls most link services don't even offer.
