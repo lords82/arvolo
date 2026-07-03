@@ -248,6 +248,44 @@ pub async fn retract_offer(
     Ok(())
 }
 
+/// Whether an offer we posted has been seen by (or handed off to) the recipient.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OfferStatus {
+    /// Still queued, not yet seen by a live recipient poll.
+    Pending,
+    /// A live recipient polled the inbox and received it.
+    Fetched,
+    /// No longer on the relay — the recipient acked/accepted it (or it expired).
+    Gone,
+}
+
+/// Ask the relay whether an offer we posted has been seen yet (poster-authed).
+/// Lets a live send tell "recipient is really online" from "stale presence".
+pub async fn offer_status(
+    client: &reqwest::Client,
+    relay: &str,
+    recipient: &PublicId,
+    id: &str,
+    poster_token: &str,
+) -> Result<OfferStatus> {
+    let slot = slot_for(&recipient.to_bytes());
+    let url = format!("{}/{id}/status", inbox_url(relay, &slot));
+    let resp = client
+        .get(url)
+        .header(POSTER_TOKEN_HEADER, poster_token)
+        .send()
+        .await
+        .context("offer status")?
+        .error_for_status()
+        .context("relay rejected offer status")?;
+    let body = resp.text().await.unwrap_or_default();
+    Ok(match body.trim() {
+        "fetched" => OfferStatus::Fetched,
+        "gone" => OfferStatus::Gone,
+        _ => OfferStatus::Pending,
+    })
+}
+
 /// Publish (refresh) a presence beacon so contacts see `me` as online. A listening
 /// client calls this periodically; the relay expires it after `PRESENCE_TTL`.
 pub async fn publish_beacon(client: &reqwest::Client, relay: &str, me: &Identity) -> Result<()> {

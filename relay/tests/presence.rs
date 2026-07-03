@@ -48,7 +48,7 @@ async fn beacon_makes_a_contact_appear_online() {
 
 #[tokio::test]
 async fn offline_deposit_round_trips() {
-    use arvolo_core::flow::{deposit_offline, fetch_offline};
+    use arvolo_core::flow::{claim_status, deposit_offline, fetch_offline, ClaimStatus};
 
     let (relay, _mailbox) = spawn_relay().await;
     let sender = Identity::generate();
@@ -69,6 +69,14 @@ async fn offline_deposit_round_trips() {
         "offline ticket is an arvm ticket"
     );
 
+    // Before pickup the sender sees the deposit as pending.
+    assert_eq!(
+        claim_status(&relay, &deposited.ticket.claim)
+            .await
+            .expect("status"),
+        ClaimStatus::Pending
+    );
+
     // The accept path (arvm branch) fetches it back, byte-identical.
     let out = dir.path().join("out.bin");
     let (path, n) = fetch_offline(&ticket, Some(out.clone()), &recipient, None)
@@ -76,4 +84,12 @@ async fn offline_deposit_round_trips() {
         .expect("fetch");
     assert_eq!(n, bytes.len());
     assert_eq!(std::fs::read(&path).unwrap(), bytes);
+
+    // After burn-after-read pickup, the blob is gone → delivery confirmed.
+    assert_eq!(
+        claim_status(&relay, &deposited.ticket.claim)
+            .await
+            .expect("status"),
+        ClaimStatus::Gone
+    );
 }

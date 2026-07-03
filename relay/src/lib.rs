@@ -173,6 +173,19 @@ pub struct Claimed {
     pub ciphertext: Vec<u8>,
 }
 
+/// Poster-facing status of an inbox offer (see [`Mailbox::inbox_status_by_poster`]).
+#[derive(Debug, PartialEq, Eq)]
+pub enum InboxStatus {
+    /// The offer no longer exists (recipient acked/accepted it, or it expired).
+    Gone,
+    /// The presented retract token does not match this offer.
+    BadToken,
+    /// Still queued, not yet seen by a live recipient poll.
+    Pending,
+    /// Delivered to a live, authenticated recipient poll.
+    Fetched,
+}
+
 /// The metadata result of a claim: enough to read the blob file off-lock.
 /// Returned by [`Mailbox::fetch_plan`].
 pub struct FetchPlan {
@@ -275,6 +288,7 @@ impl Mailbox {
                 value       BLOB NOT NULL,
                 expires_at  INTEGER NOT NULL,
                 poster_hash BLOB,
+                fetched_at  INTEGER,
                 PRIMARY KEY (slot, id)
             );
             CREATE INDEX IF NOT EXISTS inbox_by_slot ON inbox (slot, expires_at);
@@ -290,6 +304,9 @@ impl Mailbox {
         // Migrate databases whose inbox predates the poster_hash column (lets an
         // offer's poster retract it — e.g. a live offer superseded by a fallback).
         let _ = conn.execute("ALTER TABLE inbox ADD COLUMN poster_hash BLOB", []);
+        // Migrate databases whose inbox predates fetched_at (stamped when a live
+        // recipient polls the offer, so the sender knows it was seen).
+        let _ = conn.execute("ALTER TABLE inbox ADD COLUMN fetched_at INTEGER", []);
         Ok(Self {
             conn: Mutex::new(conn),
             blob_dir,
@@ -473,6 +490,21 @@ impl Mailbox {
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// Does a deposited entry still exist (and is unexpired)? Used by the sender
+    /// to confirm delivery: within a short poll window an entry that is gone was
+    /// almost certainly fetched (burn-after-read), not expired (TTL is days).
+    pub fn entry_exists(&self, claim: &str, now: u64) -> bool {
+        self.conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT 1 FROM entries WHERE claim = ?1 AND expires_at > ?2",
+                params![claim, now as i64],
+                |_| Ok(()),
+            )
+            .is_ok()
     }
 
     // ---- seeded-blob lifecycle (backfill) ---------------------------------
@@ -698,6 +730,51 @@ impl Mailbox {
         .unwrap_or(false)
     }
 
+    /// Mark the given offer `ids` in `slot` as fetched (delivered to a live,
+    /// authenticated recipient poll) — first time only. Lets the poster learn
+    /// its offer was actually seen by an online client.
+    pub fn inbox_mark_fetched(&self, slot: &str, ids: &[String], now: u64) {
+        let conn = self.conn.lock().unwrap();
+        for id in ids {
+            let _ = conn.execute(
+                "UPDATE inbox SET fetched_at = ?3
+                 WHERE slot = ?1 AND id = ?2 AND fetched_at IS NULL",
+                params![slot, id, now as i64],
+            );
+        }
+    }
+
+    /// Status of an offer for its poster (authenticated by the retract token):
+    /// `Gone` if it no longer exists (e.g. the recipient acked/accepted it),
+    /// `BadToken` if the token doesn't match, else `Pending`/`Fetched`.
+    pub fn inbox_status_by_poster(&self, slot: &str, id: &str, token: &str) -> InboxStatus {
+        let conn = self.conn.lock().unwrap();
+        let row: Option<(Option<Vec<u8>>, Option<i64>)> = conn
+            .query_row(
+                "SELECT poster_hash, fetched_at FROM inbox WHERE slot = ?1 AND id = ?2",
+                params![slot, id],
+                |r| Ok((r.get::<_, Option<Vec<u8>>>(0)?, r.get::<_, Option<i64>>(1)?)),
+            )
+            .ok();
+        let Some((stored, fetched)) = row else {
+            return InboxStatus::Gone;
+        };
+        let Some(stored) = stored else {
+            return InboxStatus::BadToken;
+        };
+        let presented = blake3::hash(token.as_bytes());
+        if stored.len() != presented.as_bytes().len()
+            || !constant_time_eq(&stored, presented.as_bytes())
+        {
+            return InboxStatus::BadToken;
+        }
+        if fetched.is_some() {
+            InboxStatus::Fetched
+        } else {
+            InboxStatus::Pending
+        }
+    }
+
     /// All unexpired offers queued in `slot`, as `(id, value)` pairs.
     pub fn inbox_list(&self, slot: &str, now: u64) -> Vec<(String, Vec<u8>)> {
         let conn = self.conn.lock().unwrap();
@@ -856,6 +933,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/deposit", post(deposit_handler))
         .route("/v1/fetch/{claim}", get(fetch_handler))
         .route("/v1/entry/{claim}", axum::routing::delete(revoke_handler))
+        .route("/v1/entry/{claim}/status", get(entry_status_handler))
         .route("/v1/addr", get(addr_handler))
         .route("/v1/seed", post(seed_handler))
         .route("/v1/release/{token}/{hash}", post(release_handler))
@@ -872,6 +950,7 @@ pub fn router(state: AppState) -> Router {
             "/v1/inbox/{slot}/{id}",
             axum::routing::delete(inbox_delete_handler),
         )
+        .route("/v1/inbox/{slot}/{id}/status", get(inbox_status_handler))
         .route(
             "/v1/presence/{slot}",
             post(presence_post_handler).get(presence_get_handler),
@@ -1128,6 +1207,10 @@ async fn inbox_get_handler(
     loop {
         let rows = state.mailbox.inbox_list(&slot, now_unix());
         if !rows.is_empty() {
+            // A live recipient is polling: mark these offers seen so their posters
+            // can tell "delivered to an online client" from "stale presence".
+            let ids: Vec<String> = rows.iter().map(|(id, _)| id.clone()).collect();
+            state.mailbox.inbox_mark_fetched(&slot, &ids, now_unix());
             let items: Vec<arvolo_core::presence::InboxItem> = rows
                 .into_iter()
                 .map(|(id, blob)| arvolo_core::presence::InboxItem { id, blob })
@@ -1169,6 +1252,43 @@ async fn inbox_delete_handler(
     }
     state.mailbox.inbox_delete(&slot, &id);
     StatusCode::NO_CONTENT
+}
+
+/// Poster-only status of one offer: has a live recipient seen it? Authorized by
+/// the retract token (only the poster holds it). Body is a plain word:
+/// `pending` / `fetched` / `gone`; a wrong/missing token is 401.
+async fn inbox_status_handler(
+    State(state): State<AppState>,
+    AxumPath((slot, id)): AxumPath<(String, String)>,
+    headers: HeaderMap,
+) -> Result<&'static str, StatusCode> {
+    let token = headers
+        .get(INBOX_POSTER_TOKEN_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    match state
+        .mailbox
+        .inbox_status_by_poster(&slot, &id, token.trim())
+    {
+        InboxStatus::BadToken => Err(StatusCode::UNAUTHORIZED),
+        InboxStatus::Gone => Ok("gone"),
+        InboxStatus::Pending => Ok("pending"),
+        InboxStatus::Fetched => Ok("fetched"),
+    }
+}
+
+/// Status of a deposited offline blob for its depositor: `pending` if still on the
+/// relay, `gone` (404) if fetched (burn-after-read) or expired. The `claim` is a
+/// secret capability, so this needs no extra auth.
+async fn entry_status_handler(
+    State(state): State<AppState>,
+    AxumPath(claim): AxumPath<String>,
+) -> Result<&'static str, StatusCode> {
+    if state.mailbox.entry_exists(&claim, now_unix()) {
+        Ok("pending")
+    } else {
+        Err(StatusCode::NOT_FOUND)
+    }
 }
 
 fn status_for(e: &MailboxError) -> StatusCode {

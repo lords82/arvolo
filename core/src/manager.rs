@@ -43,8 +43,10 @@ pub enum Direction {
 pub enum TransferStatus {
     /// In progress (or, for a send, serving and awaiting the receiver).
     Active,
-    /// Finished successfully.
+    /// Finished successfully (for a send: the recipient received it).
     Completed,
+    /// An offline send: handed to the relay mailbox, delivery not yet confirmed.
+    Deposited,
     /// Stopped before finishing (e.g. the user cancelled).
     Cancelled,
     /// Ended with an error.
@@ -91,6 +93,10 @@ pub enum ManagerEvent {
     },
     /// A transfer finished successfully; `path` is set for a completed receive.
     Completed { id: u64, path: Option<PathBuf> },
+    /// An offline send was deposited to the mailbox (awaiting the recipient). It
+    /// may later transition to [`Completed`](ManagerEvent::Completed) once the
+    /// recipient fetches it (within the confirmation window).
+    Deposited { id: u64 },
     /// A transfer failed.
     Failed { id: u64, error: String },
     /// A transfer was cancelled.
@@ -202,13 +208,14 @@ impl TransferManager {
     }
 
     /// Drop all finished (completed/failed/cancelled) transfers from the list —
-    /// e.g. when the user clears their history in the UI.
+    /// e.g. when the user clears their history in the UI. Keeps still-in-flight
+    /// transfers (Active, and Deposited ones still awaiting a pickup confirmation).
     pub fn clear_finished(&self) {
         self.inner
             .transfers
             .lock()
             .unwrap()
-            .retain(|_, t| t.status == TransferStatus::Active);
+            .retain(|_, t| matches!(t.status, TransferStatus::Active | TransferStatus::Deposited));
     }
 
     fn register(
@@ -309,16 +316,15 @@ impl TransferManager {
             "a relay is required to send to a contact (set ARVOLO_RELAY or config `relay`)",
         )?;
 
-        // Offline path: deposit on the mailbox and post a long-lived `arvm` offer.
+        // Offline path: deposit on the mailbox and post a long-lived `arvm` offer,
+        // then confirm delivery by watching the blob get fetched.
         if !self.wait_online(&relay, recipient).await {
-            let size = deposit_offline_and_offer(&self.inner, &relay, recipient, &payload, &name)
+            let out = deposit_offline_and_offer(&self.inner, &relay, recipient, &payload, &name)
                 .await
                 .context("deposit to mailbox")?;
-            let (id, _cancel) = self.register(Direction::Send, Some(recipient.clone()), name, size);
-            // The sender's work is done (blob is on the relay); knowing when the
-            // recipient actually fetches it would need a delivery receipt (future).
-            self.inner.set_progress(id, size);
-            finish(&self.inner, id, false, Ok(None));
+            let (id, _cancel) =
+                self.register(Direction::Send, Some(recipient.clone()), name, out.size);
+            spawn_offline_confirm(&self.inner, id, relay.clone(), out.size, out.claim);
             return Ok(id);
         }
 
@@ -372,13 +378,54 @@ impl TransferManager {
             let stop = cancel.clone();
             let inner_cb = inner.clone();
 
+            // Two-phase watchdog. Phase 1: wait for the offer to be *seen* by a
+            // live recipient poll (a real "they're online right now" signal). If
+            // it's never seen, presence was stale -> fall back fast. Phase 2: once
+            // seen, give the (highly variable) cross-internet P2P connection
+            // generous time before giving up.
             let wd_connected = connected.clone();
             let wd_cancel = cancel.clone();
+            let wd_inner = inner.clone();
+            let wd_relay = relay.clone();
+            let wd_recipient = recipient_owned.clone();
+            let wd_offer = posted.id.clone();
+            let wd_token = posted.poster_token.clone();
             let watchdog = tokio::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_secs(LIVE_FALLBACK_SECS)).await;
-                if !wd_connected.load(Ordering::Relaxed) {
-                    wd_cancel.cancel();
+                use std::time::{Duration, Instant};
+                let phase1 = Instant::now() + Duration::from_secs(LIVE_CONFIRM_SECS);
+                let mut seen = false;
+                while Instant::now() < phase1 {
+                    if wd_connected.load(Ordering::Relaxed) {
+                        return; // already connecting
+                    }
+                    if matches!(
+                        presence::offer_status(
+                            &wd_inner.client,
+                            &wd_relay,
+                            &wd_recipient,
+                            &wd_offer,
+                            &wd_token,
+                        )
+                        .await,
+                        Ok(presence::OfferStatus::Fetched) | Ok(presence::OfferStatus::Gone)
+                    ) {
+                        seen = true;
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_secs(OFFER_STATUS_POLL_SECS)).await;
                 }
+                if !seen {
+                    wd_cancel.cancel(); // stale presence -> fall back now
+                    return;
+                }
+                let phase2 = Instant::now() + Duration::from_secs(LIVE_CONNECT_SECS);
+                while Instant::now() < phase2 {
+                    if wd_connected.load(Ordering::Relaxed) {
+                        return; // connected -> keep serving
+                    }
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+                wd_cancel.cancel(); // seen but never connected -> fall back
             });
 
             let result = session
@@ -446,9 +493,8 @@ impl TransferManager {
                     )
                     .await
                     {
-                        Ok(sz) => {
-                            inner.set_progress(id, sz);
-                            finish(&inner, id, false, Ok(None));
+                        Ok(out) => {
+                            spawn_offline_confirm(&inner, id, relay.clone(), out.size, out.claim)
                         }
                         Err(e) => finish(&inner, id, false, Err(e)),
                     }
@@ -659,23 +705,36 @@ const PRESENCE_POLL_SECS: u64 = 2;
 /// TTL of an offline (mailbox) deposit + its inbox offer: long enough for the
 /// recipient to come back within a week.
 const OFFLINE_TTL_SECS: u64 = 7 * 24 * 3600;
-/// If a live send gets no receiver within this window, fall back to the mailbox.
-/// Covers stale presence (a departed client whose beacon hasn't lapsed yet) and
-/// an online recipient who ignores the offer. Generous enough for a real
-/// cross-internet iroh connection to establish (relay handshake + hole-punch on a
-/// cold endpoint can take well over 20s) before we give up on the direct path.
-const LIVE_FALLBACK_SECS: u64 = 45;
+/// Phase 1 of the live-send watchdog: how long to wait for the offer to be *seen*
+/// by a live recipient poll before concluding presence was stale and falling back.
+const LIVE_CONFIRM_SECS: u64 = 12;
+/// Phase 2: once the offer is seen, how long to let the P2P connection establish
+/// (cross-internet iroh cold-start + hole-punch is highly variable) before giving
+/// up and falling back to the mailbox.
+const LIVE_CONNECT_SECS: u64 = 90;
+/// How often the watchdog polls the offer's seen-status during phase 1.
+const OFFER_STATUS_POLL_SECS: u64 = 2;
+/// How long (and how often) a stay-open sender polls to confirm an offline blob
+/// was fetched before leaving the transfer as merely "deposited".
+const OFFLINE_CONFIRM_SECS: u64 = 90;
+const OFFLINE_CONFIRM_POLL_SECS: u64 = 3;
+
+/// What a mailbox deposit yields: the payload size + the claim to poll for delivery.
+struct DepositOutcome {
+    size: u64,
+    claim: String,
+}
 
 /// Deposit `payload` to the relay mailbox (sealed to `recipient`) and post a
-/// long-lived `arvm` offer pointing at it. Returns the payload size. Shared by the
-/// up-front offline path and the live-send watchdog fallback.
+/// long-lived `arvm` offer pointing at it. Shared by the up-front offline path and
+/// the live-send watchdog fallback.
 async fn deposit_offline_and_offer(
     inner: &Inner,
     relay: &str,
     recipient: &PublicId,
     payload: &Path,
     name: &str,
-) -> Result<u64> {
+) -> Result<DepositOutcome> {
     let size = std::fs::metadata(payload).map(|m| m.len()).unwrap_or(0);
     let deposited = flow::deposit_offline(
         payload,
@@ -688,6 +747,7 @@ async fn deposit_offline_and_offer(
     )
     .await
     .context("deposit to mailbox")?;
+    let claim = deposited.ticket.claim.clone();
     let offer = Offer {
         name: name.to_string(),
         size,
@@ -704,7 +764,36 @@ async fn deposit_offline_and_offer(
     )
     .await
     .context("deliver offer")?;
-    Ok(size)
+    Ok(DepositOutcome { size, claim })
+}
+
+/// Poll the relay until the deposited blob `claim` is fetched (delivered) or the
+/// confirmation window elapses. On delivery, flip the transfer to Completed and
+/// emit it; otherwise leave it as Deposited. Runs as a detached task.
+async fn confirm_offline_delivery(inner: Arc<Inner>, id: u64, relay: String, claim: String) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(OFFLINE_CONFIRM_SECS);
+    loop {
+        if matches!(
+            flow::claim_status(&relay, &claim).await,
+            Ok(flow::ClaimStatus::Gone)
+        ) {
+            inner.set_status(id, TransferStatus::Completed);
+            inner.emit(ManagerEvent::Completed { id, path: None });
+            return;
+        }
+        if std::time::Instant::now() >= deadline {
+            return; // stays Deposited; the blob still lives on the relay
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(OFFLINE_CONFIRM_POLL_SECS)).await;
+    }
+}
+
+/// Mark a transfer as deposited-to-mailbox and start confirming its delivery.
+fn spawn_offline_confirm(inner: &Arc<Inner>, id: u64, relay: String, size: u64, claim: String) {
+    inner.set_progress(id, size);
+    inner.set_status(id, TransferStatus::Deposited);
+    inner.emit(ManagerEvent::Deposited { id });
+    tokio::spawn(confirm_offline_delivery(inner.clone(), id, relay, claim));
 }
 
 /// Drop the oldest finished transfers (lowest ids) so at most `keep` remain.

@@ -70,10 +70,37 @@ pub async fn bind_endpoint_with_key(relay: RelayChoice, secret: SecretKey) -> Re
         .map_err(|e| anyhow::anyhow!("bind endpoint: {e}"))
 }
 
-/// Whether to run the iroh endpoint IPv4-only (`ARVOLO_IPV4_ONLY` truthy).
+/// Whether to run the iroh endpoint IPv4-only. `ARVOLO_IPV4_ONLY` overrides
+/// explicitly (`1`/`true`/`yes` = on, `0`/`false`/`no` = off); otherwise it is
+/// auto-detected: a host that has no usable IPv6 route would otherwise advertise
+/// a dead IPv6 candidate that peers waste time dialing (see the loopback v6 bind
+/// in [`bind_endpoint_with_key`]).
 fn ipv4_only() -> bool {
-    matches!(
-        std::env::var("ARVOLO_IPV4_ONLY").ok().as_deref(),
-        Some("1") | Some("true") | Some("yes")
-    )
+    match std::env::var("ARVOLO_IPV4_ONLY").ok().as_deref() {
+        Some("1") | Some("true") | Some("yes") => true,
+        Some("0") | Some("false") | Some("no") => false,
+        _ => *IPV4_ONLY_AUTO.get_or_init(no_ipv6_route),
+    }
+}
+
+/// Memoized auto-detection result (the probe is cheap but `bind_endpoint_*` runs
+/// per transfer).
+static IPV4_ONLY_AUTO: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// True if the host has no usable IPv6 route. Probes by `connect`-ing a UDP
+/// socket to a global IPv6 address: `connect` sends no packets, it only checks
+/// the routing table, so this is side-effect-free and instant.
+fn no_ipv6_route() -> bool {
+    use std::net::{Ipv6Addr, SocketAddrV6, UdpSocket};
+    let Ok(sock) = UdpSocket::bind(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 0, 0, 0)) else {
+        return true; // can't even bind v6 -> definitely IPv4-only
+    };
+    // Cloudflare public DNS over IPv6; any routable global v6 works.
+    let target = SocketAddrV6::new(
+        Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111),
+        443,
+        0,
+        0,
+    );
+    sock.connect(target).is_err()
 }

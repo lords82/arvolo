@@ -7,7 +7,9 @@ use std::sync::Arc;
 
 use arvolo_core::backfill::BlobNode;
 use arvolo_core::crypto::Identity;
-use arvolo_core::presence::{post_offer, retract_offer, slot_for, InboxSubscription, Offer};
+use arvolo_core::presence::{
+    offer_status, post_offer, retract_offer, slot_for, InboxSubscription, Offer, OfferStatus,
+};
 use arvolo_core::transfer::RelayChoice;
 use arvolo_relay::{router, AppState, Mailbox};
 
@@ -118,6 +120,76 @@ async fn poster_can_retract_its_own_offer() {
         sub.poll_wait(0).await.expect("poll").is_empty(),
         "poster retracted its own offer"
     );
+}
+
+#[tokio::test]
+async fn offer_status_flips_to_fetched_when_a_live_recipient_polls() {
+    let relay = spawn_relay().await;
+    let sender = Identity::generate();
+    let recipient = Identity::generate();
+    let client = reqwest::Client::new();
+
+    let posted = post_offer(
+        &client,
+        &relay,
+        &recipient.public(),
+        &sender,
+        &Offer {
+            name: "live.bin".into(),
+            size: 1,
+            chunks: 1,
+            ticket: "arvcLIVE".into(),
+        },
+        None,
+    )
+    .await
+    .expect("post");
+
+    // Before anyone polls: pending.
+    let st = offer_status(
+        &client,
+        &relay,
+        &recipient.public(),
+        &posted.id,
+        &posted.poster_token,
+    )
+    .await
+    .expect("status");
+    assert_eq!(st, OfferStatus::Pending);
+
+    // A wrong poster token is rejected (401 → error).
+    assert!(
+        offer_status(&client, &relay, &recipient.public(), &posted.id, "wrong")
+            .await
+            .is_err()
+    );
+
+    // The recipient's authenticated poll marks the offer fetched.
+    let sub = InboxSubscription::new(relay.clone(), &recipient);
+    assert_eq!(sub.poll_wait(0).await.expect("poll").len(), 1);
+    let st = offer_status(
+        &client,
+        &relay,
+        &recipient.public(),
+        &posted.id,
+        &posted.poster_token,
+    )
+    .await
+    .expect("status");
+    assert_eq!(st, OfferStatus::Fetched);
+
+    // After the recipient acks it, the offer is gone.
+    sub.ack(&posted.id).await.expect("ack");
+    let st = offer_status(
+        &client,
+        &relay,
+        &recipient.public(),
+        &posted.id,
+        &posted.poster_token,
+    )
+    .await
+    .expect("status");
+    assert_eq!(st, OfferStatus::Gone);
 }
 
 #[tokio::test]

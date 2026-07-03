@@ -749,9 +749,6 @@ async fn push(
 
     let cancel = cancel_on_ctrl_c();
     let mut last_pct = u64::MAX;
-    // Live transfers emit progress; a mailbox deposit doesn't — use that to word
-    // the completion line accurately regardless of the initial hint.
-    let mut saw_progress = false;
     loop {
         tokio::select! {
             _ = cancel.cancelled() => {
@@ -761,7 +758,6 @@ async fn push(
             ev = events.recv() => {
                 match ev {
                     Ok(ManagerEvent::Progress { id: eid, transferred, total_size }) if eid == id && total_size > 0 => {
-                        saw_progress = true;
                         let pct = transferred * 100 / total_size;
                         if pct != last_pct {
                             last_pct = pct;
@@ -771,12 +767,15 @@ async fn push(
                         }
                     }
                     Ok(ManagerEvent::Completed { id: eid, .. }) if eid == id => {
-                        if saw_progress {
-                            eprintln!("\n✓ delivered.");
-                        } else {
-                            eprintln!("✓ deposited to the mailbox (delivered when they return).");
-                        }
+                        // The offline path emits Deposited first (handled below); a
+                        // Completed here is a live P2P delivery.
+                        eprintln!("\n✓ delivered.");
                         record_history(&manager, id, "completed");
+                        break;
+                    }
+                    Ok(ManagerEvent::Deposited { id: eid }) if eid == id => {
+                        eprintln!("✓ deposited to the mailbox (delivered when they return).");
+                        record_history(&manager, id, "deposited");
                         break;
                     }
                     Ok(ManagerEvent::Failed { id: eid, error }) if eid == id => {

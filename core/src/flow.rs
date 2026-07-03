@@ -760,6 +760,37 @@ pub async fn revoke_offline(relay: &str, claim: &str, revoke_token: &str) -> Res
     Ok(())
 }
 
+/// Whether a deposited offline blob is still on the relay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaimStatus {
+    /// Still on the relay, not yet fetched.
+    Pending,
+    /// No longer on the relay — fetched (burn-after-read) or expired. Within a
+    /// short poll window (far below the blob TTL) this means it was fetched.
+    Gone,
+}
+
+/// Query whether a deposited blob (`claim`) is still on the relay. Lets a sender
+/// confirm an offline delivery (poll until [`ClaimStatus::Gone`]).
+pub async fn claim_status(relay: &str, claim: &str) -> Result<ClaimStatus> {
+    let url = format!("{}/v1/entry/{}/status", relay.trim_end_matches('/'), claim);
+    let resp = reqwest::Client::new()
+        .get(&url)
+        .send()
+        .await
+        .context("claim status request")?;
+    if resp.status().is_success() {
+        Ok(ClaimStatus::Pending)
+    } else if matches!(
+        resp.status(),
+        reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::GONE
+    ) {
+        Ok(ClaimStatus::Gone)
+    } else {
+        anyhow::bail!("relay rejected claim status: {}", resp.status())
+    }
+}
+
 /// Fetch and decrypt an offline ticket into `out` (default derived from the
 /// claim). Returns the output path and the number of plaintext bytes written.
 pub async fn fetch_offline(
