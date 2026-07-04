@@ -56,6 +56,9 @@ pub enum SendEvent {
     Backfilled,
     /// A backfill attempt failed (transfer can still be retried).
     BackfillFailed { reason: String },
+    /// The number of distinct peers currently downloading from us changed
+    /// (0, 1, or many — a shared ticket can serve a whole swarm).
+    Peers { count: usize },
 }
 
 /// Progress events emitted while receiving a file.
@@ -299,6 +302,7 @@ impl SendSession {
         // Poll the receiver's chunk-ack count and surface byte progress on change.
         let chunk_size = self.sender.chunk_size() as u64;
         let mut last_delivered = 0usize;
+        let mut last_peers = 0usize;
         let mut ticker = tokio::time::interval(std::time::Duration::from_millis(500));
         loop {
             tokio::select! {
@@ -309,6 +313,11 @@ impl SendSession {
                         last_delivered = d;
                         let transferred = (d as u64).saturating_mul(chunk_size).min(self.total_size);
                         on(SendEvent::Progress { transferred, total: self.total_size });
+                    }
+                    let p = self.sender.active_peers();
+                    if p != last_peers {
+                        last_peers = p;
+                        on(SendEvent::Peers { count: p });
                     }
                 }
                 _ = self.sender.receiver_connected() => {

@@ -523,7 +523,16 @@ fn print_history() {
 /// below and an optional `--watch` redraw loop.
 #[cfg(unix)]
 async fn show_transfers_live(mut client: ipc::client::DaemonClient, watch: bool) -> Result<()> {
-    async fn render(client: &mut ipc::client::DaemonClient) -> Result<()> {
+    use std::collections::HashMap;
+    use std::time::Instant;
+
+    // Per-transfer last (bytes, when) sample, so `--watch` can derive a live
+    // byte/s rate from the delta between redraws.
+    async fn render(
+        client: &mut ipc::client::DaemonClient,
+        samples: &mut HashMap<u64, (u64, Instant)>,
+        rates: bool,
+    ) -> Result<()> {
         let st = client.status().await?;
         let transfers = client.list().await?;
         let pending = client.list_pending().await?;
@@ -541,8 +550,36 @@ async fn show_transfers_live(mut client: ipc::client::DaemonClient, watch: bool)
             println!("transfers: (none)");
         } else {
             println!("transfers:");
+            let now = Instant::now();
+            let (mut up, mut down) = (0u64, 0u64);
             for t in &transfers {
-                print_transfer_dto(t);
+                let rate = if rates {
+                    let r = samples.get(&t.id).map(|(prev, ts)| {
+                        let dt = now.duration_since(*ts).as_secs_f64();
+                        if dt > 0.0 {
+                            (t.transferred.saturating_sub(*prev) as f64 / dt) as u64
+                        } else {
+                            0
+                        }
+                    });
+                    samples.insert(t.id, (t.transferred, now));
+                    r
+                } else {
+                    None
+                };
+                if let Some(r) = rate {
+                    if t.direction == "send" {
+                        up += r;
+                    } else {
+                        down += r;
+                    }
+                }
+                print_transfer_dto(t, rate);
+            }
+            // Drop samples for transfers that are gone.
+            samples.retain(|id, _| transfers.iter().any(|t| t.id == *id));
+            if rates && (up > 0 || down > 0) {
+                println!("  ── ↑ {}/s   ↓ {}/s", human_size(up), human_size(down));
             }
         }
         if !pending.is_empty() {
@@ -561,7 +598,8 @@ async fn show_transfers_live(mut client: ipc::client::DaemonClient, watch: bool)
         Ok(())
     }
 
-    render(&mut client).await?;
+    let mut samples: HashMap<u64, (u64, Instant)> = HashMap::new();
+    render(&mut client, &mut samples, watch).await?;
     print_history();
 
     if !watch {
@@ -570,14 +608,19 @@ async fn show_transfers_live(mut client: ipc::client::DaemonClient, watch: bool)
     let mut events = daemon_events().await?;
     let cancel = cancel_on_ctrl_c();
     println!("\n(watching — Ctrl-C to stop)");
+    // Redraw on a steady 1s beat so byte/s rates are stable; drain daemon events
+    // just to notice the socket closing.
+    let mut ticker = tokio::time::interval(Duration::from_secs(1));
+    ticker.tick().await; // consume the immediate first tick
     loop {
         tokio::select! {
             _ = cancel.cancelled() => break,
+            _ = ticker.tick() => {
+                println!("\n---");
+                render(&mut client, &mut samples, true).await?;
+            }
             ev = events.next() => match ev {
-                Ok(Some(_)) => {
-                    println!("\n---");
-                    render(&mut client).await?;
-                }
+                Ok(Some(_)) => {}       // absorbed — the 1s tick handles redraw
                 Ok(None) => break,
                 Err(e) => return Err(e),
             }
@@ -1491,8 +1534,9 @@ async fn daemon_events() -> Result<ipc::client::EventStream> {
 
 /// Print a one-line summary of a transfer DTO.
 #[cfg(unix)]
-fn print_transfer_dto(t: &ipc::protocol::TransferDto) {
-    let arrow = if t.direction == "send" { "→" } else { "←" };
+fn print_transfer_dto(t: &ipc::protocol::TransferDto, rate: Option<u64>) {
+    let is_send = t.direction == "send";
+    let arrow = if is_send { "→" } else { "←" };
     let peer = t
         .peer
         .as_deref()
@@ -1507,16 +1551,31 @@ fn print_transfer_dto(t: &ipc::protocol::TransferDto) {
     } else {
         String::new()
     };
-    let swarm = if t.swarm_peers > 0 || t.pieces_from_peers > 0 {
+    // Live throughput (only in --watch): the arrow already signals the direction.
+    let speed = match rate {
+        Some(bps) if bps > 0 => format!(" @ {}/s", human_size(bps)),
+        _ => String::new(),
+    };
+    // Who's on the other side of the swarm: for a send, how many are pulling from
+    // us right now; for a receive, how many peers we're pulling from.
+    let peers = if is_send {
+        match t.download_peers {
+            0 => String::new(),
+            1 => "  1 downloading".to_string(),
+            n => format!("  {n} downloading"),
+        }
+    } else if t.swarm_peers > 0 {
         format!(
-            "  swarm: {} peer(s), {} piece(s) from peers",
-            t.swarm_peers, t.pieces_from_peers
+            "  from {} peer{} ({} via swarm)",
+            t.swarm_peers,
+            if t.swarm_peers == 1 { "" } else { "s" },
+            t.pieces_from_peers
         )
     } else {
         String::new()
     };
     println!(
-        "  [{}] {arrow} {peer}  {}{progress}  ({}){swarm}",
+        "  [{}] {arrow} {peer}  {}{progress}{speed}  ({}){peers}",
         t.id, t.name, t.status
     );
 }
@@ -1967,6 +2026,9 @@ async fn serve_session(session: flow::SendSession, qr: bool) -> Result<()> {
                 eprintln!("Backfilled. You can close this; the relay can finish the delivery.")
             }
             SendEvent::BackfillFailed { reason } => eprintln!("Relay backfill failed: {reason}"),
+            SendEvent::Peers { count } => {
+                vprintln!("{count} peer(s) downloading");
+            }
         })
         .await
 }
@@ -2116,6 +2178,7 @@ async fn send_with_code(
             SendEvent::BackfillFailed { reason } => eprintln!("Relay backfill failed: {reason}"),
             SendEvent::Delivered => eprintln!("✓ A receiver got the whole file."),
             SendEvent::ReceiverConnected => vprintln!("receiver connected — chunk pull started"),
+            SendEvent::Peers { count } => vprintln!("{count} peer(s) downloading"),
             SendEvent::Progress { .. } => {}
             SendEvent::Ready { .. } => {} // code already printed
         })

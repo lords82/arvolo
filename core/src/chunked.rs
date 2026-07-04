@@ -24,7 +24,7 @@ use anyhow::{anyhow, Context, Result};
 use iroh::{
     endpoint::{Connection, RecvStream, SendStream},
     protocol::{AcceptError, ProtocolHandler, Router},
-    Endpoint, EndpointAddr,
+    Endpoint, EndpointAddr, EndpointId,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, Mutex as AsyncMutex};
@@ -216,10 +216,46 @@ impl ChunkBackend {
     }
 }
 
+/// Live count of *distinct* peers currently connected to a [`ChunkServer`] —
+/// i.e. how many are downloading from us right now. Keyed by remote endpoint id
+/// so repeated connects from the same peer count once. Cheap `Arc<Mutex<…>>`
+/// clone shared between the server and its [`ChunkSender`].
+#[derive(Clone, Default)]
+pub(crate) struct PeerCount(Arc<Mutex<HashMap<EndpointId, usize>>>);
+
+impl PeerCount {
+    fn enter(&self, id: EndpointId) {
+        *self.0.lock().unwrap().entry(id).or_insert(0) += 1;
+    }
+    fn leave(&self, id: EndpointId) {
+        let mut m = self.0.lock().unwrap();
+        if let Some(c) = m.get_mut(&id) {
+            *c -= 1;
+            if *c == 0 {
+                m.remove(&id);
+            }
+        }
+    }
+    /// Number of distinct peers currently connected.
+    pub(crate) fn distinct(&self) -> usize {
+        self.0.lock().unwrap().len()
+    }
+}
+
+/// Decrements the peer count when an accepted connection ends (drop-safe).
+struct PeerGuard(PeerCount, EndpointId);
+impl Drop for PeerGuard {
+    fn drop(&mut self) {
+        self.0.leave(self.1);
+    }
+}
+
 /// Serves chunks over [`CHUNK_ALPN`], from either backend.
 #[derive(Clone)]
 pub(crate) struct ChunkServer {
     backend: Arc<ChunkBackend>,
+    /// Distinct peers currently fetching from this server (see [`PeerCount`]).
+    peers: PeerCount,
 }
 
 impl ChunkServer {
@@ -227,6 +263,7 @@ impl ChunkServer {
     pub(crate) fn files(dir: PathBuf) -> Self {
         Self {
             backend: Arc::new(ChunkBackend::Files { dir }),
+            peers: PeerCount::default(),
         }
     }
 }
@@ -239,6 +276,11 @@ impl std::fmt::Debug for ChunkServer {
 
 impl ProtocolHandler for ChunkServer {
     async fn accept(&self, conn: Connection) -> std::result::Result<(), AcceptError> {
+        // Track this peer as an active downloader for the duration of the
+        // connection (dropped when it ends, even on error).
+        let peer = conn.remote_id();
+        self.peers.enter(peer);
+        let _guard = PeerGuard(self.peers.clone(), peer);
         // Serve one request per accepted bi-stream; a receiver may open several.
         while let Ok((mut send, mut recv)) = conn.accept_bi().await {
             let Some(req) = read_frame::<ChunkReq>(&mut recv).await else {
@@ -417,6 +459,7 @@ pub struct ChunkSender {
     on_relay: Arc<Mutex<HashSet<u32>>>,
     gone_rx: AsyncMutex<mpsc::UnboundedReceiver<Vec<usize>>>,
     connected_rx: AsyncMutex<mpsc::UnboundedReceiver<()>>,
+    peers: PeerCount,
 }
 
 impl ChunkSender {
@@ -466,6 +509,7 @@ impl ChunkSender {
                 idx += 1;
             }
         }
+        let peers = PeerCount::default();
         let chunk_server = ChunkServer {
             backend: Arc::new(ChunkBackend::OnTheFly {
                 path: path.to_path_buf(),
@@ -473,6 +517,7 @@ impl ChunkSender {
                 index,
                 total_chunks,
             }),
+            peers: peers.clone(),
         };
 
         let use_relay = !matches!(relay, RelayChoice::Disabled);
@@ -512,6 +557,7 @@ impl ChunkSender {
             on_relay,
             gone_rx: AsyncMutex::new(gone_rx),
             connected_rx: AsyncMutex::new(connected_rx),
+            peers,
         })
     }
 
@@ -539,6 +585,11 @@ impl ChunkSender {
     }
     pub fn delivered_count(&self) -> usize {
         self.delivered.lock().unwrap().len()
+    }
+
+    /// How many distinct peers are currently downloading from this sender.
+    pub fn active_peers(&self) -> usize {
+        self.peers.distinct()
     }
 
     /// Resolves when a receiver's control channel connects (once per receiver).
@@ -614,6 +665,7 @@ impl ChunkSeeder {
                 total_chunks,
                 have,
             }),
+            peers: PeerCount::default(),
         };
         let endpoint = bind_endpoint(relay).await?;
         let router = Router::builder(endpoint.clone())

@@ -68,6 +68,9 @@ pub struct Transfer {
     /// peers (both 0 for a non-swarm transfer).
     pub swarm_peers: usize,
     pub pieces_from_peers: u64,
+    /// For a send: distinct peers currently downloading from us right now (0 for
+    /// a receive, or a send nobody is pulling).
+    pub download_peers: usize,
 }
 
 /// Events emitted as transfers and offers progress. Cloneable for [`broadcast`].
@@ -157,6 +160,12 @@ impl Inner {
         if let Some(t) = self.transfers.lock().unwrap().get_mut(&id) {
             t.swarm_peers = peers;
             t.pieces_from_peers = from_peers;
+        }
+    }
+
+    fn set_download_peers(&self, id: u64, count: usize) {
+        if let Some(t) = self.transfers.lock().unwrap().get_mut(&id) {
+            t.download_peers = count;
         }
     }
 
@@ -273,6 +282,7 @@ impl TransferManager {
                     status: TransferStatus::Active,
                     swarm_peers: 0,
                     pieces_from_peers: 0,
+                    download_peers: 0,
                 },
             );
             // Keep the map from growing without bound over a long session: once
@@ -477,6 +487,7 @@ impl TransferManager {
                         d.store(true, Ordering::Relaxed);
                         stop.cancel();
                     }
+                    SendEvent::Peers { count } => inner_cb.set_download_peers(id, count),
                     SendEvent::Ready { .. }
                     | SendEvent::ReceiverDropped { .. }
                     | SendEvent::Backfilled
@@ -1117,6 +1128,7 @@ async fn serve_session(
                     total_size: total,
                 });
             }
+            SendEvent::Peers { count } => inner_cb.set_download_peers(id, count),
             SendEvent::Ready { .. }
             | SendEvent::ReceiverConnected
             | SendEvent::ReceiverDropped { .. }

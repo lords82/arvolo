@@ -127,6 +127,9 @@ pub struct TransferDto {
     pub swarm_peers: usize,
     #[serde(default)]
     pub pieces_from_peers: u64,
+    /// For a send: distinct peers currently downloading from us.
+    #[serde(default)]
+    pub download_peers: usize,
 }
 
 /// A parked incoming offer awaiting the user's accept/reject.
@@ -204,6 +207,7 @@ impl From<&Transfer> for TransferDto {
             status: status_str(&t.status),
             swarm_peers: t.swarm_peers,
             pieces_from_peers: t.pieces_from_peers,
+            download_peers: t.download_peers,
         }
     }
 }
