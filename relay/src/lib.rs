@@ -550,6 +550,26 @@ impl Mailbox {
             .is_ok()
     }
 
+    /// Download accounting for a live (unexpired) entry: `(downloads, max)`.
+    /// `None` if the claim is unknown or expired. Lets a depositor see how many
+    /// times a link/mailbox blob has been fetched.
+    pub fn entry_counts(&self, claim: &str, now: u64) -> Option<(u32, u32)> {
+        self.conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT downloads, max_downloads FROM entries \
+                 WHERE claim = ?1 AND expires_at > ?2",
+                params![claim, now as i64],
+                |row| {
+                    let d: i64 = row.get(0)?;
+                    let m: i64 = row.get(1)?;
+                    Ok((d.max(0) as u32, m.max(0) as u32))
+                },
+            )
+            .ok()
+    }
+
     // ---- seeded-blob lifecycle (backfill) ---------------------------------
 
     /// Record a seeded blob with a one-time release token and expiry.
@@ -1514,14 +1534,26 @@ async fn inbox_status_handler(
 /// Status of a deposited offline blob for its depositor: `pending` if still on the
 /// relay, `gone` (404) if fetched (burn-after-read) or expired. The `claim` is a
 /// secret capability, so this needs no extra auth.
+#[derive(serde::Serialize)]
+struct EntryStatusResp {
+    status: &'static str,
+    downloads: u32,
+    max_downloads: u32,
+}
+
 async fn entry_status_handler(
     State(state): State<AppState>,
     AxumPath(claim): AxumPath<String>,
-) -> Result<&'static str, StatusCode> {
-    if state.mailbox.entry_exists(&claim, now_unix()) {
-        Ok("pending")
-    } else {
-        Err(StatusCode::NOT_FOUND)
+) -> Result<axum::Json<EntryStatusResp>, StatusCode> {
+    match state.mailbox.entry_counts(&claim, now_unix()) {
+        // JSON body carries the download accounting; older clients that only check
+        // the status code (present vs 404) keep working unchanged.
+        Some((downloads, max_downloads)) => Ok(axum::Json(EntryStatusResp {
+            status: "pending",
+            downloads,
+            max_downloads,
+        })),
+        None => Err(StatusCode::NOT_FOUND),
     }
 }
 

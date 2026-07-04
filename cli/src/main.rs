@@ -781,15 +781,15 @@ async fn sessions_cmd(action: SessionAction) -> Result<()> {
             if !dep_list.is_empty() {
                 println!("Relay deposits — `arvolo sessions rm <id>` deletes from the relay:\n");
                 for r in dep_list {
-                    let on_relay = match tokio::time::timeout(
+                    let info = tokio::time::timeout(
                         Duration::from_secs(5),
-                        flow::claim_status(&r.relay, &r.claim),
+                        flow::claim_info(&r.relay, &r.claim),
                     )
-                    .await
-                    {
-                        Ok(Ok(flow::ClaimStatus::Pending)) => "present",
-                        Ok(Ok(flow::ClaimStatus::Gone)) => "gone (downloaded / expired / revoked)",
-                        _ => "unknown (relay unreachable)",
+                    .await;
+                    let (on_relay, live_downloads) = match &info {
+                        Ok(Ok(i)) if i.present => ("present", i.downloads),
+                        Ok(Ok(_)) => ("gone (downloaded / expired / revoked)", None),
+                        _ => ("unknown (relay unreachable)", None),
                     };
                     let expiry = if r.expired() {
                         "EXPIRED".to_string()
@@ -813,7 +813,12 @@ async fn sessions_cmd(action: SessionAction) -> Result<()> {
                         let disp = book::resolve_name(rcpt).unwrap_or_else(|| rcpt.clone());
                         println!("    to:         {disp}");
                     }
-                    println!("    downloads:  {}", r.max_label());
+                    // Show the live fetch count (from the relay) over the cap when
+                    // the relay reports it; else just the cap.
+                    match live_downloads {
+                        Some(n) => println!("    downloads:  {n} / {}", r.max_label()),
+                        None => println!("    downloads:  {}", r.max_label()),
+                    }
                     println!(
                         "    created:    {} ago",
                         human_duration(now_unix().saturating_sub(r.created))

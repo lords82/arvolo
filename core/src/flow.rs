@@ -1305,9 +1305,26 @@ pub enum ClaimStatus {
     Gone,
 }
 
-/// Query whether a deposited blob (`claim`) is still on the relay. Lets a sender
-/// confirm an offline delivery (poll until [`ClaimStatus::Gone`]).
-pub async fn claim_status(relay: &str, claim: &str) -> Result<ClaimStatus> {
+/// Live status of a deposited blob on the relay, with download accounting when
+/// the relay reports it. `downloads`/`max_downloads` are `None` against an older
+/// relay that only signals presence.
+#[derive(Debug, Clone, Copy)]
+pub struct ClaimInfo {
+    pub present: bool,
+    pub downloads: Option<u32>,
+    pub max_downloads: Option<u32>,
+}
+
+#[derive(serde::Deserialize)]
+struct ClaimStatusBody {
+    downloads: Option<u32>,
+    max_downloads: Option<u32>,
+}
+
+/// Query a deposited blob's status **and** how many times it's been fetched.
+/// Newer relays return the counts as JSON; against an older relay the counts are
+/// `None` but presence still resolves.
+pub async fn claim_info(relay: &str, claim: &str) -> Result<ClaimInfo> {
     let url = format!("{}/v1/entry/{}/status", relay.trim_end_matches('/'), claim);
     let resp = reqwest::Client::new()
         .get(&url)
@@ -1315,15 +1332,37 @@ pub async fn claim_status(relay: &str, claim: &str) -> Result<ClaimStatus> {
         .await
         .context("claim status request")?;
     if resp.status().is_success() {
-        Ok(ClaimStatus::Pending)
+        let (downloads, max_downloads) = match resp.json::<ClaimStatusBody>().await {
+            Ok(b) => (b.downloads, b.max_downloads),
+            Err(_) => (None, None), // older relay: plain-text body, presence only
+        };
+        Ok(ClaimInfo {
+            present: true,
+            downloads,
+            max_downloads,
+        })
     } else if matches!(
         resp.status(),
         reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::GONE
     ) {
-        Ok(ClaimStatus::Gone)
+        Ok(ClaimInfo {
+            present: false,
+            downloads: None,
+            max_downloads: None,
+        })
     } else {
         anyhow::bail!("relay rejected claim status: {}", resp.status())
     }
+}
+
+/// Query whether a deposited blob (`claim`) is still on the relay. Lets a sender
+/// confirm an offline delivery (poll until [`ClaimStatus::Gone`]).
+pub async fn claim_status(relay: &str, claim: &str) -> Result<ClaimStatus> {
+    Ok(if claim_info(relay, claim).await?.present {
+        ClaimStatus::Pending
+    } else {
+        ClaimStatus::Gone
+    })
 }
 
 /// Fetch and decrypt an offline ticket into `out` (default derived from the
