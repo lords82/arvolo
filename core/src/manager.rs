@@ -565,49 +565,69 @@ impl TransferManager {
         .context("prepare send")?;
         let ticket = session.ticket.clone();
         let total = session.total_size;
+        let node_seed = session.node_seed();
         let (id, cancel) = self.register(Direction::Send, None, name, total);
 
+        // Persist so the daemon can resume serving this ticket after a restart —
+        // the same content key (carried in the ticket) + node seed reproduce the
+        // same chunk hashes and node id, so the ticket already handed out stays
+        // valid and receivers reconnect.
+        if let Some(dir) = &self.inner.state_dir {
+            persist_send(
+                dir,
+                &SendRecord {
+                    id,
+                    path: payload.to_string_lossy().into_owned(),
+                    node_seed: node_seed.to_vec(),
+                    ticket: ticket.clone(),
+                },
+            );
+        }
+
+        tokio::spawn(serve_session(self.inner.clone(), session, id, cancel));
+        Ok((id, ticket))
+    }
+
+    /// Re-serve a persisted send after a daemon restart: rebind the same node id
+    /// and content key (from the saved ticket) so the original ticket reconnects.
+    /// Only anonymous (`Plain`-key) tickets are resumable here; `--to` sends aren't.
+    fn resume_serve(&self, rec: SendRecord) -> Result<()> {
+        let expected = crate::chunked::ChunkTicket::decode(&rec.ticket).context("decode ticket")?;
+        let key: [u8; crate::crypto::CHUNK_KEY_LEN] = match &expected.key {
+            crate::chunked::KeyDelivery::Plain(k) => {
+                k.as_slice().try_into().context("bad content key length")?
+            }
+            _ => anyhow::bail!("cannot resume a sealed (--to) send"),
+        };
+        let node_seed: [u8; 32] = rec.node_seed.as_slice().try_into().context("bad node seed")?;
+        let path = PathBuf::from(&rec.path);
+        let (id, cancel) = self.register(
+            Direction::Send,
+            None,
+            expected.name.clone(),
+            expected.total_size,
+        );
+        if let Some(dir) = &self.inner.state_dir {
+            persist_send(
+                dir,
+                &SendRecord {
+                    id,
+                    path: rec.path.clone(),
+                    node_seed: rec.node_seed.clone(),
+                    ticket: rec.ticket.clone(),
+                },
+            );
+        }
         let inner = self.inner.clone();
         tokio::spawn(async move {
-            let delivered = Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let d = delivered.clone();
-            let inner_cb = inner.clone();
-            let result = session
-                .serve(cancel, move |ev| match ev {
-                    SendEvent::Progress { transferred, total } => {
-                        inner_cb.set_progress(id, transferred);
-                        inner_cb.emit(ManagerEvent::Progress {
-                            id,
-                            transferred,
-                            total_size: total,
-                        });
-                    }
-                    SendEvent::Delivered => {
-                        // A receiver got the whole file. Keep serving (others may
-                        // still use the ticket) but surface 100% so the UI shows it.
-                        d.store(true, Ordering::Relaxed);
-                        inner_cb.set_progress(id, total);
-                        inner_cb.emit(ManagerEvent::Progress {
-                            id,
-                            transferred: total,
-                            total_size: total,
-                        });
-                    }
-                    SendEvent::Ready { .. }
-                    | SendEvent::ReceiverConnected
-                    | SendEvent::ReceiverDropped { .. }
-                    | SendEvent::Backfilled
-                    | SendEvent::BackfillFailed { .. } => {}
-                })
-                .await;
-            match result {
+            match flow::resume_send(&path, key, Some(node_seed), &expected, RelayChoice::from_env())
+                .await
+            {
+                Ok(session) => serve_session(inner, session, id, cancel).await,
                 Err(e) => finish(&inner, id, false, Err(e)),
-                // serve() returns on cancel: mark Completed if at least one receiver
-                // got the whole file, else Cancelled.
-                Ok(()) => finish(&inner, id, !delivered.load(Ordering::Relaxed), Ok(None)),
             }
         });
-        Ok((id, ticket))
+        Ok(())
     }
 
     // ---- receiving (offers) ----------------------------------------------
@@ -834,12 +854,21 @@ impl TransferManager {
         let Some(dir) = self.inner.state_dir.clone() else {
             return 0;
         };
-        let records = load_downloads(&dir);
-        let n = records.len();
-        for rec in records {
+        let downloads = load_downloads(&dir);
+        let sends = load_sends(&dir);
+        let n = downloads.len() + sends.len();
+        for rec in downloads {
             // Drop the stale record; start_download writes a fresh one (new id).
             remove_download(&dir, rec.id);
             self.start_download(rec.ticket, PathBuf::from(rec.out_path), None, rec.name, rec.size);
+        }
+        for rec in sends {
+            remove_send(&dir, rec.id);
+            // Re-serve the same ticket (same key + node seed). Best-effort: a send
+            // whose file changed/vanished just isn't resumed.
+            if let Err(e) = self.resume_serve(rec) {
+                tracing::warn!("could not resume a send: {e:#}");
+            }
         }
         n
     }
@@ -974,11 +1003,57 @@ fn prune_finished(transfers: &mut HashMap<u64, Transfer>, keep: usize) {
     }
 }
 
+/// Run a send session to completion: report progress, keep serving (a ticket may
+/// feed several receivers), and finish on cancel or error — dropping the resume
+/// record. Shared by [`TransferManager::serve_ticket`] and `resume_serve`.
+async fn serve_session(
+    inner: Arc<Inner>,
+    session: flow::SendSession,
+    id: u64,
+    cancel: CancellationToken,
+) {
+    let total = session.total_size;
+    let delivered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let d = delivered.clone();
+    let inner_cb = inner.clone();
+    let result = session
+        .serve(cancel, move |ev| match ev {
+            SendEvent::Progress { transferred, total } => {
+                inner_cb.set_progress(id, transferred);
+                inner_cb.emit(ManagerEvent::Progress {
+                    id,
+                    transferred,
+                    total_size: total,
+                });
+            }
+            SendEvent::Delivered => {
+                d.store(true, Ordering::Relaxed);
+                inner_cb.set_progress(id, total);
+                inner_cb.emit(ManagerEvent::Progress {
+                    id,
+                    transferred: total,
+                    total_size: total,
+                });
+            }
+            SendEvent::Ready { .. }
+            | SendEvent::ReceiverConnected
+            | SendEvent::ReceiverDropped { .. }
+            | SendEvent::Backfilled
+            | SendEvent::BackfillFailed { .. } => {}
+        })
+        .await;
+    match result {
+        Err(e) => finish(&inner, id, false, Err(e)),
+        Ok(()) => finish(&inner, id, !delivered.load(Ordering::Relaxed), Ok(None)),
+    }
+}
+
 /// Finalize a transfer's state and emit the terminal event.
 fn finish(inner: &Inner, id: u64, cancelled: bool, result: Result<Option<PathBuf>>) {
     // Terminal state: drop any resume record so a restart doesn't re-start it.
     if let Some(dir) = &inner.state_dir {
         remove_download(dir, id);
+        remove_send(dir, id);
     }
     match result {
         Ok(path) if cancelled => {
@@ -1028,17 +1103,59 @@ fn remove_download(dir: &Path, id: u64) {
 }
 
 fn load_downloads(dir: &Path) -> Vec<DownloadRecord> {
+    load_records(dir, "dl-")
+}
+
+/// On-disk record of an active send (serving an anonymous `arvc…` ticket), so the
+/// daemon can resume serving after a restart. Stores the file path, the ticket
+/// (which carries the content key + chunk hashes + name), and the node seed — so
+/// the same node id and hashes are reproduced and the ticket already handed out
+/// keeps working.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SendRecord {
+    id: u64,
+    path: String,
+    node_seed: Vec<u8>,
+    ticket: String,
+}
+
+fn send_record_path(dir: &Path, id: u64) -> PathBuf {
+    dir.join(format!("send-{id}.pc"))
+}
+
+fn persist_send(dir: &Path, rec: &SendRecord) {
+    if let Ok(bytes) = postcard::to_allocvec(rec) {
+        let _ = std::fs::create_dir_all(dir);
+        let _ = std::fs::write(send_record_path(dir, rec.id), bytes);
+    }
+}
+
+fn remove_send(dir: &Path, id: u64) {
+    let _ = std::fs::remove_file(send_record_path(dir, id));
+}
+
+fn load_sends(dir: &Path) -> Vec<SendRecord> {
+    load_records(dir, "send-")
+}
+
+/// Read every postcard record whose filename starts with `prefix` from `dir`.
+fn load_records<T: serde::de::DeserializeOwned>(dir: &Path, prefix: &str) -> Vec<T> {
     let mut out = Vec::new();
     let Ok(entries) = std::fs::read_dir(dir) else {
         return out;
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("pc") {
+        let is_match = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n.starts_with(prefix) && n.ends_with(".pc"))
+            .unwrap_or(false);
+        if !is_match {
             continue;
         }
         if let Ok(bytes) = std::fs::read(&path) {
-            if let Ok(rec) = postcard::from_bytes::<DownloadRecord>(&bytes) {
+            if let Ok(rec) = postcard::from_bytes::<T>(&bytes) {
                 out.push(rec);
             }
         }
