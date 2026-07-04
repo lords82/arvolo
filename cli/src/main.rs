@@ -225,20 +225,12 @@ enum Command {
     },
     /// Show your public id (creates an identity on first use).
     Id,
-    /// Revoke a previously sent offline ticket, deleting it from the relay.
+    /// Revoke a mailbox send or a browser link, deleting its blob from the relay.
     Revoke {
-        /// The offline ticket (`arvm…`) you sent.
-        ticket: String,
+        /// The offline ticket (`arvm…`) or download link (`…/dl/<claim>#…`) you
+        /// sent. For a link the `#key` part is ignored.
+        target: String,
         /// The revoke token printed when you sent it.
-        #[arg(long)]
-        token: String,
-    },
-    /// Revoke a browser download link (from `send --link`), deleting its
-    /// blob from the relay so the link stops working.
-    RevokeLink {
-        /// The download link you shared (`…/dl/<claim>#…`). The key part is ignored.
-        link: String,
-        /// The revoke token printed when you created the link.
         #[arg(long)]
         token: String,
     },
@@ -389,8 +381,7 @@ async fn main() -> Result<()> {
         Command::Contacts { action } => contacts_cmd(action).await,
         Command::Sessions { action } => sessions_cmd(action).await,
         Command::Transfers { watch, action } => transfers_cmd(watch, action).await,
-        Command::Revoke { ticket, token } => revoke(ticket, token).await,
-        Command::RevokeLink { link, token } => revoke_link(link, token).await,
+        Command::Revoke { target, token } => revoke(target, token).await,
         Command::Listen {
             download_dir,
             relay,
@@ -2381,13 +2372,23 @@ async fn recv_offline(
     Ok(())
 }
 
-async fn revoke(ticket: String, token: String) -> Result<()> {
-    let t = arvolo_core::offline::OfflineTicket::decode(&ticket)
-        .context("not a valid offline ticket (arvm…)")?;
-    vprintln!("asking relay {} to delete claim {}…", t.relay, t.claim);
-    flow::revoke_offline(&t.relay, &t.claim, &token).await?;
-    println!("Revoked — the blob is no longer available on the relay.");
-    Ok(())
+/// `arvolo revoke <arvm…|link> --token` — delete a mailbox blob or a browser link
+/// from the relay. Auto-detects the target: an `arvm…` offline ticket or a
+/// `…/dl/<claim>` download link.
+async fn revoke(target: String, token: String) -> Result<()> {
+    if let Ok(t) = arvolo_core::offline::OfflineTicket::decode(&target) {
+        vprintln!("asking relay {} to delete claim {}…", t.relay, t.claim);
+        flow::revoke_offline(&t.relay, &t.claim, &token).await?;
+        println!("Revoked — the blob is no longer available on the relay.");
+        return Ok(());
+    }
+    if let Ok((relay, claim)) = parse_dl_link(&target) {
+        vprintln!("asking relay {relay} to delete claim {claim}…");
+        flow::revoke_offline(&relay, &claim, &token).await?;
+        println!("Link revoked — the file is deleted from the relay and the link no longer works.");
+        return Ok(());
+    }
+    anyhow::bail!("not an arvolo offline ticket (arvm…) or a download link (…/dl/<claim>)")
 }
 
 /// Parse a download link (`https://<relay>/dl/<claim>[#key]`) into its relay base
@@ -2401,12 +2402,4 @@ fn parse_dl_link(link: &str) -> Result<(String, String)> {
     let claim = claim.trim_matches('/');
     anyhow::ensure!(!claim.is_empty(), "download link is missing its claim");
     Ok((relay.trim_end_matches('/').to_string(), claim.to_string()))
-}
-
-async fn revoke_link(link: String, token: String) -> Result<()> {
-    let (relay, claim) = parse_dl_link(&link)?;
-    vprintln!("asking relay {relay} to delete claim {claim}…");
-    flow::revoke_offline(&relay, &claim, &token).await?;
-    println!("Link revoked — the file is deleted from the relay and the link no longer works.");
-    Ok(())
 }

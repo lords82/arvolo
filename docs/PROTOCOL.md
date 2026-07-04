@@ -381,7 +381,7 @@ A blob is deleted when the **first** of these happens:
    unlimited for a link).
 2. **TTL lapses** — the relay's reaper deletes expired entries (default 7 days for
    a deposit; capped at 30 days).
-3. **Revoke** — `arvolo sessions rm <id>` (or `revoke` / `revoke-link`) sends the
+3. **Revoke** — `arvolo sessions rm <id>` (or `revoke <arvm…|link>`) sends the
    revoke token to `DELETE /v1/entry/{claim}` **before** dropping the local record,
    so removing the session deletes the file and kills the link.
 

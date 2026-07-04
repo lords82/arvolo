@@ -134,7 +134,7 @@ arvolo sessions rm <id>
 | `arvolo contacts add\|list\|verify\|remove\|trust\|untrust` | Address book of recipients (used by `--to`); TOFU + out-of-band fingerprint verification. `trust` lets the daemon auto-download that contact's files (default: ask). |
 | `arvolo listen [--download-dir --auto-accept-contacts --auto-accept-verified]` | Stay online and receive files contacts send to you (offers, live watchdog, transparent download). |
 | `arvolo sessions list\|rm <id>` | List relay deposits (link / sealed) with live relay status + resumable sends; `rm` **revokes on the relay**, deleting the file/link. |
-| `arvolo revoke <arvm…> --token <t>` / `revoke-link <url> --token <t>` | Delete a deposited ticket / download link from the relay. |
+| `arvolo revoke <arvm…\|link> --token <t>` | Delete a deposited mailbox ticket **or** a browser download link from the relay (auto-detects which). |
 | `arvolo transfers [--watch]` / `transfers clear` | One view of everything: with a daemon, live in/out transfers + pending offers, then history below (`--watch` redraws); without one, just history. `clear` wipes history. |
 | `arvolo daemon [--download-dir --relay]` | Run the always-on background engine + local control socket (systemd/launchd). See [`docs/DAEMON.md`](docs/DAEMON.md). |
 | `arvolo accept <id>` / `reject <id>` / `cancel <id>` | Drive the running daemon: approve/decline a parked offer, cancel a transfer (ids from `arvolo transfers`). |
