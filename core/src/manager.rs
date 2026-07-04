@@ -234,13 +234,17 @@ impl TransferManager {
 
     /// A snapshot of all known transfers (any status).
     pub fn list(&self) -> Vec<Transfer> {
-        self.inner
+        let mut out: Vec<Transfer> = self
+            .inner
             .transfers
             .lock()
             .unwrap()
             .values()
             .cloned()
-            .collect()
+            .collect();
+        // Newest first: the id is a monotonic counter, so higher = more recent.
+        out.sort_by_key(|t| std::cmp::Reverse(t.id));
+        out
     }
 
     /// A snapshot of one transfer by id, if still tracked.
