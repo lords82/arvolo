@@ -379,12 +379,18 @@ pub(crate) fn archive_stage_path(out_dir: &Path, chunks: &[crate::hash::Hash]) -
 }
 
 /// Whether a completed receiver should keep serving the file to the swarm
-/// (seed-after-complete). Opt-in via `ARVOLO_SEED` — seeding costs upload and, for
-/// archives, keeps the staged tar on disk. Read here and in the manager alike.
+/// (seed-after-complete). **On by default** — seeding is the norm; set
+/// `ARVOLO_SEED=0` (or `false`/`no`) to opt out. For archives it keeps the staged
+/// tar on disk. Read here and in the manager alike.
 pub(crate) fn seeding_enabled() -> bool {
-    matches!(
-        std::env::var("ARVOLO_SEED").ok().as_deref(),
-        Some("1") | Some("true") | Some("yes")
+    !matches!(
+        std::env::var("ARVOLO_SEED")
+            .ok()
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("0") | Some("false") | Some("no") | Some("off")
     )
 }
 
