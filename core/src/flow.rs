@@ -477,6 +477,7 @@ fn ordered_providers(
     on_relay: &Mutex<std::collections::HashSet<u32>>,
     sender_live: &Option<Arc<std::sync::atomic::AtomicBool>>,
     peers: &[(iroh::EndpointAddr, Vec<u8>)],
+    banned: &std::collections::HashSet<String>,
 ) -> (bool, Vec<iroh::EndpointAddr>) {
     use std::sync::atomic::Ordering;
     let sender_up = sender_addr.is_some()
@@ -493,9 +494,10 @@ fn ordered_providers(
         sender_addr.iter().for_each(|a| providers.push(a.clone()));
         relay_addr.iter().for_each(|a| providers.push(a.clone()));
     }
-    // Swarm peers that advertise this piece, as extra fallback sources.
+    // Swarm peers that advertise this piece — minus any banned for serving corrupt
+    // bytes — as extra fallback sources.
     for (addr, bf) in peers {
-        if crate::swarm::bitfield_has(bf, i) {
+        if crate::swarm::bitfield_has(bf, i) && !banned.contains(&addr.id.to_string()) {
             providers.push(addr.clone());
         }
     }
@@ -737,6 +739,9 @@ pub async fn recv_chunked(
     // and the announce bitfield read it; the commit loop bumps it.
     let have = Arc::new(std::sync::atomic::AtomicUsize::new(start));
     let peers: Arc<Mutex<Vec<(iroh::EndpointAddr, Vec<u8>)>>> = Arc::new(Mutex::new(Vec::new()));
+    // Peers (by endpoint id) that served corrupt bytes; filtered out of future
+    // provider lists. Populated by `fetch_to_file` on an integrity failure.
+    let banned: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
     let swarm_cancel = cancel.child_token();
     let mut seeder: Option<crate::chunked::ChunkSeeder> = None;
     let mut swarming = false;
@@ -806,8 +811,15 @@ pub async fn recv_chunked(
                 let pl = peers.lock().unwrap();
                 pick_rarest(&mut remaining, sender_up, &orl, &pl)
             };
-            let (relay_first, _) =
-                ordered_providers(i, &sender_addr, &relay_addr, &on_relay, &sender_live, &[]);
+            let (relay_first, _) = ordered_providers(
+                i,
+                &sender_addr,
+                &relay_addr,
+                &on_relay,
+                &sender_live,
+                &[],
+                &std::collections::HashSet::new(),
+            );
             sources.insert(
                 i,
                 if relay_first {
@@ -826,6 +838,7 @@ pub async fn recv_chunked(
             let orl = on_relay.clone();
             let sl = sender_live.clone();
             let pl = peers.clone();
+            let bn = banned.clone();
             set.spawn(async move {
                 use std::time::Duration;
                 let mut part = std::fs::OpenOptions::new()
@@ -850,9 +863,17 @@ pub async fn recv_chunked(
                 let mut backoff = Duration::from_secs(CHUNK_RETRY_BACKOFF_START_SECS);
                 loop {
                     let peer_snapshot = pl.lock().unwrap().clone();
-                    let (_, providers) =
-                        ordered_providers(i, &sa, &ra, &orl, &sl, &peer_snapshot);
-                    match rx.fetch_to_file(&providers, hash, &mut part).await {
+                    let banned_snapshot = bn.lock().unwrap().clone();
+                    let (_, providers) = ordered_providers(
+                        i,
+                        &sa,
+                        &ra,
+                        &orl,
+                        &sl,
+                        &peer_snapshot,
+                        &banned_snapshot,
+                    );
+                    match rx.fetch_to_file(&providers, hash, &mut part, &bn).await {
                         Ok(()) => break,
                         Err(e) => {
                             if ct.is_cancelled() {

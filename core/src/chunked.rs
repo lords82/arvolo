@@ -803,6 +803,7 @@ impl ChunkReceiver {
         providers: &[EndpointAddr],
         hash: Hash,
         out: &mut std::fs::File,
+        banned: &Mutex<HashSet<String>>,
     ) -> Result<()> {
         let mut last_err = None;
         for _round in 0..2 {
@@ -818,6 +819,10 @@ impl ChunkReceiver {
                             return Ok(());
                         }
                         out.set_len(0)?; // bad bytes: start this chunk over
+                        // This provider served bytes that don't hash to `hash`:
+                        // ban it so we stop picking it (a poisoning peer). The
+                        // caller filters banned peers out of future provider lists.
+                        banned.lock().unwrap().insert(addr.id.to_string());
                         last_err = Some(anyhow!("chunk {hash} failed integrity check"));
                     }
                     Ok(_) => last_err = Some(anyhow!("incomplete chunk {hash}")),
