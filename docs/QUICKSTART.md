@@ -118,24 +118,42 @@ iroh relay and set `ARVOLO_IROH_RELAY` on the clients. Not required to get start
 
 ## 3. Configure the client
 
-Point the client at your relay — once, in `~/.config/arvolo/config.toml`:
+**First run does this for you.** The very first time you run any `arvolo` command
+in an interactive terminal with no config yet, a one-question setup asks for your
+relay and writes `~/.config/arvolo/config.toml`:
+
+```text
+Welcome to Arvolo — no configuration found, quick one-time setup.
+
+Relay URL: brokers pairing codes, `send --to`, the mailbox, download
+links and the swarm. Leave empty to skip (plain P2P `arvc…` tickets
+still work without a relay).
+  • Production (TLS):  just the hostname, e.g. relay.example.com
+  • LAN/dev (no TLS):  http://host:6282
+Relay [none]: relay.example.com
+```
+
+The generated file has your `relay` set and **every other option listed,
+commented, at its default** — so you can see and tune everything without hunting
+through docs. Environment variables (`ARVOLO_*`) always override the file.
 
 ```toml
 # Production (nginx + TLS): just the hostname, https and port 443 are implicit.
 relay = "relay.example.com"
+# LAN/dev (plain HTTP relay): write the scheme and port, e.g.
+#relay = "http://relay.local:6282"
 
-# LAN/dev (plain HTTP relay): write the scheme and port explicitly.
-# relay = "http://relay.local:6282"
-
-# Optional: where received files land (default: ~/Arvolo).
-# download_dir = "/srv/arvolo/incoming"
+# ...download_dir, seed, swarm, concurrency, … all shown commented at their default
 ```
 
-Or per-invocation with `--relay <url>` / the `ARVOLO_RELAY` env var. First run
-creates your identity automatically:
+> The wizard is skipped automatically when non-interactive (scripts, systemd) so
+> nothing ever blocks headless; set `ARVOLO_NO_WIZARD=1` to always skip it. You
+> can also edit `config.toml` by hand, or override per-command with `--relay`.
+
+Your identity is created automatically on first use:
 
 ```sh
-arvolo id        # show your public id (created on first use)
+arvolo id        # show your public id
 ```
 
 ---

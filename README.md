@@ -148,6 +148,12 @@ Run `arvolo <cmd> --help` for the full flag list.
 
 ## Config
 
+**First run walks you through it.** With no config yet, the first interactive
+`arvolo` command asks for your relay and writes `~/.config/arvolo/config.toml`
+with every other option listed commented at its default (skipped when
+non-interactive; `ARVOLO_NO_WIZARD=1` to disable). See
+[`docs/QUICKSTART.md`](docs/QUICKSTART.md).
+
 `~/.config/arvolo/config.toml`:
 
 ```toml
@@ -157,7 +163,10 @@ download_dir = "/srv/arvolo/incoming"   # where accepted files are saved (defaul
 
 For a relay without TLS, write the scheme explicitly: `relay = "http://relay.local:6282"`.
 
-Contacts live in `~/.config/arvolo/contacts.toml` (managed via `arvolo contacts`).
+Every environment variable in the client table below has a matching `config.toml`
+key (same name, lowercased without the `ARVOLO_` prefix — e.g. `ARVOLO_SEED` →
+`seed`); the env var wins when both are set. Contacts live in
+`~/.config/arvolo/contacts.toml` (managed via `arvolo contacts`).
 
 ### Environment variables
 

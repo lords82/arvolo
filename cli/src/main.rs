@@ -339,10 +339,11 @@ async fn main() -> Result<()> {
     VERBOSITY.store(cli.verbose, Ordering::Relaxed);
     init_tracing(cli.verbose);
 
-    // Pin the client scratch dir (default `<config>/tmp`) so arvolo-core stages
-    // archives and packed tars there — off the download dir and off a small
-    // system tmpfs. `book::temp_dir()` honors an explicit ARVOLO_TEMP_DIR.
-    std::env::set_var("ARVOLO_TEMP_DIR", book::temp_dir());
+    // First run: if there's no config yet, guide an interactive user through a
+    // one-question setup and write a self-documenting config.toml.
+    maybe_first_run_wizard();
+    // Bridge config.toml → ARVOLO_* (env still wins) and pin the scratch dir.
+    book::apply_config_to_env();
 
     match cli.command {
         Command::Send {
@@ -407,6 +408,58 @@ async fn main() -> Result<()> {
         Command::Reject { offer_id } => reject_cmd(offer_id).await,
         #[cfg(unix)]
         Command::Cancel { id } => cancel_cmd(id).await,
+    }
+}
+
+/// First-run setup: when no `config.toml` exists yet and we're attached to an
+/// interactive terminal, ask the one thing that matters (the relay) and write a
+/// self-documenting config. Silently skipped when non-interactive (scripts,
+/// systemd) or disabled via `ARVOLO_NO_WIZARD`, so nothing ever blocks headless.
+fn maybe_first_run_wizard() {
+    if book::config_exists() || std::env::var_os("ARVOLO_NO_WIZARD").is_some() {
+        return;
+    }
+    // Need a real TTY on both ends to prompt; otherwise leave the config absent
+    // (commands that need a relay error normally with a clear message).
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        return;
+    }
+    let relay = prompt_relay();
+    match book::write_default_config(relay.as_deref()) {
+        Ok(()) => {
+            println!("\n✓ Saved {}", book::config_path().display());
+            match relay {
+                Some(r) => println!("  relay = {r}\n"),
+                None => println!(
+                    "  No relay set — codes/mailbox/links need one. Edit the file or \
+                     pass --relay.\n"
+                ),
+            }
+        }
+        Err(e) => eprintln!("warning: could not write config: {e:#}"),
+    }
+}
+
+/// Prompt for the relay URL (the only required setting). Empty = skip.
+fn prompt_relay() -> Option<String> {
+    use std::io::Write;
+    println!("\nWelcome to Arvolo — no configuration found, quick one-time setup.\n");
+    println!("Relay URL: brokers pairing codes, `send --to`, the mailbox, download");
+    println!("links and the swarm. Leave empty to skip (plain P2P `arvc…` tickets");
+    println!("still work without a relay).");
+    println!("  • Production (TLS):  just the hostname, e.g. relay.example.com");
+    println!("  • LAN/dev (no TLS):  http://host:6282");
+    print!("Relay [none]: ");
+    let _ = std::io::stdout().flush();
+    let mut line = String::new();
+    if std::io::stdin().read_line(&mut line).is_err() {
+        return None;
+    }
+    let t = line.trim();
+    if t.is_empty() {
+        None
+    } else {
+        Some(t.to_string())
     }
 }
 

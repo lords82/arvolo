@@ -56,8 +56,13 @@ pub fn temp_dir() -> PathBuf {
     dir
 }
 
-fn config_path() -> PathBuf {
+pub fn config_path() -> PathBuf {
     config_dir().join("config.toml")
+}
+
+/// Whether a config file already exists (drives the first-run setup wizard).
+pub fn config_exists() -> bool {
+    config_path().exists()
 }
 fn contacts_path() -> PathBuf {
     config_dir().join("contacts.toml")
@@ -76,6 +81,17 @@ fn trusted_path() -> PathBuf {
 struct Config {
     relay: Option<String>,
     download_dir: Option<String>,
+    temp_dir: Option<String>,
+    identity: Option<String>,
+    iroh_relay: Option<String>,
+    seed: Option<bool>,
+    seed_after: Option<u64>,
+    swarm: Option<String>,
+    concurrency: Option<u32>,
+    ipv4_only: Option<bool>,
+    max_fetch_bytes: Option<u64>,
+    debug: Option<bool>,
+    log: Option<String>,
 }
 
 fn load_config() -> Config {
@@ -83,6 +99,134 @@ fn load_config() -> Config {
         .ok()
         .and_then(|s| toml::from_str(&s).ok())
         .unwrap_or_default()
+}
+
+/// Bridge `config.toml` settings into the `ARVOLO_*` environment that
+/// `arvolo-core` reads, so a config key actually drives behavior. Precedence is
+/// **env > config > default**: a value already present in the environment is left
+/// untouched. Also pins `ARVOLO_TEMP_DIR` to a concrete directory. Call once at
+/// startup, after any first-run wizard has written the file.
+pub fn apply_config_to_env() {
+    let cfg = load_config();
+
+    fn set_if_unset(key: &str, val: impl AsRef<std::ffi::OsStr>) {
+        if std::env::var_os(key).is_none() {
+            std::env::set_var(key, val);
+        }
+    }
+
+    if let Some(v) = cfg.temp_dir.filter(|s| !s.trim().is_empty()) {
+        set_if_unset("ARVOLO_TEMP_DIR", v);
+    }
+    if let Some(v) = cfg.identity.filter(|s| !s.trim().is_empty()) {
+        set_if_unset("ARVOLO_IDENTITY", v);
+    }
+    if let Some(v) = cfg.iroh_relay.filter(|s| !s.trim().is_empty()) {
+        set_if_unset("ARVOLO_IROH_RELAY", v);
+    }
+    if let Some(b) = cfg.seed {
+        set_if_unset("ARVOLO_SEED", if b { "1" } else { "0" });
+    }
+    if let Some(n) = cfg.seed_after {
+        set_if_unset("ARVOLO_SEED_AFTER", n.to_string());
+    }
+    if let Some(v) = cfg.swarm.filter(|s| !s.trim().is_empty()) {
+        set_if_unset("ARVOLO_SWARM", v);
+    }
+    if let Some(n) = cfg.concurrency {
+        set_if_unset("ARVOLO_CONCURRENCY", n.to_string());
+    }
+    if let Some(b) = cfg.ipv4_only {
+        set_if_unset("ARVOLO_IPV4_ONLY", if b { "1" } else { "0" });
+    }
+    if let Some(n) = cfg.max_fetch_bytes {
+        set_if_unset("ARVOLO_MAX_FETCH_BYTES", n.to_string());
+    }
+    // Core treats *any* value of ARVOLO_DEBUG as on, so only set it when enabled.
+    if cfg.debug == Some(true) {
+        set_if_unset("ARVOLO_DEBUG", "1");
+    }
+    if let Some(v) = cfg.log.filter(|s| !s.trim().is_empty()) {
+        set_if_unset("RUST_LOG", v);
+    }
+
+    // Always pin the scratch dir to a concrete path (config value if bridged
+    // above, else `<config>/tmp`) — off the download dir and off a system tmpfs.
+    std::env::set_var("ARVOLO_TEMP_DIR", temp_dir());
+}
+
+/// Write a fresh `config.toml`: the answered `relay` active (or commented with an
+/// example when skipped), and every other client setting listed **commented at
+/// its default** so the file self-documents what can be tuned. Overwrites any
+/// existing file — callers gate on [`config_exists`].
+pub fn write_default_config(relay: Option<&str>) -> Result<()> {
+    let dir = config_dir();
+    std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+
+    let relay_line = match relay.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(r) => format!("relay = \"{}\"", r.replace('"', "")),
+        None => "#relay = \"relay.example.com\"".to_string(),
+    };
+    let downloads = default_home_downloads();
+    let tmp = config_dir().join("tmp");
+    let identity = config_dir().join("identity.key");
+
+    let body = format!(
+        r#"# Arvolo client configuration.
+#
+# Only `relay` is needed for full functionality; everything else is optional and
+# shown below commented at its default. Uncomment a line to change it.
+# Environment variables (ARVOLO_*) always override these keys.
+
+# Relay URL — brokers pairing codes, `send --to`, the mailbox, download links and
+# the swarm. A bare host assumes https://; for a plaintext/LAN relay write the
+# scheme and port, e.g. "http://relay.local:6282".
+{relay_line}
+
+# Where received files are saved.
+#download_dir = "{downloads}"
+
+# Scratch dir for temporary artifacts (packed tars, staged archives).
+#temp_dir = "{tmp}"
+
+# Path to your identity key.
+#identity = "{identity}"
+
+# Self-hosted iroh NAT relay for P2P hole-punching (default: n0 public relays).
+#iroh_relay = ""
+
+# Keep seeding a completed file into the swarm.
+#seed = true
+
+# Seconds to keep backfilling the relay after a transfer completes (0 = off).
+#seed_after = 0
+
+# Swarm mode for shared arvc… tickets: "on", "off", or "relay-only" (privacy).
+#swarm = "on"
+
+# Parallel chunk fetches (1–16).
+#concurrency = 4
+
+# Force IPv4-only transport (default: auto-detected).
+#ipv4_only = false
+
+# Max bytes a single download link/blob will fetch (default 512 MiB).
+#max_fetch_bytes = 536870912
+
+# Extra diagnostics.
+#debug = false
+
+# Log level (tracing / RUST_LOG syntax).
+#log = "info"
+"#,
+        relay_line = relay_line,
+        downloads = downloads.display(),
+        tmp = tmp.display(),
+        identity = identity.display(),
+    );
+
+    std::fs::write(config_path(), body).with_context(|| "write config.toml")?;
+    Ok(())
 }
 
 pub use arvolo_core::code::normalize_relay;
