@@ -506,6 +506,42 @@ fn ordered_providers(
 /// `SWARM_PEER_TTL_SECS`) and refreshes its peer list.
 const SWARM_ANNOUNCE_SECS: u64 = 20;
 
+/// Rarest-first piece selection: from `remaining`, pick (and remove) the piece
+/// held by the fewest sources right now — the origin (if connected) counts for
+/// every piece, the relay for pieces it has backfilled, and each peer for the
+/// pieces in its bitfield. Ties are broken randomly so concurrent peers don't all
+/// grab the same piece. This automatically drains scarce pieces first: a piece
+/// only the origin has (availability 1) outranks one that's also on the relay or a
+/// peer — so the at-risk source is emptied before it can drop. A piece with zero
+/// known sources still gets picked (and then waits/retries) rather than stalling.
+fn pick_rarest(
+    remaining: &mut Vec<usize>,
+    sender_up: bool,
+    on_relay: &std::collections::HashSet<u32>,
+    peers: &[(iroh::EndpointAddr, Vec<u8>)],
+) -> usize {
+    let avail = |i: usize| -> usize {
+        let mut a = usize::from(sender_up);
+        if on_relay.contains(&(i as u32)) {
+            a += 1;
+        }
+        a + peers
+            .iter()
+            .filter(|(_, bf)| crate::swarm::bitfield_has(bf, i))
+            .count()
+    };
+    let best = remaining.iter().map(|&i| avail(i)).min().unwrap_or(0);
+    let candidates: Vec<usize> = remaining
+        .iter()
+        .enumerate()
+        .filter(|(_, &i)| avail(i) == best)
+        .map(|(pos, _)| pos)
+        .collect();
+    use rand::Rng;
+    let pos = candidates[rand::rng().random_range(0..candidates.len())];
+    remaining.swap_remove(pos)
+}
+
 /// Announce this receiver to the swarm tracker on a timer — publishing our seeder
 /// address + which pieces we can serve, and learning the other peers (into
 /// `peers`, used by [`ordered_providers`]). Deregisters on cancel.
@@ -734,15 +770,26 @@ pub async fn recv_chunked(
     let stage_path = |i: usize| PathBuf::from(format!("{}.arvpart.{i}", download.display()));
 
     let mut set: JoinSet<Result<usize>> = JoinSet::new();
-    let mut spawn_idx = start;
+    // Pieces still to fetch. We pick the rarest of these each time we fill the
+    // window (rather than scanning in order), so scarce sources are drained first.
+    let mut remaining: Vec<usize> = (start..total).collect();
     let mut next_commit = start;
     let mut ready: HashSet<usize> = HashSet::new();
     let mut sources: HashMap<usize, ChunkSource> = HashMap::new();
 
     loop {
-        // Refill the in-flight window with fetch-only tasks.
-        while spawn_idx < total && set.len() < concurrency && !cancel.is_cancelled() {
-            let i = spawn_idx;
+        // Refill the in-flight window, rarest-piece-first.
+        while !remaining.is_empty() && set.len() < concurrency && !cancel.is_cancelled() {
+            let sender_up = sender_addr.is_some()
+                && sender_live
+                    .as_ref()
+                    .map(|b| b.load(std::sync::atomic::Ordering::Relaxed))
+                    .unwrap_or(false);
+            let i = {
+                let orl = on_relay.lock().unwrap();
+                let pl = peers.lock().unwrap();
+                pick_rarest(&mut remaining, sender_up, &orl, &pl)
+            };
             let (relay_first, _) =
                 ordered_providers(i, &sender_addr, &relay_addr, &on_relay, &sender_live, &[]);
             sources.insert(
@@ -813,7 +860,6 @@ pub async fn recv_chunked(
                 }
                 Ok::<usize, anyhow::Error>(i)
             });
-            spawn_idx += 1;
         }
 
         if set.is_empty() {
