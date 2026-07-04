@@ -1,10 +1,20 @@
-# Arvolo swarm — design spec (DRAFT)
+# Arvolo swarm — design spec
 
-> **Status:** design draft for review. Nothing here is implemented yet. Scope was
-> agreed as: **swarm applies only to shared `arvc…` tickets** (reusable content
+> **Status:** phases 1–4 implemented and phase 5 partially, on top of 0.8.5.
+> Scope: **swarm applies only to shared `arvc…` tickets** (reusable content
 > capabilities, magnet-like). `--to <contact>` sends stay strictly 1-to-1 (sealed
 > per recipient) and are out of scope — they keep the sender+relay resilience
 > already shipped in 0.8.5.
+>
+> **Implementation status** (see §11 for the phase plan):
+> - ✅ **Phase 1** — supervised control channel (reconnects), live provider choice.
+> - ✅ **Phase 2** — persist + resume downloads across a receiver restart.
+> - ✅ **Phase 3** — relay tracker (`/v1/swarm/*`), receiver-as-seeder (`Reseal`),
+>   peers as providers.
+> - ✅ **Phase 4** — rarest-first piece selection.
+> - ◻︎ **Phase 5** — done: relay-only privacy toggle (`ARVOLO_SWARM=off`).
+>   Deferred: provider health/banning, swarm metrics in `arvolo transfers`,
+>   endgame mode (needs per-attempt stage files), seed-after-complete.
 
 This document specifies turning a reusable-ticket transfer into a **BitTorrent-style
 swarm**: multiple concurrent sources (original sender, relay, and other receivers
