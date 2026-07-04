@@ -11,19 +11,21 @@
 //! max-downloads (burn-after-read). Federation, multi-recipient refcount GC, and
 //! partial backfill are post-MVP (see docs/ROADMAP-FUTURE.md).
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use arvolo_core::backfill::BlobNode;
 use arvolo_core::chunked::SeedRequest;
+use arvolo_core::swarm::{AnnounceReq, AnnounceResp, PeerInfo};
 use axum::{
     body::Bytes,
     extract::{Path as AxumPath, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
-    Router,
+    Json, Router,
 };
 use rusqlite::{params, Connection};
 use serde::Deserialize;
@@ -41,7 +43,29 @@ pub struct AppState {
     /// When an administrator disables it, the `/dl` page is not served and
     /// link deposits (HPKE-less blobs) are refused. Defaults to enabled.
     pub links_enabled: bool,
+    /// Swarm tracker: `swarm_id → (peer node_addr → entry)`, in-memory with a TTL.
+    /// Purely a rendezvous for peers of one shared `arvc…` ticket to find each
+    /// other; the relay learns node addresses + bitfields, never the key/plaintext.
+    pub swarm: Arc<Mutex<HashMap<String, HashMap<String, SwarmPeer>>>>,
 }
+
+/// One tracked peer of a swarm (in-memory tracker row).
+#[derive(Clone)]
+pub struct SwarmPeer {
+    pub node_addr: String,
+    pub bitfield: Vec<u8>,
+    pub expires_at: u64,
+}
+
+/// How long a swarm peer stays listed without re-announcing.
+pub const SWARM_PEER_TTL_SECS: u64 = 60;
+/// Max peers tracked (and returned) per swarm — bounds memory and response size.
+pub const MAX_SWARM_PEERS: usize = 100;
+/// Max distinct swarms tracked at once (disk/memory guard; new swarms rejected
+/// beyond this until entries expire).
+pub const MAX_SWARMS: usize = 10_000;
+/// Sanity cap on a swarm's piece count (bounds an announced bitfield).
+pub const MAX_SWARM_CHUNKS: u32 = 1_000_000;
 
 /// Whether the relay administrator has disabled public download links, via
 /// `ARVOLO_DISABLE_LINKS` (set to `1`/`true`/`yes`/`on`).
@@ -64,6 +88,7 @@ impl AppState {
             mailbox,
             blobs,
             auth_secret: Arc::new(rand::random()),
+            swarm: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -1041,6 +1066,86 @@ async fn features_handler(State(state): State<AppState>) -> impl IntoResponse {
     )
 }
 
+/// Swarm tracker: register/refresh this peer for `swarm_id` and return a sample of
+/// the others. `POST /v1/swarm/{swarm_id}/announce`. Zero-knowledge: the relay
+/// stores node addresses + bitfields with a TTL, never the key or plaintext.
+async fn swarm_announce_handler(
+    State(state): State<AppState>,
+    AxumPath(swarm_id): AxumPath<String>,
+    Json(req): Json<AnnounceReq>,
+) -> Response {
+    if req.n_chunks > MAX_SWARM_CHUNKS
+        || req.node_addr.is_empty()
+        || req.node_addr.len() > 4096
+        || req.bitfield.len() > (req.n_chunks as usize).div_ceil(8).max(1)
+    {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let now = now_unix();
+    let want = (req.want as usize).min(MAX_SWARM_PEERS);
+    let mut tracker = state.swarm.lock().unwrap();
+
+    // Reject a brand-new swarm once we're tracking too many (memory guard).
+    if !tracker.contains_key(&swarm_id) && tracker.len() >= MAX_SWARMS && req.event != "stopped" {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
+
+    let peers_map = tracker.entry(swarm_id.clone()).or_default();
+    peers_map.retain(|_, e| e.expires_at > now);
+
+    if req.event == "stopped" {
+        peers_map.remove(&req.node_addr);
+    } else if peers_map.len() < MAX_SWARM_PEERS || peers_map.contains_key(&req.node_addr) {
+        peers_map.insert(
+            req.node_addr.clone(),
+            SwarmPeer {
+                node_addr: req.node_addr.clone(),
+                bitfield: req.bitfield.clone(),
+                expires_at: now + SWARM_PEER_TTL_SECS,
+            },
+        );
+    }
+
+    let peers: Vec<PeerInfo> = peers_map
+        .values()
+        .filter(|e| e.node_addr != req.node_addr)
+        .take(want)
+        .map(|e| PeerInfo {
+            node_addr: e.node_addr.clone(),
+            bitfield: e.bitfield.clone(),
+        })
+        .collect();
+
+    if peers_map.is_empty() {
+        tracker.remove(&swarm_id);
+    }
+    Json(AnnounceResp { peers }).into_response()
+}
+
+/// Swarm tracker: list current peers for `swarm_id` without announcing.
+/// `GET /v1/swarm/{swarm_id}/peers`.
+async fn swarm_peers_handler(
+    State(state): State<AppState>,
+    AxumPath(swarm_id): AxumPath<String>,
+) -> Response {
+    let now = now_unix();
+    let mut tracker = state.swarm.lock().unwrap();
+    let peers = tracker
+        .get_mut(&swarm_id)
+        .map(|m| {
+            m.retain(|_, e| e.expires_at > now);
+            m.values()
+                .take(MAX_SWARM_PEERS)
+                .map(|e| PeerInfo {
+                    node_addr: e.node_addr.clone(),
+                    bitfield: e.bitfield.clone(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Json(AnnounceResp { peers }).into_response()
+}
+
 /// Build the relay HTTP router over the shared [`AppState`].
 ///
 /// A global request-body limit (`max_blob_bytes()`) is applied so the relay
@@ -1074,6 +1179,9 @@ pub fn router(state: AppState) -> Router {
             "/v1/presence/{slot}",
             post(presence_post_handler).get(presence_get_handler),
         )
+        // Swarm tracker (peer rendezvous for a shared arvc… ticket).
+        .route("/v1/swarm/{swarm_id}/announce", post(swarm_announce_handler))
+        .route("/v1/swarm/{swarm_id}/peers", get(swarm_peers_handler))
         // Browser secure-download page (E2E: decrypts client-side).
         .route("/dl/{claim}", get(dl_page_handler))
         .route("/dl.js", get(dl_js_handler))
