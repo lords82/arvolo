@@ -580,6 +580,7 @@ impl TransferManager {
                     path: payload.to_string_lossy().into_owned(),
                     node_seed: node_seed.to_vec(),
                     ticket: ticket.clone(),
+                    owned_stage: None,
                 },
             );
         }
@@ -595,12 +596,18 @@ impl TransferManager {
     /// resumable send of the complete file with a fresh node identity, so it is
     /// persisted as a `SendRecord` and auto-resumes on daemon restart like any
     /// other sender. No-op for a sealed (`--to`) ticket.
-    fn seed_file(&self, path: PathBuf, ticket: String) {
+    ///
+    /// `owned` marks a file the daemon created purely to seed (a staged archive
+    /// tar) — it is deleted when the session ends. For a single-file seed `path`
+    /// is the user's own download, so `owned` is false and it's never deleted.
+    fn seed_file(&self, path: PathBuf, ticket: String, owned: bool) {
+        let path_str = path.to_string_lossy().into_owned();
         let rec = SendRecord {
             id: 0, // ignored: resume_serve registers a fresh id
-            path: path.to_string_lossy().into_owned(),
+            path: path_str.clone(),
             node_seed: crate::node::random_node_seed().to_vec(),
             ticket,
+            owned_stage: owned.then_some(path_str),
         };
         if let Err(e) = self.resume_serve(rec) {
             tracing::warn!("seed-after-complete: not seeding {}: {e:#}", path.display());
@@ -635,6 +642,7 @@ impl TransferManager {
                     path: rec.path.clone(),
                     node_seed: rec.node_seed.clone(),
                     ticket: rec.ticket.clone(),
+                    owned_stage: rec.owned_stage.clone(),
                 },
             );
         }
@@ -868,14 +876,23 @@ impl TransferManager {
                 },
             )
             .await;
-            // Seed-after-complete: on a clean finish, keep serving the file to the
-            // swarm (opt-in via ARVOLO_SEED). Persisted, so it survives a restart.
+            // Seed-after-complete: on a clean finish, keep serving the payload to
+            // the swarm (opt-in via ARVOLO_SEED). Persisted, so it survives a
+            // restart. For an archive `saved` is the unpacked directory, so we seed
+            // the staged tar (a file we own and delete when the session ends); for a
+            // single file we seed the download itself (owned by the user).
             if let (Ok(saved), false) = (&result, cancelled.is_cancelled()) {
-                if seeding_enabled() {
+                if flow::seeding_enabled() {
                     let mgr = TransferManager {
                         inner: inner.clone(),
                     };
-                    mgr.seed_file(saved.clone(), ticket.clone());
+                    match crate::chunked::ChunkTicket::decode(&ticket) {
+                        Ok(t) if t.archive => {
+                            let tar = flow::archive_stage_path(saved, &t.chunks);
+                            mgr.seed_file(tar, ticket.clone(), true);
+                        }
+                        _ => mgr.seed_file(saved.clone(), ticket.clone(), false),
+                    }
                 }
             }
             finish(&inner, id, cancelled.is_cancelled(), result.map(Some));
@@ -1114,15 +1131,6 @@ async fn serve_session(
     }
 }
 
-/// Whether a completed receiver should keep seeding the file into the swarm.
-/// Opt-in — seeding costs upload + keeps the file served indefinitely.
-fn seeding_enabled() -> bool {
-    matches!(
-        std::env::var("ARVOLO_SEED").ok().as_deref(),
-        Some("1") | Some("true") | Some("yes")
-    )
-}
-
 /// Finalize a transfer's state and emit the terminal event.
 fn finish(inner: &Inner, id: u64, cancelled: bool, result: Result<Option<PathBuf>>) {
     // Terminal state: drop any resume record so a restart doesn't re-start it.
@@ -1192,6 +1200,11 @@ struct SendRecord {
     path: String,
     node_seed: Vec<u8>,
     ticket: String,
+    /// A file this send *owns* and should delete when it's removed (cancel /
+    /// finish) — e.g. the staged archive tar a seeder keeps only to serve. `None`
+    /// for a normal send of a user's own file (never delete that).
+    #[serde(default)]
+    owned_stage: Option<String>,
 }
 
 fn send_record_path(dir: &Path, id: u64) -> PathBuf {
@@ -1206,7 +1219,17 @@ fn persist_send(dir: &Path, rec: &SendRecord) {
 }
 
 fn remove_send(dir: &Path, id: u64) {
-    let _ = std::fs::remove_file(send_record_path(dir, id));
+    let path = send_record_path(dir, id);
+    // Delete any file this send owns (a staged archive tar we kept only to seed)
+    // before dropping the record, so a cancelled session leaves nothing behind.
+    if let Ok(bytes) = std::fs::read(&path) {
+        if let Ok(rec) = postcard::from_bytes::<SendRecord>(&bytes) {
+            if let Some(stage) = &rec.owned_stage {
+                let _ = std::fs::remove_file(stage);
+            }
+        }
+    }
+    let _ = std::fs::remove_file(path);
 }
 
 fn load_sends(dir: &Path) -> Vec<SendRecord> {

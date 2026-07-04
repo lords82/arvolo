@@ -365,6 +365,29 @@ fn fetch_concurrency() -> usize {
         .clamp(1, 16)
 }
 
+/// Where an archive download is staged on disk: a hidden `.arvolo-{hash}.tar`
+/// sibling of the unpack target `out_dir` (NOT the system temp dir, which may be
+/// a small tmpfs). Deterministic in the ticket's first chunk hash, so a partial
+/// resumes and the manager can recompute the same path to keep seeding the tar.
+pub(crate) fn archive_stage_path(out_dir: &Path, chunks: &[crate::hash::Hash]) -> PathBuf {
+    let hash = chunks.first().map(|h| h.to_string()).unwrap_or_default();
+    let file = format!(".arvolo-{hash}.tar");
+    match out_dir.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.join(file),
+        _ => PathBuf::from(file),
+    }
+}
+
+/// Whether a completed receiver should keep serving the file to the swarm
+/// (seed-after-complete). Opt-in via `ARVOLO_SEED` — seeding costs upload and, for
+/// archives, keeps the staged tar on disk. Read here and in the manager alike.
+pub(crate) fn seeding_enabled() -> bool {
+    matches!(
+        std::env::var("ARVOLO_SEED").ok().as_deref(),
+        Some("1") | Some("true") | Some("yes")
+    )
+}
+
 /// Remove any `{download}.arvpart.*` per-chunk staging files.
 fn remove_stage_files(download: &Path) {
     let Some(name) = download.file_name().and_then(|n| n.to_str()) else {
@@ -615,18 +638,28 @@ pub async fn recv_chunked(
 
     let t = ChunkTicket::decode(ticket).context("invalid ticket")?;
     let user_out = out;
-    // Where the payload lands on disk: a stable temp tar for archives (so a
-    // partial resumes), else the requested path or a default from the name.
-    let download: PathBuf = if t.archive {
-        std::env::temp_dir().join(format!(
-            "arvolo-{}.tar",
-            t.chunks.first().map(|h| h.to_string()).unwrap_or_default()
-        ))
-    } else {
-        user_out
+    // For an archive the payload is unpacked into this directory; the tar itself is
+    // staged as a hidden sibling (see `archive_stage_path`).
+    let archive_dir: Option<PathBuf> = t
+        .archive
+        .then(|| user_out.clone().unwrap_or_else(|| PathBuf::from(&t.name)));
+    // Where the payload lands on disk: the staged tar for archives (so a partial
+    // resumes and — with ARVOLO_SEED — the tar can keep being seeded), else the
+    // requested path or a default from the name.
+    let download: PathBuf = match &archive_dir {
+        Some(dir) => archive_stage_path(dir, &t.chunks),
+        None => user_out
             .clone()
-            .unwrap_or_else(|| default_from_name(&t.name, &t.chunks))
+            .unwrap_or_else(|| default_from_name(&t.name, &t.chunks)),
     };
+    // Make sure the staging directory (parent of `download`) exists before we
+    // start writing per-chunk `.arvpart` files into it.
+    if let Some(parent) = download.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create staging dir {}", parent.display()))?;
+        }
+    }
     let sender_addr = t.providers.first().cloned();
     let relay_addr = match &t.relay {
         Some(r) => Some(crate::chunked::decode_addr(&r.addr).context("relay address")?),
@@ -1095,15 +1128,20 @@ pub async fn recv_chunked(
     // removal was interrupted on a previous run).
     remove_stage_files(&download);
 
-    if t.archive {
-        // Unpack the tar into the target directory, then drop the temp archive.
-        let dir = user_out.unwrap_or_else(|| PathBuf::from(&t.name));
+    if let Some(dir) = archive_dir {
+        // Unpack the tar into the target directory.
         std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
         let f = std::fs::File::open(&download).context("open downloaded archive")?;
         tar::Archive::new(f)
             .unpack(&dir)
             .with_context(|| format!("extract into {}", dir.display()))?;
-        let _ = std::fs::remove_file(&download);
+        // Keep the staged tar iff we'll seed it (its bytes are exactly what the
+        // sender sealed, so re-sealing reproduces the ticket's hashes). The manager
+        // recomputes this path, seeds it, and deletes it when the session ends.
+        // Otherwise drop it now so nothing is left behind.
+        if !seeding_enabled() {
+            let _ = std::fs::remove_file(&download);
+        }
         on(RecvEvent::Saved { path: dir.clone() });
         Ok(dir)
     } else {
