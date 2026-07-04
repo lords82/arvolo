@@ -127,6 +127,9 @@ pub struct SenderStatus {
     pub name: Option<String>,
     pub seen_before: bool,
     pub verified: bool,
+    /// Only consumed by the daemon's auto-download policy, which is `#[cfg(unix)]`;
+    /// on non-unix it's computed but never read.
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub trusted: bool,
 }
 
