@@ -377,6 +377,124 @@ fn remove_stage_files(download: &Path) {
 /// ticket). Resumes a partial output, prefers P2P, falls back to the relay, and
 /// releases relay chunks as they're taken. Returns the output path. If `cancel`
 /// fires mid-transfer it returns early with the partial (resumable) output.
+/// A supervised control channel to the sender. Unlike a one-shot `open_control`,
+/// it keeps the channel connected across churn: on a drop it reconnects with
+/// backoff, so the sender's `RelayHas` updates keep flowing into `on_relay` and
+/// acks keep reaching the sender. It also publishes the sender's live/offline
+/// state so the fetch scheduler can prefer P2P while the sender is up and lean on
+/// the relay while it's down — re-evaluated per fetch attempt, not fixed at start.
+struct ControlHandle {
+    /// True while a control connection to the sender is currently up.
+    sender_live: Arc<std::sync::atomic::AtomicBool>,
+    /// Best-effort ack of a committed chunk to the sender (dropped while offline).
+    ack_tx: tokio::sync::mpsc::UnboundedSender<u32>,
+}
+
+fn spawn_control_supervisor(
+    receiver: ChunkReceiver,
+    sender_addr: iroh::EndpointAddr,
+    on_relay: Arc<Mutex<std::collections::HashSet<u32>>>,
+    cancel: CancellationToken,
+) -> ControlHandle {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+    let sender_live = Arc::new(AtomicBool::new(false));
+    let (ack_tx, mut ack_rx) = tokio::sync::mpsc::unbounded_channel::<u32>();
+    let live = sender_live.clone();
+    tokio::spawn(async move {
+        let mut backoff = Duration::from_secs(1);
+        // Once the receiver finishes and drops `ack_tx`, stop selecting on it (a
+        // closed channel returns immediately) but keep the connection for
+        // `RelayHas` updates until cancelled.
+        let mut ack_open = true;
+        loop {
+            if cancel.is_cancelled() {
+                break;
+            }
+            let opened = tokio::select! {
+                _ = cancel.cancelled() => break,
+                r = tokio::time::timeout(
+                    Duration::from_secs(12),
+                    receiver.open_control(&sender_addr, on_relay.clone()),
+                ) => r,
+            };
+            let mut control = match opened {
+                Ok(Some(c)) => c,
+                _ => {
+                    live.store(false, Ordering::Relaxed);
+                    tokio::select! {
+                        _ = cancel.cancelled() => break,
+                        _ = tokio::time::sleep(backoff) => {}
+                    }
+                    backoff = (backoff * 2).min(Duration::from_secs(30));
+                    continue;
+                }
+            };
+            live.store(true, Ordering::Relaxed);
+            backoff = Duration::from_secs(1);
+            // A separate clone of the connection so we can await its close without
+            // holding a borrow that would block `control.ack`.
+            let conn = control.connection();
+            loop {
+                tokio::select! {
+                    _ = cancel.cancelled() => {
+                        live.store(false, Ordering::Relaxed);
+                        return;
+                    }
+                    _ = conn.closed() => break,
+                    maybe = ack_rx.recv(), if ack_open => {
+                        match maybe {
+                            Some(idx) => {
+                                if control.ack(idx).await.is_err() {
+                                    break;
+                                }
+                            }
+                            None => ack_open = false,
+                        }
+                    }
+                }
+            }
+            live.store(false, Ordering::Relaxed);
+        }
+        live.store(false, Ordering::Relaxed);
+    });
+    ControlHandle {
+        sender_live,
+        ack_tx,
+    }
+}
+
+/// Ordered providers for chunk `i`, re-evaluated from *live* state (so it adapts
+/// as the sender reconnects or the relay's backfill lands): sender-first (P2P)
+/// while the sender is connected and the chunk isn't already on the relay;
+/// relay-first when the chunk is on the relay or the sender is offline. Returns
+/// `(relay_first, providers)`. `providers` always lists both sources (when
+/// present) so the fetch falls back to the other one.
+fn ordered_providers(
+    i: usize,
+    sender_addr: &Option<iroh::EndpointAddr>,
+    relay_addr: &Option<iroh::EndpointAddr>,
+    on_relay: &Mutex<std::collections::HashSet<u32>>,
+    sender_live: &Option<Arc<std::sync::atomic::AtomicBool>>,
+) -> (bool, Vec<iroh::EndpointAddr>) {
+    use std::sync::atomic::Ordering;
+    let sender_up = sender_addr.is_some()
+        && sender_live
+            .as_ref()
+            .map(|b| b.load(Ordering::Relaxed))
+            .unwrap_or(false);
+    let relay_first = !sender_up || on_relay.lock().unwrap().contains(&(i as u32));
+    let mut providers = Vec::new();
+    if relay_first {
+        relay_addr.iter().for_each(|a| providers.push(a.clone()));
+        sender_addr.iter().for_each(|a| providers.push(a.clone()));
+    } else {
+        sender_addr.iter().for_each(|a| providers.push(a.clone()));
+        relay_addr.iter().for_each(|a| providers.push(a.clone()));
+    }
+    (relay_first, providers)
+}
+
 pub async fn recv_chunked(
     ticket: &str,
     out: Option<PathBuf>,
@@ -465,65 +583,29 @@ pub async fn recv_chunked(
     // Control channel to the sender. Patience scales with fallback availability:
     // one short attempt if a relay can finish the job, three for pure P2P.
     let on_relay: Arc<Mutex<HashSet<u32>>> = Arc::new(Mutex::new(HashSet::new()));
-    let mut control = None;
-    if let Some(s) = &sender_addr {
-        let attempts = if t.relay.is_some() { 1 } else { 3 };
-        for attempt in 1..=attempts {
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(12),
-                receiver.open_control(s, on_relay.clone()),
-            )
-            .await
-            {
-                Ok(Some(c)) => {
-                    control = Some(c);
-                    break;
-                }
-                _ if attempt < attempts => on(RecvEvent::Warning {
-                    message: format!(
-                        "control channel attempt {attempt}/{attempts} failed; retrying…"
-                    ),
-                }),
-                _ => {}
-            }
-        }
-    }
-    on(RecvEvent::Control {
-        connected: control.is_some(),
+    // Supervised control channel: keeps `on_relay` fresh and the sender's
+    // live/offline state current across churn (reconnecting on drop), rather than
+    // a one-shot open whose verdict is frozen for the whole transfer. A child of
+    // `cancel` so it stops on cancel; we also cancel it explicitly on completion.
+    let ctrl_cancel = cancel.child_token();
+    let ctrl = sender_addr.clone().map(|s| {
+        spawn_control_supervisor(receiver.clone(), s, on_relay.clone(), ctrl_cancel.clone())
     });
-    if control.is_some() {
-        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-    }
-    // No control channel => the sender is most likely offline; prefer the relay.
-    let sender_offline = control.is_none();
+    let sender_live = ctrl.as_ref().map(|h| h.sender_live.clone());
+    let ack_tx = ctrl.as_ref().map(|h| h.ack_tx.clone());
+    on(RecvEvent::Control {
+        connected: sender_addr.is_some(),
+    });
 
     // Fetch up to `concurrency` chunks in parallel (pipelining hides latency),
     // but commit them to the output **in order** so the file grows contiguously
     // and the length-based resume above stays correct. Each in-flight fetch
     // stages its ciphertext in a per-index `.arvpart.{i}` file (BLAKE3-verified
     // by `fetch_to_file`); the committer then decrypts and positions each chunk.
+    // Provider order is re-evaluated live per fetch attempt (see `ordered_providers`).
     let concurrency = fetch_concurrency();
     let total = t.chunks.len();
     let stage_path = |i: usize| PathBuf::from(format!("{}.arvpart.{i}", download.display()));
-    // (source, ordered providers) for a chunk: relay-first when the sender pushed
-    // it to the relay or is offline, else sender-first with relay fallback.
-    let providers_for = |i: usize| {
-        let relay_first = on_relay.lock().unwrap().contains(&(i as u32)) || sender_offline;
-        let mut providers = Vec::new();
-        if relay_first {
-            relay_addr.iter().for_each(|a| providers.push(a.clone()));
-            sender_addr.iter().for_each(|a| providers.push(a.clone()));
-        } else {
-            sender_addr.iter().for_each(|a| providers.push(a.clone()));
-            relay_addr.iter().for_each(|a| providers.push(a.clone()));
-        }
-        let source = if relay_first {
-            ChunkSource::Relay
-        } else {
-            ChunkSource::Sender
-        };
-        (source, providers)
-    };
 
     let mut set: JoinSet<Result<usize>> = JoinSet::new();
     let mut spawn_idx = start;
@@ -535,12 +617,25 @@ pub async fn recv_chunked(
         // Refill the in-flight window with fetch-only tasks.
         while spawn_idx < total && set.len() < concurrency && !cancel.is_cancelled() {
             let i = spawn_idx;
-            let (source, providers) = providers_for(i);
-            sources.insert(i, source);
+            let (relay_first, _) =
+                ordered_providers(i, &sender_addr, &relay_addr, &on_relay, &sender_live);
+            sources.insert(
+                i,
+                if relay_first {
+                    ChunkSource::Relay
+                } else {
+                    ChunkSource::Sender
+                },
+            );
             let rx = receiver.clone();
             let hash = t.chunks[i];
             let sp = stage_path(i);
             let ct = cancel.clone();
+            // Clones for the live provider re-evaluation inside the retry loop.
+            let sa = sender_addr.clone();
+            let ra = relay_addr.clone();
+            let orl = on_relay.clone();
+            let sl = sender_live.clone();
             set.spawn(async move {
                 use std::time::Duration;
                 let mut part = std::fs::OpenOptions::new()
@@ -552,16 +647,19 @@ pub async fn recv_chunked(
                     .with_context(|| format!("open {}", sp.display()))?;
                 // Resilient fetch, BitTorrent-style: a mid-transfer P2P drop or a
                 // relay whose backfill hasn't reached a chunk yet makes it
-                // transiently unavailable. Rather than failing, keep retrying the
-                // same providers with capped exponential backoff — the sender (as
-                // its direct connection re-establishes) and the relay (as its
-                // backfill lands) — *indefinitely*, until the chunk arrives or the
-                // user cancels. So a transfer whose sender went away simply waits
-                // and resumes whenever the sender comes back; it never gives up on
-                // its own. Partial bytes persist in the stage file, so each retry
-                // resumes mid-chunk.
+                // transiently unavailable. Rather than failing, keep retrying with
+                // capped exponential backoff — the sender (as its direct connection
+                // re-establishes) and the relay (as its backfill lands) —
+                // *indefinitely*, until the chunk arrives or the user cancels. So a
+                // transfer whose sender went away simply waits and resumes whenever
+                // the sender comes back; it never gives up on its own. The provider
+                // order is re-evaluated each attempt, so a chunk that becomes
+                // available on the relay, or a sender that reconnects, is used as
+                // soon as it appears. Partial bytes persist in the stage file, so
+                // each retry resumes mid-chunk.
                 let mut backoff = Duration::from_secs(CHUNK_RETRY_BACKOFF_START_SECS);
                 loop {
+                    let (_, providers) = ordered_providers(i, &sa, &ra, &orl, &sl);
                     match rx.fetch_to_file(&providers, hash, &mut part).await {
                         Ok(()) => break,
                         Err(e) => {
@@ -628,8 +726,10 @@ pub async fn recv_chunked(
                 source,
                 bytes: plain.len() as u64,
             });
-            if let Some(c) = control.as_mut() {
-                let _ = c.ack(i as u32).await;
+            // Ack to the sender (best-effort, via the supervisor — dropped while
+            // the control channel is down, resumed on reconnect).
+            if let Some(tx) = &ack_tx {
+                let _ = tx.send(i as u32);
             }
             // Free relay-backfilled chunks as we take them. Attempt release for
             // every chunk: with the sender offline there's no control channel to
@@ -655,9 +755,9 @@ pub async fn recv_chunked(
         receiver.close().await;
         return Ok(download);
     }
-    if let Some(c) = control {
-        let _ = c.finish().await;
-    }
+    // Stop the control supervisor (drops the ack channel and closes the connection).
+    ctrl_cancel.cancel();
+    drop(ack_tx);
     file.set_len(t.total_size)?;
     drop(file);
     receiver.close().await;

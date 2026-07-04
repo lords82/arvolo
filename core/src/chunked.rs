@@ -582,6 +582,12 @@ impl Control {
         let mut send = self.send.lock().await;
         write_msg(&mut send, &CtrlMsg::Have(idx)).await
     }
+    /// A cheap clone of the underlying connection, so a supervisor can await
+    /// `.closed()` (to detect a drop and reconnect) without holding a borrow on
+    /// `self` that would block `ack`.
+    pub fn connection(&self) -> Connection {
+        self.conn.clone()
+    }
     pub async fn finish(self) -> Result<()> {
         self.heartbeat.abort();
         {
