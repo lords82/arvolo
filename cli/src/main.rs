@@ -138,14 +138,11 @@ enum Command {
     Send {
         #[arg(num_args = 0..)]
         paths: Vec<PathBuf>,
-        /// Resume a send interrupted by the sender restarting: re-serve <path>
-        /// under the ticket you already handed out, so it stays valid. Works for
-        /// plain (non---to) tickets, which carry their own key. Needs the file.
-        #[arg(long, value_name = "TICKET")]
-        resume_ticket: Option<String>,
-        /// Resume a saved send by its session id (see `arvolo sessions list`).
-        /// Recovers `--to` sends too; no need to re-supply the file or ticket.
-        #[arg(long, value_name = "ID")]
+        /// Resume an interrupted send so the ticket you already shared stays valid.
+        /// Pass a **session id** (see `arvolo sessions list`) — recovers `--to`
+        /// sends too, no file needed — OR a plain **`arvc…` ticket** together with
+        /// its file (re-serves it; the receiver uses the reprinted ticket).
+        #[arg(long, value_name = "ID|TICKET")]
         resume: Option<String>,
         /// Also seed the file to a relay so the recipient can finish even if you
         /// go offline (backfill). Relay host or URL, e.g. relay.example.com
@@ -342,7 +339,6 @@ async fn main() -> Result<()> {
     match cli.command {
         Command::Send {
             paths,
-            resume_ticket,
             resume,
             seed_relay,
             code,
@@ -357,20 +353,8 @@ async fn main() -> Result<()> {
             qr,
         } => {
             send(
-                paths,
-                resume_ticket,
-                resume,
-                seed_relay,
-                code,
-                relay,
-                use_http,
-                to,
-                ticket,
-                link,
-                ttl,
-                max,
-                password,
-                qr,
+                paths, resume, seed_relay, code, relay, use_http, to, ticket, link, ttl, max,
+                password, qr,
             )
             .await
         }
@@ -1619,7 +1603,6 @@ async fn push(
 #[allow(clippy::too_many_arguments)]
 async fn send(
     paths: Vec<PathBuf>,
-    resume_ticket: Option<String>,
     resume: Option<String>,
     seed_relay: Option<String>,
     code_mode: bool,
@@ -1633,35 +1616,32 @@ async fn send(
     password: Option<String>,
     qr: bool,
 ) -> Result<()> {
-    // Resume paths short-circuit the normal flow: re-serve a previous send so
-    // the ticket you already handed out stays valid after the sender restarted.
-    // Recovery is pure P2P and independent of --seed-relay.
-    if let Some(id) = resume {
-        anyhow::ensure!(
-            resume_ticket.is_none(),
-            "--resume and --resume-ticket are mutually exclusive"
-        );
-        anyhow::ensure!(
-            paths.is_empty() && to.is_none() && !code_mode && !link && !ticket_mode,
-            "--resume replays a saved P2P session (no paths/--to/--code/--link/--ticket)"
-        );
-        return resume_by_id(&id, qr).await;
-    }
-    if let Some(rticket) = resume_ticket {
+    // Resume short-circuits the normal flow: re-serve a previous send so the
+    // ticket you already handed out stays valid after the sender restarted.
+    // Recovery is pure P2P and independent of --seed-relay. The argument is either
+    // a plain `arvc…` ticket (re-serve, needs the file) or a saved session id.
+    if let Some(arg) = resume {
         anyhow::ensure!(
             !code_mode && to.is_none() && !link && !ticket_mode,
-            "--resume-ticket re-serves a plain P2P ticket (no --code/--to/--link/--ticket)"
+            "--resume replays a saved P2P send (no --to/--code/--link/--ticket)"
         );
+        if ChunkTicket::looks_like(&arg) {
+            anyhow::ensure!(
+                paths.len() == 1,
+                "resuming from an `arvc…` ticket needs exactly one path: the file to re-serve"
+            );
+            return resume_by_ticket(&arg, &paths[0], qr).await;
+        }
         anyhow::ensure!(
-            paths.len() == 1,
-            "--resume-ticket needs exactly one path: the file to re-serve"
+            paths.is_empty(),
+            "resuming a session by id takes no paths (the saved session remembers the file)"
         );
-        return resume_by_ticket(&rticket, &paths[0], qr).await;
+        return resume_by_id(&arg, qr).await;
     }
 
     anyhow::ensure!(
         !paths.is_empty(),
-        "provide at least one file or folder to send (or use --resume / --resume-ticket)"
+        "provide at least one file or folder to send (or use --resume)"
     );
 
     // --link: a public, browser-openable download URL (no recipient).
@@ -1843,9 +1823,10 @@ async fn serve_session(session: flow::SendSession, qr: bool) -> Result<()> {
         .await
 }
 
-/// `send --resume-ticket`: re-serve `path` under an existing *plain* ticket so it
-/// stays valid after the sender restarted. The key rides in the ticket, so no
-/// saved session is needed. Sealed (`--to`) tickets must use `--resume` instead.
+/// `send --resume <arvc…> <file>`: re-serve `path` under an existing *plain*
+/// ticket so it stays valid after the sender restarted. The key rides in the
+/// ticket, so no saved session is needed. Sealed (`--to`) tickets resume by
+/// session id instead (`send --resume <id>`).
 async fn resume_by_ticket(ticket: &str, path: &Path, qr: bool) -> Result<()> {
     let expected = ChunkTicket::decode(ticket).context("parse ticket")?;
     let key: [u8; 32] = match &expected.key {

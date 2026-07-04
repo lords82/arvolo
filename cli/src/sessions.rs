@@ -3,11 +3,12 @@
 //! per-transfer content key (a capability secret), so its file is written with
 //! owner-only permissions under `~/.config/arvolo/sessions`.
 //!
-//! Two recovery paths use this differently:
-//!   - a *plain* ticket is self-describing, so `send --resume-ticket <arvc…>`
+//! Two recovery paths use this differently (both via `send --resume <arg>`):
+//!   - a *plain* `arvc…` ticket is self-describing, so `send --resume <arvc…> <file>`
 //!     needs no stored record at all (the key is in the ticket);
 //!   - a *sealed* (`--to`) ticket hides the key from the sender, so recovery
-//!     relies on the record saved here, addressed by a short session id.
+//!     relies on the record saved here, addressed by a short session id
+//!     (`send --resume <id>`).
 
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
