@@ -1223,7 +1223,14 @@ async fn daemon(
         .unwrap_or_else(|| book::config_dir().join("downloads"));
     std::fs::create_dir_all(&download_dir).context("create download dir")?;
 
-    let manager = TransferManager::new(me, Some(relay.clone()), download_dir.clone());
+    // Persist resumable downloads here so a daemon restart picks them back up.
+    let state_dir = book::config_dir().join("transfers");
+    let manager = TransferManager::with_state_dir(
+        me,
+        Some(relay.clone()),
+        download_dir.clone(),
+        Some(state_dir),
+    );
     let inbox = manager.spawn_inbox()?;
 
     // Single-instance guard: if the socket answers, a daemon is already up.
@@ -1343,6 +1350,13 @@ async fn daemon(
     eprintln!("  relay:    {relay}");
     eprintln!("  socket:   {}", sock.display());
     eprintln!("  saving:   {}", download_dir.display());
+
+    // Resume any downloads that were in flight when the daemon last stopped — each
+    // continues from its partial file on disk, no re-accept needed.
+    let resumed = manager.resume_incomplete();
+    if resumed > 0 {
+        eprintln!("  resuming: {resumed} unfinished download(s)");
+    }
 
     let shutdown = daemon_shutdown_signal();
     let daemon = ipc::server::Daemon {

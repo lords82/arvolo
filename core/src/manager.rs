@@ -113,6 +113,12 @@ struct Inner {
     relay: Option<String>,
     client: reqwest::Client,
     download_dir: PathBuf,
+    /// Where to persist resumable-download records (present in the daemon). When
+    /// set, an accepted chunked download writes a record here on start and removes
+    /// it on finish, so [`resume_incomplete`](TransferManager::resume_incomplete)
+    /// can restart it after a daemon/machine restart. `None` = no persistence
+    /// (ephemeral one-shot clients).
+    state_dir: Option<PathBuf>,
     /// Shared inbox subscription (present iff a relay is configured). One instance
     /// so its proof-of-possession session token is reused across polls and acks.
     inbox: Option<Arc<InboxSubscription>>,
@@ -161,10 +167,24 @@ impl TransferManager {
     /// [`send_to`](Self::send_to) and [`spawn_inbox`](Self::spawn_inbox)) and
     /// saving accepted downloads under `download_dir` by default.
     pub fn new(me: Identity, relay: Option<String>, download_dir: PathBuf) -> Self {
+        Self::with_state_dir(me, relay, download_dir, None)
+    }
+
+    /// Like [`new`](Self::new) but with a `state_dir` for persisting resumable
+    /// downloads (the daemon passes one; ephemeral clients pass `None`).
+    pub fn with_state_dir(
+        me: Identity,
+        relay: Option<String>,
+        download_dir: PathBuf,
+        state_dir: Option<PathBuf>,
+    ) -> Self {
         let (events, _) = broadcast::channel(256);
         let inbox = relay
             .as_ref()
             .map(|r| Arc::new(InboxSubscription::new(r.clone(), &me)));
+        if let Some(d) = &state_dir {
+            let _ = std::fs::create_dir_all(d);
+        }
         Self {
             inner: Arc::new(Inner {
                 next_id: AtomicU64::new(1),
@@ -176,6 +196,7 @@ impl TransferManager {
                 relay,
                 client: reqwest::Client::new(),
                 download_dir,
+                state_dir,
                 inbox,
             }),
         }
@@ -655,20 +676,53 @@ impl TransferManager {
             }
         }
 
-        let (id, cancel) = self.register(
-            Direction::Recv,
-            Some(offer.sender.clone()),
-            offer.offer.name.clone(),
-            offer.offer.size,
-        );
-
         // Ack the offer now that we've taken ownership of it (best-effort).
         if let Some(sub) = &self.inner.inbox {
             let _ = sub.ack(offer_id).await;
         }
 
+        Ok(self.start_download(
+            offer.offer.ticket.clone(),
+            out_path,
+            Some(offer.sender.clone()),
+            offer.offer.name.clone(),
+            offer.offer.size,
+        ))
+    }
+
+    /// Start (or resume) a background download of `ticket` into `out_path`. A
+    /// chunked (live/swarm) download is recorded to `state_dir` so a daemon restart
+    /// can [`resume`](Self::resume_incomplete) it; the record is removed when the
+    /// download finishes. `recv_chunked` itself resumes from the partial file on
+    /// disk, so restarting the same (ticket, out_path) continues where it left off.
+    pub fn start_download(
+        &self,
+        ticket: String,
+        out_path: PathBuf,
+        peer: Option<PublicId>,
+        name: String,
+        size: u64,
+    ) -> u64 {
+        let (id, cancel) = self.register(Direction::Recv, peer.clone(), name.clone(), size);
+
+        // Persist a resume record for chunked downloads (offline one-shots aren't
+        // worth resuming — they just re-fetch from the mailbox).
+        if crate::chunked::ChunkTicket::looks_like(&ticket) {
+            if let Some(dir) = &self.inner.state_dir {
+                persist_download(
+                    dir,
+                    &DownloadRecord {
+                        id,
+                        ticket: ticket.clone(),
+                        out_path: out_path.to_string_lossy().into_owned(),
+                        name: name.clone(),
+                        size,
+                    },
+                );
+            }
+        }
+
         let inner = self.inner.clone();
-        let ticket = offer.offer.ticket.clone();
         tokio::spawn(async move {
             let me = match inner.identity() {
                 Ok(id) => id,
@@ -682,7 +736,9 @@ impl TransferManager {
             // An offline (`arvm`) offer is a one-shot mailbox fetch — no live
             // sender to stream from, so no per-chunk progress.
             if !crate::chunked::ChunkTicket::looks_like(&ticket) {
-                inner.set_peer(id, offer.sender.clone());
+                if let Some(p) = &peer {
+                    inner.set_peer(id, p.clone());
+                }
                 let result = flow::fetch_offline(&ticket, Some(out_path.clone()), &me, None).await;
                 match result {
                     Ok((path, n)) => {
@@ -751,7 +807,24 @@ impl TransferManager {
             .await;
             finish(&inner, id, cancelled.is_cancelled(), result.map(Some));
         });
-        Ok(id)
+        id
+    }
+
+    /// Re-start every persisted, not-yet-finished chunked download (called once at
+    /// daemon startup). Each resumes from its partial file on disk — no re-accept.
+    /// Returns how many were resumed.
+    pub fn resume_incomplete(&self) -> usize {
+        let Some(dir) = self.inner.state_dir.clone() else {
+            return 0;
+        };
+        let records = load_downloads(&dir);
+        let n = records.len();
+        for rec in records {
+            // Drop the stale record; start_download writes a fresh one (new id).
+            remove_download(&dir, rec.id);
+            self.start_download(rec.ticket, PathBuf::from(rec.out_path), None, rec.name, rec.size);
+        }
+        n
     }
 
     /// Reject a pending offer: drop it and ack it so it stops coming back.
@@ -886,6 +959,10 @@ fn prune_finished(transfers: &mut HashMap<u64, Transfer>, keep: usize) {
 
 /// Finalize a transfer's state and emit the terminal event.
 fn finish(inner: &Inner, id: u64, cancelled: bool, result: Result<Option<PathBuf>>) {
+    // Terminal state: drop any resume record so a restart doesn't re-start it.
+    if let Some(dir) = &inner.state_dir {
+        remove_download(dir, id);
+    }
     match result {
         Ok(path) if cancelled => {
             inner.set_status(id, TransferStatus::Cancelled);
@@ -902,4 +979,52 @@ fn finish(inner: &Inner, id: u64, cancelled: bool, result: Result<Option<PathBuf
             inner.emit(ManagerEvent::Failed { id, error: msg });
         }
     }
+}
+
+// ---- resumable-download persistence ---------------------------------------
+
+/// On-disk record of an accepted, not-yet-finished chunked download, so the
+/// daemon can resume it after a restart. Small (a ticket + a path) — one postcard
+/// file per download under the manager's `state_dir`.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct DownloadRecord {
+    id: u64,
+    ticket: String,
+    out_path: String,
+    name: String,
+    size: u64,
+}
+
+fn download_record_path(dir: &Path, id: u64) -> PathBuf {
+    dir.join(format!("dl-{id}.pc"))
+}
+
+fn persist_download(dir: &Path, rec: &DownloadRecord) {
+    if let Ok(bytes) = postcard::to_allocvec(rec) {
+        let _ = std::fs::create_dir_all(dir);
+        let _ = std::fs::write(download_record_path(dir, rec.id), bytes);
+    }
+}
+
+fn remove_download(dir: &Path, id: u64) {
+    let _ = std::fs::remove_file(download_record_path(dir, id));
+}
+
+fn load_downloads(dir: &Path) -> Vec<DownloadRecord> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("pc") {
+            continue;
+        }
+        if let Ok(bytes) = std::fs::read(&path) {
+            if let Ok(rec) = postcard::from_bytes::<DownloadRecord>(&bytes) {
+                out.push(rec);
+            }
+        }
+    }
+    out
 }
