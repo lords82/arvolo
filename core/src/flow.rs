@@ -25,12 +25,12 @@ const CHUNK_KEY_AAD: &[u8] = b"arvolo/chunk-key/v1";
 
 /// Per-chunk fetch resilience: when a chunk is transiently unavailable (a dropped
 /// direct P2P connection, or a relay whose backfill hasn't reached it yet), keep
-/// retrying the same providers with exponential backoff for up to this long before
-/// failing the transfer — long enough for the sender to reconnect or the relay to
-/// catch up, so an interrupted transfer self-heals instead of dying.
-const CHUNK_RETRY_MAX_ELAPSED: u64 = 15 * 60;
+/// retrying the same providers with exponential backoff, from `START` up to a `CAP`
+/// interval, *indefinitely* — the transfer never fails on its own, it just waits
+/// and resumes whenever the sender/relay has the chunk again (torrent-style). Only
+/// a user cancel stops it.
 const CHUNK_RETRY_BACKOFF_START_SECS: u64 = 2;
-const CHUNK_RETRY_BACKOFF_CAP_SECS: u64 = 30;
+const CHUNK_RETRY_BACKOFF_CAP_SECS: u64 = 5 * 60;
 
 /// Where a received chunk was pulled from (the selected primary provider).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -542,7 +542,7 @@ pub async fn recv_chunked(
             let sp = stage_path(i);
             let ct = cancel.clone();
             set.spawn(async move {
-                use std::time::{Duration, Instant};
+                use std::time::Duration;
                 let mut part = std::fs::OpenOptions::new()
                     .create(true)
                     .truncate(false)
@@ -550,14 +550,16 @@ pub async fn recv_chunked(
                     .write(true)
                     .open(&sp)
                     .with_context(|| format!("open {}", sp.display()))?;
-                // Resilient fetch: a mid-transfer P2P drop or a relay backfill lag
-                // can make a chunk transiently unavailable. Rather than failing the
-                // whole transfer, retry with backoff over the same providers — this
-                // re-tries the sender (letting the direct connection re-establish)
-                // and the relay (as its backfill catches up) — until the chunk
-                // arrives or a generous window elapses. Partial bytes persist in the
-                // stage file, so each retry resumes mid-chunk.
-                let deadline = Instant::now() + Duration::from_secs(CHUNK_RETRY_MAX_ELAPSED);
+                // Resilient fetch, BitTorrent-style: a mid-transfer P2P drop or a
+                // relay whose backfill hasn't reached a chunk yet makes it
+                // transiently unavailable. Rather than failing, keep retrying the
+                // same providers with capped exponential backoff — the sender (as
+                // its direct connection re-establishes) and the relay (as its
+                // backfill lands) — *indefinitely*, until the chunk arrives or the
+                // user cancels. So a transfer whose sender went away simply waits
+                // and resumes whenever the sender comes back; it never gives up on
+                // its own. Partial bytes persist in the stage file, so each retry
+                // resumes mid-chunk.
                 let mut backoff = Duration::from_secs(CHUNK_RETRY_BACKOFF_START_SECS);
                 loop {
                     match rx.fetch_to_file(&providers, hash, &mut part).await {
@@ -566,13 +568,9 @@ pub async fn recv_chunked(
                             if ct.is_cancelled() {
                                 return Err(e).with_context(|| format!("fetch chunk {}", i + 1));
                             }
-                            if Instant::now() >= deadline {
-                                return Err(e).with_context(|| {
-                                    format!("fetch chunk {} (gave up after retrying)", i + 1)
-                                });
-                            }
                             tracing::warn!(
-                                "chunk {} unavailable ({e:#}); retrying in {}s",
+                                "chunk {} unavailable ({e:#}); retrying in {}s \
+                                 (will keep retrying until it's available or you cancel)",
                                 i + 1,
                                 backoff.as_secs()
                             );
