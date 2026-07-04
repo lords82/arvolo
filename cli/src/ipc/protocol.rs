@@ -99,6 +99,9 @@ pub enum ServerMessage {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StatusDto {
     /// The daemon binary's version (`CARGO_PKG_VERSION` at its build time).
+    /// Optional on the wire so a newer client can still read an **older** daemon's
+    /// status (which predates this field) — it just shows up empty there.
+    #[serde(default)]
     pub version: String,
     pub public_id: String,
     pub fingerprint: String,

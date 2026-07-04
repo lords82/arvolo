@@ -475,9 +475,13 @@ async fn show_transfers_live(mut client: ipc::client::DaemonClient, watch: bool)
         let st = client.status().await?;
         let transfers = client.list().await?;
         let pending = client.list_pending().await?;
+        let ver = if st.version.is_empty() {
+            "?".to_string()
+        } else {
+            st.version.clone()
+        };
         println!(
-            "daemon {}: {}  relay: {}",
-            st.version,
+            "daemon {ver}: {}  relay: {}",
             st.public_id,
             st.relay.as_deref().unwrap_or("-")
         );
@@ -755,13 +759,19 @@ async fn version_cmd() -> Result<()> {
     {
         match daemon_client().await {
             Some(mut c) => match c.status().await {
-                Ok(st) => println!(
-                    "daemon:  running — v{}  (relay {}, {} active, {} pending)",
-                    st.version,
-                    st.relay.as_deref().unwrap_or("-"),
-                    st.transfers,
-                    st.pending
-                ),
+                Ok(st) => {
+                    let ver = if st.version.is_empty() {
+                        "unknown (older daemon — restart it to pick up this binary)".to_string()
+                    } else {
+                        format!("v{}", st.version)
+                    };
+                    println!(
+                        "daemon:  running — {ver}  (relay {}, {} active, {} pending)",
+                        st.relay.as_deref().unwrap_or("-"),
+                        st.transfers,
+                        st.pending
+                    );
+                }
                 Err(e) => println!("daemon:  reachable but status failed: {e:#}"),
             },
             None => println!("daemon:  not running  (start it with `arvolo daemon`)"),
