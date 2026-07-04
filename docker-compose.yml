@@ -8,8 +8,12 @@ services:
     #   dockerfile: relay/Dockerfile
     container_name: arvolo-relay
     restart: always
-    ports:
-      - "8787:8787"
+    # No host port publish in production: a TLS-terminating reverse proxy on the
+    # same Docker network reaches the relay by its service name (arvolo-relay:8787).
+    # Publishing 8787 to the host would expose the relay in plaintext, bypassing
+    # TLS — uncomment only for a local, non-public dev run.
+    # ports:
+    #   - "8787:8787"
     volumes:
       - arvolo-data:/data
     healthcheck:
