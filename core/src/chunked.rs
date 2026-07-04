@@ -778,71 +778,34 @@ impl ChunkReceiver {
         Err(last_err.unwrap_or_else(|| anyhow!("no providers for chunk {hash}")))
     }
 
-    /// Fetch chunk `hash` into `out`, BLAKE3-verified. **Races** the providers:
-    /// opens the chunk request to all of them at once and takes the body from the
-    /// *first that responds* — so the fastest reachable source wins and a slow or
-    /// dead provider can't hold the fetch up. Only that one provider's body is
-    /// downloaded (the losers are cancelled), so it costs one chunk of bandwidth,
-    /// not one per provider. If the winner's body fails the hash check it's banned
-    /// and the race falls through to the remaining providers. Returns the winning
-    /// provider's endpoint id.
-    pub async fn fetch_to_file(
+    /// Fetch chunk `hash` from a **single** provider `addr` into `out`,
+    /// BLAKE3-verified. The scheduler chooses which provider (least-in-flight, for
+    /// load balancing) and re-queues on failure, so this does no provider fallback
+    /// or retry itself. On an integrity failure the provider is banned. Fetches the
+    /// whole chunk fresh (a chunk is <= one CHUNK_SIZE).
+    pub async fn fetch_one(
         &self,
-        providers: &[EndpointAddr],
+        addr: &EndpointAddr,
         hash: Hash,
         out: &mut std::fs::File,
         banned: &Mutex<HashSet<String>>,
-    ) -> Result<String> {
+    ) -> Result<()> {
         use std::io::Write;
-        if providers.is_empty() {
-            anyhow::bail!("no providers for chunk {hash}");
+        let mut stream = open_chunk_stream(&self.endpoint, addr, hash, 0).await?;
+        let mut buf = vec![0u8; stream.total_len as usize];
+        stream
+            .recv
+            .read_exact(&mut buf)
+            .await
+            .map_err(|e| anyhow!("read chunk body: {e}"))?;
+        if Hash::new(&buf) != hash {
+            banned.lock().unwrap().insert(addr.id.to_string());
+            anyhow::bail!("chunk {hash} failed integrity check");
         }
-        // Open the request to every provider concurrently. A chunk is <= one
-        // CHUNK_SIZE, so we fetch it whole (offset 0) rather than resume mid-chunk.
-        let mut set: tokio::task::JoinSet<(String, Result<ChunkStream>)> =
-            tokio::task::JoinSet::new();
-        for addr in providers {
-            let endpoint = self.endpoint.clone();
-            let addr = addr.clone();
-            let id = addr.id.to_string();
-            set.spawn(async move { (id, open_chunk_stream(&endpoint, &addr, hash, 0).await) });
-        }
-        // Take responders in the order they arrive; read the body from the first
-        // that gives a valid chunk, keeping the others as fallbacks until then.
-        let mut last_err = None;
-        while let Some(joined) = set.join_next().await {
-            let (id, opened) = match joined {
-                Ok(v) => v,
-                Err(e) => {
-                    last_err = Some(anyhow!("fetch task: {e}"));
-                    continue;
-                }
-            };
-            let mut stream = match opened {
-                Ok(s) => s,
-                Err(e) => {
-                    last_err = Some(e);
-                    continue;
-                }
-            };
-            let mut buf = vec![0u8; stream.total_len as usize];
-            match stream.recv.read_exact(&mut buf).await {
-                Ok(()) if Hash::new(&buf) == hash => {
-                    set.shutdown().await; // cancel the losing racers
-                    out.set_len(0)?;
-                    out.seek(SeekFrom::Start(0))?;
-                    out.write_all(&buf)?;
-                    return Ok(id);
-                }
-                Ok(()) => {
-                    // Corrupt body: ban this provider, keep racing the rest.
-                    banned.lock().unwrap().insert(id);
-                    last_err = Some(anyhow!("chunk {hash} failed integrity check"));
-                }
-                Err(e) => last_err = Some(anyhow!("read chunk body: {e}")),
-            }
-        }
-        Err(last_err.unwrap_or_else(|| anyhow!("no providers for chunk {hash}")))
+        out.set_len(0)?;
+        out.seek(SeekFrom::Start(0))?;
+        out.write_all(&buf)?;
+        Ok(())
     }
 
     pub async fn close(self) {
