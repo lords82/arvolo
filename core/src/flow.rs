@@ -148,7 +148,11 @@ async fn fetch_relay_release(client: &reqwest::Client, url: &str) -> Result<Rela
         .trim()
         .to_string();
     let token = lines.next().context("missing token")?.trim().to_string();
-    Ok(RelayRelease { http: url, addr, token })
+    Ok(RelayRelease {
+        http: url,
+        addr,
+        token,
+    })
 }
 
 /// Split and serve `path`; with `seed_relay` set, learn the relay's address +
@@ -258,7 +262,10 @@ pub async fn resume_send(
         chunk_size: sender.chunk_size(),
         chunks: sender.chunks().to_vec(),
         providers: vec![sender.addr()],
-        relay: None,
+        // Keep the original relay in the ticket so a resumed sender / a seeder still
+        // joins the swarm (the tracker announce in the manager keys off it). We
+        // don't re-seed to the relay here — just stay discoverable.
+        relay: expected.relay.clone(),
         key: expected.key.clone(),
         name: expected.name.clone(),
         archive: expected.archive,
@@ -503,18 +510,23 @@ fn swarm_enabled() -> bool {
     )
 }
 
-/// Announce this receiver to the swarm tracker on a timer — publishing our seeder
-/// address + which pieces we can serve, and learning the other peers (into
-/// `peers`, used by [`ordered_providers`]). Deregisters on cancel.
+/// Shared list of known swarm peers: each entry is a peer's serving address and
+/// its raw bitfield (which pieces it can serve).
+pub(crate) type SwarmPeers = Arc<Mutex<Vec<(iroh::EndpointAddr, Vec<u8>)>>>;
+
+/// Announce a swarm member to the tracker on a timer — publishing its serving
+/// address + which pieces it can serve, and learning the other peers (into
+/// `peers`). Deregisters on cancel. Used by receivers (partial bitfield) and by
+/// senders/seeders (full bitfield) alike.
 #[allow(clippy::too_many_arguments)]
-fn spawn_swarm_coordinator(
+pub(crate) fn spawn_swarm_coordinator(
     client: reqwest::Client,
     relay_http: String,
     swarm_id: String,
     my_addr: String,
     have: Arc<std::sync::atomic::AtomicUsize>,
     n_chunks: usize,
-    peers: Arc<Mutex<Vec<(iroh::EndpointAddr, Vec<u8>)>>>,
+    peers: SwarmPeers,
     cancel: CancellationToken,
 ) {
     use std::sync::atomic::Ordering;
@@ -538,7 +550,12 @@ fn spawn_swarm_coordinator(
                 node_addr: my_addr.clone(),
                 bitfield: bf,
                 n_chunks: n_chunks as u32,
-                event: if h >= n_chunks { "completed" } else { "progress" }.to_string(),
+                event: if h >= n_chunks {
+                    "completed"
+                } else {
+                    "progress"
+                }
+                .to_string(),
                 want: 30,
             };
             if let Ok(resp) = client.post(&url).json(&req).send().await {
@@ -693,7 +710,7 @@ pub async fn recv_chunked(
     // count of contiguous committed pieces — both the seeder (what it may serve)
     // and the announce bitfield read it; the commit loop bumps it.
     let have = Arc::new(std::sync::atomic::AtomicUsize::new(start));
-    let peers: Arc<Mutex<Vec<(iroh::EndpointAddr, Vec<u8>)>>> = Arc::new(Mutex::new(Vec::new()));
+    let peers: SwarmPeers = Arc::new(Mutex::new(Vec::new()));
     // Peers (by endpoint id) that served corrupt bytes; filtered out of future
     // provider lists. Populated by `fetch_to_file` on an integrity failure.
     let banned: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
@@ -870,7 +887,11 @@ pub async fn recv_chunked(
                 .entry(i)
                 .or_insert_with(|| cancel.child_token())
                 .clone();
-            let stage = if n == 1 { stage_path(i) } else { stage_dup(i, n) };
+            let stage = if n == 1 {
+                stage_path(i)
+            } else {
+                stage_dup(i, n)
+            };
             let rx = receiver.clone();
             let bn = banned.clone();
             let hash = t.chunks[i];
@@ -957,7 +978,10 @@ pub async fn recv_chunked(
                 // This provider failed: cool it down briefly, and re-queue the piece
                 // if no other source is still fetching it.
                 let now = std::time::Instant::now();
-                cooldown.insert(pid, now + std::time::Duration::from_secs(PROVIDER_COOLDOWN_SECS));
+                cooldown.insert(
+                    pid,
+                    now + std::time::Duration::from_secs(PROVIDER_COOLDOWN_SECS),
+                );
                 let _ = std::fs::remove_file(&stage);
                 if !satisfied.contains(&i)
                     && piece_srcs.get(&i).map(|s| s.is_empty()).unwrap_or(true)

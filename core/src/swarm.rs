@@ -39,7 +39,9 @@ pub fn bitfield_set(bf: &mut [u8], i: usize) {
 
 /// Whether piece `i` is present.
 pub fn bitfield_has(bf: &[u8], i: usize) -> bool {
-    bf.get(i / 8).map(|b| b & (1 << (i % 8)) != 0).unwrap_or(false)
+    bf.get(i / 8)
+        .map(|b| b & (1 << (i % 8)) != 0)
+        .unwrap_or(false)
 }
 
 /// How many pieces the bitfield marks present.

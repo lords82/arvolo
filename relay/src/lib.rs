@@ -1180,7 +1180,10 @@ pub fn router(state: AppState) -> Router {
             post(presence_post_handler).get(presence_get_handler),
         )
         // Swarm tracker (peer rendezvous for a shared arvc… ticket).
-        .route("/v1/swarm/{swarm_id}/announce", post(swarm_announce_handler))
+        .route(
+            "/v1/swarm/{swarm_id}/announce",
+            post(swarm_announce_handler),
+        )
         .route("/v1/swarm/{swarm_id}/peers", get(swarm_peers_handler))
         // Browser secure-download page (E2E: decrypts client-side).
         .route("/dl/{claim}", get(dl_page_handler))

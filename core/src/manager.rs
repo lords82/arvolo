@@ -591,6 +591,22 @@ impl TransferManager {
     /// Re-serve a persisted send after a daemon restart: rebind the same node id
     /// and content key (from the saved ticket) so the original ticket reconnects.
     /// Only anonymous (`Plain`-key) tickets are resumable here; `--to` sends aren't.
+    /// Keep seeding a fully-downloaded file into the swarm. Modeled as a normal
+    /// resumable send of the complete file with a fresh node identity, so it is
+    /// persisted as a `SendRecord` and auto-resumes on daemon restart like any
+    /// other sender. No-op for a sealed (`--to`) ticket.
+    fn seed_file(&self, path: PathBuf, ticket: String) {
+        let rec = SendRecord {
+            id: 0, // ignored: resume_serve registers a fresh id
+            path: path.to_string_lossy().into_owned(),
+            node_seed: crate::node::random_node_seed().to_vec(),
+            ticket,
+        };
+        if let Err(e) = self.resume_serve(rec) {
+            tracing::warn!("seed-after-complete: not seeding {}: {e:#}", path.display());
+        }
+    }
+
     fn resume_serve(&self, rec: SendRecord) -> Result<()> {
         let expected = crate::chunked::ChunkTicket::decode(&rec.ticket).context("decode ticket")?;
         let key: [u8; crate::crypto::CHUNK_KEY_LEN] = match &expected.key {
@@ -599,7 +615,11 @@ impl TransferManager {
             }
             _ => anyhow::bail!("cannot resume a sealed (--to) send"),
         };
-        let node_seed: [u8; 32] = rec.node_seed.as_slice().try_into().context("bad node seed")?;
+        let node_seed: [u8; 32] = rec
+            .node_seed
+            .as_slice()
+            .try_into()
+            .context("bad node seed")?;
         let path = PathBuf::from(&rec.path);
         let (id, cancel) = self.register(
             Direction::Send,
@@ -620,8 +640,14 @@ impl TransferManager {
         }
         let inner = self.inner.clone();
         tokio::spawn(async move {
-            match flow::resume_send(&path, key, Some(node_seed), &expected, RelayChoice::from_env())
-                .await
+            match flow::resume_send(
+                &path,
+                key,
+                Some(node_seed),
+                &expected,
+                RelayChoice::from_env(),
+            )
+            .await
             {
                 Ok(session) => serve_session(inner, session, id, cancel).await,
                 Err(e) => finish(&inner, id, false, Err(e)),
@@ -842,6 +868,16 @@ impl TransferManager {
                 },
             )
             .await;
+            // Seed-after-complete: on a clean finish, keep serving the file to the
+            // swarm (opt-in via ARVOLO_SEED). Persisted, so it survives a restart.
+            if let (Ok(saved), false) = (&result, cancelled.is_cancelled()) {
+                if seeding_enabled() {
+                    let mgr = TransferManager {
+                        inner: inner.clone(),
+                    };
+                    mgr.seed_file(saved.clone(), ticket.clone());
+                }
+            }
             finish(&inner, id, cancelled.is_cancelled(), result.map(Some));
         });
         id
@@ -860,7 +896,13 @@ impl TransferManager {
         for rec in downloads {
             // Drop the stale record; start_download writes a fresh one (new id).
             remove_download(&dir, rec.id);
-            self.start_download(rec.ticket, PathBuf::from(rec.out_path), None, rec.name, rec.size);
+            self.start_download(
+                rec.ticket,
+                PathBuf::from(rec.out_path),
+                None,
+                rec.name,
+                rec.size,
+            );
         }
         for rec in sends {
             remove_send(&dir, rec.id);
@@ -1013,6 +1055,29 @@ async fn serve_session(
     cancel: CancellationToken,
 ) {
     let total = session.total_size;
+    // Swarm: announce this server to the tracker with a FULL bitfield (a sender/
+    // seeder has every piece), so receivers can discover it as a peer beyond the
+    // ticket. Only for a relay-embedded (swarm) anonymous ticket.
+    let swarm_cancel = cancel.child_token();
+    if let Ok(t) = crate::chunked::ChunkTicket::decode(&session.ticket) {
+        if matches!(&t.key, crate::chunked::KeyDelivery::Plain(_)) {
+            if let (Some(r), Some(addr)) = (&t.relay, t.providers.first()) {
+                if let Ok(my_addr) = crate::chunked::encode_addr(addr) {
+                    let n = t.chunks.len();
+                    flow::spawn_swarm_coordinator(
+                        inner.client.clone(),
+                        r.http.clone(),
+                        crate::swarm::swarm_id(&t.chunks, t.total_size),
+                        my_addr,
+                        Arc::new(std::sync::atomic::AtomicUsize::new(n)),
+                        n,
+                        Arc::new(Mutex::new(Vec::new())),
+                        swarm_cancel.clone(),
+                    );
+                }
+            }
+        }
+    }
     let delivered = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let d = delivered.clone();
     let inner_cb = inner.clone();
@@ -1042,10 +1107,20 @@ async fn serve_session(
             | SendEvent::BackfillFailed { .. } => {}
         })
         .await;
+    swarm_cancel.cancel(); // stop announcing / deregister from the tracker
     match result {
         Err(e) => finish(&inner, id, false, Err(e)),
         Ok(()) => finish(&inner, id, !delivered.load(Ordering::Relaxed), Ok(None)),
     }
+}
+
+/// Whether a completed receiver should keep seeding the file into the swarm.
+/// Opt-in — seeding costs upload + keeps the file served indefinitely.
+fn seeding_enabled() -> bool {
+    matches!(
+        std::env::var("ARVOLO_SEED").ok().as_deref(),
+        Some("1") | Some("true") | Some("yes")
+    )
 }
 
 /// Finalize a transfer's state and emit the terminal event.

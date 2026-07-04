@@ -17,7 +17,7 @@ async fn main() -> Result<()> {
     // ARVOLO_RELAY_* env vars below. Still, handle --version/--help (and reject
     // stray flags) so an accidental `arvolo-relay --version` prints and exits
     // instead of silently starting the server and grabbing the listen port.
-    for arg in std::env::args().skip(1) {
+    if let Some(arg) = std::env::args().nth(1) {
         match arg.as_str() {
             "-V" | "--version" => {
                 println!("arvolo-relay {}", env!("CARGO_PKG_VERSION"));
@@ -37,7 +37,9 @@ async fn main() -> Result<()> {
                 println!("  ARVOLO_RELAY_ADDR       listen address (default 0.0.0.0:8787)");
                 println!("  ARVOLO_RELAY_DB         mailbox db path (default arvolo-relay.db)");
                 println!("  ARVOLO_RELAY_BLOBS      blob directory (default arvolo-blobs)");
-                println!("  ARVOLO_RELAY_BLOBSTORE  blobstore directory (default arvolo-blobstore)");
+                println!(
+                    "  ARVOLO_RELAY_BLOBSTORE  blobstore directory (default arvolo-blobstore)"
+                );
                 return Ok(());
             }
             other => {

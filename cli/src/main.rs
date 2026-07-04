@@ -2209,7 +2209,9 @@ async fn recv(ticket: String, out: Option<PathBuf>, password: Option<String>) ->
                     pieces_from_peers,
                 } => {
                     if let Some(pb) = slot.as_ref() {
-                        pb.set_message(format!("swarm: {peers} peers, {pieces_from_peers} pieces from peers"));
+                        pb.set_message(format!(
+                            "swarm: {peers} peers, {pieces_from_peers} pieces from peers"
+                        ));
                     }
                 }
             }

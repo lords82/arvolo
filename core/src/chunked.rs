@@ -205,7 +205,8 @@ impl ChunkBackend {
                     return None; // we haven't verified/committed this piece yet
                 }
                 let mut file = std::fs::File::open(path).ok()?;
-                file.seek(SeekFrom::Start(idx as u64 * CHUNK_SIZE as u64)).ok()?;
+                file.seek(SeekFrom::Start(idx as u64 * CHUNK_SIZE as u64))
+                    .ok()?;
                 let mut buf = vec![0u8; CHUNK_SIZE as usize];
                 let n = fill(&mut file, &mut buf).ok()?;
                 let ct = crate::crypto::seal_chunk(key, idx, *total_chunks, &buf[..n]).ok()?;
