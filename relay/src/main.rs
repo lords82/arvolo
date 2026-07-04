@@ -11,13 +11,27 @@ use arvolo_core::backfill::BlobNode;
 use arvolo_core::transfer::RelayChoice;
 use arvolo_relay::{now_unix, router, AppState, Mailbox};
 
+/// Build the tracing filter from `-v` count. arvolo (`arvolo_relay`,
+/// `arvolo_core`) gets louder with each `-v`; dependencies (iroh, hyper, …) stay
+/// quiet at `warn` until `-vvv`, which raises the base to `debug` so their logs
+/// show too.
+fn relay_log_filter(verbosity: u8) -> String {
+    match verbosity {
+        0 => "warn,arvolo_relay=info,arvolo_core=info".into(),
+        1 => "warn,arvolo_relay=debug,arvolo_core=debug".into(),
+        2 => "warn,arvolo_relay=trace,arvolo_core=trace".into(),
+        _ => "debug,arvolo_relay=trace,arvolo_core=trace".into(),
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // The relay takes no positional args — it's configured entirely via the
-    // ARVOLO_RELAY_* env vars below. Still, handle --version/--help (and reject
-    // stray flags) so an accidental `arvolo-relay --version` prints and exits
-    // instead of silently starting the server and grabbing the listen port.
-    if let Some(arg) = std::env::args().nth(1) {
+    // ARVOLO_RELAY_* env vars below. It does accept -v/-vv/-vvv (verbosity) and
+    // --version/--help; anything else is rejected so an accidental flag prints and
+    // exits instead of silently starting the server and grabbing the listen port.
+    let mut verbosity: u8 = 0;
+    for arg in std::env::args().skip(1) {
         match arg.as_str() {
             "-V" | "--version" => {
                 println!("arvolo-relay {}", env!("CARGO_PKG_VERSION"));
@@ -30,10 +44,14 @@ async fn main() -> Result<()> {
                 println!("Usage: arvolo-relay   (no arguments; configured via environment)");
                 println!();
                 println!("Options:");
+                println!(
+                    "  -v, -vv, -vvv   log verbosity: arvolo debug/trace; -vvv also shows iroh"
+                );
                 println!("  -V, --version   print version and exit");
                 println!("  -h, --help      print this help and exit");
                 println!();
                 println!("Environment:");
+                println!("  RUST_LOG                explicit log filter (overrides -v)");
                 println!("  ARVOLO_RELAY_ADDR       listen address (default 0.0.0.0:6282)");
                 println!("  ARVOLO_RELAY_DB         mailbox db path (default arvolo-relay.db)");
                 println!("  ARVOLO_RELAY_BLOBS      blob directory (default arvolo-blobs)");
@@ -42,6 +60,11 @@ async fn main() -> Result<()> {
                 );
                 return Ok(());
             }
+            "--verbose" => verbosity = verbosity.saturating_add(1),
+            // -v, -vv, -vvv, … (stacked v's).
+            s if s.len() >= 2 && s.starts_with("-v") && s[1..].bytes().all(|b| b == b'v') => {
+                verbosity = verbosity.saturating_add((s.len() - 1) as u8);
+            }
             other => {
                 eprintln!("arvolo-relay: unexpected argument '{other}' (try --help)");
                 std::process::exit(2);
@@ -49,10 +72,15 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Default: only arvolo's own logs (deps like iroh stay at warn). -v/-vv raise
+    // arvolo to debug/trace; -vvv also surfaces iroh and the rest. An explicit
+    // RUST_LOG always wins.
+    let filter = std::env::var("RUST_LOG")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| relay_log_filter(verbosity));
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
+        .with_env_filter(tracing_subscriber::EnvFilter::new(filter))
         .init();
 
     let addr = std::env::var("ARVOLO_RELAY_ADDR").unwrap_or_else(|_| "0.0.0.0:6282".to_string());
