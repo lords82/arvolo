@@ -136,6 +136,30 @@ impl SendSession {
     }
 }
 
+/// Ask the relay for its chunk-serving address + a seed token (`/v1/addr`), to
+/// embed in a ticket as a [`RelayRelease`].
+async fn fetch_relay_release(client: &reqwest::Client, url: &str) -> Result<RelayRelease> {
+    let url = url.trim_end_matches('/').to_string();
+    let resp = client
+        .get(format!("{url}/v1/addr"))
+        .send()
+        .await
+        .context("relay /v1/addr")?
+        .error_for_status()
+        .context("relay rejected addr")?
+        .text()
+        .await
+        .context("read relay addr")?;
+    let mut lines = resp.lines();
+    let addr = lines
+        .next()
+        .context("missing relay address")?
+        .trim()
+        .to_string();
+    let token = lines.next().context("missing token")?.trim().to_string();
+    Ok(RelayRelease { http: url, addr, token })
+}
+
 /// Split and serve `path`; with `seed_relay` set, learn the relay's address +
 /// token so the tail can be backfilled if the receiver drops (nothing is
 /// uploaded yet — that's lazy, in [`SendSession::serve`]).
@@ -167,32 +191,19 @@ pub async fn prepare_send(
         None => KeyDelivery::Plain(sender.key().to_vec()),
     };
 
-    let mut relay = None;
-    if let Some(url) = seed_relay {
-        let url = url.trim_end_matches('/').to_string();
-        let resp = client
-            .get(format!("{url}/v1/addr"))
-            .send()
-            .await
-            .context("relay /v1/addr")?
-            .error_for_status()
-            .context("relay rejected addr")?
-            .text()
-            .await
-            .context("read relay addr")?;
-        let mut lines = resp.lines();
-        let addr = lines
-            .next()
-            .context("missing relay address")?
-            .trim()
-            .to_string();
-        let token = lines.next().context("missing token")?.trim().to_string();
-        relay = Some(RelayRelease {
-            http: url,
-            addr,
-            token,
-        });
-    }
+    // Embed the relay in the ticket (enables relay backfill + the swarm) —
+    // best-effort: if the relay is unreachable, fall back to a pure-P2P ticket
+    // rather than failing the send. So it's safe to default this on.
+    let relay = match &seed_relay {
+        Some(url) => match fetch_relay_release(&client, url).await {
+            Ok(rr) => Some(rr),
+            Err(e) => {
+                tracing::warn!("relay {url} unavailable ({e:#}); serving peer-to-peer only");
+                None
+            }
+        },
+        None => None,
+    };
 
     let ticket = ChunkTicket {
         total_size: sender.total_size(),
@@ -895,10 +906,31 @@ pub async fn recv_chunked(
                     );
                     match rx.fetch_to_file(&providers, hash, &mut part, &bn).await {
                         Ok(winner) => {
-                            // Count a piece served by a peer (not the origin/relay).
-                            if peer_snapshot.iter().any(|(a, _)| a.id.to_string() == winner) {
+                            // Classify the winning provider for the metric + a
+                            // verbose "which chunk from whom" log line.
+                            let is_peer =
+                                peer_snapshot.iter().any(|(a, _)| a.id.to_string() == winner);
+                            if is_peer {
                                 fp.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             }
+                            let src = if sa.as_ref().map(|a| a.id.to_string()).as_deref()
+                                == Some(winner.as_str())
+                            {
+                                "origin"
+                            } else if ra.as_ref().map(|a| a.id.to_string()).as_deref()
+                                == Some(winner.as_str())
+                            {
+                                "relay"
+                            } else if is_peer {
+                                "peer"
+                            } else {
+                                "?"
+                            };
+                            tracing::info!(
+                                "chunk {} ← {src} {}",
+                                i + 1,
+                                winner.chars().take(12).collect::<String>()
+                            );
                             break;
                         }
                         Err(e) => {

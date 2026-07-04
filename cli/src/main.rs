@@ -144,11 +144,6 @@ enum Command {
         /// its file (re-serves it; the receiver uses the reprinted ticket).
         #[arg(long, value_name = "ID|TICKET")]
         resume: Option<String>,
-        /// Also seed the file to a relay so the recipient can finish even if you
-        /// go offline (backfill). Relay host or URL, e.g. relay.example.com
-        /// (https assumed; pass --use-http for plaintext).
-        #[arg(long)]
-        seed_relay: Option<String>,
         /// Show a short pairing code (e.g. 4821-crater-mango) instead of the long
         /// ticket. Needs a relay: --relay, or the ARVOLO_RELAY env var.
         #[arg(long)]
@@ -348,7 +343,6 @@ async fn main() -> Result<()> {
         Command::Send {
             paths,
             resume,
-            seed_relay,
             code,
             relay,
             use_http,
@@ -362,8 +356,8 @@ async fn main() -> Result<()> {
             qr,
         } => {
             send(
-                paths, resume, seed_relay, code, relay, use_http, to, ticket, link, ttl, max,
-                password, foreground, qr,
+                paths, resume, code, relay, use_http, to, ticket, link, ttl, max, password,
+                foreground, qr,
             )
             .await
         }
@@ -1684,7 +1678,6 @@ async fn push(
 async fn send(
     paths: Vec<PathBuf>,
     resume: Option<String>,
-    seed_relay: Option<String>,
     code_mode: bool,
     relay: Option<String>,
     use_http: bool,
@@ -1699,8 +1692,8 @@ async fn send(
 ) -> Result<()> {
     // Resume short-circuits the normal flow: re-serve a previous send so the
     // ticket you already handed out stays valid after the sender restarted.
-    // Recovery is pure P2P and independent of --seed-relay. The argument is either
-    // a plain `arvc…` ticket (re-serve, needs the file) or a saved session id.
+    // Recovery is pure P2P. The argument is either a plain `arvc…` ticket
+    // (re-serve, needs the file) or a saved session id.
     if let Some(arg) = resume {
         anyhow::ensure!(
             !code_mode && to.is_none() && !link && !ticket_mode,
@@ -1732,10 +1725,6 @@ async fn send(
             !code_mode && !ticket_mode,
             "--link can't be combined with --code / --ticket"
         );
-        anyhow::ensure!(
-            seed_relay.is_none(),
-            "--seed-relay applies to a P2P ticket send, not --link"
-        );
         return send_offline(
             paths, None, true, relay, use_http, ttl, max, password, qr, false,
         )
@@ -1749,10 +1738,6 @@ async fn send(
         anyhow::ensure!(
             !code_mode,
             "--code makes a shareable P2P ticket; it doesn't apply with --to"
-        );
-        anyhow::ensure!(
-            seed_relay.is_none(),
-            "--seed-relay applies to a P2P ticket send (no --to)"
         );
         let relay_url = require_relay(relay, use_http)?;
         let recipient = book::resolve_recipient(&to)?;
@@ -1795,10 +1780,19 @@ async fn send(
     );
 
     // A bare relay host gets a scheme (https by default, http with --use-http).
-    let seed_relay = seed_relay.map(|r| book::normalize_relay(&r, use_http));
     let relay = relay.map(|r| book::normalize_relay(&r, use_http));
+    // Swarm is the norm: embed the configured relay in every arvc… ticket so the
+    // recipient can backfill from it AND the relay acts as the swarm tracker
+    // (peers seed to each other). Best-effort in the core — if the relay is
+    // unreachable at send time, the ticket falls back to pure P2P. `--code`
+    // carries its own rendezvous relay, so it opts out here.
+    let seed_relay = if code_mode {
+        None
+    } else {
+        relay.clone().or_else(book::default_relay)
+    };
     if let Some(r) = &seed_relay {
-        vprintln!("seed relay (backfill): {r}");
+        vprintln!("swarm relay (embedded in ticket): {r}");
     }
 
     // By default hand a plain ticket send to a running daemon: it serves in the
