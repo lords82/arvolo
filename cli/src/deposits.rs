@@ -1,4 +1,5 @@
-//! Persisted relay-deposit sessions. Every `send-offline` — whether sealed to a
+//! Persisted relay-deposit sessions. Every mailbox/link send (`send --to` to an
+//! offline recipient / `--ticket`, or `send --link`) — whether sealed to a
 //! contact (`arvm` ticket) or a public browser `--link` — leaves the encrypted
 //! file on a relay. We record it here, including the sender-only **revoke
 //! token**, so the sender can later list and cancel it without having kept the
@@ -34,7 +35,7 @@ fn record_path(id: &str) -> PathBuf {
     deposits_dir().join(format!("{id}.toml"))
 }
 
-/// A file left on a relay by `send-offline`.
+/// A file left on a relay by a mailbox/link send.
 #[derive(Serialize, Deserialize, Clone)]
 pub struct DepositRecord {
     pub id: String,

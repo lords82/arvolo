@@ -1,13 +1,11 @@
-//! arvolo CLI (`lss`).
+//! arvolo CLI.
 //!
-//! P2P (both online):
-//!   arvolo send <file>            serve a file; prints a ticket
-//!   arvolo recv <ticket>          fetch a file from a ticket
-//!
-//! Offline mailbox (recipient away — store-and-forward via a relay):
-//!   arvolo id                     show your public id
-//!   arvolo send-offline <file> --to <id> --relay <url>
-//!   arvolo recv-offline <ticket>
+//! One `send` picks the channel by situation; one `recv` takes any ticket/code:
+//!   arvolo send <file>                 P2P: prints an `arvc…` ticket to share
+//!   arvolo send <file> --to <id>       to a contact: live if online, else mailbox + `arvm…`
+//!   arvolo send <file> --to <id> --ticket   force the mailbox/`arvm…` path
+//!   arvolo send <file> --link          public browser download link
+//!   arvolo recv <arvc…|arvm…|code>     fetch — auto-detects P2P vs mailbox
 //!
 //! P2P transport is encrypted by QUIC and each chunk is end-to-end encrypted;
 //! the offline path is end-to-end encrypted with HPKE. The relay only ever sees
@@ -165,10 +163,31 @@ enum Command {
         /// (LAN / dev / plaintext relays). Explicit schemes are always kept.
         #[arg(long)]
         use_http: bool,
-        /// Encrypt so only this recipient can receive (a saved contact name or a
-        /// public id). Authenticates you as the sender.
+        /// Send to a known recipient (a saved contact name or public id). The
+        /// tool picks the channel: if they're online it's delivered live to their
+        /// daemon; if offline it's deposited on the relay (mailbox) + an `arvm…`
+        /// ticket is printed so you can also hand it over. Without `--to` you get
+        /// a P2P `arvc…` ticket to share.
         #[arg(long)]
         to: Option<String>,
+        /// With `--to`: force the mailbox/`arvm…` path even if the recipient is
+        /// online (send-and-forget with a shareable code).
+        #[arg(long)]
+        ticket: bool,
+        /// Produce a public browser **download link** instead (anyone with the
+        /// link decrypts it client-side). `--to` is not used.
+        #[arg(long)]
+        link: bool,
+        /// Mailbox/link time-to-live in seconds (default 7 days).
+        #[arg(long, default_value_t = 7 * 24 * 3600)]
+        ttl: u64,
+        /// Mailbox/link max downloads before deletion (default 1 for a sealed
+        /// send; unlimited for `--link`).
+        #[arg(long)]
+        max: Option<u32>,
+        /// Password-protect a mailbox/link send (E2E — required to decrypt).
+        #[arg(long)]
+        password: Option<String>,
         /// Also render the ticket/code as a scannable QR code.
         #[arg(long)]
         qr: bool,
@@ -206,47 +225,6 @@ enum Command {
     },
     /// Show your public id (creates an identity on first use).
     Id,
-    /// Encrypt a file for a recipient and deposit it on a relay (offline send).
-    ///
-    /// With `--link`, produces a browser-openable download URL instead: anyone
-    /// with the link can decrypt it in their browser (no arvolo install, no
-    /// account). The key travels only in the link's `#fragment`, so the relay
-    /// stays zero-knowledge. In link mode `--to` is not used (the link is the
-    /// capability).
-    SendOffline {
-        path: PathBuf,
-        /// Recipient: a saved contact name or a public id (from their `arvolo
-        /// id`). Required unless `--link` is given.
-        #[arg(long)]
-        to: Option<String>,
-        /// Produce a browser download link (public capability) instead of a
-        /// recipient-sealed ticket.
-        #[arg(long)]
-        link: bool,
-        /// Relay host or URL, e.g. relay.example.com (https assumed; pass
-        /// --use-http for plaintext). Defaults to ARVOLO_RELAY / config `relay`.
-        #[arg(long)]
-        relay: Option<String>,
-        /// Treat a bare relay address as `http://` instead of `https://`
-        /// (LAN / dev / plaintext relays). Explicit schemes are always kept.
-        #[arg(long)]
-        use_http: bool,
-        /// Time-to-live in seconds (default 7 days).
-        #[arg(long, default_value_t = 7 * 24 * 3600)]
-        ttl: u64,
-        /// Max downloads before the file is deleted. Default: 1 (burn-after-read)
-        /// for a sealed send; **unlimited** for `--link` (a link expires only
-        /// when you remove its session or the TTL lapses).
-        #[arg(long)]
-        max: Option<u32>,
-        /// Protect the link with a password (E2E — required to decrypt, even by
-        /// the intended recipient). Share it out-of-band, not with the ticket.
-        #[arg(long)]
-        password: Option<String>,
-        /// Also render the ticket as a scannable QR code.
-        #[arg(long)]
-        qr: bool,
-    },
     /// Revoke a previously sent offline ticket, deleting it from the relay.
     Revoke {
         /// The offline ticket (`arvm…`) you sent.
@@ -255,7 +233,7 @@ enum Command {
         #[arg(long)]
         token: String,
     },
-    /// Revoke a browser download link (from `send-offline --link`), deleting its
+    /// Revoke a browser download link (from `send --link`), deleting its
     /// blob from the relay so the link stops working.
     RevokeLink {
         /// The download link you shared (`…/dl/<claim>#…`). The key part is ignored.
@@ -288,22 +266,6 @@ enum Command {
         /// Accept every incoming offer without prompting.
         #[arg(long)]
         yes: bool,
-    },
-    /// Push one or more files/folders to an online contact: they get a popup and
-    /// the transfer starts on accept — no ticket to copy. Needs a relay.
-    Push {
-        #[arg(num_args = 1..)]
-        paths: Vec<PathBuf>,
-        /// Recipient: a saved contact name or a public id (from their `arvolo id`).
-        #[arg(long)]
-        to: String,
-        /// Relay host or URL (https assumed; pass --use-http for plaintext).
-        /// Defaults to ARVOLO_RELAY / config `relay`.
-        #[arg(long)]
-        relay: Option<String>,
-        /// Treat a bare relay address as `http://` instead of `https://`.
-        #[arg(long)]
-        use_http: bool,
     },
     /// Run the always-on background engine: stays online, receives files, and
     /// exposes a local control socket so `push`/`transfers`/etc. drive one shared
@@ -393,6 +355,11 @@ async fn main() -> Result<()> {
             relay,
             use_http,
             to,
+            ticket,
+            link,
+            ttl,
+            max,
+            password,
             qr,
         } => {
             send(
@@ -404,6 +371,11 @@ async fn main() -> Result<()> {
                 relay,
                 use_http,
                 to,
+                ticket,
+                link,
+                ttl,
+                max,
+                password,
                 qr,
             )
             .await
@@ -417,17 +389,6 @@ async fn main() -> Result<()> {
         Command::Contacts { action } => contacts_cmd(action).await,
         Command::Sessions { action } => sessions_cmd(action).await,
         Command::Transfers { watch, action } => transfers_cmd(watch, action).await,
-        Command::SendOffline {
-            path,
-            to,
-            link,
-            relay,
-            use_http,
-            ttl,
-            max,
-            password,
-            qr,
-        } => send_offline(path, to, link, relay, use_http, ttl, max, password, qr).await,
         Command::Revoke { ticket, token } => revoke(ticket, token).await,
         Command::RevokeLink { link, token } => revoke_link(link, token).await,
         Command::Listen {
@@ -448,12 +409,6 @@ async fn main() -> Result<()> {
             )
             .await
         }
-        Command::Push {
-            paths,
-            to,
-            relay,
-            use_http,
-        } => push(paths, to, relay, use_http).await,
         #[cfg(unix)]
         Command::Daemon {
             download_dir,
@@ -685,7 +640,7 @@ async fn sessions_cmd(action: SessionAction) -> Result<()> {
             let resumable = sessions::list();
             if dep_list.is_empty() && resumable.is_empty() {
                 eprintln!(
-                    "(no sessions yet — saved automatically when you `arvolo send` or `send-offline`)"
+                    "(no sessions yet — saved automatically when you `arvolo send` to the mailbox or as a link)"
                 );
                 return Ok(());
             }
@@ -1678,6 +1633,11 @@ async fn send(
     relay: Option<String>,
     use_http: bool,
     to: Option<String>,
+    ticket_mode: bool,
+    link: bool,
+    ttl: u64,
+    max: Option<u32>,
+    password: Option<String>,
     qr: bool,
 ) -> Result<()> {
     // Resume paths short-circuit the normal flow: re-serve a previous send so
@@ -1689,26 +1649,95 @@ async fn send(
             "--resume and --resume-ticket are mutually exclusive"
         );
         anyhow::ensure!(
-            paths.is_empty() && to.is_none() && !code_mode,
-            "--resume takes no paths, --to, or --code (it replays a saved session)"
+            paths.is_empty() && to.is_none() && !code_mode && !link && !ticket_mode,
+            "--resume replays a saved P2P session (no paths/--to/--code/--link/--ticket)"
         );
         return resume_by_id(&id, qr).await;
     }
-    if let Some(ticket) = resume_ticket {
+    if let Some(rticket) = resume_ticket {
         anyhow::ensure!(
-            !code_mode && to.is_none(),
-            "--resume-ticket re-serves a plain ticket over P2P (no --code / --to)"
+            !code_mode && to.is_none() && !link && !ticket_mode,
+            "--resume-ticket re-serves a plain P2P ticket (no --code/--to/--link/--ticket)"
         );
         anyhow::ensure!(
             paths.len() == 1,
             "--resume-ticket needs exactly one path: the file to re-serve"
         );
-        return resume_by_ticket(&ticket, &paths[0], qr).await;
+        return resume_by_ticket(&rticket, &paths[0], qr).await;
     }
 
     anyhow::ensure!(
         !paths.is_empty(),
         "provide at least one file or folder to send (or use --resume / --resume-ticket)"
+    );
+
+    // --link: a public, browser-openable download URL (no recipient).
+    if link {
+        anyhow::ensure!(to.is_none(), "--link makes a public link; drop --to");
+        anyhow::ensure!(
+            !code_mode && !ticket_mode,
+            "--link can't be combined with --code / --ticket"
+        );
+        anyhow::ensure!(
+            seed_relay.is_none(),
+            "--seed-relay applies to a P2P ticket send, not --link"
+        );
+        return send_offline(
+            paths, None, true, relay, use_http, ttl, max, password, qr, false,
+        )
+        .await;
+    }
+
+    // --to: deliver to a known recipient. Online (a live daemon) → delivered live
+    // (push); offline or --ticket → deposited on the mailbox + an inbox offer, and
+    // an `arvm…` ticket is printed so you can also hand it over.
+    if let Some(to) = to {
+        anyhow::ensure!(
+            !code_mode,
+            "--code makes a shareable P2P ticket; it doesn't apply with --to"
+        );
+        anyhow::ensure!(
+            seed_relay.is_none(),
+            "--seed-relay applies to a P2P ticket send (no --to)"
+        );
+        let relay_url = require_relay(relay, use_http)?;
+        let recipient = book::resolve_recipient(&to)?;
+        let online = if ticket_mode {
+            false
+        } else {
+            vprintln!("checking {to}'s presence on the relay…");
+            arvolo_core::presence::check_online(&reqwest::Client::new(), &relay_url, &recipient)
+                .await
+                .unwrap_or(false)
+        };
+        if online {
+            if max.is_some() || password.is_some() {
+                eprintln!(
+                    "note: --max/--password apply to a mailbox send; ignored for a live delivery."
+                );
+            }
+            return push(paths, to, Some(relay_url), use_http).await;
+        }
+        return send_offline(
+            paths,
+            Some(to),
+            false,
+            Some(relay_url),
+            use_http,
+            ttl,
+            max,
+            password,
+            qr,
+            true,
+        )
+        .await;
+    }
+
+    // No --to: a shareable P2P ticket (arvc…) or pairing code. Mailbox-only flags
+    // don't apply here.
+    anyhow::ensure!(
+        max.is_none() && password.is_none(),
+        "--max/--password apply to a mailbox send or --link (use --to or --link)"
     );
 
     // A bare relay host gets a scheme (https by default, http with --use-http).
@@ -1727,29 +1756,17 @@ async fn send(
         human_size(std::fs::metadata(&payload).map(|m| m.len()).unwrap_or(0)),
         if archive { ", packed archive" } else { "" }
     );
-    if to.is_some() {
-        vprintln!(
-            "sealing the content key to the recipient (--to); you are authenticated as sender"
-        );
-    } else {
-        vprintln!("plain ticket: the ticket itself is the capability (anonymous, unauthenticated)");
-    }
-    // Resolve --to into a (sender identity, recipient) pair we can borrow from.
-    let to_owned: Option<(Identity, PublicId)> = match &to {
-        Some(t) => Some((my_identity()?, book::resolve_recipient(t)?)),
-        None => None,
-    };
-    let to_ref = to_owned.as_ref().map(|(me, r)| (me, r));
+    vprintln!("plain ticket: the ticket itself is the capability (anonymous, unauthenticated)");
 
     if code_mode {
-        return send_with_code(payload, name, archive, temp, relay, to_ref, qr).await;
+        return send_with_code(payload, name, archive, temp, relay, None, qr).await;
     }
     eprintln!("Splitting and serving chunks…");
     let session = flow::prepare_send(
         &payload,
         &name,
         archive,
-        to_ref,
+        None,
         seed_relay,
         RelayChoice::from_env(),
     )
@@ -2132,9 +2149,13 @@ async fn recv(ticket: String, out: Option<PathBuf>, password: Option<String>) ->
 
 // ---- offline mailbox ------------------------------------------------------
 
+/// Deposit `paths` on the relay mailbox (or as a `--link`). Internal helper for
+/// the unified `send`: `link` → public browser URL; otherwise HPKE-sealed to
+/// `to`, and if `offer` is set an inbox offer is posted too so the recipient's
+/// daemon can auto-fetch it (a shareable `arvm…` ticket is printed either way).
 #[allow(clippy::too_many_arguments)]
 async fn send_offline(
-    path: PathBuf,
+    paths: Vec<PathBuf>,
     to: Option<String>,
     link: bool,
     relay: Option<String>,
@@ -2143,13 +2164,23 @@ async fn send_offline(
     max: Option<u32>,
     password: Option<String>,
     qr: bool,
+    offer: bool,
 ) -> Result<()> {
+    anyhow::ensure!(
+        !paths.is_empty(),
+        "provide at least one file or folder to send"
+    );
     let me = my_identity()?;
     let relay = relay
         .map(|r| book::normalize_relay(&r, use_http))
         .or_else(book::default_relay)
         .context("no relay: pass --relay <host>, set ARVOLO_RELAY, or configure `relay`")?;
     vprintln!("using relay: {relay}");
+    let (payload, name, archive, temp) = resolve_payload(&paths)?;
+    if archive {
+        eprintln!("Packing {} item(s) into an archive…", paths.len());
+    }
+    let size = std::fs::metadata(&payload).map(|m| m.len()).unwrap_or(0);
     vprintln!(
         "mode: {} — TTL {}",
         if link {
@@ -2174,7 +2205,18 @@ async fn send_offline(
         );
         let max = max.unwrap_or(deposits::UNLIMITED);
         vprintln!("encrypting locally and uploading to the relay (key stays in the link's #fragment; the relay only sees ciphertext)…");
-        let out = arvolo_core::link::deposit_link(&path, &relay, ttl, max).await?;
+        let out = match arvolo_core::link::deposit_link(&payload, &relay, ttl, max).await {
+            Ok(o) => o,
+            Err(e) => {
+                if let Some(t) = &temp {
+                    let _ = std::fs::remove_file(t);
+                }
+                return Err(e);
+            }
+        };
+        if let Some(t) = &temp {
+            let _ = std::fs::remove_file(t);
+        }
         let rec = deposits::save(
             deposits::KIND_LINK,
             &relay,
@@ -2227,8 +2269,8 @@ async fn send_offline(
             ""
         }
     );
-    let deposited = flow::deposit_offline(
-        &path,
+    let deposited = match flow::deposit_offline(
+        &payload,
         &recipient,
         &me,
         &relay,
@@ -2236,14 +2278,47 @@ async fn send_offline(
         max,
         password.as_deref(),
     )
-    .await?;
+    .await
+    {
+        Ok(d) => d,
+        Err(e) => {
+            if let Some(t) = &temp {
+                let _ = std::fs::remove_file(t);
+            }
+            return Err(e);
+        }
+    };
+    if let Some(t) = &temp {
+        let _ = std::fs::remove_file(t);
+    }
     let encoded = deposited.ticket.encode();
-    let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-    let name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("file")
-        .to_string();
+
+    // Also drop an inbox offer so the recipient's daemon can auto-fetch it (the
+    // offer carries this same arvm ticket; best-effort — the printed ticket still
+    // works if this fails).
+    if offer {
+        let off = arvolo_core::presence::Offer {
+            name: name.clone(),
+            size,
+            chunks: 0,
+            ticket: encoded.clone(),
+        };
+        if let Err(e) = arvolo_core::presence::post_offer(
+            &reqwest::Client::new(),
+            &relay,
+            &recipient,
+            &me,
+            &off,
+            Some(ttl),
+        )
+        .await
+        {
+            eprintln!(
+                "(warning: couldn't post an inbox offer, so the recipient's daemon won't auto-fetch: {e:#})"
+            );
+        }
+    }
+
     let rec = deposits::save(
         deposits::KIND_OFFLINE,
         &relay,
@@ -2263,8 +2338,12 @@ async fn send_offline(
     if password.is_some() {
         println!("Password-protected — share the password out-of-band (not with the ticket).");
     }
-    println!("Send this ticket to the recipient:\n");
-    println!("    arvolo recv-offline {encoded}\n");
+    if offer {
+        println!("The recipient's daemon will fetch it automatically. To hand it over instead:\n");
+    } else {
+        println!("Send this ticket to the recipient:\n");
+    }
+    println!("    arvolo recv {encoded}\n");
     println!(
         "Session '{}' saved — cancel the delivery (and delete it from the relay) with:\n",
         rec.id

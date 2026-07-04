@@ -5,7 +5,7 @@ The **daemon** turns the engine into a persistent background service so you can:
 
 - **stay online and receive** files without keeping a terminal open, surviving
   logout/reboot when run under systemd/launchd;
-- **queue several sends** at once — `arvolo push` hands off to the daemon and the
+- **queue several sends** at once — `arvolo send --to` hands off to the daemon and the
   transfers run concurrently;
 - **see everything in one place** — `arvolo transfers` lists incoming *and* outgoing
   transfers plus offers awaiting approval;
@@ -46,7 +46,7 @@ arvolo transfers --watch      # redraw as things progress
 arvolo accept <offer-id>      # download a parked offer (id from `arvolo transfers`)
 arvolo reject <offer-id>      # decline it
 arvolo cancel <transfer-id>   # stop a running transfer
-arvolo push <file> --to bob   # hand a send to the daemon (concurrent)
+arvolo send <file> --to bob   # hand a send to the daemon (live if online, else mailbox)
 arvolo listen                 # attach as an interactive approver (Ctrl-C detaches)
 ```
 

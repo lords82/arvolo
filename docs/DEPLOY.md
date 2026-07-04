@@ -129,7 +129,7 @@ mailbox.example.com {
 
 ### Disabling browser download links (optional)
 
-Public browser download links (`send-offline --link`) let anyone with the link
+Public browser download links (`send --link`) let anyone with the link
 fetch a file with no account — convenient, but some deployments prefer to allow
 only recipient-sealed sends. Start the relay with:
 
@@ -138,9 +138,9 @@ Environment=ARVOLO_DISABLE_LINKS=1
 ```
 
 Then the relay reports `{"links":false}` on `GET /v1/features`, serves `403` for
-the `/dl` page and its assets, and refuses link deposits. `arvolo send-offline
+the `/dl` page and its assets, and refuses link deposits. `arvolo send
 --link` fails **immediately** (before uploading) with a message telling the user
-the administrator disabled the feature; normal `send-offline --to` and all other
+the administrator disabled the feature; normal `send --to` and all other
 paths are unaffected.
 
 ## 4. The NAT relay (`iroh-relay`)
@@ -161,8 +161,8 @@ On each device using `arvolo`:
 # use YOUR iroh relay instead of n0's public ones
 export ARVOLO_IROH_RELAY=https://relay.example.com
 
-# offline sends target YOUR mailbox (https assumed; --use-http for plaintext)
-arvolo send-offline file --to <id> --relay mailbox.example.com
+# sends to a contact use YOUR relay (mailbox when they're offline; --use-http for plaintext)
+arvolo send file --to <id> --relay mailbox.example.com
 ```
 
 With `ARVOLO_IROH_RELAY` set and your own mailbox URL, **no third-party server is

@@ -130,7 +130,7 @@ ordered list of chunk **BLAKE3 hashes**, one or more provider **iroh
   learn the authenticated sender. AAD `arvolo/chunk-key/v1`.
 
 ### 4.2 `arvm…` — offline (mailbox) ticket
-Produced by `arvolo send-offline --to`. A base32 postcard of
+Produced by `arvolo send --to` (mailbox path). A base32 postcard of
 [`OfflineTicket`](../core/src/offline.rs): the `relay` URL, the `claim`, the
 `sender` public id, and a password `salt` (empty if no `--password`). The file is
 HPKE-sealed **directly** to the recipient (no separate content key); the relay
@@ -142,7 +142,7 @@ receiver needs no configuration. It is **not** the ticket; it is the SPAKE2
 password used to fetch the ticket from a relay rendezvous (§7.2).
 
 ### 4.4 Download link — `https://<relay>/dl/<claim>#<key>`
-Produced by `arvolo send-offline --link`. The `claim` addresses a relay blob (a
+Produced by `arvolo send --link`. The `claim` addresses a relay blob (a
 chunked AES-256-GCM **container**, §7.6); the `#fragment` carries the 32-byte
 content key in base64url. Browsers never send the fragment to the server, so the
 relay stays zero-knowledge.
@@ -257,11 +257,11 @@ are released/reaped afterwards.
 
 ### 7.4 Offline mailbox (recipient away)
 ```
-sender:  arvolo send-offline file --to R
+sender:  arvolo send file --to R --ticket
   1. HPKE-seal the file to R (auth mode; optional Argon2id password wrap)
   2. POST /v1/deposit (encapped key + optional revoke-hash) → claim
   3. print arvm… (relay, claim, sender, salt) + save a local deposit session (§8)
-receiver: arvolo recv-offline arvm…
+receiver: arvolo recv arvm…
   1. GET /v1/fetch/{claim} (+ encapped-key header)
   2. optional password unwrap → HPKE-open with your identity (verifies sender)
   3. burn-after-read: the blob is gone once the download cap is reached
@@ -297,7 +297,7 @@ recipient's `listen` surfaces each offer (sender, name, size) and, on accept,
 runs the underlying transfer (an `arvc` ticket over P2P, or an `arvm` fetch)
 transparently.
 
-**Two-phase watchdog (`push`).** `arvolo push` decides live-vs-mailbox on a real
+**Two-phase watchdog (`send --to`).** `arvolo send --to` decides live-vs-mailbox on a real
 signal rather than a blind timer:
 
 ```
@@ -311,7 +311,7 @@ Mailbox fallback deposits the file as in §7.4 and the sender can confirm delive
 later via claim status.
 
 ### 7.6 Browser download link
-`arvolo send-offline --link` produces a URL any browser can open — no arvolo, no
+`arvolo send --link` produces a URL any browser can open — no arvolo, no
 account — while keeping the relay zero-knowledge.
 
 **Container.** [`core/src/link.rs`](../core/src/link.rs) encrypts the file into a
@@ -360,7 +360,7 @@ links off entirely by starting the relay with `ARVOLO_DISABLE_LINKS=1`. Then the
 relay (a) reports `{"links":false}` on `/v1/features`, (b) serves `403` for the
 `/dl` page, script, and service worker, and (c) refuses HPKE-less (link) deposits
 with `403`. The client checks `/v1/features` **before** encrypting, so
-`send-offline --link` fails immediately with a message explaining the
+`send --link` fails immediately with a message explaining the
 administrator disabled the feature; recipient-sealed sends (`--to`) are
 unaffected. An older relay without `/v1/features` is treated as allowing links.
 

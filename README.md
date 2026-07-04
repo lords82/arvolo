@@ -84,22 +84,23 @@ arvolo send --code --relay relay.local:8787 --use-http ./photo.jpg
 on a relay until they fetch it:
 
 ```sh
-arvolo id                                             # recipient shows their public id
-arvolo send-offline ./report.pdf --to <id-or-contact> # sender deposits (HPKE E2E)
-arvolo recv arvm…                                     # recipient fetches + decrypts (burns on read)
+arvolo id                                          # recipient shows their public id
+arvolo send ./report.pdf --to <id-or-contact> --ticket  # deposit (HPKE E2E) + print an arvm ticket
+arvolo recv arvm…                                  # recipient fetches + decrypts (burns on read)
 ```
 
-**Always-open client** — stay online and receive files contacts push to you; each
-incoming offer shows sender, name, and size, and accepted transfers download
+**Send to a known recipient** — `send --to` picks the channel automatically: if
+they're online it's delivered live to their daemon; if offline it's deposited on
+the relay (mailbox) and an `arvm…` ticket is printed so you can also hand it over.
+Each incoming offer shows sender, name, and size; accepted transfers download
 transparently (no ticket to copy):
 
 ```sh
 # receiver: stay online (auto-accept files from saved contacts)
 arvolo listen --auto-accept-contacts
 
-# sender: push straight to a contact — live P2P if they're online, else it lands
-# in the mailbox and is delivered when they return
-arvolo push ./photo.jpg --to alice
+# sender: online → live; offline → mailbox + a shareable arvm ticket
+arvolo send ./photo.jpg --to alice
 ```
 
 **Browser download link** — share a URL anyone can open in a browser to download
@@ -107,7 +108,7 @@ and decrypt the file, **no arvolo install and no account**. The key lives only i
 the link's `#fragment`, so the relay stays zero-knowledge:
 
 ```sh
-arvolo send-offline ./report.pdf --link
+arvolo send ./report.pdf --link
 #   ->  https://relay.example.com/dl/<claim>#<key>
 
 # The link is tracked as a local session; cancel it (and delete the file from the
@@ -120,20 +121,18 @@ arvolo sessions rm <id>
 
 | Command | What it does |
 |---|---|
-| `arvolo send <paths…>` | Serve one or more files/folders P2P (multiple paths or a folder are packed into one archive). Prints an `arvc…` ticket. |
-| &nbsp;&nbsp;`--code` | Show a short pairing code instead of the ticket (needs a relay). |
-| &nbsp;&nbsp;`--relay <host>` | Rendezvous relay for `--code`; embedded in the code so the receiver needs no config. `https://` is assumed for a bare host. |
-| &nbsp;&nbsp;`--use-http` | Treat bare relay hosts as `http://` instead of `https://` (LAN / dev). An explicit scheme is always kept. |
-| &nbsp;&nbsp;`--to <name\|id>` | Encrypt so **only** this recipient can receive, and authenticate you as sender. |
-| &nbsp;&nbsp;`--seed-relay <host>` | Also seed to a relay so the transfer finishes even if you go offline (lazy backfill). |
-| &nbsp;&nbsp;`--qr` | Also render the ticket/code as a scannable QR. |
+| `arvolo send <paths…>` | Get files/folders to someone — the tool picks the channel (multiple paths / a folder are packed into one archive). Without `--to`: prints an `arvc…` P2P ticket to share. |
+| &nbsp;&nbsp;`--to <name\|id>` | Send to a known recipient: **online** → delivered live to their daemon; **offline** → deposited on the relay (mailbox) + an `arvm…` ticket printed so you can also hand it over. |
+| &nbsp;&nbsp;`--ticket` | With `--to`: force the mailbox/`arvm…` path even if they're online (send-and-forget). |
+| &nbsp;&nbsp;`--link` | Produce a public **browser download link** instead (decrypts client-side; `--to` not used; no download cap by default). |
+| &nbsp;&nbsp;`--code` | Show a short pairing code instead of the P2P ticket (no `--to`; needs a relay). |
+| &nbsp;&nbsp;`--ttl --max --password` | Mailbox/link tuning: expiry, download cap, E2E password. |
+| &nbsp;&nbsp;`--seed-relay <host>` | P2P ticket send: also seed to a relay so it finishes even if you go offline (lazy backfill). |
+| &nbsp;&nbsp;`--relay --use-http --qr` | Relay for `--code`/mailbox/link; `http://` for bare hosts (LAN/dev); render the ticket/code/link as a QR. |
 | `arvolo recv <ticket\|code> [-o out] [--password]` | Receive from **any** ticket or code — auto-detects: `arvc…`/pairing-code fetch live P2P (resumes, unpacks folders), `arvm…`/download-link decrypt from the relay. |
 | `arvolo id` | Show your public id (created on first use). |
 | `arvolo contacts add\|list\|verify\|remove\|trust\|untrust` | Address book of recipients (used by `--to`); TOFU + out-of-band fingerprint verification. `trust` lets the daemon auto-download that contact's files (default: ask). |
-| `arvolo send-offline <file> --to <name\|id> [--relay --ttl --max --password --qr]` | Encrypt (HPKE) and deposit on a relay for an offline recipient. |
-| &nbsp;&nbsp;`--link` | Instead, produce a **browser download link** (public capability, decrypts client-side). `--to` is not used; **no download cap** by default. |
-| `arvolo listen [--download-dir --auto-accept-contacts --auto-accept-verified]` | Stay online and receive files contacts push to you (offers, live watchdog, transparent download). |
-| `arvolo push <paths…> --to <name\|id>` | Push to a contact: live P2P if online, else deposited to the mailbox and delivered on their return. |
+| `arvolo listen [--download-dir --auto-accept-contacts --auto-accept-verified]` | Stay online and receive files contacts send to you (offers, live watchdog, transparent download). |
 | `arvolo sessions list\|rm <id>` | List relay deposits (link / sealed) with live relay status + resumable sends; `rm` **revokes on the relay**, deleting the file/link. |
 | `arvolo revoke <arvm…> --token <t>` / `revoke-link <url> --token <t>` | Delete a deposited ticket / download link from the relay. |
 | `arvolo transfers [--watch]` / `transfers clear` | One view of everything: with a daemon, live in/out transfers + pending offers, then history below (`--watch` redraws); without one, just history. `clear` wipes history. |
@@ -147,7 +146,7 @@ Run `arvolo <cmd> --help` for the full flag list.
 `~/.config/arvolo/config.toml`:
 
 ```toml
-relay = "relay.example.com"   # default relay for --code / recv <code> / send-offline (https assumed)
+relay = "relay.example.com"   # default relay for --code / recv <code> / send --to (https assumed)
 download_dir = "/srv/arvolo/incoming"   # where the daemon saves accepted files (default: <config>/downloads)
 ```
 
@@ -187,7 +186,7 @@ Contacts live in `~/.config/arvolo/contacts.toml` (managed via `arvolo contacts`
   through a zero-knowledge inbox (proof-of-possession session auth) and presence
   beacons, with a two-phase watchdog that delivers **live P2P** when the recipient
   is online and falls back to the **mailbox** when they aren't.
-- **Browser download links**: `send-offline --link` deposits a chunked AES-256-GCM
+- **Browser download links**: `send --link` deposits a chunked AES-256-GCM
   container; the relay serves a self-contained page that fetches the ciphertext and
   decrypts it in the browser (key only in the URL `#fragment`), streaming to disk
   without buffering the whole file. Each link is a local **session** whose removal
