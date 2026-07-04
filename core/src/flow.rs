@@ -23,6 +23,15 @@ use crate::transfer::RelayChoice;
 /// AAD binding the sealed content key to its purpose (`--to` sends).
 const CHUNK_KEY_AAD: &[u8] = b"arvolo/chunk-key/v1";
 
+/// Per-chunk fetch resilience: when a chunk is transiently unavailable (a dropped
+/// direct P2P connection, or a relay whose backfill hasn't reached it yet), keep
+/// retrying the same providers with exponential backoff for up to this long before
+/// failing the transfer — long enough for the sender to reconnect or the relay to
+/// catch up, so an interrupted transfer self-heals instead of dying.
+const CHUNK_RETRY_MAX_ELAPSED: u64 = 15 * 60;
+const CHUNK_RETRY_BACKOFF_START_SECS: u64 = 2;
+const CHUNK_RETRY_BACKOFF_CAP_SECS: u64 = 30;
+
 /// Where a received chunk was pulled from (the selected primary provider).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChunkSource {
@@ -531,7 +540,9 @@ pub async fn recv_chunked(
             let rx = receiver.clone();
             let hash = t.chunks[i];
             let sp = stage_path(i);
+            let ct = cancel.clone();
             set.spawn(async move {
+                use std::time::{Duration, Instant};
                 let mut part = std::fs::OpenOptions::new()
                     .create(true)
                     .truncate(false)
@@ -539,9 +550,42 @@ pub async fn recv_chunked(
                     .write(true)
                     .open(&sp)
                     .with_context(|| format!("open {}", sp.display()))?;
-                rx.fetch_to_file(&providers, hash, &mut part)
-                    .await
-                    .with_context(|| format!("fetch chunk {}", i + 1))?;
+                // Resilient fetch: a mid-transfer P2P drop or a relay backfill lag
+                // can make a chunk transiently unavailable. Rather than failing the
+                // whole transfer, retry with backoff over the same providers — this
+                // re-tries the sender (letting the direct connection re-establish)
+                // and the relay (as its backfill catches up) — until the chunk
+                // arrives or a generous window elapses. Partial bytes persist in the
+                // stage file, so each retry resumes mid-chunk.
+                let deadline = Instant::now() + Duration::from_secs(CHUNK_RETRY_MAX_ELAPSED);
+                let mut backoff = Duration::from_secs(CHUNK_RETRY_BACKOFF_START_SECS);
+                loop {
+                    match rx.fetch_to_file(&providers, hash, &mut part).await {
+                        Ok(()) => break,
+                        Err(e) => {
+                            if ct.is_cancelled() {
+                                return Err(e).with_context(|| format!("fetch chunk {}", i + 1));
+                            }
+                            if Instant::now() >= deadline {
+                                return Err(e).with_context(|| {
+                                    format!("fetch chunk {} (gave up after retrying)", i + 1)
+                                });
+                            }
+                            tracing::warn!(
+                                "chunk {} unavailable ({e:#}); retrying in {}s",
+                                i + 1,
+                                backoff.as_secs()
+                            );
+                            tokio::select! {
+                                _ = ct.cancelled() => {
+                                    return Err(e).with_context(|| format!("fetch chunk {}", i + 1));
+                                }
+                                _ = tokio::time::sleep(backoff) => {}
+                            }
+                            backoff = (backoff * 2).min(Duration::from_secs(CHUNK_RETRY_BACKOFF_CAP_SECS));
+                        }
+                    }
+                }
                 Ok::<usize, anyhow::Error>(i)
             });
             spawn_idx += 1;
