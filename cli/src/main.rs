@@ -306,15 +306,31 @@ enum ContactAction {
     /// Save (or update) a contact: a name and their public id.
     Add { name: String, id: String },
     /// List saved contacts (with online status if a relay is configured).
-    List,
+    /// Pass a filter to show only matches: a public id (exact or prefix,
+    /// case-insensitive) or a substring of the contact name.
+    List { filter: Option<String> },
     /// Remove a saved contact.
     Remove { name: String },
     /// Mark a contact verified after comparing its fingerprint out-of-band.
-    Verify { name: String },
+    /// Shows the fingerprint and asks for confirmation before marking; pass
+    /// `--yes` to skip the prompt (required in a non-interactive shell).
+    Verify {
+        name: String,
+        /// Mark verified without the confirmation prompt.
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
     /// Remove a contact's verified mark.
     Unverify { name: String },
     /// Trust a contact so the daemon auto-downloads their files without asking.
-    Trust { name: String },
+    /// Refuses an unverified contact unless `--force` is given (auto-downloading
+    /// from a key you haven't confirmed out-of-band is a MITM risk).
+    Trust {
+        name: String,
+        /// Trust even if the contact isn't verified yet.
+        #[arg(long)]
+        force: bool,
+    },
     /// Stop auto-downloading from a contact (their files will ask again).
     Untrust { name: String },
 }
@@ -689,10 +705,22 @@ async fn contacts_cmd(action: ContactAction) -> Result<()> {
                 eprintln!("   then: arvolo contacts verify {name}");
             }
         }
-        ContactAction::List => {
-            let list = book::contact_list();
+        ContactAction::List { filter } => {
+            let mut list = book::contact_list();
             if list.is_empty() {
                 eprintln!("(no contacts yet — add one: arvolo contacts add <name> <id>)");
+            }
+            // Optional filter: match a full/prefix public id (case-insensitive)
+            // or a substring of the contact name.
+            if let Some(q) = &filter {
+                let needle = q.to_lowercase();
+                list.retain(|(name, id)| {
+                    id.to_lowercase().starts_with(&needle)
+                        || name.to_lowercase().contains(&needle)
+                });
+                if list.is_empty() {
+                    eprintln!("(no contact matching '{q}')");
+                }
             }
             // Query presence per contact, if a relay is configured.
             let relay = book::default_relay();
@@ -734,24 +762,59 @@ async fn contacts_cmd(action: ContactAction) -> Result<()> {
                 eprintln!("No such contact '{name}'.");
             }
         }
-        ContactAction::Verify { name } => {
-            let id = book::mark_verified(&name)?;
+        ContactAction::Verify { name, yes } => {
+            // Show the fingerprint FIRST and require an explicit confirmation, so
+            // marking verified is a deliberate act — not a side effect of running
+            // the command to read the fingerprint.
+            let id = encode_id(&book::resolve_recipient(&name)?);
             let fp = book::fingerprint_of(&id).unwrap_or_default();
+            println!("Fingerprint of '{name}':  {fp}");
+            if !yes {
+                if !std::io::stdin().is_terminal() {
+                    anyhow::bail!(
+                        "not a terminal — pass --yes to confirm you've checked the fingerprint \
+                         out-of-band: arvolo contacts verify {name} --yes"
+                    );
+                }
+                use std::io::Write;
+                print!("Have you confirmed this fingerprint out-of-band? [y/N]: ");
+                let _ = std::io::stdout().flush();
+                let mut line = String::new();
+                std::io::stdin().read_line(&mut line).ok();
+                if !matches!(line.trim().to_lowercase().as_str(), "y" | "yes") {
+                    eprintln!("Aborted — '{name}' left unverified.");
+                    return Ok(());
+                }
+            }
+            book::mark_verified(&name)?;
             println!("Marked '{name}' verified.");
-            eprintln!("Confirm out-of-band that their fingerprint is: {fp}");
         }
         ContactAction::Unverify { name } => {
             book::unmark_verified(&name)?;
             println!("Cleared verified mark for '{name}'.");
         }
-        ContactAction::Trust { name } => {
+        ContactAction::Trust { name, force } => {
+            // Trust means auto-download without a prompt, so it must sit on a key
+            // you've confirmed is really theirs. Refuse an unverified contact
+            // unless the user explicitly overrides with --force.
+            let id = encode_id(&book::resolve_recipient(&name)?);
+            if !book::is_verified(&id) && !force {
+                let fp = book::fingerprint_of(&id).unwrap_or_default();
+                anyhow::bail!(
+                    "'{name}' isn't verified — trusting it would auto-download from a key you \
+                     haven't confirmed out-of-band (MITM risk).\n   fingerprint: {fp}\n   \
+                     Verify first: arvolo contacts verify {name}   (or override: \
+                     arvolo contacts trust {name} --force)"
+                );
+            }
             let id = book::mark_trusted(&name)?;
             let fp = book::fingerprint_of(&id).unwrap_or_default();
             println!("Trusting '{name}' — files from them auto-download without a prompt.");
             eprintln!("   (fingerprint: {fp})");
             if !book::is_verified(&id) {
                 eprintln!(
-                    "   tip: they're not verified yet — consider `arvolo contacts verify {name}` first."
+                    "   ⚠  trusted WITHOUT verification (--force) — confirm the fingerprint \
+                     out-of-band, then: arvolo contacts verify {name}"
                 );
             }
         }
