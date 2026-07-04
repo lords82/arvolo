@@ -176,7 +176,7 @@ checksum = "f02882884d3e1bc524fb12c79f107f6ad0e1cfd498c536ffb494301740995dfe"
 
 [[package]]
 name = "arvolo-cli"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "arvolo-core",
@@ -198,7 +198,7 @@ dependencies = [
 
 [[package]]
 name = "arvolo-core"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -225,7 +225,7 @@ dependencies = [
 
 [[package]]
 name = "arvolo-relay"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "arvolo-core",
