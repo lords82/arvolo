@@ -12,9 +12,18 @@
 > - ✅ **Phase 3** — relay tracker (`/v1/swarm/*`), receiver-as-seeder (`Reseal`),
 >   peers as providers.
 > - ✅ **Phase 4** — rarest-first piece selection.
-> - ◻︎ **Phase 5** — done: relay-only privacy toggle (`ARVOLO_SWARM=off`).
->   Deferred: provider health/banning, swarm metrics in `arvolo transfers`,
->   endgame mode (needs per-attempt stage files), seed-after-complete.
+> - ◧ **Phase 5** — done: relay-only privacy toggle (`ARVOLO_SWARM=off`),
+>   provider banning on integrity failure, swarm metrics in `arvolo transfers`
+>   (peers + pieces-from-peers), seed-after-complete (`ARVOLO_SEED_AFTER`).
+>   Deferred: **endgame mode** — racing the last pieces across providers needs
+>   per-attempt stage files AND per-duplicate cancellation (the fetch retry is
+>   infinite, so a losing duplicate would otherwise retry forever); a careful
+>   change to defer, not rush.
+>
+> **Swarm activation:** the swarm (seeder + tracker + peers) engages only for a
+> shared `arvc…` ticket whose sender embedded a relay — i.e. sent with
+> `--seed-relay`. A pure `--relay` P2P ticket has no relay in it, so those
+> transfers stay origin-only (still with all the phase-1/2 resilience).
 
 This document specifies turning a reusable-ticket transfer into a **BitTorrent-style
 swarm**: multiple concurrent sources (original sender, relay, and other receivers
