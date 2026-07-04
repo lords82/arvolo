@@ -506,6 +506,22 @@ fn ordered_providers(
 /// `SWARM_PEER_TTL_SECS`) and refreshes its peer list.
 const SWARM_ANNOUNCE_SECS: u64 = 20;
 
+/// Whether to join the peer swarm for shared tickets. On by default. Set
+/// `ARVOLO_SWARM=off` (or `relay-only`) for the privacy escape hatch: don't
+/// announce our address to the tracker and don't seed to peers — fetch only from
+/// the origin and the relay, exposing our node to neither other peers. Trades
+/// swarm efficiency for not revealing our address to the swarm.
+fn swarm_enabled() -> bool {
+    !matches!(
+        std::env::var("ARVOLO_SWARM")
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "off" | "0" | "false" | "no" | "relay-only" | "relay_only"
+    )
+}
+
 /// Rarest-first piece selection: from `remaining`, pick (and remove) the piece
 /// held by the fewest sources right now — the origin (if connected) counts for
 /// every piece, the relay for pieces it has backfilled, and each peer for the
@@ -724,7 +740,7 @@ pub async fn recv_chunked(
     let swarm_cancel = cancel.child_token();
     let mut seeder: Option<crate::chunked::ChunkSeeder> = None;
     let mut swarming = false;
-    if matches!(&t.key, KeyDelivery::Plain(_)) {
+    if swarm_enabled() && matches!(&t.key, KeyDelivery::Plain(_)) {
         if let Some(r) = &t.relay {
             match crate::chunked::ChunkSeeder::start(
                 download.clone(),
