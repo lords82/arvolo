@@ -97,6 +97,21 @@ impl DaemonClient {
         }
     }
 
+    /// Serve an anonymous P2P ticket in the daemon; returns (transfer id, `arvc…`).
+    pub async fn serve_ticket(
+        &mut self,
+        paths: Vec<String>,
+        seed_relay: Option<String>,
+    ) -> Result<(u64, String)> {
+        match self
+            .request(Request::ServeTicket { paths, seed_relay })
+            .await?
+        {
+            Response::Served { id, ticket } => Ok((id, ticket)),
+            other => unexpected(other),
+        }
+    }
+
     pub async fn cancel(&mut self, id: u64) -> Result<()> {
         expect_ok(self.request(Request::Cancel { id }).await?)
     }

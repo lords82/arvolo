@@ -116,6 +116,7 @@ async fn dispatch(d: &Daemon, cmd: Request) -> Response {
             }
         }
         Request::Push { to, paths } => push(d, to, paths).await,
+        Request::ServeTicket { paths, seed_relay } => serve_ticket(d, paths, seed_relay).await,
         // Handled in `handle_conn` before dispatch; reachable only if a client
         // pipelines Subscribe with other commands, which we don't support.
         Request::Subscribe => {
@@ -147,6 +148,38 @@ async fn push(d: &Daemon, to: String, paths: Vec<String>) -> Response {
                 spawn_temp_cleanup(rx, id, t);
             }
             Response::TransferId(id)
+        }
+        Err(e) => {
+            if let Some(t) = temp {
+                let _ = std::fs::remove_file(t);
+            }
+            Response::Error(format!("{e:#}"))
+        }
+    }
+}
+
+async fn serve_ticket(d: &Daemon, paths: Vec<String>, seed_relay: Option<String>) -> Response {
+    if paths.is_empty() {
+        return Response::Error("provide at least one file or folder to serve".into());
+    }
+    let paths: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
+    let (payload, name, archive, temp) = match crate::resolve_payload(&paths) {
+        Ok(v) => v,
+        Err(e) => return Response::Error(format!("{e:#}")),
+    };
+    // Subscribe before serving so the temp archive is cleaned up once the serving
+    // transfer ends (it stays alive for the whole session — chunks are on the fly).
+    let watch = temp.clone().map(|t| (d.manager.subscribe(), t));
+    match d
+        .manager
+        .serve_ticket(payload, name, archive, seed_relay)
+        .await
+    {
+        Ok((id, ticket)) => {
+            if let Some((rx, t)) = watch {
+                spawn_temp_cleanup(rx, id, t);
+            }
+            Response::Served { id, ticket }
         }
         Err(e) => {
             if let Some(t) = temp {
@@ -206,6 +239,7 @@ async fn stream_events(daemon: &Daemon, write: &mut (impl AsyncWrite + Unpin)) {
 fn status(d: &Daemon) -> StatusDto {
     let pid = d.manager.public_id();
     StatusDto {
+        version: env!("CARGO_PKG_VERSION").to_string(),
         public_id: crate::encode_id(&pid),
         fingerprint: pid.fingerprint(),
         relay: d.relay.clone(),

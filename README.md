@@ -121,16 +121,18 @@ arvolo sessions rm <id>
 
 | Command | What it does |
 |---|---|
-| `arvolo send <paths…>` | Get files/folders to someone — the tool picks the channel (multiple paths / a folder are packed into one archive). Without `--to`: prints an `arvc…` P2P ticket to share. |
+| `arvolo send <paths…>` | Get files/folders to someone — the tool picks the channel (multiple paths / a folder are packed into one archive). Without `--to`: prints an `arvc…` P2P ticket to share; if a daemon is running it serves it in the **background** (track with `arvolo transfers`). |
 | &nbsp;&nbsp;`--to <name\|id>` | Send to a known recipient: **online** → delivered live to their daemon; **offline** → deposited on the relay (mailbox) + an `arvm…` ticket printed so you can also hand it over. |
 | &nbsp;&nbsp;`--ticket` | With `--to`: force the mailbox/`arvm…` path even if they're online (send-and-forget). |
 | &nbsp;&nbsp;`--link` | Produce a public **browser download link** instead (decrypts client-side; `--to` not used; no download cap by default). |
 | &nbsp;&nbsp;`--code` | Show a short pairing code instead of the P2P ticket (no `--to`; needs a relay). |
 | &nbsp;&nbsp;`--ttl --max --password` | Mailbox/link tuning: expiry, download cap, E2E password. |
 | &nbsp;&nbsp;`--seed-relay <host>` | P2P ticket send: also seed to a relay so it finishes even if you go offline (lazy backfill). |
+| &nbsp;&nbsp;`--foreground` | Serve the P2P ticket in **this terminal** (blocking, Ctrl-C to stop) instead of the daemon. |
 | &nbsp;&nbsp;`--relay --use-http --qr` | Relay for `--code`/mailbox/link; `http://` for bare hosts (LAN/dev); render the ticket/code/link as a QR. |
 | `arvolo recv <ticket\|code> [-o out] [--password]` | Receive from **any** ticket or code — auto-detects: `arvc…`/pairing-code fetch live P2P (resumes, unpacks folders), `arvm…`/download-link decrypt from the relay. |
 | `arvolo id` | Show your public id (created on first use). |
+| `arvolo version` | CLI version + whether the daemon is running (and its version). |
 | `arvolo contacts add\|list\|verify\|remove\|trust\|untrust` | Address book of recipients (used by `--to`); TOFU + out-of-band fingerprint verification. `trust` lets the daemon auto-download that contact's files (default: ask). |
 | `arvolo listen [--download-dir --auto-accept-contacts --auto-accept-verified]` | Stay online and receive files contacts send to you (offers, live watchdog, transparent download). |
 | `arvolo sessions list\|rm <id>` | List relay deposits (link / sealed) with live relay status + resumable sends; `rm` **revokes on the relay**, deleting the file/link. |

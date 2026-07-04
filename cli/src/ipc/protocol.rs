@@ -39,6 +39,12 @@ pub enum Request {
     /// Send files/folders to a contact; paths are on the *daemon's* filesystem.
     /// → [`Response::TransferId`].
     Push { to: String, paths: Vec<String> },
+    /// Serve an anonymous P2P ticket in the background (no recipient); paths are on
+    /// the *daemon's* filesystem. → [`Response::Served`].
+    ServeTicket {
+        paths: Vec<String>,
+        seed_relay: Option<String>,
+    },
     /// Cancel a transfer by id → [`Response::Ok`].
     Cancel { id: u64 },
     /// Accept a parked offer, optionally to a specific path → [`Response::TransferId`].
@@ -59,6 +65,11 @@ pub enum Response {
     Pong,
     Status(StatusDto),
     TransferId(u64),
+    /// A background ticket-serve started: its transfer id + the `arvc…` ticket.
+    Served {
+        id: u64,
+        ticket: String,
+    },
     Transfers(Vec<TransferDto>),
     Pending(Vec<OfferDto>),
     Ok,
@@ -87,6 +98,8 @@ pub enum ServerMessage {
 /// Serializable snapshot of a daemon's identity/config for the status view.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StatusDto {
+    /// The daemon binary's version (`CARGO_PKG_VERSION` at its build time).
+    pub version: String,
     pub public_id: String,
     pub fingerprint: String,
     pub relay: Option<String>,

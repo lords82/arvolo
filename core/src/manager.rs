@@ -506,6 +506,76 @@ impl TransferManager {
         Ok(id)
     }
 
+    /// Serve an **anonymous** P2P ticket (no `--to`) in the background: returns the
+    /// `arvc…` ticket and a transfer id, then keeps serving to whoever fetches it —
+    /// the ticket is a reusable capability, so serving continues until
+    /// [`cancel`](Self::cancel)led. Progress is tracked on the [`Transfer`] so a UI
+    /// can show "downloading / % / delivered". Unlike [`send_to`](Self::send_to)
+    /// there's no recipient, no offer, and no mailbox fallback.
+    pub async fn serve_ticket(
+        &self,
+        payload: PathBuf,
+        name: String,
+        archive: bool,
+        seed_relay: Option<String>,
+    ) -> Result<(u64, String)> {
+        let session = flow::prepare_send(
+            &payload,
+            &name,
+            archive,
+            None,
+            seed_relay,
+            RelayChoice::from_env(),
+        )
+        .await
+        .context("prepare send")?;
+        let ticket = session.ticket.clone();
+        let total = session.total_size;
+        let (id, cancel) = self.register(Direction::Send, None, name, total);
+
+        let inner = self.inner.clone();
+        tokio::spawn(async move {
+            let delivered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let d = delivered.clone();
+            let inner_cb = inner.clone();
+            let result = session
+                .serve(cancel, move |ev| match ev {
+                    SendEvent::Progress { transferred, total } => {
+                        inner_cb.set_progress(id, transferred);
+                        inner_cb.emit(ManagerEvent::Progress {
+                            id,
+                            transferred,
+                            total_size: total,
+                        });
+                    }
+                    SendEvent::Delivered => {
+                        // A receiver got the whole file. Keep serving (others may
+                        // still use the ticket) but surface 100% so the UI shows it.
+                        d.store(true, Ordering::Relaxed);
+                        inner_cb.set_progress(id, total);
+                        inner_cb.emit(ManagerEvent::Progress {
+                            id,
+                            transferred: total,
+                            total_size: total,
+                        });
+                    }
+                    SendEvent::Ready { .. }
+                    | SendEvent::ReceiverConnected
+                    | SendEvent::ReceiverDropped { .. }
+                    | SendEvent::Backfilled
+                    | SendEvent::BackfillFailed { .. } => {}
+                })
+                .await;
+            match result {
+                Err(e) => finish(&inner, id, false, Err(e)),
+                // serve() returns on cancel: mark Completed if at least one receiver
+                // got the whole file, else Cancelled.
+                Ok(()) => finish(&inner, id, !delivered.load(Ordering::Relaxed), Ok(None)),
+            }
+        });
+        Ok((id, ticket))
+    }
+
     // ---- receiving (offers) ----------------------------------------------
 
     /// Start a background task that long-polls this client's inbox and surfaces

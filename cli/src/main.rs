@@ -187,6 +187,12 @@ enum Command {
         /// Password-protect a mailbox/link send (E2E — required to decrypt).
         #[arg(long)]
         password: Option<String>,
+        /// Serve the P2P ticket **in this terminal** (blocking, Ctrl-C to stop)
+        /// instead of handing it to the daemon. Default: if a daemon is running, a
+        /// plain ticket send is served by it in the background (track with `arvolo
+        /// transfers`). No effect with `--to`/`--link`/`--code`.
+        #[arg(long)]
+        foreground: bool,
         /// Also render the ticket/code as a scannable QR code.
         #[arg(long)]
         qr: bool,
@@ -224,6 +230,8 @@ enum Command {
     },
     /// Show your public id (creates an identity on first use).
     Id,
+    /// Show the CLI version and whether the daemon is running (and its version).
+    Version,
     /// Revoke a mailbox send or a browser link, deleting its blob from the relay.
     Revoke {
         /// The offline ticket (`arvm…`) or download link (`…/dl/<claim>#…`) you
@@ -350,11 +358,12 @@ async fn main() -> Result<()> {
             ttl,
             max,
             password,
+            foreground,
             qr,
         } => {
             send(
                 paths, resume, seed_relay, code, relay, use_http, to, ticket, link, ttl, max,
-                password, qr,
+                password, foreground, qr,
             )
             .await
         }
@@ -364,6 +373,7 @@ async fn main() -> Result<()> {
             password,
         } => recv(ticket, out, password).await,
         Command::Id => id(),
+        Command::Version => version_cmd().await,
         Command::Contacts { action } => contacts_cmd(action).await,
         Command::Sessions { action } => sessions_cmd(action).await,
         Command::Transfers { watch, action } => transfers_cmd(watch, action).await,
@@ -466,7 +476,8 @@ async fn show_transfers_live(mut client: ipc::client::DaemonClient, watch: bool)
         let transfers = client.list().await?;
         let pending = client.list_pending().await?;
         println!(
-            "daemon: {}  relay: {}",
+            "daemon {}: {}  relay: {}",
+            st.version,
             st.public_id,
             st.relay.as_deref().unwrap_or("-")
         );
@@ -735,6 +746,30 @@ fn encode_id(p: &PublicId) -> String {
     data_encoding::BASE32_NOPAD
         .encode(&p.to_bytes())
         .to_lowercase()
+}
+
+/// `arvolo version` — CLI version + whether a daemon is running (and its version).
+async fn version_cmd() -> Result<()> {
+    println!("arvolo {} (cli)", env!("CARGO_PKG_VERSION"));
+    #[cfg(unix)]
+    {
+        match daemon_client().await {
+            Some(mut c) => match c.status().await {
+                Ok(st) => println!(
+                    "daemon:  running — v{}  (relay {}, {} active, {} pending)",
+                    st.version,
+                    st.relay.as_deref().unwrap_or("-"),
+                    st.transfers,
+                    st.pending
+                ),
+                Err(e) => println!("daemon:  reachable but status failed: {e:#}"),
+            },
+            None => println!("daemon:  not running  (start it with `arvolo daemon`)"),
+        }
+    }
+    #[cfg(not(unix))]
+    println!("daemon:  not supported on this platform");
+    Ok(())
 }
 
 /// A cancellation token that fires on Ctrl-C.
@@ -1410,6 +1445,40 @@ async fn cancel_cmd(id: u64) -> Result<()> {
     Ok(())
 }
 
+/// Hand a plain ticket send to the daemon: it serves in the background. Prints the
+/// `arvc…` ticket and returns immediately; the transfer is tracked in the daemon.
+#[cfg(unix)]
+async fn serve_ticket_via_daemon(
+    mut client: ipc::client::DaemonClient,
+    paths: Vec<PathBuf>,
+    seed_relay: Option<String>,
+    qr: bool,
+) -> Result<()> {
+    // The daemon resolves paths on its own cwd — absolutize relative to ours.
+    let paths_s: Vec<String> = paths
+        .iter()
+        .map(|p| {
+            std::fs::canonicalize(p)
+                .with_context(|| format!("{}", p.display()))
+                .map(|abs| abs.to_string_lossy().into_owned())
+        })
+        .collect::<Result<Vec<_>>>()
+        .context("no such file or folder to serve")?;
+    let (id, ticket) = client
+        .serve_ticket(paths_s, seed_relay)
+        .await
+        .context("daemon rejected the serve")?;
+    println!("\nServing via the daemon. On the other device:\n");
+    println!("    arvolo recv {ticket}\n");
+    if qr {
+        print_qr(&ticket);
+    }
+    println!(
+        "Tracked as transfer {id} — follow it with `arvolo transfers`, stop it with `arvolo cancel {id}`."
+    );
+    Ok(())
+}
+
 /// Submit a push to the running daemon and render its progress. Ctrl-C detaches
 /// (the daemon keeps sending); it does not cancel.
 #[cfg(unix)]
@@ -1614,6 +1683,7 @@ async fn send(
     ttl: u64,
     max: Option<u32>,
     password: Option<String>,
+    foreground: bool,
     qr: bool,
 ) -> Result<()> {
     // Resume short-circuits the normal flow: re-serve a previous send so the
@@ -1719,6 +1789,21 @@ async fn send(
     if let Some(r) = &seed_relay {
         vprintln!("seed relay (backfill): {r}");
     }
+
+    // By default hand a plain ticket send to a running daemon: it serves in the
+    // background, observable via `arvolo transfers` and surviving this terminal.
+    // `--foreground` (or `--code`) keep it inline in this process.
+    #[cfg(unix)]
+    {
+        if !code_mode && !foreground {
+            if let Some(client) = daemon_client().await {
+                return serve_ticket_via_daemon(client, paths, seed_relay, qr).await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = foreground;
+
     let (payload, name, archive, temp) = resolve_payload(&paths)?;
     if archive {
         eprintln!("Packing {} item(s) into an archive…", paths.len());

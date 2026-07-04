@@ -47,8 +47,15 @@ arvolo accept <offer-id>      # download a parked offer (id from `arvolo transfe
 arvolo reject <offer-id>      # decline it
 arvolo cancel <transfer-id>   # stop a running transfer
 arvolo send <file> --to bob   # hand a send to the daemon (live if online, else mailbox)
+arvolo send <file>            # plain P2P ticket, served by the daemon in the background
 arvolo listen                 # attach as an interactive approver (Ctrl-C detaches)
+arvolo version                # is the daemon up? which version?
 ```
+
+A plain `arvolo send <file>` (no `--to`) hands its `arvc…` ticket to the daemon by
+default: it serves in the background and you watch it (who's pulling, %, delivered)
+with `arvolo transfers`, surviving your terminal. `arvolo send <file> --foreground`
+keeps the old inline behavior (serve here, Ctrl-C to stop).
 
 With no daemon running, `push`/`listen` fall back to their old in-process
 behavior, so nothing you already do breaks.
