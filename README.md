@@ -149,22 +149,57 @@ Run `arvolo <cmd> --help` for the full flag list.
 
 ```toml
 relay = "relay.example.com"   # default relay for --code / recv <code> / send --to (https assumed)
-download_dir = "/srv/arvolo/incoming"   # where the daemon saves accepted files (default: <config>/downloads)
+download_dir = "/srv/arvolo/incoming"   # where accepted files are saved (default: ~/Arvolo)
 ```
 
 For a relay without TLS, write the scheme explicitly: `relay = "http://relay.local:8787"`.
 
 Contacts live in `~/.config/arvolo/contacts.toml` (managed via `arvolo contacts`).
 
-**Environment variables** (override config where relevant):
+### Environment variables
+
+**Required** — everything else has a sane default, but this must be set (env or
+`config.toml`) or the client cannot pair codes, send `--to`, use the mailbox/links,
+or join the swarm:
 
 | Var | Meaning |
 |---|---|
-| `ARVOLO_RELAY` | Default relay URL (wins over `config.toml`). |
-| `ARVOLO_DOWNLOAD_DIR` | Where the daemon saves accepted files (wins over `config.toml`). |
-| `ARVOLO_IDENTITY` | Path to your identity key (default `~/.config/arvolo/identity.key`). |
-| `ARVOLO_CONFIG_DIR` | Override the config/contacts directory. |
-| `ARVOLO_IROH_RELAY` | Self-hosted **iroh** NAT relay for P2P hole-punching (vs. n0's public relays). |
+| `ARVOLO_RELAY` | Relay URL. Mandatory unless `relay` is set in `config.toml`. A bare host assumes `https://`; write `http://host:8787` for plaintext. |
+
+Everything below is **optional** (defaults shown).
+
+**Client** (`arvolo` / daemon):
+
+| Var | Default | Meaning |
+|---|---|---|
+| `ARVOLO_DOWNLOAD_DIR` | `~/Arvolo` | Where accepted files are saved (wins over `config.toml`). |
+| `ARVOLO_TEMP_DIR` | `<config>/tmp` | Scratch dir for staged tars (folder sends, archive receives) — kept off the download dir and off a small system tmpfs. |
+| `ARVOLO_CONFIG_DIR` | `~/.config/arvolo` | Config/contacts/identity/resume directory. |
+| `ARVOLO_IDENTITY` | `<config>/identity.key` | Path to your identity key. |
+| `ARVOLO_SEED` | `1` (on) | Keep seeding a completed file into the swarm. Set `0`/`false`/`no`/`off` to opt out. |
+| `ARVOLO_SEED_AFTER` | `0` (off) | Seconds to keep backfilling the relay after a transfer completes. |
+| `ARVOLO_SWARM` | on | BitTorrent-style swarm for shared `arvc…` tickets. Set `off`/`0`/`relay-only` to disable (privacy escape hatch). |
+| `ARVOLO_CONCURRENCY` | `4` | Parallel chunk fetches (clamped to 1–16). |
+| `ARVOLO_IPV4_ONLY` | auto | `1` forces IPv4-only (auto-detected when there's no IPv6 route). |
+| `ARVOLO_IROH_RELAY` | n0 public | Self-hosted **iroh** NAT relay for P2P hole-punching. |
+| `ARVOLO_MAX_FETCH_BYTES` | 512 MiB | Max size a single download link/blob will fetch. |
+| `ARVOLO_DEBUG` | off | Extra diagnostics. |
+| `RUST_LOG` | `info` | `tracing` log level. |
+
+**Relay** (`arvolo-relay` — all optional; the server runs with defaults):
+
+| Var | Default | Meaning |
+|---|---|---|
+| `ARVOLO_RELAY_ADDR` | `0.0.0.0:8787` | Listen address. |
+| `ARVOLO_RELAY_DB` | `arvolo-relay.db` | Mailbox database path. |
+| `ARVOLO_RELAY_BLOBS` | `arvolo-blobs` | Blob directory. |
+| `ARVOLO_RELAY_BLOBSTORE` | `arvolo-blobstore` | Blobstore directory. |
+| `ARVOLO_DISABLE_LINKS` | off | `1`/`true`/`yes`/`on` disables browser download links. |
+| `ARVOLO_MAX_BLOB_BYTES` | 256 MiB | Max deposited-blob size. |
+| `ARVOLO_MAX_TTL` | 30 days | Max mailbox/blob TTL (seconds). |
+| `ARVOLO_SEED_TTL` | 24 h | TTL for seeded chunks not yet released (seconds). |
+| `ARVOLO_MAX_ENTRIES` | 100 000 | Global row cap. |
+| `ARVOLO_MAX_INBOX_ROWS` / `ARVOLO_MAX_PRESENCE_ROWS` / `ARVOLO_MAX_RZ_ROWS` / `ARVOLO_MAX_SEEDED_ROWS` | per-table | Per-table row caps. |
 
 ## How it works
 

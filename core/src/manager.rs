@@ -888,7 +888,7 @@ impl TransferManager {
                     };
                     match crate::chunked::ChunkTicket::decode(&ticket) {
                         Ok(t) if t.archive => {
-                            let tar = flow::archive_stage_path(saved, &t.chunks);
+                            let tar = flow::archive_stage_path(&t.chunks);
                             mgr.seed_file(tar, ticket.clone(), true);
                         }
                         _ => mgr.seed_file(saved.clone(), ticket.clone(), false),

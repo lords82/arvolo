@@ -7,12 +7,53 @@ use anyhow::{Context, Result};
 use arvolo_core::crypto::PublicId;
 use serde::{Deserialize, Serialize};
 
+/// The user's home directory, cross-platform: `$HOME` on Unix/macOS, else
+/// `%USERPROFILE%` (or `%HOMEDRIVE%%HOMEPATH%`) on Windows. Falls back to `.`.
+pub fn home_dir() -> PathBuf {
+    if let Ok(h) = std::env::var("HOME") {
+        if !h.is_empty() {
+            return PathBuf::from(h);
+        }
+    }
+    if let Ok(p) = std::env::var("USERPROFILE") {
+        if !p.is_empty() {
+            return PathBuf::from(p);
+        }
+    }
+    if let (Ok(drive), Ok(path)) = (std::env::var("HOMEDRIVE"), std::env::var("HOMEPATH")) {
+        if !drive.is_empty() && !path.is_empty() {
+            return PathBuf::from(format!("{drive}{path}"));
+        }
+    }
+    PathBuf::from(".")
+}
+
+/// The default download directory when none is configured: an `Arvolo` folder in
+/// the user's home (`~/Arvolo`), created on every platform.
+pub fn default_home_downloads() -> PathBuf {
+    home_dir().join("Arvolo")
+}
+
 pub fn config_dir() -> PathBuf {
     if let Ok(p) = std::env::var("ARVOLO_CONFIG_DIR") {
         return PathBuf::from(p);
     }
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join(".config/arvolo")
+    home_dir().join(".config/arvolo")
+}
+
+/// Scratch directory for the client's own temporary artifacts — e.g. the tar
+/// packed when sending a folder, or an archive staged while receiving. Defaults
+/// to `<config>/tmp` (kept off the system temp dir, which may be a small tmpfs,
+/// and out of the download directory); override with `ARVOLO_TEMP_DIR`. The
+/// directory is created if missing.
+pub fn temp_dir() -> PathBuf {
+    let dir = std::env::var("ARVOLO_TEMP_DIR")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| config_dir().join("tmp"));
+    let _ = std::fs::create_dir_all(&dir);
+    dir
 }
 
 fn config_path() -> PathBuf {
@@ -60,7 +101,7 @@ pub fn default_relay() -> Option<String> {
 
 /// The configured download directory for accepted files: the `ARVOLO_DOWNLOAD_DIR`
 /// env var wins, else the config file's `download_dir` key. `None` if neither is
-/// set — callers pick their own default (the daemon uses `<config>/downloads`).
+/// set — callers fall back to [`default_home_downloads`] (`~/Arvolo`).
 pub fn default_download_dir() -> Option<PathBuf> {
     std::env::var("ARVOLO_DOWNLOAD_DIR")
         .ok()

@@ -365,17 +365,27 @@ fn fetch_concurrency() -> usize {
         .clamp(1, 16)
 }
 
-/// Where an archive download is staged on disk: a hidden `.arvolo-{hash}.tar`
-/// sibling of the unpack target `out_dir` (NOT the system temp dir, which may be
-/// a small tmpfs). Deterministic in the ticket's first chunk hash, so a partial
-/// resumes and the manager can recompute the same path to keep seeding the tar.
-pub(crate) fn archive_stage_path(out_dir: &Path, chunks: &[crate::hash::Hash]) -> PathBuf {
+/// The client's scratch directory for temporary artifacts, per `ARVOLO_TEMP_DIR`
+/// (the CLI sets it to `<config>/tmp`). Falls back to the system temp dir for a
+/// bare library user. Kept off the download directory and off a small tmpfs.
+/// Created if missing.
+fn client_temp_dir() -> PathBuf {
+    let dir = std::env::var("ARVOLO_TEMP_DIR")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+/// Where an archive download is staged on disk: `<temp>/arvolo-{hash}.tar` under
+/// [`client_temp_dir`]. Deterministic in the ticket's first chunk hash, so a
+/// partial resumes and the manager can recompute the same path to keep seeding
+/// the tar — never landing in the download directory.
+pub(crate) fn archive_stage_path(chunks: &[crate::hash::Hash]) -> PathBuf {
     let hash = chunks.first().map(|h| h.to_string()).unwrap_or_default();
-    let file = format!(".arvolo-{hash}.tar");
-    match out_dir.parent() {
-        Some(p) if !p.as_os_str().is_empty() => p.join(file),
-        _ => PathBuf::from(file),
-    }
+    client_temp_dir().join(format!("arvolo-{hash}.tar"))
 }
 
 /// Whether a completed receiver should keep serving the file to the swarm
@@ -653,7 +663,7 @@ pub async fn recv_chunked(
     // resumes and — with ARVOLO_SEED — the tar can keep being seeded), else the
     // requested path or a default from the name.
     let download: PathBuf = match &archive_dir {
-        Some(dir) => archive_stage_path(dir, &t.chunks),
+        Some(_) => archive_stage_path(&t.chunks),
         None => user_out
             .clone()
             .unwrap_or_else(|| default_from_name(&t.name, &t.chunks)),

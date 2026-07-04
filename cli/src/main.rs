@@ -240,7 +240,7 @@ enum Command {
     /// incoming offer (sender, name, size) and downloads accepted ones
     /// transparently. Needs a relay (--relay / ARVOLO_RELAY / config).
     Listen {
-        /// Directory to save accepted downloads into (default: current dir).
+        /// Directory to save accepted downloads into (default: ~/Arvolo).
         #[arg(long)]
         download_dir: Option<PathBuf>,
         /// Relay host or URL (https assumed; pass --use-http for plaintext).
@@ -267,7 +267,7 @@ enum Command {
     #[cfg(unix)]
     Daemon {
         /// Directory to save accepted downloads into
-        /// (default: <config>/downloads).
+        /// (default: ~/Arvolo).
         #[arg(long)]
         download_dir: Option<PathBuf>,
         /// Relay host or URL (https assumed; pass --use-http for plaintext).
@@ -338,6 +338,11 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     VERBOSITY.store(cli.verbose, Ordering::Relaxed);
     init_tracing(cli.verbose);
+
+    // Pin the client scratch dir (default `<config>/tmp`) so arvolo-core stages
+    // archives and packed tars there — off the download dir and off a small
+    // system tmpfs. `book::temp_dir()` honors an explicit ARVOLO_TEMP_DIR.
+    std::env::set_var("ARVOLO_TEMP_DIR", book::temp_dir());
 
     match cli.command {
         Command::Send {
@@ -873,7 +878,7 @@ fn resolve_payload(paths: &[PathBuf]) -> Result<(PathBuf, String, bool, Option<P
     } else {
         "bundle".into()
     };
-    let temp = std::env::temp_dir().join(format!("arvolo-send-{}.tar", std::process::id()));
+    let temp = book::temp_dir().join(format!("arvolo-send-{}.tar", std::process::id()));
     flow::pack_tar(paths, &temp).context("pack archive")?;
     Ok((temp.clone(), name, true, Some(temp)))
 }
@@ -980,7 +985,7 @@ async fn listen(
     let my_id = encode_id(&me.public());
     let download_dir = download_dir
         .or_else(book::default_download_dir)
-        .unwrap_or_else(|| PathBuf::from("."));
+        .unwrap_or_else(book::default_home_downloads);
 
     let manager = TransferManager::new(me, Some(relay.clone()), download_dir.clone());
     let mut events = manager.subscribe();
@@ -1214,7 +1219,7 @@ async fn daemon(
     let my_id = encode_id(&me.public());
     let download_dir = download_dir
         .or_else(book::default_download_dir)
-        .unwrap_or_else(|| book::config_dir().join("downloads"));
+        .unwrap_or_else(book::default_home_downloads);
     std::fs::create_dir_all(&download_dir).context("create download dir")?;
 
     // Persist resumable downloads here so a daemon restart picks them back up.
@@ -1962,7 +1967,7 @@ async fn resume_by_id(id: &str, qr: bool) -> Result<()> {
     // For an archive, materialize the deterministic tar once and serve from it;
     // for a single file, serve it directly.
     let temp = if rec.archive {
-        let t = std::env::temp_dir().join(format!("arvolo-resume-{}.tar", std::process::id()));
+        let t = book::temp_dir().join(format!("arvolo-resume-{}.tar", std::process::id()));
         flow::pack_tar(&rec.sources, &t).context("repack archive for resume")?;
         Some(t)
     } else {
