@@ -173,12 +173,16 @@ enum Command {
         #[arg(long)]
         qr: bool,
     },
-    /// Fetch a file from a chunked ticket (`arvc…`) or a pairing code
-    /// (`N-word-word[@relay]`); resumes if interrupted.
+    /// Receive from any arvolo ticket or code — the tool picks how automatically:
+    /// a P2P ticket (`arvc…`) or pairing code (`N-word-word[@relay]`) fetches live,
+    /// an offline/mailbox ticket (`arvm…`) or download link decrypts from the relay.
     Recv {
         ticket: String,
         #[arg(short, long)]
         out: Option<PathBuf>,
+        /// Password for a password-protected offline ticket / link.
+        #[arg(long)]
+        password: Option<String>,
     },
     /// Manage your address book of recipients (used by --to).
     Contacts {
@@ -190,10 +194,15 @@ enum Command {
         #[command(subcommand)]
         action: SessionAction,
     },
-    /// View or clear the history of past transfers.
+    /// Show all transfers — live (in/out) and past — plus offers awaiting
+    /// approval. With a daemon running it includes its live state; otherwise it
+    /// shows the persisted history. `clear` wipes the history.
     Transfers {
+        /// Keep the view open and redraw as transfers progress (needs a daemon).
+        #[arg(long)]
+        watch: bool,
         #[command(subcommand)]
-        action: TransferAction,
+        action: Option<TransferAction>,
     },
     /// Show your public id (creates an identity on first use).
     Id,
@@ -237,15 +246,6 @@ enum Command {
         /// Also render the ticket as a scannable QR code.
         #[arg(long)]
         qr: bool,
-    },
-    /// Fetch and decrypt an offline ticket (`arvm…`).
-    RecvOffline {
-        ticket: String,
-        #[arg(short, long)]
-        out: Option<PathBuf>,
-        /// Password for a password-protected link.
-        #[arg(long)]
-        password: Option<String>,
     },
     /// Revoke a previously sent offline ticket, deleting it from the relay.
     Revoke {
@@ -322,21 +322,10 @@ enum Command {
         #[arg(long)]
         use_http: bool,
     },
-    /// Show all live transfers (in and out) and pending offers from the running
-    /// daemon. Requires `arvolo daemon` to be running.
-    #[cfg(unix)]
-    Status {
-        /// Keep the view open and redraw as transfers progress.
-        #[arg(long)]
-        watch: bool,
-    },
-    /// List incoming offers the daemon has parked awaiting your approval.
-    #[cfg(unix)]
-    Pending,
-    /// Accept a parked offer by its id (see `arvolo pending`) and download it.
+    /// Accept a parked offer by its id (see `arvolo transfers`) and download it.
     #[cfg(unix)]
     Accept {
-        /// The offer id shown by `arvolo pending`.
+        /// The offer id shown by `arvolo transfers`.
         offer_id: String,
         /// Save to this path instead of the daemon's download dir.
         #[arg(long)]
@@ -345,13 +334,13 @@ enum Command {
     /// Reject a parked offer by its id.
     #[cfg(unix)]
     Reject {
-        /// The offer id shown by `arvolo pending`.
+        /// The offer id shown by `arvolo transfers`.
         offer_id: String,
     },
-    /// Cancel a running transfer by its id (see `arvolo status`).
+    /// Cancel a running transfer by its id (see `arvolo transfers`).
     #[cfg(unix)]
     Cancel {
-        /// The transfer id shown by `arvolo status`.
+        /// The transfer id shown by `arvolo transfers`.
         id: u64,
     },
 }
@@ -376,8 +365,6 @@ enum ContactAction {
 
 #[derive(Subcommand)]
 enum TransferAction {
-    /// List past transfers (most recent first).
-    List,
     /// Delete all transfer history.
     Clear,
 }
@@ -421,11 +408,15 @@ async fn main() -> Result<()> {
             )
             .await
         }
-        Command::Recv { ticket, out } => recv(ticket, out).await,
+        Command::Recv {
+            ticket,
+            out,
+            password,
+        } => recv(ticket, out, password).await,
         Command::Id => id(),
         Command::Contacts { action } => contacts_cmd(action).await,
         Command::Sessions { action } => sessions_cmd(action).await,
-        Command::Transfers { action } => transfers_cmd(action),
+        Command::Transfers { watch, action } => transfers_cmd(watch, action).await,
         Command::SendOffline {
             path,
             to,
@@ -437,11 +428,6 @@ async fn main() -> Result<()> {
             password,
             qr,
         } => send_offline(path, to, link, relay, use_http, ttl, max, password, qr).await,
-        Command::RecvOffline {
-            ticket,
-            out,
-            password,
-        } => recv_offline(ticket, out, password).await,
         Command::Revoke { ticket, token } => revoke(ticket, token).await,
         Command::RevokeLink { link, token } => revoke_link(link, token).await,
         Command::Listen {
@@ -475,10 +461,6 @@ async fn main() -> Result<()> {
             use_http,
         } => daemon(download_dir, relay, use_http).await,
         #[cfg(unix)]
-        Command::Status { watch } => status_cmd(watch).await,
-        #[cfg(unix)]
-        Command::Pending => pending_cmd().await,
-        #[cfg(unix)]
         Command::Accept { offer_id, out } => accept_cmd(offer_id, out).await,
         #[cfg(unix)]
         Command::Reject { offer_id } => reject_cmd(offer_id).await,
@@ -487,36 +469,119 @@ async fn main() -> Result<()> {
     }
 }
 
-fn transfers_cmd(action: TransferAction) -> Result<()> {
-    match action {
-        TransferAction::List => {
-            let list = history::list();
-            if list.is_empty() {
-                eprintln!("(no transfers yet)");
-                return Ok(());
+/// `arvolo transfers` — the unified view: with a daemon running, its live
+/// transfers (in/out) + pending offers, then the persisted history below;
+/// without one, just the history. `clear` wipes the history.
+async fn transfers_cmd(watch: bool, action: Option<TransferAction>) -> Result<()> {
+    if let Some(TransferAction::Clear) = action {
+        let n = history::clear()?;
+        println!("Cleared {n} transfer record(s).");
+        return Ok(());
+    }
+
+    #[cfg(unix)]
+    {
+        if let Some(client) = daemon_client().await {
+            return show_transfers_live(client, watch).await;
+        }
+        if watch {
+            eprintln!(
+                "(no daemon running — showing history only; start `arvolo daemon` for a live view)"
+            );
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = watch;
+
+    print_history();
+    Ok(())
+}
+
+/// Print the persisted transfer history (the no-daemon / below-the-live view).
+fn print_history() {
+    let list = history::list();
+    if list.is_empty() {
+        println!("history: (none)");
+        return;
+    }
+    println!("history:");
+    for rec in list {
+        let arrow = if rec.direction == "send" {
+            "→"
+        } else {
+            "←"
+        };
+        let peer = rec
+            .peer_id
+            .as_deref()
+            .map(|id| book::resolve_name(id).unwrap_or_else(|| id.to_string()))
+            .unwrap_or_else(|| "anonymous".into());
+        println!(
+            "  {arrow} {peer}\t{}\t{}\t{}",
+            rec.name,
+            human_size(rec.transferred),
+            rec.status
+        );
+    }
+}
+
+/// The live daemon view (transfers in/out + pending offers), with the history
+/// below and an optional `--watch` redraw loop.
+#[cfg(unix)]
+async fn show_transfers_live(mut client: ipc::client::DaemonClient, watch: bool) -> Result<()> {
+    async fn render(client: &mut ipc::client::DaemonClient) -> Result<()> {
+        let st = client.status().await?;
+        let transfers = client.list().await?;
+        let pending = client.list_pending().await?;
+        println!(
+            "daemon: {}  relay: {}",
+            st.public_id,
+            st.relay.as_deref().unwrap_or("-")
+        );
+        if transfers.is_empty() {
+            println!("transfers: (none)");
+        } else {
+            println!("transfers:");
+            for t in &transfers {
+                print_transfer_dto(t);
             }
-            for rec in list {
-                let arrow = if rec.direction == "send" {
-                    "→"
-                } else {
-                    "←"
-                };
-                let peer = rec
-                    .peer_id
-                    .as_deref()
-                    .map(|id| book::resolve_name(id).unwrap_or_else(|| id.to_string()))
-                    .unwrap_or_else(|| "anonymous".into());
+        }
+        if !pending.is_empty() {
+            println!("pending offers (awaiting approval):");
+            for o in &pending {
+                let who = book::resolve_name(&o.from).unwrap_or_else(|| o.from.clone());
                 println!(
-                    "{arrow} {peer}\t{}\t{}\t{}",
-                    rec.name,
-                    human_size(rec.transferred),
-                    rec.status
+                    "  ? {}  {} ({})  — arvolo accept {}",
+                    who,
+                    o.name,
+                    human_size(o.size),
+                    o.id
                 );
             }
         }
-        TransferAction::Clear => {
-            let n = history::clear()?;
-            println!("Cleared {n} transfer record(s).");
+        Ok(())
+    }
+
+    render(&mut client).await?;
+    print_history();
+
+    if !watch {
+        return Ok(());
+    }
+    let mut events = daemon_events().await?;
+    let cancel = cancel_on_ctrl_c();
+    println!("\n(watching — Ctrl-C to stop)");
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => break,
+            ev = events.next() => match ev {
+                Ok(Some(_)) => {
+                    println!("\n---");
+                    render(&mut client).await?;
+                }
+                Ok(None) => break,
+                Err(e) => return Err(e),
+            }
         }
     }
     Ok(())
@@ -1380,96 +1445,6 @@ fn print_transfer_dto(t: &ipc::protocol::TransferDto) {
     );
 }
 
-/// `arvolo status` — unified live view of transfers + pending offers.
-#[cfg(unix)]
-async fn status_cmd(watch: bool) -> Result<()> {
-    let mut client = daemon_client()
-        .await
-        .context("no daemon running (start `arvolo daemon`)")?;
-
-    let render = |st: &ipc::protocol::StatusDto,
-                  transfers: &[ipc::protocol::TransferDto],
-                  pending: &[ipc::protocol::OfferDto]| {
-        println!(
-            "daemon: {}  relay: {}",
-            st.public_id,
-            st.relay.as_deref().unwrap_or("-")
-        );
-        if transfers.is_empty() {
-            println!("transfers: (none)");
-        } else {
-            println!("transfers:");
-            for t in transfers {
-                print_transfer_dto(t);
-            }
-        }
-        if !pending.is_empty() {
-            println!("pending offers (awaiting approval):");
-            for o in pending {
-                let who = book::resolve_name(&o.from).unwrap_or_else(|| o.from.clone());
-                println!(
-                    "  ? {}  {} ({})  — arvolo accept {}",
-                    who,
-                    o.name,
-                    human_size(o.size),
-                    o.id
-                );
-            }
-        }
-    };
-
-    let st = client.status().await?;
-    let transfers = client.list().await?;
-    let pending = client.list_pending().await?;
-    render(&st, &transfers, &pending);
-
-    if !watch {
-        return Ok(());
-    }
-
-    // Watch mode: redraw on every engine event.
-    let mut events = daemon_events().await?;
-    let cancel = cancel_on_ctrl_c();
-    println!("\n(watching — Ctrl-C to stop)");
-    loop {
-        tokio::select! {
-            _ = cancel.cancelled() => break,
-            ev = events.next() => {
-                match ev {
-                    Ok(Some(_)) => {
-                        let st = client.status().await?;
-                        let transfers = client.list().await?;
-                        let pending = client.list_pending().await?;
-                        println!("\n---");
-                        render(&st, &transfers, &pending);
-                    }
-                    Ok(None) => break,
-                    Err(e) => return Err(e),
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-/// `arvolo pending` — list offers parked awaiting approval.
-#[cfg(unix)]
-async fn pending_cmd() -> Result<()> {
-    let mut client = daemon_client()
-        .await
-        .context("no daemon running (start `arvolo daemon`)")?;
-    let pending = client.list_pending().await?;
-    if pending.is_empty() {
-        eprintln!("(no pending offers)");
-        return Ok(());
-    }
-    for o in pending {
-        let who = book::resolve_name(&o.from).unwrap_or_else(|| o.from.clone());
-        println!("{}  from {who}  {} ({})", o.id, o.name, human_size(o.size));
-    }
-    Ok(())
-}
-
 /// `arvolo accept <offer_id>` — approve a parked offer and download it.
 #[cfg(unix)]
 async fn accept_cmd(offer_id: String, out: Option<PathBuf>) -> Result<()> {
@@ -1477,7 +1452,7 @@ async fn accept_cmd(offer_id: String, out: Option<PathBuf>) -> Result<()> {
         .await
         .context("no daemon running (start `arvolo daemon`)")?;
     let id = client.accept(offer_id, out).await?;
-    eprintln!("✓ accepted — downloading (transfer {id}). Track it with `arvolo status`.");
+    eprintln!("✓ accepted — downloading (transfer {id}). Track it with `arvolo transfers`.");
     Ok(())
 }
 
@@ -2015,7 +1990,19 @@ async fn send_with_code(
     result
 }
 
-async fn recv(ticket: String, out: Option<PathBuf>) -> Result<()> {
+async fn recv(ticket: String, out: Option<PathBuf>, password: Option<String>) -> Result<()> {
+    // An offline/mailbox ticket (arvm…) is fetched + decrypted from the relay;
+    // pairing codes and P2P tickets (arvc…) take the live chunked route. Detect
+    // by trying to decode it as an offline ticket (codes never do).
+    if !code::looks_like_code(&ticket)
+        && arvolo_core::offline::OfflineTicket::decode(&ticket).is_ok()
+    {
+        return recv_offline(ticket, out, password).await;
+    }
+    if password.is_some() {
+        eprintln!("note: --password applies only to an offline (arvm…) ticket — ignoring it here.");
+    }
+
     // A short pairing code is resolved to the real ticket over a rendezvous first.
     let ticket = if code::looks_like_code(&ticket) {
         eprintln!("Pairing… (waiting for the sender)");

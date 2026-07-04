@@ -7,7 +7,7 @@ The **daemon** turns the engine into a persistent background service so you can:
   logout/reboot when run under systemd/launchd;
 - **queue several sends** at once — `arvolo push` hands off to the daemon and the
   transfers run concurrently;
-- **see everything in one place** — `arvolo status` lists incoming *and* outgoing
+- **see everything in one place** — `arvolo transfers` lists incoming *and* outgoing
   transfers plus offers awaiting approval;
 - **auto-download from people you trust** while everyone else waits for your
   approval (the default).
@@ -41,10 +41,9 @@ A second `arvolo daemon` refuses to start while one is already running
 Then, from any terminal (or a second machine's account):
 
 ```sh
-arvolo status                 # live transfers (→ out, ← in) + pending offers
-arvolo status --watch         # redraw as things progress
-arvolo pending                # offers waiting for your approval
-arvolo accept <offer-id>      # download a parked offer
+arvolo transfers              # live transfers (→ out, ← in) + pending offers + history
+arvolo transfers --watch      # redraw as things progress
+arvolo accept <offer-id>      # download a parked offer (id from `arvolo transfers`)
 arvolo reject <offer-id>      # decline it
 arvolo cancel <transfer-id>   # stop a running transfer
 arvolo push <file> --to bob   # hand a send to the daemon (concurrent)
@@ -56,8 +55,8 @@ behavior, so nothing you already do breaks.
 
 ## Trust: auto-download vs. ask
 
-Every incoming offer **asks for approval by default** — it parks in
-`arvolo pending` and (on a desktop) raises a notification. Mark the senders you
+Every incoming offer **asks for approval by default** — it parks (visible in
+`arvolo transfers`) and (on a desktop) raises a notification. Mark the senders you
 trust to skip the prompt:
 
 ```sh
@@ -83,7 +82,7 @@ Templates live in [`packaging/`](../packaging/):
   → `~/.config/systemd/user/`. Edit `ExecStart` + `ARVOLO_RELAY`, then
   `systemctl --user enable --now arvolo` and `loginctl enable-linger "$USER"` so
   it keeps running after logout. On a headless server the desktop notification is
-  a no-op — the offer still lands in `arvolo pending` and the journal.
+  a no-op — the offer still shows in `arvolo transfers` and the journal.
 
 Both run the daemon in the **foreground** (the supervisor manages the process and
 restarts it on failure); `stop` sends SIGTERM, which removes the socket cleanly.

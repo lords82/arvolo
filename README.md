@@ -86,7 +86,7 @@ on a relay until they fetch it:
 ```sh
 arvolo id                                             # recipient shows their public id
 arvolo send-offline ./report.pdf --to <id-or-contact> # sender deposits (HPKE E2E)
-arvolo recv-offline arvm…                             # recipient fetches + decrypts (burns on read)
+arvolo recv arvm…                                     # recipient fetches + decrypts (burns on read)
 ```
 
 **Always-open client** — stay online and receive files contacts push to you; each
@@ -127,19 +127,18 @@ arvolo sessions rm <id>
 | &nbsp;&nbsp;`--to <name\|id>` | Encrypt so **only** this recipient can receive, and authenticate you as sender. |
 | &nbsp;&nbsp;`--seed-relay <host>` | Also seed to a relay so the transfer finishes even if you go offline (lazy backfill). |
 | &nbsp;&nbsp;`--qr` | Also render the ticket/code as a scannable QR. |
-| `arvolo recv <ticket\|code> [-o out]` | Receive from an `arvc…` ticket **or** a pairing code; resumes if interrupted; unpacks folders. |
+| `arvolo recv <ticket\|code> [-o out] [--password]` | Receive from **any** ticket or code — auto-detects: `arvc…`/pairing-code fetch live P2P (resumes, unpacks folders), `arvm…`/download-link decrypt from the relay. |
 | `arvolo id` | Show your public id (created on first use). |
 | `arvolo contacts add\|list\|verify\|remove\|trust\|untrust` | Address book of recipients (used by `--to`); TOFU + out-of-band fingerprint verification. `trust` lets the daemon auto-download that contact's files (default: ask). |
 | `arvolo send-offline <file> --to <name\|id> [--relay --ttl --max --password --qr]` | Encrypt (HPKE) and deposit on a relay for an offline recipient. |
 | &nbsp;&nbsp;`--link` | Instead, produce a **browser download link** (public capability, decrypts client-side). `--to` is not used; **no download cap** by default. |
-| `arvolo recv-offline <arvm…> [-o out]` | Fetch + decrypt an offline ticket. |
 | `arvolo listen [--download-dir --auto-accept-contacts --auto-accept-verified]` | Stay online and receive files contacts push to you (offers, live watchdog, transparent download). |
 | `arvolo push <paths…> --to <name\|id>` | Push to a contact: live P2P if online, else deposited to the mailbox and delivered on their return. |
 | `arvolo sessions list\|rm <id>` | List relay deposits (link / sealed) with live relay status + resumable sends; `rm` **revokes on the relay**, deleting the file/link. |
 | `arvolo revoke <arvm…> --token <t>` / `revoke-link <url> --token <t>` | Delete a deposited ticket / download link from the relay. |
-| `arvolo transfers list\|clear` | Show or clear the history of past transfers. |
+| `arvolo transfers [--watch]` / `transfers clear` | One view of everything: with a daemon, live in/out transfers + pending offers, then history below (`--watch` redraws); without one, just history. `clear` wipes history. |
 | `arvolo daemon [--download-dir --relay]` | Run the always-on background engine + local control socket (systemd/launchd). See [`docs/DAEMON.md`](docs/DAEMON.md). |
-| `arvolo status [--watch]` / `pending` / `accept <id>` / `reject <id>` / `cancel <id>` | Drive the running daemon: unified in/out view, approve/decline parked offers, cancel a transfer. |
+| `arvolo accept <id>` / `reject <id>` / `cancel <id>` | Drive the running daemon: approve/decline a parked offer, cancel a transfer (ids from `arvolo transfers`). |
 
 Run `arvolo <cmd> --help` for the full flag list.
 
