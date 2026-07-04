@@ -519,6 +519,17 @@ const SWARM_ANNOUNCE_SECS: u64 = 20;
 /// announce our address to the tracker and don't seed to peers — fetch only from
 /// the origin and the relay, exposing our node to neither other peers. Trades
 /// swarm efficiency for not revealing our address to the swarm.
+/// How long a completed peer keeps seeding to the swarm, from `ARVOLO_SEED_AFTER`
+/// (seconds; 0 or unset = don't linger after completing).
+fn seed_after_complete() -> std::time::Duration {
+    std::time::Duration::from_secs(
+        std::env::var("ARVOLO_SEED_AFTER")
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(0),
+    )
+}
+
 fn swarm_enabled() -> bool {
     !matches!(
         std::env::var("ARVOLO_SWARM")
@@ -999,15 +1010,33 @@ pub async fn recv_chunked(
     // Stop the control supervisor (drops the ack channel and closes the connection).
     ctrl_cancel.cancel();
     drop(ack_tx);
-    // Stop swarming: deregister from the tracker and shut the seeder down. (A
-    // completed peer stops seeding when the transfer ends; seed-after-complete is a
-    // later enhancement.)
+    // Finalize the file so the seeder serves the last piece at its true length.
+    file.set_len(t.total_size)?;
+    drop(file);
+    // Seed-after-complete: a fully-downloaded peer keeps serving the swarm for a
+    // while (the coordinator keeps announcing, now as a complete seeder). Opt-in
+    // via ARVOLO_SEED_AFTER=<seconds> (0/unset = off) so a finished transfer
+    // doesn't linger by default. Stops early on cancel.
+    if swarming && !cancel.is_cancelled() {
+        let dur = seed_after_complete();
+        if !dur.is_zero() {
+            on(RecvEvent::Warning {
+                message: format!(
+                    "download complete — seeding to the swarm for {}s (cancel to stop)",
+                    dur.as_secs()
+                ),
+            });
+            tokio::select! {
+                _ = cancel.cancelled() => {}
+                _ = tokio::time::sleep(dur) => {}
+            }
+        }
+    }
+    // Stop swarming: deregister from the tracker and shut the seeder down.
     swarm_cancel.cancel();
     if let Some(s) = seeder.take() {
         s.shutdown().await;
     }
-    file.set_len(t.total_size)?;
-    drop(file);
     receiver.close().await;
     // Tidy up any leftover per-chunk stage files (e.g. an index committed but its
     // removal was interrupted on a previous run).
