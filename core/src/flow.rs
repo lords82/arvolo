@@ -657,6 +657,117 @@ fn spawn_swarm_coordinator(
     });
 }
 
+/// Endgame: once this few pieces are left in flight, race each remaining piece
+/// across multiple providers so one slow source can't stall the finish.
+const ENDGAME_PIECES: usize = 4;
+/// Max concurrent fetches of a single endgame piece (across distinct sources).
+const ENDGAME_PARALLEL: usize = 4;
+
+/// Spawn one chunk-fetch task. Fetches piece `i` (hash `hash`) into the stage file
+/// `stage`, retrying with backoff over live providers until it succeeds or its
+/// `pcancel` token fires. `rotate` shifts the provider order (endgame duplicates
+/// each use a different offset, so they prefer different sources). Returns
+/// `Some((i, stage))` on success, or `None` if aborted (its piece got satisfied
+/// elsewhere, or a cancel). A genuine I/O error is the only `Err`. `pcancel` is a
+/// per-piece child of the transfer cancel, so the winner cancels it to stop the
+/// losing duplicates promptly.
+#[allow(clippy::too_many_arguments)]
+fn spawn_chunk_fetch(
+    set: &mut tokio::task::JoinSet<Result<Option<(usize, PathBuf)>>>,
+    i: usize,
+    stage: PathBuf,
+    hash: crate::hash::Hash,
+    rotate: usize,
+    pcancel: CancellationToken,
+    receiver: ChunkReceiver,
+    sender_addr: Option<iroh::EndpointAddr>,
+    relay_addr: Option<iroh::EndpointAddr>,
+    on_relay: Arc<Mutex<std::collections::HashSet<u32>>>,
+    sender_live: Option<Arc<std::sync::atomic::AtomicBool>>,
+    peers: Arc<Mutex<Vec<(iroh::EndpointAddr, Vec<u8>)>>>,
+    banned: Arc<Mutex<std::collections::HashSet<String>>>,
+    from_peers: Arc<std::sync::atomic::AtomicU64>,
+) {
+    set.spawn(async move {
+        use std::time::Duration;
+        let mut part = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&stage)
+            .with_context(|| format!("open {}", stage.display()))?;
+        // Resilient fetch, BitTorrent-style: an unavailable piece (dropped P2P, a
+        // relay whose backfill hasn't landed) is retried with capped backoff, not
+        // failed — so the transfer waits and resumes whenever a source returns.
+        // The provider order is re-evaluated each attempt. Stops promptly if this
+        // piece's token fires (the winner of an endgame race, or a user cancel).
+        let mut backoff = Duration::from_secs(CHUNK_RETRY_BACKOFF_START_SECS);
+        loop {
+            if pcancel.is_cancelled() {
+                return Ok(None);
+            }
+            let peer_snapshot = peers.lock().unwrap().clone();
+            let banned_snapshot = banned.lock().unwrap().clone();
+            let (_, mut providers) = ordered_providers(
+                i,
+                &sender_addr,
+                &relay_addr,
+                &on_relay,
+                &sender_live,
+                &peer_snapshot,
+                &banned_snapshot,
+            );
+            let plen = providers.len();
+            if plen > 0 {
+                providers.rotate_left(rotate % plen);
+            }
+            match receiver.fetch_to_file(&providers, hash, &mut part, &banned).await {
+                Ok(winner) => {
+                    let is_peer = peer_snapshot.iter().any(|(a, _)| a.id.to_string() == winner);
+                    if is_peer {
+                        from_peers.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    let src = if sender_addr.as_ref().map(|a| a.id.to_string()).as_deref()
+                        == Some(winner.as_str())
+                    {
+                        "origin"
+                    } else if relay_addr.as_ref().map(|a| a.id.to_string()).as_deref()
+                        == Some(winner.as_str())
+                    {
+                        "relay"
+                    } else if is_peer {
+                        "peer"
+                    } else {
+                        "?"
+                    };
+                    tracing::info!(
+                        "chunk {} ← {src} {}",
+                        i + 1,
+                        winner.chars().take(12).collect::<String>()
+                    );
+                    return Ok(Some((i, stage)));
+                }
+                Err(e) => {
+                    if pcancel.is_cancelled() {
+                        return Ok(None);
+                    }
+                    tracing::warn!(
+                        "chunk {} unavailable ({e:#}); retrying in {}s",
+                        i + 1,
+                        backoff.as_secs()
+                    );
+                    tokio::select! {
+                        _ = pcancel.cancelled() => return Ok(None),
+                        _ = tokio::time::sleep(backoff) => {}
+                    }
+                    backoff = (backoff * 2).min(Duration::from_secs(CHUNK_RETRY_BACKOFF_CAP_SECS));
+                }
+            }
+        }
+    });
+}
+
 pub async fn recv_chunked(
     ticket: &str,
     out: Option<PathBuf>,
@@ -820,13 +931,41 @@ pub async fn recv_chunked(
     let total = t.chunks.len();
     let stage_path = |i: usize| PathBuf::from(format!("{}.arvpart.{i}", download.display()));
 
-    let mut set: JoinSet<Result<usize>> = JoinSet::new();
-    // Pieces still to fetch. We pick the rarest of these each time we fill the
-    // window (rather than scanning in order), so scarce sources are drained first.
+    let mut set: JoinSet<Result<Option<(usize, PathBuf)>>> = JoinSet::new();
+    // Pieces still to fetch, rarest picked first. `pending` = picked-but-not-yet-
+    // satisfied; `piece_cancel[i]` stops every fetch of piece i once one wins;
+    // `dup_count[i]` caps how many parallel sources we race it on in the endgame;
+    // `winner_stage[i]` is the stage file the winning fetch wrote (committer reads it).
     let mut remaining: Vec<usize> = (start..total).collect();
     let mut next_commit = start;
     let mut ready: HashSet<usize> = HashSet::new();
     let mut sources: HashMap<usize, ChunkSource> = HashMap::new();
+    let mut pending: HashSet<usize> = HashSet::new();
+    let mut satisfied: HashSet<usize> = HashSet::new();
+    let mut dup_count: HashMap<usize, usize> = HashMap::new();
+    let mut piece_cancel: HashMap<usize, CancellationToken> = HashMap::new();
+    let mut winner_stage: HashMap<usize, PathBuf> = HashMap::new();
+    let stage_dup =
+        |i: usize, n: usize| PathBuf::from(format!("{}.arvpart.{i}.eg{n}", download.display()));
+    // How many distinct sources currently advertise piece `i` — caps its endgame
+    // parallelism (no point racing a piece only one source has).
+    let avail_for = |i: usize| -> usize {
+        let sender_up = sender_addr.is_some()
+            && sender_live
+                .as_ref()
+                .map(|b| b.load(std::sync::atomic::Ordering::Relaxed))
+                .unwrap_or(false);
+        let mut n = usize::from(sender_up);
+        if on_relay.lock().unwrap().contains(&(i as u32)) {
+            n += 1;
+        }
+        n + peers
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, bf)| crate::swarm::bitfield_has(bf, i))
+            .count()
+    };
 
     loop {
         // Refill the in-flight window, rarest-piece-first.
@@ -858,103 +997,64 @@ pub async fn recv_chunked(
                     ChunkSource::Sender
                 },
             );
-            let rx = receiver.clone();
-            let hash = t.chunks[i];
-            let sp = stage_path(i);
-            let ct = cancel.clone();
-            // Clones for the live provider re-evaluation inside the retry loop.
-            let sa = sender_addr.clone();
-            let ra = relay_addr.clone();
-            let orl = on_relay.clone();
-            let sl = sender_live.clone();
-            let pl = peers.clone();
-            let bn = banned.clone();
-            let fp = from_peers.clone();
-            set.spawn(async move {
-                use std::time::Duration;
-                let mut part = std::fs::OpenOptions::new()
-                    .create(true)
-                    .truncate(false)
-                    .read(true)
-                    .write(true)
-                    .open(&sp)
-                    .with_context(|| format!("open {}", sp.display()))?;
-                // Resilient fetch, BitTorrent-style: a mid-transfer P2P drop or a
-                // relay whose backfill hasn't reached a chunk yet makes it
-                // transiently unavailable. Rather than failing, keep retrying with
-                // capped exponential backoff — the sender (as its direct connection
-                // re-establishes) and the relay (as its backfill lands) —
-                // *indefinitely*, until the chunk arrives or the user cancels. So a
-                // transfer whose sender went away simply waits and resumes whenever
-                // the sender comes back; it never gives up on its own. The provider
-                // order is re-evaluated each attempt, so a chunk that becomes
-                // available on the relay, or a sender that reconnects, is used as
-                // soon as it appears. Partial bytes persist in the stage file, so
-                // each retry resumes mid-chunk.
-                let mut backoff = Duration::from_secs(CHUNK_RETRY_BACKOFF_START_SECS);
-                loop {
-                    let peer_snapshot = pl.lock().unwrap().clone();
-                    let banned_snapshot = bn.lock().unwrap().clone();
-                    let (_, providers) = ordered_providers(
-                        i,
-                        &sa,
-                        &ra,
-                        &orl,
-                        &sl,
-                        &peer_snapshot,
-                        &banned_snapshot,
-                    );
-                    match rx.fetch_to_file(&providers, hash, &mut part, &bn).await {
-                        Ok(winner) => {
-                            // Classify the winning provider for the metric + a
-                            // verbose "which chunk from whom" log line.
-                            let is_peer =
-                                peer_snapshot.iter().any(|(a, _)| a.id.to_string() == winner);
-                            if is_peer {
-                                fp.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            }
-                            let src = if sa.as_ref().map(|a| a.id.to_string()).as_deref()
-                                == Some(winner.as_str())
-                            {
-                                "origin"
-                            } else if ra.as_ref().map(|a| a.id.to_string()).as_deref()
-                                == Some(winner.as_str())
-                            {
-                                "relay"
-                            } else if is_peer {
-                                "peer"
-                            } else {
-                                "?"
-                            };
-                            tracing::info!(
-                                "chunk {} ← {src} {}",
-                                i + 1,
-                                winner.chars().take(12).collect::<String>()
-                            );
-                            break;
-                        }
-                        Err(e) => {
-                            if ct.is_cancelled() {
-                                return Err(e).with_context(|| format!("fetch chunk {}", i + 1));
-                            }
-                            tracing::warn!(
-                                "chunk {} unavailable ({e:#}); retrying in {}s \
-                                 (will keep retrying until it's available or you cancel)",
-                                i + 1,
-                                backoff.as_secs()
-                            );
-                            tokio::select! {
-                                _ = ct.cancelled() => {
-                                    return Err(e).with_context(|| format!("fetch chunk {}", i + 1));
-                                }
-                                _ = tokio::time::sleep(backoff) => {}
-                            }
-                            backoff = (backoff * 2).min(Duration::from_secs(CHUNK_RETRY_BACKOFF_CAP_SECS));
-                        }
-                    }
-                }
-                Ok::<usize, anyhow::Error>(i)
+            let tok = cancel.child_token();
+            piece_cancel.insert(i, tok.clone());
+            pending.insert(i);
+            dup_count.insert(i, 1);
+            spawn_chunk_fetch(
+                &mut set,
+                i,
+                stage_path(i),
+                t.chunks[i],
+                0,
+                tok,
+                receiver.clone(),
+                sender_addr.clone(),
+                relay_addr.clone(),
+                on_relay.clone(),
+                sender_live.clone(),
+                peers.clone(),
+                banned.clone(),
+                from_peers.clone(),
+            );
+        }
+
+        // Endgame: with every piece picked and only the last few in flight, race
+        // each remaining piece across up to ENDGAME_PARALLEL distinct sources (each
+        // duplicate rotates the provider order to prefer a different one). The first
+        // to complete AND pass the BLAKE3 check wins; the winner cancels the piece
+        // token so the losers stop immediately and their stage files are discarded.
+        while remaining.is_empty()
+            && set.len() < concurrency
+            && !cancel.is_cancelled()
+            && pending.len() <= ENDGAME_PIECES
+        {
+            let cand = pending.iter().copied().find(|&i| {
+                *dup_count.get(&i).unwrap_or(&0) < ENDGAME_PARALLEL.min(avail_for(i).max(1))
             });
+            let Some(i) = cand else { break };
+            let n = *dup_count.get(&i).unwrap_or(&1);
+            dup_count.insert(i, n + 1);
+            let tok = piece_cancel
+                .get(&i)
+                .cloned()
+                .unwrap_or_else(|| cancel.child_token());
+            spawn_chunk_fetch(
+                &mut set,
+                i,
+                stage_dup(i, n),
+                t.chunks[i],
+                n,
+                tok,
+                receiver.clone(),
+                sender_addr.clone(),
+                relay_addr.clone(),
+                on_relay.clone(),
+                sender_live.clone(),
+                peers.clone(),
+                banned.clone(),
+                from_peers.clone(),
+            );
         }
 
         if set.is_empty() {
@@ -971,15 +1071,33 @@ pub async fn recv_chunked(
             r = set.join_next() => r,
         };
         let Some(res) = joined else { break };
-        let done = res.context("fetch task failed")??;
-        ready.insert(done);
+        match res.context("fetch task failed")?? {
+            Some((done_i, done_stage)) => {
+                if satisfied.contains(&done_i) {
+                    // A losing duplicate that finished after the winner: discard it.
+                    let _ = std::fs::remove_file(&done_stage);
+                } else {
+                    satisfied.insert(done_i);
+                    pending.remove(&done_i);
+                    // Stop any still-running duplicates of this piece.
+                    if let Some(tok) = piece_cancel.get(&done_i) {
+                        tok.cancel();
+                    }
+                    winner_stage.insert(done_i, done_stage);
+                    ready.insert(done_i);
+                }
+            }
+            // An aborted duplicate (its piece got satisfied elsewhere) — ignore.
+            None => {}
+        }
 
         // Commit every chunk whose turn has come, ascending, so writes stay
-        // contiguous (positioned at `i * chunk_size`).
+        // contiguous (positioned at `i * chunk_size`), reading each from the stage
+        // file its winning fetch wrote.
         while ready.remove(&next_commit) {
             let i = next_commit;
-            let source = sources[&i];
-            let sp = stage_path(i);
+            let source = sources.get(&i).copied().unwrap_or(ChunkSource::Sender);
+            let sp = winner_stage.remove(&i).unwrap_or_else(|| stage_path(i));
             let mut ct = Vec::new();
             std::fs::File::open(&sp)
                 .with_context(|| format!("open {}", sp.display()))?
@@ -989,7 +1107,15 @@ pub async fn recv_chunked(
                 .with_context(|| format!("decrypt chunk {}", i + 1))?;
             file.seek(SeekFrom::Start(i as u64 * t.chunk_size as u64))?;
             file.write_all(&plain)?;
+            // Clean up this piece's stage file(s): the winner's, the primary's, and
+            // any leftover endgame-duplicate partials from a cancelled loser.
             let _ = std::fs::remove_file(&sp);
+            let _ = std::fs::remove_file(stage_path(i));
+            for n in 1..ENDGAME_PARALLEL {
+                let _ = std::fs::remove_file(stage_dup(i, n));
+            }
+            piece_cancel.remove(&i);
+            dup_count.remove(&i);
             on(RecvEvent::Chunk {
                 index: i,
                 total,
