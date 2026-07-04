@@ -37,10 +37,10 @@ RUN apt-get update \
 COPY --from=builder /app/target/release/arvolo-relay /usr/local/bin/arvolo-relay
 
 USER arvolo
-ENV ARVOLO_RELAY_ADDR=0.0.0.0:8787 \
+ENV ARVOLO_RELAY_ADDR=0.0.0.0:6282 \
     ARVOLO_RELAY_DB=/data/relay.db \
     ARVOLO_RELAY_BLOBS=/data/blobs \
     ARVOLO_RELAY_BLOBSTORE=/data/blobstore
-EXPOSE 8787
+EXPOSE 6282
 VOLUME ["/data"]
 CMD ["arvolo-relay"]

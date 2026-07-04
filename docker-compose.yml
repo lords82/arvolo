@@ -9,15 +9,15 @@ services:
     container_name: arvolo-relay
     restart: always
     # No host port publish in production: a TLS-terminating reverse proxy on the
-    # same Docker network reaches the relay by its service name (arvolo-relay:8787).
-    # Publishing 8787 to the host would expose the relay in plaintext, bypassing
+    # same Docker network reaches the relay by its service name (arvolo-relay:6282).
+    # Publishing 6282 to the host would expose the relay in plaintext, bypassing
     # TLS — uncomment only for a local, non-public dev run.
     # ports:
-    #   - "8787:8787"
+    #   - "6282:6282"
     volumes:
       - arvolo-data:/data
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8787/healthz || exit 1"]
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:6282/healthz || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3

@@ -34,7 +34,7 @@ async fn main() -> Result<()> {
                 println!("  -h, --help      print this help and exit");
                 println!();
                 println!("Environment:");
-                println!("  ARVOLO_RELAY_ADDR       listen address (default 0.0.0.0:8787)");
+                println!("  ARVOLO_RELAY_ADDR       listen address (default 0.0.0.0:6282)");
                 println!("  ARVOLO_RELAY_DB         mailbox db path (default arvolo-relay.db)");
                 println!("  ARVOLO_RELAY_BLOBS      blob directory (default arvolo-blobs)");
                 println!(
@@ -55,7 +55,7 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let addr = std::env::var("ARVOLO_RELAY_ADDR").unwrap_or_else(|_| "0.0.0.0:8787".to_string());
+    let addr = std::env::var("ARVOLO_RELAY_ADDR").unwrap_or_else(|_| "0.0.0.0:6282".to_string());
     let db = std::env::var("ARVOLO_RELAY_DB").unwrap_or_else(|_| "arvolo-relay.db".to_string());
     let blobs = std::env::var("ARVOLO_RELAY_BLOBS").unwrap_or_else(|_| "arvolo-blobs".to_string());
     let blobstore =

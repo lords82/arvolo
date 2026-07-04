@@ -21,7 +21,7 @@ The fastest way to run just the `arvolo-relay` mailbox is the published image
 state under `/data`:
 
 ```sh
-docker run -d --name arvolo-relay -p 8787:8787 -v arvolo-data:/data \
+docker run -d --name arvolo-relay -p 6282:6282 -v arvolo-data:/data \
   ghcr.io/lords82/arvolo-relay:latest
 ```
 
@@ -70,7 +70,7 @@ Description=arvolo mailbox
 After=network.target
 
 [Service]
-Environment=ARVOLO_RELAY_ADDR=127.0.0.1:8787
+Environment=ARVOLO_RELAY_ADDR=127.0.0.1:6282
 Environment=ARVOLO_RELAY_DB=/var/lib/arvolo/relay.db
 Environment=ARVOLO_RELAY_BLOBS=/var/lib/arvolo/blobs
 ExecStart=/usr/local/bin/arvolo-relay
@@ -85,7 +85,7 @@ WantedBy=multi-user.target
 
 ```
 mailbox.example.com {
-    reverse_proxy 127.0.0.1:8787
+    reverse_proxy 127.0.0.1:6282
 }
 ```
 
@@ -120,7 +120,7 @@ mailbox.example.com {
         events 30
         window 1m
     }
-    reverse_proxy 127.0.0.1:8787
+    reverse_proxy 127.0.0.1:6282
 }
 ```
 

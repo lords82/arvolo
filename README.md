@@ -52,11 +52,14 @@ cargo install --git https://github.com/lords82/arvolo arvolo-relay
 **Relay via Docker** — self-host the zero-knowledge relay in one command:
 
 ```sh
-docker run -d --name arvolo-relay -p 8787:8787 -v arvolo-data:/data \
+docker run -d --name arvolo-relay -p 6282:6282 -v arvolo-data:/data \
   ghcr.io/lords82/arvolo-relay:latest
 ```
 
 ## Quickstart
+
+> New here? [`docs/QUICKSTART.md`](docs/QUICKSTART.md) walks through standing up a
+> relay (LAN/dev **and** behind nginx+TLS) and the minimal client config end to end.
 
 **P2P, both online** — share a short code instead of a giant ticket:
 
@@ -77,7 +80,7 @@ self-contained `arvc…` ticket instead — no relay needed at all.
 Relay without TLS (LAN / dev)? Add `--use-http`:
 
 ```sh
-arvolo send --code --relay relay.local:8787 --use-http ./photo.jpg
+arvolo send --code --relay relay.local:6282 --use-http ./photo.jpg
 ```
 
 **Offline mailbox** — recipient is away; encrypt to their identity and leave it
@@ -152,7 +155,7 @@ relay = "relay.example.com"   # default relay for --code / recv <code> / send --
 download_dir = "/srv/arvolo/incoming"   # where accepted files are saved (default: ~/Arvolo)
 ```
 
-For a relay without TLS, write the scheme explicitly: `relay = "http://relay.local:8787"`.
+For a relay without TLS, write the scheme explicitly: `relay = "http://relay.local:6282"`.
 
 Contacts live in `~/.config/arvolo/contacts.toml` (managed via `arvolo contacts`).
 
@@ -164,7 +167,7 @@ or join the swarm:
 
 | Var | Meaning |
 |---|---|
-| `ARVOLO_RELAY` | Relay URL. Mandatory unless `relay` is set in `config.toml`. A bare host assumes `https://`; write `http://host:8787` for plaintext. |
+| `ARVOLO_RELAY` | Relay URL. Mandatory unless `relay` is set in `config.toml`. A bare host assumes `https://`; write `http://host:6282` for plaintext. |
 
 Everything below is **optional** (defaults shown).
 
@@ -190,7 +193,7 @@ Everything below is **optional** (defaults shown).
 
 | Var | Default | Meaning |
 |---|---|---|
-| `ARVOLO_RELAY_ADDR` | `0.0.0.0:8787` | Listen address. |
+| `ARVOLO_RELAY_ADDR` | `0.0.0.0:6282` | Listen address. |
 | `ARVOLO_RELAY_DB` | `arvolo-relay.db` | Mailbox database path. |
 | `ARVOLO_RELAY_BLOBS` | `arvolo-blobs` | Blob directory. |
 | `ARVOLO_RELAY_BLOBSTORE` | `arvolo-blobstore` | Blobstore directory. |
