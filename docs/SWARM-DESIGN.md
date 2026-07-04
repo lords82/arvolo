@@ -20,10 +20,11 @@
 >   infinite, so a losing duplicate would otherwise retry forever); a careful
 >   change to defer, not rush.
 >
-> **Swarm activation:** the swarm (seeder + tracker + peers) engages only for a
-> shared `arvc…` ticket whose sender embedded a relay — i.e. sent with
-> `--seed-relay`. A pure `--relay` P2P ticket has no relay in it, so those
-> transfers stay origin-only (still with all the phase-1/2 resilience).
+> **Swarm activation:** on by default. Every shared `arvc…` ticket embeds the
+> configured relay (best-effort — falls back to pure P2P if the relay is
+> unreachable at send time), so the seeder + tracker + peers engage without any
+> flag. The old `--seed-relay` flag is gone. `--code` and `--to` are unaffected
+> (`--to` stays 1-to-1; `--code` carries its own rendezvous relay).
 
 This document specifies turning a reusable-ticket transfer into a **BitTorrent-style
 swarm**: multiple concurrent sources (original sender, relay, and other receivers
