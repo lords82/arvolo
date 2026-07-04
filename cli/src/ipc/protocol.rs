@@ -122,6 +122,11 @@ pub struct TransferDto {
     pub transferred: u64,
     /// "active" | "completed" | "deposited" | "cancelled" | "failed: <msg>".
     pub status: String,
+    /// Swarm metrics (0 for a non-swarm transfer).
+    #[serde(default)]
+    pub swarm_peers: usize,
+    #[serde(default)]
+    pub pieces_from_peers: u64,
 }
 
 /// A parked incoming offer awaiting the user's accept/reject.
@@ -197,6 +202,8 @@ impl From<&Transfer> for TransferDto {
             total_size: t.total_size,
             transferred: t.transferred,
             status: status_str(&t.status),
+            swarm_peers: t.swarm_peers,
+            pieces_from_peers: t.pieces_from_peers,
         }
     }
 }

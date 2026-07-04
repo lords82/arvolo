@@ -804,7 +804,7 @@ impl ChunkReceiver {
         hash: Hash,
         out: &mut std::fs::File,
         banned: &Mutex<HashSet<String>>,
-    ) -> Result<()> {
+    ) -> Result<String> {
         let mut last_err = None;
         for _round in 0..2 {
             for addr in providers {
@@ -816,7 +816,7 @@ impl ChunkReceiver {
                         let mut ct = Vec::with_capacity(total as usize);
                         out.read_to_end(&mut ct)?;
                         if Hash::new(&ct) == hash {
-                            return Ok(());
+                            return Ok(addr.id.to_string()); // winning provider
                         }
                         out.set_len(0)?; // bad bytes: start this chunk over
                         // This provider served bytes that don't hash to `hash`:

@@ -187,7 +187,12 @@ async fn intra_chunk_resume_completes_partial() {
     part.write_all(&full[..half]).unwrap();
 
     receiver
-        .fetch_to_file(&[sender.addr()], hash, &mut part)
+        .fetch_to_file(
+            &[sender.addr()],
+            hash,
+            &mut part,
+            &std::sync::Mutex::new(std::collections::HashSet::new()),
+        )
         .await
         .expect("resume");
 

@@ -64,6 +64,10 @@ pub struct Transfer {
     pub total_size: u64,
     pub transferred: u64,
     pub status: TransferStatus,
+    /// Swarm metrics for a receive: peers currently known, and pieces pulled from
+    /// peers (both 0 for a non-swarm transfer).
+    pub swarm_peers: usize,
+    pub pieces_from_peers: u64,
 }
 
 /// Events emitted as transfers and offers progress. Cloneable for [`broadcast`].
@@ -146,6 +150,13 @@ impl Inner {
     fn set_peer(&self, id: u64, peer: PublicId) {
         if let Some(t) = self.transfers.lock().unwrap().get_mut(&id) {
             t.peer = Some(peer);
+        }
+    }
+
+    fn set_swarm(&self, id: u64, peers: usize, from_peers: u64) {
+        if let Some(t) = self.transfers.lock().unwrap().get_mut(&id) {
+            t.swarm_peers = peers;
+            t.pieces_from_peers = from_peers;
         }
     }
 
@@ -260,6 +271,8 @@ impl TransferManager {
                     total_size,
                     transferred: 0,
                     status: TransferStatus::Active,
+                    swarm_peers: 0,
+                    pieces_from_peers: 0,
                 },
             );
             // Keep the map from growing without bound over a long session: once
@@ -799,6 +812,10 @@ impl TransferManager {
                             total_size,
                         });
                     }
+                    RecvEvent::Swarm {
+                        peers,
+                        pieces_from_peers,
+                    } => inner_cb.set_swarm(id, peers, pieces_from_peers),
                     RecvEvent::Saved { .. }
                     | RecvEvent::Control { .. }
                     | RecvEvent::Warning { .. } => {}

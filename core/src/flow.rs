@@ -99,6 +99,12 @@ pub enum RecvEvent {
     Warning {
         message: String,
     },
+    /// Swarm progress: how many peers we currently know, and how many pieces we've
+    /// pulled from peers (vs. the origin/relay). Emitted while swarming.
+    Swarm {
+        peers: usize,
+        pieces_from_peers: u64,
+    },
 }
 
 // ---- send -----------------------------------------------------------------
@@ -742,6 +748,8 @@ pub async fn recv_chunked(
     // Peers (by endpoint id) that served corrupt bytes; filtered out of future
     // provider lists. Populated by `fetch_to_file` on an integrity failure.
     let banned: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+    // Metric: pieces we pulled from a swarm peer (vs. the origin/relay).
+    let from_peers = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let swarm_cancel = cancel.child_token();
     let mut seeder: Option<crate::chunked::ChunkSeeder> = None;
     let mut swarming = false;
@@ -839,6 +847,7 @@ pub async fn recv_chunked(
             let sl = sender_live.clone();
             let pl = peers.clone();
             let bn = banned.clone();
+            let fp = from_peers.clone();
             set.spawn(async move {
                 use std::time::Duration;
                 let mut part = std::fs::OpenOptions::new()
@@ -874,7 +883,13 @@ pub async fn recv_chunked(
                         &banned_snapshot,
                     );
                     match rx.fetch_to_file(&providers, hash, &mut part, &bn).await {
-                        Ok(()) => break,
+                        Ok(winner) => {
+                            // Count a piece served by a peer (not the origin/relay).
+                            if peer_snapshot.iter().any(|(a, _)| a.id.to_string() == winner) {
+                                fp.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            }
+                            break;
+                        }
                         Err(e) => {
                             if ct.is_cancelled() {
                                 return Err(e).with_context(|| format!("fetch chunk {}", i + 1));
@@ -966,6 +981,13 @@ pub async fn recv_chunked(
             // Publish the newly-committed contiguous prefix so the seeder can serve
             // it and the tracker announce advertises it.
             have.store(next_commit, std::sync::atomic::Ordering::Relaxed);
+            // Surface swarm metrics (current peer count + pieces pulled from peers).
+            if swarming {
+                on(RecvEvent::Swarm {
+                    peers: peers.lock().unwrap().len(),
+                    pieces_from_peers: from_peers.load(std::sync::atomic::Ordering::Relaxed),
+                });
+            }
         }
     }
     // Cancelled before completing (e.g. the token was already tripped): leave the

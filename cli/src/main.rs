@@ -1455,8 +1455,16 @@ fn print_transfer_dto(t: &ipc::protocol::TransferDto) {
     } else {
         String::new()
     };
+    let swarm = if t.swarm_peers > 0 || t.pieces_from_peers > 0 {
+        format!(
+            "  swarm: {} peer(s), {} piece(s) from peers",
+            t.swarm_peers, t.pieces_from_peers
+        )
+    } else {
+        String::new()
+    };
     println!(
-        "  [{}] {arrow} {peer}  {}{progress}  ({})",
+        "  [{}] {arrow} {peer}  {}{progress}  ({}){swarm}",
         t.id, t.name, t.status
     );
 }
@@ -2201,6 +2209,14 @@ async fn recv(ticket: String, out: Option<PathBuf>, password: Option<String>) ->
                         pb.finish_and_clear();
                     }
                     println!("Saved to {}", path.display());
+                }
+                RecvEvent::Swarm {
+                    peers,
+                    pieces_from_peers,
+                } => {
+                    if let Some(pb) = slot.as_ref() {
+                        pb.set_message(format!("swarm: {peers} peers, {pieces_from_peers} pieces from peers"));
+                    }
                 }
             }
         },
