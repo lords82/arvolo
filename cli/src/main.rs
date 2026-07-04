@@ -525,7 +525,8 @@ fn print_history() {
 /// delta/interval reading flaps between 0 and a spike; the EWMA converges on the
 /// true sustained rate while still reacting to real changes. Using a wall-clock
 /// time constant (not a fixed per-tick weight) keeps it correct under irregular
-/// redraw intervals.
+/// redraw intervals. Used only by the (unix-only) live `--watch` view.
+#[cfg(unix)]
 struct RateEstimator {
     bytes: u64,
     at: std::time::Instant,
@@ -533,6 +534,7 @@ struct RateEstimator {
     ewma: Option<f64>,
 }
 
+#[cfg(unix)]
 impl RateEstimator {
     /// Smoothing time constant: ~90% of a step change is reflected within ~3τ.
     const TAU_SECS: f64 = 3.0;
