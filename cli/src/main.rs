@@ -1514,16 +1514,15 @@ async fn serve_ticket_via_daemon(
     Ok(())
 }
 
-/// Submit a push to the running daemon and render its progress. Ctrl-C detaches
-/// (the daemon keeps sending); it does not cancel.
+/// Hand a push off to the running daemon and return immediately — the daemon
+/// delivers it in the background, concurrent and surviving our exit. Mirrors
+/// [`serve_ticket_via_daemon`]; observe progress with `arvolo transfers`.
 #[cfg(unix)]
 async fn push_via_daemon(
     mut client: ipc::client::DaemonClient,
     paths: Vec<PathBuf>,
     to: String,
 ) -> Result<()> {
-    use ipc::protocol::EventDto;
-
     // The daemon resolves paths on *its own* cwd (e.g. `/` under systemd), not
     // ours — so absolutize here, relative to the client's cwd, and validate the
     // files exist now with a clear error instead of a confusing daemon-side one.
@@ -1536,60 +1535,15 @@ async fn push_via_daemon(
         })
         .collect::<Result<Vec<_>>>()
         .context("no such file or folder to push")?;
-    // Subscribe before submitting so an early terminal event isn't missed.
-    let mut events = daemon_events().await?;
     eprintln!("Handing off to the daemon (sending to {to})…");
     let id = client
         .push(to, paths_s)
         .await
         .context("daemon rejected the push")?;
-    eprintln!("queued as transfer {id}. (Ctrl-C detaches; the daemon keeps sending.)\n");
-
-    let cancel = cancel_on_ctrl_c();
-    let mut last_pct = u64::MAX;
-    loop {
-        tokio::select! {
-            _ = cancel.cancelled() => {
-                eprintln!("\n(detached — transfer {id} continues in the daemon; `arvolo cancel {id}` to stop it)");
-                break;
-            }
-            ev = events.next() => {
-                match ev {
-                    Ok(Some(EventDto::Progress { id: eid, transferred, total_size })) if eid == id && total_size > 0 => {
-                        let pct = transferred * 100 / total_size;
-                        if pct != last_pct {
-                            last_pct = pct;
-                            use std::io::Write;
-                            eprint!("\r  {pct}% ({}/{})   ", human_size(transferred), human_size(total_size));
-                            let _ = std::io::stderr().flush();
-                        }
-                    }
-                    Ok(Some(EventDto::Completed { id: eid, .. })) if eid == id => {
-                        eprintln!("\n✓ delivered.");
-                        break;
-                    }
-                    Ok(Some(EventDto::Deposited { id: eid })) if eid == id => {
-                        eprintln!("✓ deposited to the mailbox (delivered when they return).");
-                        break;
-                    }
-                    Ok(Some(EventDto::Failed { id: eid, error })) if eid == id => {
-                        eprintln!("\n✗ failed: {error}");
-                        break;
-                    }
-                    Ok(Some(EventDto::Cancelled { id: eid })) if eid == id => {
-                        eprintln!("\n(cancelled)");
-                        break;
-                    }
-                    Ok(Some(_)) => {}
-                    Ok(None) => {
-                        eprintln!("\n(daemon closed the connection)");
-                        break;
-                    }
-                    Err(e) => return Err(e),
-                }
-            }
-        }
-    }
+    println!(
+        "queued as transfer {id} — the daemon delivers it in the background.\n\
+         Track it with `arvolo transfers`, stop it with `arvolo cancel {id}`."
+    );
     Ok(())
 }
 
