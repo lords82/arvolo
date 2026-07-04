@@ -519,18 +519,61 @@ fn print_history() {
     }
 }
 
+/// Smooths a transfer's throughput with a **time-based exponentially weighted
+/// moving average** — the same estimator TCP uses for RTT and Unix for load
+/// average. Byte counters here jump a full 16 MiB chunk at a time, so a raw
+/// delta/interval reading flaps between 0 and a spike; the EWMA converges on the
+/// true sustained rate while still reacting to real changes. Using a wall-clock
+/// time constant (not a fixed per-tick weight) keeps it correct under irregular
+/// redraw intervals.
+struct RateEstimator {
+    bytes: u64,
+    at: std::time::Instant,
+    /// Smoothed rate in bytes/second; `None` until the first real interval.
+    ewma: Option<f64>,
+}
+
+impl RateEstimator {
+    /// Smoothing time constant: ~90% of a step change is reflected within ~3τ.
+    const TAU_SECS: f64 = 3.0;
+
+    fn new(bytes: u64, at: std::time::Instant) -> Self {
+        Self {
+            bytes,
+            at,
+            ewma: None,
+        }
+    }
+
+    /// Fold in a new cumulative byte count observed at `now`; returns the current
+    /// smoothed bytes/second (once at least one interval has elapsed).
+    fn observe(&mut self, bytes: u64, now: std::time::Instant) -> Option<f64> {
+        let dt = now.duration_since(self.at).as_secs_f64();
+        if dt <= 0.0 {
+            return self.ewma;
+        }
+        let instant = bytes.saturating_sub(self.bytes) as f64 / dt;
+        // Continuous-time EWMA weight for this (possibly irregular) interval.
+        let alpha = 1.0 - (-dt / Self::TAU_SECS).exp();
+        self.ewma = Some(match self.ewma {
+            Some(prev) => alpha * instant + (1.0 - alpha) * prev,
+            None => instant,
+        });
+        self.bytes = bytes;
+        self.at = now;
+        self.ewma
+    }
+}
+
 /// The live daemon view (transfers in/out + pending offers), with the history
 /// below and an optional `--watch` redraw loop.
 #[cfg(unix)]
 async fn show_transfers_live(mut client: ipc::client::DaemonClient, watch: bool) -> Result<()> {
     use std::collections::HashMap;
-    use std::time::Instant;
 
-    // Per-transfer last (bytes, when) sample, so `--watch` can derive a live
-    // byte/s rate from the delta between redraws.
     async fn render(
         client: &mut ipc::client::DaemonClient,
-        samples: &mut HashMap<u64, (u64, Instant)>,
+        samples: &mut HashMap<u64, RateEstimator>,
         rates: bool,
     ) -> Result<()> {
         let st = client.status().await?;
@@ -550,20 +593,14 @@ async fn show_transfers_live(mut client: ipc::client::DaemonClient, watch: bool)
             println!("transfers: (none)");
         } else {
             println!("transfers:");
-            let now = Instant::now();
-            let (mut up, mut down) = (0u64, 0u64);
+            let now = std::time::Instant::now();
+            let (mut up, mut down) = (0f64, 0f64);
             for t in &transfers {
                 let rate = if rates {
-                    let r = samples.get(&t.id).map(|(prev, ts)| {
-                        let dt = now.duration_since(*ts).as_secs_f64();
-                        if dt > 0.0 {
-                            (t.transferred.saturating_sub(*prev) as f64 / dt) as u64
-                        } else {
-                            0
-                        }
-                    });
-                    samples.insert(t.id, (t.transferred, now));
-                    r
+                    let est = samples
+                        .entry(t.id)
+                        .or_insert_with(|| RateEstimator::new(t.transferred, now));
+                    est.observe(t.transferred, now)
                 } else {
                     None
                 };
@@ -574,12 +611,16 @@ async fn show_transfers_live(mut client: ipc::client::DaemonClient, watch: bool)
                         down += r;
                     }
                 }
-                print_transfer_dto(t, rate);
+                print_transfer_dto(t, rate.map(|r| r as u64));
             }
             // Drop samples for transfers that are gone.
             samples.retain(|id, _| transfers.iter().any(|t| t.id == *id));
-            if rates && (up > 0 || down > 0) {
-                println!("  ── ↑ {}/s   ↓ {}/s", human_size(up), human_size(down));
+            if rates && (up >= 1.0 || down >= 1.0) {
+                println!(
+                    "  ── ↑ {}/s   ↓ {}/s",
+                    human_size(up as u64),
+                    human_size(down as u64)
+                );
             }
         }
         if !pending.is_empty() {
@@ -598,7 +639,7 @@ async fn show_transfers_live(mut client: ipc::client::DaemonClient, watch: bool)
         Ok(())
     }
 
-    let mut samples: HashMap<u64, (u64, Instant)> = HashMap::new();
+    let mut samples: HashMap<u64, RateEstimator> = HashMap::new();
     render(&mut client, &mut samples, watch).await?;
     print_history();
 
