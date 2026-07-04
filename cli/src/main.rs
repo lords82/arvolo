@@ -1382,10 +1382,35 @@ fn daemon_shutdown_signal() -> CancellationToken {
 
 /// Connect to a running daemon and confirm it answers, else `None` (so callers
 /// fall back to running the engine in-process).
+///
+/// A daemon is long-lived: after upgrading the binary the old process keeps
+/// running the old code, and a mismatched daemon speaks a different IPC dialect
+/// — it may not answer newer requests at all, hanging the client. So we gate on
+/// version here: same version → use it; different (or a pre-versioning daemon
+/// that reports none) → refuse loudly and exit, telling the user to restart it.
 #[cfg(unix)]
 async fn daemon_client() -> Option<ipc::client::DaemonClient> {
     let mut c = ipc::client::DaemonClient::connect().await.ok()?;
     c.ping().await.ok()?;
+    // `status` predates the newer requests, so an old daemon still answers it
+    // (with an empty version) — safe to probe without risking a hang.
+    if let Ok(st) = c.status().await {
+        let ours = env!("CARGO_PKG_VERSION");
+        if st.version != ours {
+            let theirs = if st.version.is_empty() {
+                "unknown (older, pre-versioning)".to_string()
+            } else {
+                st.version.clone()
+            };
+            eprintln!(
+                "✗ version mismatch: this CLI is {ours}, but the running daemon is {theirs}.\n  \
+                 The daemon kept running the old binary after the upgrade. Restart it:\n    \
+                 kill $(cat ~/.config/arvolo/daemon.pid)   # stop the stale daemon\n    \
+                 arvolo daemon                             # start it on {ours}"
+            );
+            std::process::exit(1);
+        }
+    }
     Some(c)
 }
 
