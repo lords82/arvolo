@@ -657,11 +657,14 @@ fn spawn_swarm_coordinator(
     });
 }
 
-/// Endgame: once this few pieces are left in flight, race each remaining piece
-/// across multiple providers so one slow source can't stall the finish.
+/// Endgame threshold (kept for the machinery, now dormant — see `ENDGAME_PARALLEL`).
 const ENDGAME_PIECES: usize = 4;
-/// Max concurrent fetches of a single endgame piece (across distinct sources).
-const ENDGAME_PARALLEL: usize = 4;
+/// Max concurrent fetches of a single endgame piece. Set to 1 (no duplicates)
+/// because `fetch_to_file` now *races all providers* for every chunk and takes the
+/// body from the fastest responder — so a piece is already pulled from the best
+/// source, and duplicating the fetch would just re-race and waste bandwidth. Raise
+/// this only if `fetch_to_file` ever goes back to single-provider fetches.
+const ENDGAME_PARALLEL: usize = 1;
 
 /// Spawn one chunk-fetch task. Fetches piece `i` (hash `hash`) into the stage file
 /// `stage`, retrying with backoff over live providers until it succeeds or its

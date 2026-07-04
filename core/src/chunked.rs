@@ -283,6 +283,36 @@ pub(crate) async fn fetch_chunk_wire(
     hash: Hash,
     offset: u64,
 ) -> Result<(u64, Vec<u8>)> {
+    let mut stream = open_chunk_stream(endpoint, addr, hash, offset).await?;
+    let want = stream.total_len.saturating_sub(offset) as usize;
+    let mut buf = vec![0u8; want];
+    stream
+        .recv
+        .read_exact(&mut buf)
+        .await
+        .map_err(|e| anyhow!("read chunk body: {e}"))?;
+    Ok((stream.total_len, buf))
+}
+
+/// An opened chunk request to one provider: the response stream positioned at the
+/// body, the body's total ciphertext length, and the live connection kept alive
+/// while the body is read. Lets [`ChunkReceiver::fetch_to_file`] *race* providers
+/// — open the request to all, then read the body only from the first that responds.
+struct ChunkStream {
+    _conn: Connection,
+    recv: RecvStream,
+    total_len: u64,
+}
+
+/// Connect to `addr`, request chunk `hash` from `offset`, and read the response
+/// header — but not the body. Errors if the provider doesn't have it
+/// (`total_len == 0`) or is unreachable.
+async fn open_chunk_stream(
+    endpoint: &Endpoint,
+    addr: &EndpointAddr,
+    hash: Hash,
+    offset: u64,
+) -> Result<ChunkStream> {
     let conn = endpoint
         .connect(addr.clone(), CHUNK_ALPN)
         .await
@@ -300,57 +330,11 @@ pub(crate) async fn fetch_chunk_wire(
         resp.total_len <= MAX_CHUNK_CT,
         "provider claims oversized chunk"
     );
-    let want = resp.total_len.saturating_sub(offset) as usize;
-    let mut buf = vec![0u8; want];
-    recv.read_exact(&mut buf)
-        .await
-        .map_err(|e| anyhow!("read chunk body: {e}"))?;
-    Ok((resp.total_len, buf))
-}
-
-/// Stream `ct[have..]` of chunk `hash` from one provider, appending to `out`
-/// (which already holds `have` verified ciphertext bytes). Writes incrementally
-/// so a partial download survives an interruption. Returns the full ciphertext
-/// length.
-async fn fetch_chunk_wire_to_file(
-    endpoint: &Endpoint,
-    addr: &EndpointAddr,
-    hash: Hash,
-    out: &mut std::fs::File,
-    have: u64,
-) -> Result<u64> {
-    use std::io::Write;
-    let conn = endpoint
-        .connect(addr.clone(), CHUNK_ALPN)
-        .await
-        .map_err(|e| anyhow!("connect chunk provider: {e}"))?;
-    let (mut send, mut recv) = conn.open_bi().await.map_err(|e| anyhow!("open_bi: {e}"))?;
-    write_frame(&mut send, &ChunkReq { hash, offset: have }).await?;
-    send.finish().map_err(|e| anyhow!("finish req: {e}"))?;
-    let resp: ChunkResp = read_frame(&mut recv)
-        .await
-        .ok_or_else(|| anyhow!("no chunk response"))?;
-    if resp.total_len == 0 {
-        anyhow::bail!("chunk not available from this provider");
-    }
-    anyhow::ensure!(
-        resp.total_len <= MAX_CHUNK_CT,
-        "provider claims oversized chunk"
-    );
-    let mut remaining = resp.total_len.saturating_sub(have);
-    let mut buf = vec![0u8; 64 * 1024];
-    while remaining > 0 {
-        let want = (remaining as usize).min(buf.len());
-        match recv.read(&mut buf[..want]).await {
-            Ok(Some(n)) if n > 0 => {
-                out.write_all(&buf[..n])
-                    .map_err(|e| anyhow!("stage chunk: {e}"))?;
-                remaining -= n as u64;
-            }
-            _ => break,
-        }
-    }
-    Ok(resp.total_len)
+    Ok(ChunkStream {
+        _conn: conn,
+        recv,
+        total_len: resp.total_len,
+    })
 }
 
 // ---- sender ---------------------------------------------------------------
@@ -794,10 +778,14 @@ impl ChunkReceiver {
         Err(last_err.unwrap_or_else(|| anyhow!("no providers for chunk {hash}")))
     }
 
-    /// Fetch chunk `hash` into `out`, resuming from whatever `out` already holds
-    /// (intra-chunk resume). Tries providers in order; on success `out` contains
-    /// the full BLAKE3-verified ciphertext. A partial download persists in `out`
-    /// for a later resume.
+    /// Fetch chunk `hash` into `out`, BLAKE3-verified. **Races** the providers:
+    /// opens the chunk request to all of them at once and takes the body from the
+    /// *first that responds* — so the fastest reachable source wins and a slow or
+    /// dead provider can't hold the fetch up. Only that one provider's body is
+    /// downloaded (the losers are cancelled), so it costs one chunk of bandwidth,
+    /// not one per provider. If the winner's body fails the hash check it's banned
+    /// and the race falls through to the remaining providers. Returns the winning
+    /// provider's endpoint id.
     pub async fn fetch_to_file(
         &self,
         providers: &[EndpointAddr],
@@ -805,29 +793,53 @@ impl ChunkReceiver {
         out: &mut std::fs::File,
         banned: &Mutex<HashSet<String>>,
     ) -> Result<String> {
+        use std::io::Write;
+        if providers.is_empty() {
+            anyhow::bail!("no providers for chunk {hash}");
+        }
+        // Open the request to every provider concurrently. A chunk is <= one
+        // CHUNK_SIZE, so we fetch it whole (offset 0) rather than resume mid-chunk.
+        let mut set: tokio::task::JoinSet<(String, Result<ChunkStream>)> =
+            tokio::task::JoinSet::new();
+        for addr in providers {
+            let endpoint = self.endpoint.clone();
+            let addr = addr.clone();
+            let id = addr.id.to_string();
+            set.spawn(async move { (id, open_chunk_stream(&endpoint, &addr, hash, 0).await) });
+        }
+        // Take responders in the order they arrive; read the body from the first
+        // that gives a valid chunk, keeping the others as fallbacks until then.
         let mut last_err = None;
-        for _round in 0..2 {
-            for addr in providers {
-                let have = out.metadata()?.len();
-                out.seek(SeekFrom::Start(have))?;
-                match fetch_chunk_wire_to_file(&self.endpoint, addr, hash, out, have).await {
-                    Ok(total) if out.metadata()?.len() == total => {
-                        out.seek(SeekFrom::Start(0))?;
-                        let mut ct = Vec::with_capacity(total as usize);
-                        out.read_to_end(&mut ct)?;
-                        if Hash::new(&ct) == hash {
-                            return Ok(addr.id.to_string()); // winning provider
-                        }
-                        out.set_len(0)?; // bad bytes: start this chunk over
-                        // This provider served bytes that don't hash to `hash`:
-                        // ban it so we stop picking it (a poisoning peer). The
-                        // caller filters banned peers out of future provider lists.
-                        banned.lock().unwrap().insert(addr.id.to_string());
-                        last_err = Some(anyhow!("chunk {hash} failed integrity check"));
-                    }
-                    Ok(_) => last_err = Some(anyhow!("incomplete chunk {hash}")),
-                    Err(e) => last_err = Some(e),
+        while let Some(joined) = set.join_next().await {
+            let (id, opened) = match joined {
+                Ok(v) => v,
+                Err(e) => {
+                    last_err = Some(anyhow!("fetch task: {e}"));
+                    continue;
                 }
+            };
+            let mut stream = match opened {
+                Ok(s) => s,
+                Err(e) => {
+                    last_err = Some(e);
+                    continue;
+                }
+            };
+            let mut buf = vec![0u8; stream.total_len as usize];
+            match stream.recv.read_exact(&mut buf).await {
+                Ok(()) if Hash::new(&buf) == hash => {
+                    set.shutdown().await; // cancel the losing racers
+                    out.set_len(0)?;
+                    out.seek(SeekFrom::Start(0))?;
+                    out.write_all(&buf)?;
+                    return Ok(id);
+                }
+                Ok(()) => {
+                    // Corrupt body: ban this provider, keep racing the rest.
+                    banned.lock().unwrap().insert(id);
+                    last_err = Some(anyhow!("chunk {hash} failed integrity check"));
+                }
+                Err(e) => last_err = Some(anyhow!("read chunk body: {e}")),
             }
         }
         Err(last_err.unwrap_or_else(|| anyhow!("no providers for chunk {hash}")))
