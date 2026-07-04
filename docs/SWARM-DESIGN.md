@@ -12,13 +12,12 @@
 > - ✅ **Phase 3** — relay tracker (`/v1/swarm/*`), receiver-as-seeder (`Reseal`),
 >   peers as providers.
 > - ✅ **Phase 4** — rarest-first piece selection.
-> - ◧ **Phase 5** — done: relay-only privacy toggle (`ARVOLO_SWARM=off`),
->   provider banning on integrity failure, swarm metrics in `arvolo transfers`
->   (peers + pieces-from-peers), seed-after-complete (`ARVOLO_SEED_AFTER`).
->   Deferred: **endgame mode** — racing the last pieces across providers needs
->   per-attempt stage files AND per-duplicate cancellation (the fetch retry is
->   infinite, so a losing duplicate would otherwise retry forever); a careful
->   change to defer, not rush.
+> - ✅ **Phase 5** — relay-only privacy toggle (`ARVOLO_SWARM=off`), provider
+>   banning on integrity failure, swarm metrics in `arvolo transfers` (peers +
+>   pieces-from-peers), seed-after-complete (`ARVOLO_SEED_AFTER`), and **endgame**
+>   (race the last ≤4 pieces across up to 4 sources each; first BLAKE3-verified
+>   wins and cancels the losers via the per-piece token; only pieces with ≥2
+>   sources are duplicated).
 >
 > **Swarm activation:** on by default. Every shared `arvc…` ticket embeds the
 > configured relay (best-effort — falls back to pure P2P if the relay is
