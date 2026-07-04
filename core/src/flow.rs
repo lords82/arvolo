@@ -476,6 +476,7 @@ fn ordered_providers(
     relay_addr: &Option<iroh::EndpointAddr>,
     on_relay: &Mutex<std::collections::HashSet<u32>>,
     sender_live: &Option<Arc<std::sync::atomic::AtomicBool>>,
+    peers: &[(iroh::EndpointAddr, Vec<u8>)],
 ) -> (bool, Vec<iroh::EndpointAddr>) {
     use std::sync::atomic::Ordering;
     let sender_up = sender_addr.is_some()
@@ -492,7 +493,86 @@ fn ordered_providers(
         sender_addr.iter().for_each(|a| providers.push(a.clone()));
         relay_addr.iter().for_each(|a| providers.push(a.clone()));
     }
+    // Swarm peers that advertise this piece, as extra fallback sources.
+    for (addr, bf) in peers {
+        if crate::swarm::bitfield_has(bf, i) {
+            providers.push(addr.clone());
+        }
+    }
     (relay_first, providers)
+}
+
+/// How often a swarm member re-announces to the tracker (well within the relay's
+/// `SWARM_PEER_TTL_SECS`) and refreshes its peer list.
+const SWARM_ANNOUNCE_SECS: u64 = 20;
+
+/// Announce this receiver to the swarm tracker on a timer — publishing our seeder
+/// address + which pieces we can serve, and learning the other peers (into
+/// `peers`, used by [`ordered_providers`]). Deregisters on cancel.
+#[allow(clippy::too_many_arguments)]
+fn spawn_swarm_coordinator(
+    client: reqwest::Client,
+    relay_http: String,
+    swarm_id: String,
+    my_addr: String,
+    have: Arc<std::sync::atomic::AtomicUsize>,
+    n_chunks: usize,
+    peers: Arc<Mutex<Vec<(iroh::EndpointAddr, Vec<u8>)>>>,
+    cancel: CancellationToken,
+) {
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+    let url = format!(
+        "{}/v1/swarm/{}/announce",
+        relay_http.trim_end_matches('/'),
+        swarm_id
+    );
+    tokio::spawn(async move {
+        loop {
+            if cancel.is_cancelled() {
+                break;
+            }
+            let h = have.load(Ordering::Relaxed).min(n_chunks);
+            let mut bf = crate::swarm::bitfield_new(n_chunks);
+            for i in 0..h {
+                crate::swarm::bitfield_set(&mut bf, i);
+            }
+            let req = crate::swarm::AnnounceReq {
+                node_addr: my_addr.clone(),
+                bitfield: bf,
+                n_chunks: n_chunks as u32,
+                event: if h >= n_chunks { "completed" } else { "progress" }.to_string(),
+                want: 30,
+            };
+            if let Ok(resp) = client.post(&url).json(&req).send().await {
+                if let Ok(ar) = resp.json::<crate::swarm::AnnounceResp>().await {
+                    let decoded: Vec<(iroh::EndpointAddr, Vec<u8>)> = ar
+                        .peers
+                        .into_iter()
+                        .filter_map(|p| {
+                            crate::chunked::decode_addr(&p.node_addr)
+                                .ok()
+                                .map(|a| (a, p.bitfield))
+                        })
+                        .collect();
+                    *peers.lock().unwrap() = decoded;
+                }
+            }
+            tokio::select! {
+                _ = cancel.cancelled() => break,
+                _ = tokio::time::sleep(Duration::from_secs(SWARM_ANNOUNCE_SECS)) => {}
+            }
+        }
+        // Best-effort deregister.
+        let req = crate::swarm::AnnounceReq {
+            node_addr: my_addr,
+            bitfield: Vec::new(),
+            n_chunks: n_chunks as u32,
+            event: "stopped".to_string(),
+            want: 0,
+        };
+        let _ = client.post(&url).json(&req).send().await;
+    });
 }
 
 pub async fn recv_chunked(
@@ -577,7 +657,7 @@ pub async fn recv_chunked(
         resumed_bytes: start as u64 * t.chunk_size as u64,
     });
 
-    let receiver = ChunkReceiver::open(relay).await?;
+    let receiver = ChunkReceiver::open(relay.clone()).await?;
     let client = reqwest::Client::new();
 
     // Control channel to the sender. Patience scales with fallback availability:
@@ -596,6 +676,52 @@ pub async fn recv_chunked(
     on(RecvEvent::Control {
         connected: sender_addr.is_some(),
     });
+
+    // Swarm (multi-peer) coordination — only for shared `arvc…` tickets: a Plain,
+    // ticket-carried key means every holder has the same key and piece hashes, so
+    // pieces are shareable. We seed the pieces we've verified (via `ChunkSeeder`)
+    // and discover/pull from other peers through the relay tracker. `have` is the
+    // count of contiguous committed pieces — both the seeder (what it may serve)
+    // and the announce bitfield read it; the commit loop bumps it.
+    let have = Arc::new(std::sync::atomic::AtomicUsize::new(start));
+    let peers: Arc<Mutex<Vec<(iroh::EndpointAddr, Vec<u8>)>>> = Arc::new(Mutex::new(Vec::new()));
+    let swarm_cancel = cancel.child_token();
+    let mut seeder: Option<crate::chunked::ChunkSeeder> = None;
+    let mut swarming = false;
+    if matches!(&t.key, KeyDelivery::Plain(_)) {
+        if let Some(r) = &t.relay {
+            match crate::chunked::ChunkSeeder::start(
+                download.clone(),
+                key,
+                &t.chunks,
+                total_chunks,
+                have.clone(),
+                relay.clone(),
+            )
+            .await
+            {
+                Ok(s) => {
+                    swarming = true;
+                    if let Ok(my_addr) = crate::chunked::encode_addr(&s.addr()) {
+                        spawn_swarm_coordinator(
+                            client.clone(),
+                            r.http.clone(),
+                            crate::swarm::swarm_id(&t.chunks, t.total_size),
+                            my_addr,
+                            have.clone(),
+                            total_chunks as usize,
+                            peers.clone(),
+                            swarm_cancel.clone(),
+                        );
+                    }
+                    seeder = Some(s);
+                }
+                Err(e) => on(RecvEvent::Warning {
+                    message: format!("swarm seeder unavailable: {e:#}"),
+                }),
+            }
+        }
+    }
 
     // Fetch up to `concurrency` chunks in parallel (pipelining hides latency),
     // but commit them to the output **in order** so the file grows contiguously
@@ -618,7 +744,7 @@ pub async fn recv_chunked(
         while spawn_idx < total && set.len() < concurrency && !cancel.is_cancelled() {
             let i = spawn_idx;
             let (relay_first, _) =
-                ordered_providers(i, &sender_addr, &relay_addr, &on_relay, &sender_live);
+                ordered_providers(i, &sender_addr, &relay_addr, &on_relay, &sender_live, &[]);
             sources.insert(
                 i,
                 if relay_first {
@@ -636,6 +762,7 @@ pub async fn recv_chunked(
             let ra = relay_addr.clone();
             let orl = on_relay.clone();
             let sl = sender_live.clone();
+            let pl = peers.clone();
             set.spawn(async move {
                 use std::time::Duration;
                 let mut part = std::fs::OpenOptions::new()
@@ -659,7 +786,9 @@ pub async fn recv_chunked(
                 // each retry resumes mid-chunk.
                 let mut backoff = Duration::from_secs(CHUNK_RETRY_BACKOFF_START_SECS);
                 loop {
-                    let (_, providers) = ordered_providers(i, &sa, &ra, &orl, &sl);
+                    let peer_snapshot = pl.lock().unwrap().clone();
+                    let (_, providers) =
+                        ordered_providers(i, &sa, &ra, &orl, &sl, &peer_snapshot);
                     match rx.fetch_to_file(&providers, hash, &mut part).await {
                         Ok(()) => break,
                         Err(e) => {
@@ -735,18 +864,25 @@ pub async fn recv_chunked(
             // every chunk: with the sender offline there's no control channel to
             // learn `on_relay`, yet those are the chunks the relay holds. The
             // relay's (token, hash) guard makes it a no-op for anything not seeded.
-            if let Some(r) = &t.relay {
-                let _ = client
-                    .post(format!(
-                        "{}/v1/release/{}/{}",
-                        r.http.trim_end_matches('/'),
-                        r.token,
-                        t.chunks[i]
-                    ))
-                    .send()
-                    .await;
+            // BUT in a swarm we deliberately keep the relay's copy so other peers
+            // can still fetch it — releasing would strand pieces if we go offline.
+            if !swarming {
+                if let Some(r) = &t.relay {
+                    let _ = client
+                        .post(format!(
+                            "{}/v1/release/{}/{}",
+                            r.http.trim_end_matches('/'),
+                            r.token,
+                            t.chunks[i]
+                        ))
+                        .send()
+                        .await;
+                }
             }
             next_commit += 1;
+            // Publish the newly-committed contiguous prefix so the seeder can serve
+            // it and the tracker announce advertises it.
+            have.store(next_commit, std::sync::atomic::Ordering::Relaxed);
         }
     }
     // Cancelled before completing (e.g. the token was already tripped): leave the
@@ -758,6 +894,13 @@ pub async fn recv_chunked(
     // Stop the control supervisor (drops the ack channel and closes the connection).
     ctrl_cancel.cancel();
     drop(ack_tx);
+    // Stop swarming: deregister from the tracker and shut the seeder down. (A
+    // completed peer stops seeding when the transfer ends; seed-after-complete is a
+    // later enhancement.)
+    swarm_cancel.cancel();
+    if let Some(s) = seeder.take() {
+        s.shutdown().await;
+    }
     file.set_len(t.total_size)?;
     drop(file);
     receiver.close().await;

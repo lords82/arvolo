@@ -160,6 +160,17 @@ enum ChunkBackend {
     },
     /// Serve stored ciphertext files, one per hash, from a directory.
     Files { dir: PathBuf },
+    /// A receiver re-seeding: regenerate a chunk it has verified by re-sealing it
+    /// from its own (plaintext) output file — deterministic sealing reproduces the
+    /// sender's exact ciphertext/hash. `have` is the count of contiguous committed
+    /// chunks; only indices `< have` are served (the rest aren't on disk yet).
+    Reseal {
+        path: PathBuf,
+        key: [u8; crate::crypto::CHUNK_KEY_LEN],
+        index: HashMap<Hash, u32>,
+        total_chunks: u32,
+        have: Arc<std::sync::atomic::AtomicUsize>,
+    },
 }
 
 impl ChunkBackend {
@@ -182,6 +193,24 @@ impl ChunkBackend {
                 Some(ct)
             }
             ChunkBackend::Files { dir } => std::fs::read(dir.join(hash.to_string())).ok(),
+            ChunkBackend::Reseal {
+                path,
+                key,
+                index,
+                total_chunks,
+                have,
+            } => {
+                let idx = *index.get(hash)?;
+                if idx as usize >= have.load(std::sync::atomic::Ordering::Relaxed) {
+                    return None; // we haven't verified/committed this piece yet
+                }
+                let mut file = std::fs::File::open(path).ok()?;
+                file.seek(SeekFrom::Start(idx as u64 * CHUNK_SIZE as u64)).ok()?;
+                let mut buf = vec![0u8; CHUNK_SIZE as usize];
+                let n = fill(&mut file, &mut buf).ok()?;
+                let ct = crate::crypto::seal_chunk(key, idx, *total_chunks, &buf[..n]).ok()?;
+                Some(ct)
+            }
         }
     }
 }
@@ -560,6 +589,66 @@ impl ChunkSender {
         // loop's token, waits for it to finish, and closes the endpoint for us.
         // A JoinError here only means a protocol handler itself panicked during
         // shutdown — nothing we can act on at teardown, so ignore it.
+        let _ = self.router.shutdown().await;
+        self.endpoint.close().await;
+    }
+}
+
+/// A receiver-side seeder: serves, over `CHUNK_ALPN`, the pieces this receiver has
+/// already verified — re-sealed from its own output file, so the ciphertext is
+/// byte-identical to the sender's. Lets a downloading peer also *upload* to other
+/// swarm peers. One endpoint + router; keep it alive for the transfer.
+pub struct ChunkSeeder {
+    router: Router,
+    endpoint: Endpoint,
+    addr: EndpointAddr,
+}
+
+impl ChunkSeeder {
+    /// Start seeding the pieces of `chunks` (the ticket's ordered hash list) from
+    /// the plaintext at `path` under `key`. `have` is a live count of contiguous
+    /// committed pieces — indices `< have` are served, and the caller bumps it as
+    /// it commits. Resolves once the seeder is reachable (its address is known).
+    pub async fn start(
+        path: PathBuf,
+        key: [u8; crate::crypto::CHUNK_KEY_LEN],
+        chunks: &[Hash],
+        total_chunks: u32,
+        have: Arc<std::sync::atomic::AtomicUsize>,
+        relay: RelayChoice,
+    ) -> Result<Self> {
+        let mut index: HashMap<Hash, u32> = HashMap::new();
+        for (i, h) in chunks.iter().enumerate() {
+            index.insert(*h, i as u32);
+        }
+        let chunk_server = ChunkServer {
+            backend: Arc::new(ChunkBackend::Reseal {
+                path,
+                key,
+                index,
+                total_chunks,
+                have,
+            }),
+        };
+        let endpoint = bind_endpoint(relay).await?;
+        let router = Router::builder(endpoint.clone())
+            .accept(CHUNK_ALPN, chunk_server)
+            .spawn();
+        endpoint.online().await;
+        let addr = endpoint.addr();
+        Ok(Self {
+            router,
+            endpoint,
+            addr,
+        })
+    }
+
+    /// This seeder's address, to announce to the swarm tracker.
+    pub fn addr(&self) -> EndpointAddr {
+        self.addr.clone()
+    }
+
+    pub async fn shutdown(self) {
         let _ = self.router.shutdown().await;
         self.endpoint.close().await;
     }
