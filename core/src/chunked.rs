@@ -392,7 +392,7 @@ impl ProtocolHandler for CtrlHandler {
 
 /// A running sender: serves every chunk and orchestrates lazy relay backfill.
 pub struct ChunkSender {
-    _router: Router,
+    router: Router,
     endpoint: Endpoint,
     addr: EndpointAddr,
     chunks: Vec<Hash>,
@@ -487,7 +487,7 @@ impl ChunkSender {
             local_addr_of(&endpoint)
         };
         Ok(Self {
-            _router: router,
+            router,
             endpoint,
             addr,
             chunks,
@@ -553,6 +553,14 @@ impl ChunkSender {
     }
 
     pub async fn shutdown(self) {
+        // Shut the accept loop down *gracefully*, awaiting its task. iroh's Router
+        // holds the loop in an `AbortOnDropHandle`, so simply dropping the sender
+        // aborts it mid-flight — and the abort surfaces as a "task was cancelled"
+        // panic from the loop's internal `join_all`. `Router::shutdown` cancels the
+        // loop's token, waits for it to finish, and closes the endpoint for us.
+        // A JoinError here only means a protocol handler itself panicked during
+        // shutdown — nothing we can act on at teardown, so ignore it.
+        let _ = self.router.shutdown().await;
         self.endpoint.close().await;
     }
 }
