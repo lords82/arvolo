@@ -131,7 +131,9 @@ fn init_tracing(verbose: u8) {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Serve one or more files/folders P2P; prints a ticket (or short code).
+    /// Send files/folders — the tool picks the channel. Without `--to`: a P2P
+    /// `arvc…` ticket to share. With `--to <id>`: live to their daemon if online,
+    /// else mailbox + an `arvm…` ticket. `--link` makes a public browser link.
     /// Multiple paths or a folder are packed into one archive automatically.
     Send {
         #[arg(num_args = 0..)]
@@ -260,7 +262,7 @@ enum Command {
         yes: bool,
     },
     /// Run the always-on background engine: stays online, receives files, and
-    /// exposes a local control socket so `push`/`transfers`/etc. drive one shared
+    /// exposes a local control socket so `send`/`transfers`/etc. drive one shared
     /// instance. Meant to run under systemd/launchd. Needs a relay.
     #[cfg(unix)]
     Daemon {
