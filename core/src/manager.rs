@@ -47,6 +47,11 @@ pub enum TransferStatus {
     Completed,
     /// An offline send: handed to the relay mailbox, delivery not yet confirmed.
     Deposited,
+    /// A send that could not be handed off yet (the relay refused it, was
+    /// unreachable, or errored): the daemon is holding it and will keep trying —
+    /// delivering live P2P as soon as the recipient is online, and re-trying the
+    /// relay on a slow interval. The string is a short human reason.
+    Waiting(String),
     /// Stopped before finishing (e.g. the user cancelled).
     Cancelled,
     /// Ended with an error.
@@ -104,6 +109,11 @@ pub enum ManagerEvent {
     /// may later transition to [`Completed`](ManagerEvent::Completed) once the
     /// recipient fetches it (within the confirmation window).
     Deposited { id: u64 },
+    /// A send is being held for later delivery because the relay couldn't take it
+    /// (refused / unreachable / errored). The daemon keeps trying: live P2P when
+    /// the recipient appears, and the relay again on a slow interval. `reason` is
+    /// a short human explanation.
+    Waiting { id: u64, reason: String },
     /// A transfer failed.
     Failed { id: u64, error: String },
     /// A transfer was cancelled.
@@ -256,11 +266,12 @@ impl TransferManager {
     /// e.g. when the user clears their history in the UI. Keeps still-in-flight
     /// transfers (Active, and Deposited ones still awaiting a pickup confirmation).
     pub fn clear_finished(&self) {
-        self.inner
-            .transfers
-            .lock()
-            .unwrap()
-            .retain(|_, t| matches!(t.status, TransferStatus::Active | TransferStatus::Deposited));
+        self.inner.transfers.lock().unwrap().retain(|_, t| {
+            matches!(
+                t.status,
+                TransferStatus::Active | TransferStatus::Deposited | TransferStatus::Waiting(_)
+            )
+        });
     }
 
     fn register(
@@ -327,32 +338,13 @@ impl TransferManager {
             .unwrap_or(false)
     }
 
-    /// Poll presence for up to `PRESENCE_GRACE_SECS`, returning as soon as the
-    /// contact shows online (covers a client that's just starting up).
-    async fn wait_online(&self, relay: &str, contact: &PublicId) -> bool {
-        let deadline =
-            std::time::Instant::now() + std::time::Duration::from_secs(PRESENCE_GRACE_SECS);
-        loop {
-            if presence::check_online(&self.inner.client, relay, contact)
-                .await
-                .unwrap_or(false)
-            {
-                return true;
-            }
-            if std::time::Instant::now() >= deadline {
-                return false;
-            }
-            tokio::time::sleep(std::time::Duration::from_secs(PRESENCE_POLL_SECS)).await;
-        }
-    }
-
     // ---- sending ----------------------------------------------------------
 
-    /// Send `payload` to `recipient`, choosing the path by presence: if they're
-    /// online, serve it live P2P (`arvc`) and stop on delivery; if offline, deposit
-    /// it on the relay mailbox (`arvm`, store-and-forward) so it lands when they
-    /// return. Either way an [`Offer`] is placed in their inbox as the notification.
-    /// Returns the transfer id.
+    /// Send `payload` to `recipient`, robustly. Registers the transfer and returns
+    /// its id immediately; delivery runs in the background (see [`deliver_to`]):
+    /// live P2P whenever the recipient is online, else the relay mailbox. If the
+    /// relay can't take it (too large / unreachable / error) the send is *held*
+    /// (`Waiting`) and keeps retrying rather than failing.
     pub async fn send_to(
         &self,
         recipient: &PublicId,
@@ -363,196 +355,19 @@ impl TransferManager {
         let relay = self.inner.relay.clone().context(
             "a relay is required to send to a contact (set ARVOLO_RELAY or config `relay`)",
         )?;
-
-        // Offline path: deposit on the mailbox and post a long-lived `arvm` offer,
-        // then confirm delivery by watching the blob get fetched.
-        if !self.wait_online(&relay, recipient).await {
-            let out = deposit_offline_and_offer(&self.inner, &relay, recipient, &payload, &name)
-                .await
-                .context("deposit to mailbox")?;
-            let (id, _cancel) =
-                self.register(Direction::Send, Some(recipient.clone()), name, out.size);
-            spawn_offline_confirm(&self.inner, id, relay.clone(), out.size, out.claim);
-            return Ok(id);
-        }
-
-        // Online path: split + serve live, sealed to the recipient.
-        let session = flow::prepare_send(
-            &payload,
-            &name,
+        let size = std::fs::metadata(&payload).map(|m| m.len()).unwrap_or(0);
+        let (id, cancel) =
+            self.register(Direction::Send, Some(recipient.clone()), name.clone(), size);
+        tokio::spawn(deliver_to(
+            self.inner.clone(),
+            id,
+            cancel,
+            relay,
+            recipient.clone(),
+            payload,
+            name,
             archive,
-            Some((&self.inner.me, recipient)),
-            Some(relay.clone()),
-            RelayChoice::from_env(),
-        )
-        .await
-        .context("prepare send")?;
-
-        let offer = Offer {
-            name: name.clone(),
-            size: session.total_size,
-            chunks: session.chunks as u64,
-            ticket: session.ticket.clone(),
-        };
-        let posted = presence::post_offer(
-            &self.inner.client,
-            &relay,
-            recipient,
-            &self.inner.me,
-            &offer,
-            None,
-        )
-        .await
-        .context("deliver offer")?;
-
-        let (id, cancel) = self.register(
-            Direction::Send,
-            Some(recipient.clone()),
-            name.clone(),
-            session.total_size,
-        );
-
-        let inner = self.inner.clone();
-        let recipient_owned = recipient.clone();
-        tokio::spawn(async move {
-            // A push targets one recipient: stop serving once they have the whole
-            // file (`Delivered`). Presence is best-effort (a just-departed client
-            // lingers "online" until its beacon lapses), so a watchdog falls back
-            // to the mailbox if nobody actually starts pulling within the grace.
-            let connected = Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let delivered = Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let c = connected.clone();
-            let d = delivered.clone();
-            let stop = cancel.clone();
-            let inner_cb = inner.clone();
-
-            // Two-phase watchdog. Phase 1: wait for the offer to be *seen* by a
-            // live recipient poll (a real "they're online right now" signal). If
-            // it's never seen, presence was stale -> fall back fast. Phase 2: once
-            // seen, give the (highly variable) cross-internet P2P connection
-            // generous time before giving up.
-            let wd_connected = connected.clone();
-            let wd_cancel = cancel.clone();
-            let wd_inner = inner.clone();
-            let wd_relay = relay.clone();
-            let wd_recipient = recipient_owned.clone();
-            let wd_offer = posted.id.clone();
-            let wd_token = posted.poster_token.clone();
-            let watchdog = tokio::spawn(async move {
-                use std::time::{Duration, Instant};
-                let phase1 = Instant::now() + Duration::from_secs(LIVE_CONFIRM_SECS);
-                let mut seen = false;
-                while Instant::now() < phase1 {
-                    if wd_connected.load(Ordering::Relaxed) {
-                        return; // already connecting
-                    }
-                    if matches!(
-                        presence::offer_status(
-                            &wd_inner.client,
-                            &wd_relay,
-                            &wd_recipient,
-                            &wd_offer,
-                            &wd_token,
-                        )
-                        .await,
-                        Ok(presence::OfferStatus::Fetched) | Ok(presence::OfferStatus::Gone)
-                    ) {
-                        seen = true;
-                        break;
-                    }
-                    tokio::time::sleep(Duration::from_secs(OFFER_STATUS_POLL_SECS)).await;
-                }
-                if !seen {
-                    wd_cancel.cancel(); // stale presence -> fall back now
-                    return;
-                }
-                let phase2 = Instant::now() + Duration::from_secs(LIVE_CONNECT_SECS);
-                while Instant::now() < phase2 {
-                    if wd_connected.load(Ordering::Relaxed) {
-                        return; // connected -> keep serving
-                    }
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                }
-                wd_cancel.cancel(); // seen but never connected -> fall back
-            });
-
-            let result = session
-                .serve(cancel, move |ev| match ev {
-                    SendEvent::ReceiverConnected => c.store(true, Ordering::Relaxed),
-                    SendEvent::Progress { transferred, total } => {
-                        inner_cb.set_progress(id, transferred);
-                        inner_cb.emit(ManagerEvent::Progress {
-                            id,
-                            transferred,
-                            total_size: total,
-                        });
-                    }
-                    SendEvent::Delivered => {
-                        d.store(true, Ordering::Relaxed);
-                        stop.cancel();
-                    }
-                    SendEvent::Peers { count } => inner_cb.set_download_peers(id, count),
-                    SendEvent::Ready { .. }
-                    | SendEvent::ReceiverDropped { .. }
-                    | SendEvent::Backfilled
-                    | SendEvent::BackfillFailed { .. }
-                    | SendEvent::RelayCapped { .. } => {}
-                })
-                .await;
-            watchdog.abort();
-
-            let was_delivered = delivered.load(Ordering::Relaxed);
-            let was_connected = connected.load(Ordering::Relaxed);
-            match result {
-                Err(e) => finish(&inner, id, false, Err(e)),
-                Ok(()) if was_delivered => {
-                    // The chunk sender has no per-byte progress; on full delivery
-                    // mark the whole size moved so the history isn't "0 B". Read the
-                    // total in its own statement so the lock is released before
-                    // `set_progress` re-locks.
-                    let total = inner
-                        .transfers
-                        .lock()
-                        .unwrap()
-                        .get(&id)
-                        .map(|t| t.total_size);
-                    if let Some(total) = total {
-                        inner.set_progress(id, total);
-                    }
-                    finish(&inner, id, false, Ok(None));
-                }
-                // Nobody ever connected (stale presence / recipient vanished) →
-                // deposit to the mailbox so the file still lands later. First
-                // retract the now-useless live offer so the recipient doesn't see a
-                // dangling one whose accept would fail.
-                Ok(()) if !was_connected => {
-                    let _ = presence::retract_offer(
-                        &inner.client,
-                        &relay,
-                        &recipient_owned,
-                        &posted.id,
-                        &posted.poster_token,
-                    )
-                    .await;
-                    match deposit_offline_and_offer(
-                        &inner,
-                        &relay,
-                        &recipient_owned,
-                        &payload,
-                        &name,
-                    )
-                    .await
-                    {
-                        Ok(out) => {
-                            spawn_offline_confirm(&inner, id, relay.clone(), out.size, out.claim)
-                        }
-                        Err(e) => finish(&inner, id, false, Err(e)),
-                    }
-                }
-                // Connected but the loop ended without delivery = a user cancel.
-                Ok(()) => finish(&inner, id, true, Ok(None)),
-            }
-        });
+        ));
         Ok(id)
     }
 
@@ -962,10 +777,6 @@ const MAX_FINISHED_RETAINED: usize = 512;
 /// How often a listening client refreshes its presence beacon (< the relay's
 /// `PRESENCE_TTL` of ~30s, so it never lapses while online).
 const BEACON_REFRESH_SECS: u64 = 10;
-/// How long `send_to` waits for the recipient to show online before falling back
-/// to the offline mailbox, and how often it re-checks within that window.
-const PRESENCE_GRACE_SECS: u64 = 10;
-const PRESENCE_POLL_SECS: u64 = 2;
 /// TTL of an offline (mailbox) deposit + its inbox offer: long enough for the
 /// recipient to come back within a week.
 const OFFLINE_TTL_SECS: u64 = 7 * 24 * 3600;
@@ -983,6 +794,297 @@ const OFFER_STATUS_POLL_SECS: u64 = 2;
 const OFFLINE_CONFIRM_SECS: u64 = 90;
 const OFFLINE_CONFIRM_POLL_SECS: u64 = 3;
 
+/// How long to hold before re-trying the relay after it was unavailable/errored.
+const RELAY_RETRY_SECS: u64 = 15 * 60;
+/// How often to re-check the recipient's presence while a send is held.
+const WAITING_POLL_SECS: u64 = 15;
+
+/// Outcome of one live-P2P delivery attempt to a recipient believed online.
+enum LiveOutcome {
+    /// The recipient received the whole file.
+    Delivered,
+    /// Nobody actually connected (stale presence / they vanished) — fall back to
+    /// the relay, or keep waiting for them to reappear.
+    NotConnected,
+    /// The user cancelled the send.
+    Cancelled,
+    /// An unrecoverable error preparing or serving.
+    Fatal(anyhow::Error),
+}
+
+fn set_waiting(inner: &Arc<Inner>, id: u64, reason: &str) {
+    inner.set_status(id, TransferStatus::Waiting(reason.to_string()));
+    inner.emit(ManagerEvent::Waiting {
+        id,
+        reason: reason.to_string(),
+    });
+}
+
+/// Background delivery loop for a `send --to`. Prefers live P2P whenever the
+/// recipient is online; otherwise hands the file to the relay mailbox. If the
+/// relay can't take it, the send is *held* (`Waiting`) instead of failed:
+///
+/// * **too large** — never retried on the relay (it can only go P2P); the loop
+///   just keeps watching presence to deliver live.
+/// * **unreachable / error** — retried on the relay on a slow [`RELAY_RETRY_SECS`]
+///   interval, while presence is re-checked fast so a P2P window is never missed.
+///
+/// Ends (terminal state) only on delivery, a fatal error, a successful mailbox
+/// deposit, or user cancel.
+#[allow(clippy::too_many_arguments)]
+async fn deliver_to(
+    inner: Arc<Inner>,
+    id: u64,
+    cancel: CancellationToken,
+    relay: String,
+    recipient: PublicId,
+    payload: PathBuf,
+    name: String,
+    archive: bool,
+) {
+    use std::time::{Duration, Instant};
+    let mut too_big = false;
+    let mut next_relay_try = Instant::now();
+    loop {
+        if cancel.is_cancelled() {
+            finish(&inner, id, true, Ok(None));
+            return;
+        }
+
+        // 1) Recipient online → deliver live P2P.
+        let online = presence::check_online(&inner.client, &relay, &recipient)
+            .await
+            .unwrap_or(false);
+        if online {
+            match serve_live_once(
+                &inner, id, &cancel, &relay, &recipient, &payload, &name, archive,
+            )
+            .await
+            {
+                LiveOutcome::Delivered => {
+                    // The chunk sender has no per-byte progress; on full delivery
+                    // mark the whole size moved so history isn't "0 B".
+                    let total = inner
+                        .transfers
+                        .lock()
+                        .unwrap()
+                        .get(&id)
+                        .map(|t| t.total_size);
+                    if let Some(total) = total {
+                        inner.set_progress(id, total);
+                    }
+                    finish(&inner, id, false, Ok(None));
+                    return;
+                }
+                LiveOutcome::Cancelled => {
+                    finish(&inner, id, true, Ok(None));
+                    return;
+                }
+                LiveOutcome::Fatal(e) => {
+                    finish(&inner, id, false, Err(e));
+                    return;
+                }
+                LiveOutcome::NotConnected => {}
+            }
+        }
+
+        // 2) Try the relay mailbox — unless it already refused as too large, or
+        //    we're backing off after it was unavailable.
+        if !too_big && Instant::now() >= next_relay_try {
+            match deposit_offline_and_offer(&inner, &relay, &recipient, &payload, &name).await {
+                Ok(out) => {
+                    spawn_offline_confirm(&inner, id, relay.clone(), out.size, out.claim);
+                    return;
+                }
+                Err(flow::DepositError::TooLarge) => {
+                    too_big = true;
+                    set_waiting(
+                        &inner,
+                        id,
+                        "file too large for this relay — waiting for the recipient to come online for a direct transfer",
+                    );
+                }
+                Err(flow::DepositError::Fatal(e)) => {
+                    finish(&inner, id, false, Err(e));
+                    return;
+                }
+                Err(e @ flow::DepositError::Unavailable(_)) => {
+                    set_waiting(
+                        &inner,
+                        id,
+                        &format!(
+                            "{e} — retrying later, and delivering P2P as soon as the recipient is online"
+                        ),
+                    );
+                    next_relay_try = Instant::now() + Duration::from_secs(RELAY_RETRY_SECS);
+                }
+            }
+        }
+
+        // 3) Idle briefly, then re-check presence (bail immediately on cancel).
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                finish(&inner, id, true, Ok(None));
+                return;
+            }
+            _ = tokio::time::sleep(Duration::from_secs(WAITING_POLL_SECS)) => {}
+        }
+    }
+}
+
+/// One live-P2P delivery attempt to a recipient believed online: prepare the
+/// sealed send, post the offer, and serve it under a two-phase watchdog. Uses a
+/// child cancellation token so the watchdog can abandon *this attempt* (fall back)
+/// without cancelling the caller's user-cancel token.
+#[allow(clippy::too_many_arguments)]
+async fn serve_live_once(
+    inner: &Arc<Inner>,
+    id: u64,
+    cancel: &CancellationToken,
+    relay: &str,
+    recipient: &PublicId,
+    payload: &Path,
+    name: &str,
+    archive: bool,
+) -> LiveOutcome {
+    let session = match flow::prepare_send(
+        payload,
+        name,
+        archive,
+        Some((&inner.me, recipient)),
+        Some(relay.to_string()),
+        RelayChoice::from_env(),
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(e) => return LiveOutcome::Fatal(e.context("prepare send")),
+    };
+
+    let offer = Offer {
+        name: name.to_string(),
+        size: session.total_size,
+        chunks: session.chunks as u64,
+        ticket: session.ticket.clone(),
+    };
+    let posted = match presence::post_offer(
+        &inner.client,
+        relay,
+        recipient,
+        &inner.me,
+        &offer,
+        None,
+    )
+    .await
+    {
+        Ok(p) => p,
+        // Can't even notify them → treat as not-connected; the caller retries.
+        Err(_) => return LiveOutcome::NotConnected,
+    };
+    inner.set_status(id, TransferStatus::Active);
+
+    // Per-attempt child token: the watchdog cancels *this* to stop serving on
+    // fallback, leaving the caller's token (user cancel) untouched.
+    let attempt = cancel.child_token();
+    let connected = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let delivered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    let wd_attempt = attempt.clone();
+    let wd_connected = connected.clone();
+    let wd_inner = inner.clone();
+    let wd_relay = relay.to_string();
+    let wd_recipient = recipient.clone();
+    let wd_offer = posted.id.clone();
+    let wd_token = posted.poster_token.clone();
+    let watchdog = tokio::spawn(async move {
+        use std::time::{Duration, Instant};
+        let phase1 = Instant::now() + Duration::from_secs(LIVE_CONFIRM_SECS);
+        let mut seen = false;
+        while Instant::now() < phase1 {
+            if wd_connected.load(Ordering::Relaxed) {
+                return; // already connecting
+            }
+            if matches!(
+                presence::offer_status(
+                    &wd_inner.client,
+                    &wd_relay,
+                    &wd_recipient,
+                    &wd_offer,
+                    &wd_token,
+                )
+                .await,
+                Ok(presence::OfferStatus::Fetched) | Ok(presence::OfferStatus::Gone)
+            ) {
+                seen = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_secs(OFFER_STATUS_POLL_SECS)).await;
+        }
+        if !seen {
+            wd_attempt.cancel(); // stale presence -> abandon this attempt
+            return;
+        }
+        let phase2 = Instant::now() + Duration::from_secs(LIVE_CONNECT_SECS);
+        while Instant::now() < phase2 {
+            if wd_connected.load(Ordering::Relaxed) {
+                return; // connected -> keep serving
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        wd_attempt.cancel(); // seen but never connected -> abandon this attempt
+    });
+
+    let c = connected.clone();
+    let d = delivered.clone();
+    let stop = attempt.clone();
+    let inner_cb = inner.clone();
+    let result = session
+        .serve(attempt, move |ev| match ev {
+            SendEvent::ReceiverConnected => c.store(true, Ordering::Relaxed),
+            SendEvent::Progress { transferred, total } => {
+                inner_cb.set_progress(id, transferred);
+                inner_cb.emit(ManagerEvent::Progress {
+                    id,
+                    transferred,
+                    total_size: total,
+                });
+            }
+            SendEvent::Delivered => {
+                d.store(true, Ordering::Relaxed);
+                stop.cancel();
+            }
+            SendEvent::Peers { count } => inner_cb.set_download_peers(id, count),
+            SendEvent::Ready { .. }
+            | SendEvent::ReceiverDropped { .. }
+            | SendEvent::Backfilled
+            | SendEvent::BackfillFailed { .. }
+            | SendEvent::RelayCapped { .. } => {}
+        })
+        .await;
+    watchdog.abort();
+
+    if let Err(e) = result {
+        return LiveOutcome::Fatal(e);
+    }
+    if delivered.load(Ordering::Relaxed) {
+        return LiveOutcome::Delivered;
+    }
+    if cancel.is_cancelled() {
+        return LiveOutcome::Cancelled;
+    }
+    // Seen/served but nobody completed the pull → retract the dangling offer and
+    // report not-connected so the caller falls back to the relay / keeps waiting.
+    let _ = presence::retract_offer(
+        &inner.client,
+        relay,
+        recipient,
+        &posted.id,
+        &posted.poster_token,
+    )
+    .await;
+    LiveOutcome::NotConnected
+}
+
 /// What a mailbox deposit yields: the payload size + the claim to poll for delivery.
 struct DepositOutcome {
     size: u64,
@@ -998,7 +1100,7 @@ async fn deposit_offline_and_offer(
     recipient: &PublicId,
     payload: &Path,
     name: &str,
-) -> Result<DepositOutcome> {
+) -> std::result::Result<DepositOutcome, flow::DepositError> {
     let size = std::fs::metadata(payload).map(|m| m.len()).unwrap_or(0);
     let deposited = flow::deposit_offline(
         payload,
@@ -1009,8 +1111,7 @@ async fn deposit_offline_and_offer(
         1,
         None,
     )
-    .await
-    .context("deposit to mailbox")?;
+    .await?;
     let claim = deposited.ticket.claim.clone();
     let offer = Offer {
         name: name.to_string(),
@@ -1027,7 +1128,7 @@ async fn deposit_offline_and_offer(
         Some(OFFLINE_TTL_SECS),
     )
     .await
-    .context("deliver offer")?;
+    .map_err(|e| flow::DepositError::Unavailable(format!("deliver offer: {e:#}")))?;
     Ok(DepositOutcome { size, claim })
 }
 
@@ -1065,7 +1166,12 @@ fn spawn_offline_confirm(inner: &Arc<Inner>, id: u64, relay: String, size: u64, 
 fn prune_finished(transfers: &mut HashMap<u64, Transfer>, keep: usize) {
     let mut finished: Vec<u64> = transfers
         .iter()
-        .filter(|(_, t)| t.status != TransferStatus::Active)
+        .filter(|(_, t)| {
+            matches!(
+                t.status,
+                TransferStatus::Completed | TransferStatus::Cancelled | TransferStatus::Failed(_)
+            )
+        })
         .map(|(id, _)| *id)
         .collect();
     if finished.len() <= keep {

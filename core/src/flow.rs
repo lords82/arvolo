@@ -1236,6 +1236,31 @@ fn max_fetch_bytes() -> u64 {
 /// additionally wrapped under a password-derived key (E2E — the relay can never
 /// bypass it), and the recipient must supply the same password to
 /// [`fetch_offline`]. Returns the ticket plus a sender-only revoke token.
+/// Why an offline mailbox deposit couldn't be placed — lets callers react
+/// differently: [`TooLarge`](DepositError::TooLarge) will never fit (deliver live
+/// P2P instead), [`Unavailable`](DepositError::Unavailable) is transient (retry
+/// later), [`Fatal`](DepositError::Fatal) is a local, unrecoverable error.
+#[derive(Debug)]
+pub enum DepositError {
+    /// The relay refused the file as larger than its per-file cap.
+    TooLarge,
+    /// The relay was unreachable or returned a transient error. Human reason.
+    Unavailable(String),
+    /// A local, unrecoverable error (couldn't read or seal the file).
+    Fatal(anyhow::Error),
+}
+
+impl std::fmt::Display for DepositError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DepositError::TooLarge => write!(f, "the relay refused the file as too large"),
+            DepositError::Unavailable(m) => write!(f, "relay unavailable: {m}"),
+            DepositError::Fatal(e) => write!(f, "{e:#}"),
+        }
+    }
+}
+impl std::error::Error for DepositError {}
+
 pub async fn deposit_offline(
     path: &Path,
     recipient: &PublicId,
@@ -1244,17 +1269,25 @@ pub async fn deposit_offline(
     ttl: u64,
     max: u32,
     password: Option<&str>,
-) -> Result<Deposited> {
-    anyhow::ensure!(path.is_file(), "{} is not a file", path.display());
-    let plaintext = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
-    let sealed = seal(&plaintext, recipient, me, b"").context("encrypt")?;
+) -> std::result::Result<Deposited, DepositError> {
+    use DepositError::Fatal;
+    if !path.is_file() {
+        return Err(Fatal(anyhow::anyhow!("{} is not a file", path.display())));
+    }
+    let plaintext = std::fs::read(path)
+        .with_context(|| format!("read {}", path.display()))
+        .map_err(Fatal)?;
+    let sealed = seal(&plaintext, recipient, me, b"")
+        .context("encrypt")
+        .map_err(Fatal)?;
 
     // Optional outer password-wrap layer over the HPKE ciphertext.
     let (body, salt) = match password {
         Some(pw) if !pw.is_empty() => {
             let salt = random_pw_salt();
-            let wrapped =
-                wrap_with_password(pw, &salt, &sealed.ciphertext).context("wrap with password")?;
+            let wrapped = wrap_with_password(pw, &salt, &sealed.ciphertext)
+                .context("wrap with password")
+                .map_err(Fatal)?;
             (wrapped, salt.to_vec())
         }
         _ => (sealed.ciphertext, Vec::new()),
@@ -1266,7 +1299,7 @@ pub async fn deposit_offline(
 
     let relay = relay.trim_end_matches('/').to_string();
     let url = format!("{relay}/v1/deposit?ttl={ttl}&max={max}");
-    let claim = reqwest::Client::new()
+    let resp = reqwest::Client::new()
         .post(&url)
         .header(
             "x-arvolo-encapped-key",
@@ -1279,12 +1312,20 @@ pub async fn deposit_offline(
         .body(body)
         .send()
         .await
-        .context("deposit request")?
-        .error_for_status()
-        .context("relay rejected deposit")?
+        .map_err(|e| DepositError::Unavailable(e.to_string()))?;
+    let status = resp.status();
+    if status == reqwest::StatusCode::PAYLOAD_TOO_LARGE {
+        return Err(DepositError::TooLarge);
+    }
+    if !status.is_success() {
+        return Err(DepositError::Unavailable(format!(
+            "relay returned {status}"
+        )));
+    }
+    let claim = resp
         .text()
         .await
-        .context("read claim")?;
+        .map_err(|e| DepositError::Unavailable(e.to_string()))?;
 
     Ok(Deposited {
         ticket: OfflineTicket {

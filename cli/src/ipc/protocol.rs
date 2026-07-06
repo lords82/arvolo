@@ -169,6 +169,10 @@ pub enum EventDto {
     Deposited {
         id: u64,
     },
+    Waiting {
+        id: u64,
+        reason: String,
+    },
     Failed {
         id: u64,
         error: String,
@@ -190,6 +194,7 @@ fn status_str(s: &TransferStatus) -> String {
         TransferStatus::Active => "active".into(),
         TransferStatus::Completed => "completed".into(),
         TransferStatus::Deposited => "deposited".into(),
+        TransferStatus::Waiting(r) => format!("waiting: {r}"),
         TransferStatus::Cancelled => "cancelled".into(),
         TransferStatus::Failed(e) => format!("failed: {e}"),
     }
@@ -251,6 +256,10 @@ impl From<&ManagerEvent> for EventDto {
                 path: path.as_ref().map(|p| p.display().to_string()),
             },
             ManagerEvent::Deposited { id } => EventDto::Deposited { id: *id },
+            ManagerEvent::Waiting { id, reason } => EventDto::Waiting {
+                id: *id,
+                reason: reason.clone(),
+            },
             ManagerEvent::Failed { id, error } => EventDto::Failed {
                 id: *id,
                 error: error.clone(),

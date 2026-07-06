@@ -1897,6 +1897,14 @@ async fn push(
                         record_history(&manager, id, "deposited");
                         break;
                     }
+                    Ok(ManagerEvent::Waiting { id: eid, reason }) if eid == id => {
+                        eprintln!("\n⏳ held: {reason}");
+                        eprintln!(
+                            "   The daemon keeps trying in the background — see `arvolo transfers`."
+                        );
+                        record_history(&manager, id, &format!("waiting: {reason}"));
+                        break;
+                    }
                     Ok(ManagerEvent::Failed { id: eid, error }) if eid == id => {
                         eprintln!("\n✗ failed: {error}");
                         record_history(&manager, id, &format!("failed: {error}"));
@@ -2611,7 +2619,18 @@ async fn send_offline(
             if let Some(t) = &temp {
                 let _ = std::fs::remove_file(t);
             }
-            return Err(e);
+            match e {
+                flow::DepositError::TooLarge => anyhow::bail!(
+                    "the relay refused this file — it's larger than the mailbox allows. \
+                     Send it directly instead (`arvolo send …` P2P while both devices are \
+                     online), or use a private relay with a higher limit."
+                ),
+                flow::DepositError::Unavailable(m) => anyhow::bail!(
+                    "the relay is unavailable ({m}). Try again later, or check ARVOLO_RELAY \
+                     / --relay. A direct P2P send works while both devices are online."
+                ),
+                flow::DepositError::Fatal(err) => return Err(err),
+            }
         }
     };
     if let Some(t) = &temp {
