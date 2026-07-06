@@ -37,6 +37,11 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 tokio-util = { version = "0.7", features = ["io"] }
 tar = "0.4"
 
+# Unix `statvfs` for a best-effort pre-flight free-space check before a download
+# (already in the tree transitively; unix-only, so non-unix skips the check).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tokio = { workspace = true }
 tempfile = "3"

@@ -105,12 +105,109 @@ pub enum RecvEvent {
     Warning {
         message: String,
     },
+    /// The download stopped before completing on an unrecoverable *local*
+    /// condition (e.g. the disk is full) — not a provider/network fault. The
+    /// partial output + resume sidecar are left on disk; re-run to resume once
+    /// the condition is cleared. `reason` is a human-facing explanation.
+    Paused {
+        reason: String,
+    },
     /// Swarm progress: how many peers we currently know, and how many pieces we've
     /// pulled from peers (vs. the origin/relay). Emitted while swarming.
     Swarm {
         peers: usize,
         pieces_from_peers: u64,
     },
+}
+
+/// How a [`recv_chunked`] call ended. Distinguishes a finished download from one
+/// that stopped early but is *resumable* (its partial output + sidecar remain on
+/// disk), so a caller doesn't mistake a paused/cancelled transfer for a complete
+/// one (and, e.g., seed a partial file).
+pub enum RecvOutcome {
+    /// Fully downloaded, verified, and finalized at this path (the unpacked
+    /// directory for an archive, else the output file).
+    Completed(PathBuf),
+    /// Stopped before completing because the caller's cancellation token fired.
+    /// The partial output + resume sidecar remain on disk — re-run to resume.
+    Cancelled(PathBuf),
+    /// Stopped before completing on an unrecoverable *local* condition (e.g. the
+    /// disk is full). Not a provider/network fault and not a user cancel: the
+    /// partial output + sidecar remain, so re-running resumes once it's cleared.
+    Paused { output: PathBuf, reason: String },
+}
+
+impl RecvOutcome {
+    /// The output path in every outcome (finalized, or the resumable partial).
+    pub fn path(&self) -> &Path {
+        match self {
+            RecvOutcome::Completed(p) | RecvOutcome::Cancelled(p) => p,
+            RecvOutcome::Paused { output, .. } => output,
+        }
+    }
+    /// Consumes the outcome, yielding its output path.
+    pub fn into_path(self) -> PathBuf {
+        match self {
+            RecvOutcome::Completed(p) | RecvOutcome::Cancelled(p) => p,
+            RecvOutcome::Paused { output, .. } => output,
+        }
+    }
+    /// True only for a fully-completed download (not cancelled, not paused).
+    pub fn is_complete(&self) -> bool {
+        matches!(self, RecvOutcome::Completed(_))
+    }
+}
+
+/// True if `e` (or anything in its source chain) is a *local* filesystem error
+/// that won't fix itself by retrying: the disk is full (`ENOSPC`), a quota is
+/// exhausted (`EDQUOT`), or the target is read-only (`EROFS`). Such an error is
+/// not a provider/network failure — reassigning the piece to another peer would
+/// just spin — so the receiver pauses (resumably) instead. Matched by raw errno
+/// so it stays correct regardless of the toolchain's `io::ErrorKind` coverage.
+fn is_local_storage_error(e: &anyhow::Error) -> bool {
+    const ENOSPC: i32 = 28;
+    const EROFS: i32 = 30;
+    // EDQUOT differs across platforms (Linux 122, macOS/BSD 69).
+    #[cfg(target_os = "linux")]
+    const EDQUOT: i32 = 122;
+    #[cfg(not(target_os = "linux"))]
+    const EDQUOT: i32 = 69;
+    e.chain().any(|c| {
+        c.downcast_ref::<std::io::Error>()
+            .and_then(|io| io.raw_os_error())
+            .is_some_and(|errno| matches!(errno, ENOSPC | EROFS | EDQUOT))
+    })
+}
+
+/// Best-effort free space (bytes) on the filesystem holding `path`, or `None` if
+/// it can't be determined (non-unix, or the syscall fails). Used only for a
+/// *pre-flight* check — an unknown or wrong figure must never block a valid
+/// download, so callers treat `None` as "proceed".
+#[cfg(unix)]
+fn available_space(path: &Path) -> Option<u64> {
+    use std::os::unix::ffi::OsStrExt;
+    let cpath = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    // SAFETY: `cpath` is a valid NUL-terminated C string; `statvfs` fills `stat`
+    // only on success (returns 0), and we read it only then.
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statvfs(cpath.as_ptr(), &mut stat) } != 0 {
+        return None;
+    }
+    // Blocks available to an unprivileged process × fragment size.
+    Some((stat.f_bavail as u64).saturating_mul(stat.f_frsize as u64))
+}
+
+#[cfg(not(unix))]
+fn available_space(_path: &Path) -> Option<u64> {
+    None
+}
+
+/// Human-facing reason for a disk-full [`RecvEvent::Paused`] / [`RecvOutcome::Paused`].
+fn disk_full_reason(output: &Path) -> String {
+    format!(
+        "not enough disk space to write {} — free up space and re-run to resume",
+        output.display()
+    )
 }
 
 // ---- send -----------------------------------------------------------------
@@ -442,6 +539,38 @@ pub(crate) fn seeding_enabled() -> bool {
     )
 }
 
+/// Path of the resume sidecar: a bitfield of the pieces already verified and
+/// written into `download` (parallel to the sparse output an out-of-order piece
+/// swarm produces). It is the sole resume state — there is no length-based resume.
+fn sidecar_path(download: &Path) -> PathBuf {
+    let mut s = download.as_os_str().to_os_string();
+    s.push(".arvhave");
+    PathBuf::from(s)
+}
+
+/// Read the resume sidecar for `download` into a `total`-bit bitfield. A missing or
+/// wrong-sized sidecar yields an empty bitfield (start fresh).
+fn read_sidecar(download: &Path, total: usize) -> Vec<u8> {
+    let want = crate::swarm::bitfield_bytes(total);
+    match std::fs::read(sidecar_path(download)) {
+        Ok(b) if b.len() == want => b,
+        _ => crate::swarm::bitfield_new(total),
+    }
+}
+
+/// Write the resume sidecar (owner-only on unix). Best-effort: a failed write only
+/// costs a re-fetch of some pieces on the next run, never correctness.
+fn write_sidecar(download: &Path, bitfield: &[u8]) {
+    let path = sidecar_path(download);
+    if std::fs::write(&path, bitfield).is_ok() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        }
+    }
+}
+
 /// Remove any `{download}.arvpart.*` per-chunk staging files.
 fn remove_stage_files(download: &Path) {
     let Some(name) = download.file_name().and_then(|n| n.to_str()) else {
@@ -656,12 +785,11 @@ pub(crate) fn spawn_swarm_coordinator(
     relay_http: String,
     swarm_id: String,
     my_addr: String,
-    have: Arc<std::sync::atomic::AtomicUsize>,
+    have: crate::chunked::HaveBitfield,
     n_chunks: usize,
     peers: SwarmPeers,
     cancel: CancellationToken,
 ) {
-    use std::sync::atomic::Ordering;
     use std::time::Duration;
     let url = format!(
         "{}/v1/swarm/{}/announce",
@@ -673,16 +801,15 @@ pub(crate) fn spawn_swarm_coordinator(
             if cancel.is_cancelled() {
                 break;
             }
-            let h = have.load(Ordering::Relaxed).min(n_chunks);
-            let mut bf = crate::swarm::bitfield_new(n_chunks);
-            for i in 0..h {
-                crate::swarm::bitfield_set(&mut bf, i);
-            }
+            // Announce the *actual* bitfield of verified pieces (possibly disjoint),
+            // so peers know exactly which pieces we can serve.
+            let bf = have.lock().unwrap().clone();
+            let count = crate::swarm::bitfield_count(&bf) as usize;
             let req = crate::swarm::AnnounceReq {
                 node_addr: my_addr.clone(),
                 bitfield: bf,
                 n_chunks: n_chunks as u32,
-                event: if h >= n_chunks {
+                event: if count >= n_chunks {
                     "completed"
                 } else {
                     "progress"
@@ -740,7 +867,7 @@ pub async fn recv_chunked(
     relay: RelayChoice,
     cancel: CancellationToken,
     on: impl Fn(RecvEvent) + Send + Sync,
-) -> Result<PathBuf> {
+) -> Result<RecvOutcome> {
     use std::collections::{HashMap, HashSet};
     use std::io::{Read, Seek, SeekFrom, Write};
     use tokio::task::JoinSet;
@@ -816,13 +943,41 @@ pub async fn recv_chunked(
         .truncate(false)
         .open(&download)
         .with_context(|| format!("open {}", download.display()))?;
-    let existing = file.metadata()?.len();
-    let start = ((existing / t.chunk_size as u64) as usize).min(t.chunks.len());
+    // Resume from the sidecar bitfield of already-verified pieces. This tolerates
+    // the sparse, out-of-order output a piece-swarm produces (a length-based resume
+    // cannot). An absent/mismatched sidecar starts fresh — any bytes already on disk
+    // are overwritten as pieces commit.
+    let have_bits = read_sidecar(&download, t.chunks.len());
+    let resuming_from = crate::swarm::bitfield_count(&have_bits) as usize;
+
+    // Pre-flight: if the filesystem plainly lacks room for what's left to fetch,
+    // pause up front instead of downloading gigabytes only to fill the disk
+    // partway. Best-effort — an unknown free-space figure (non-unix / syscall
+    // failure) never blocks the transfer, and a real mid-transfer ENOSPC is still
+    // caught and paused. `resuming_from * chunk_size` over-counts committed bytes
+    // (the last piece may be short), which only makes this *less* eager to pause.
+    let remaining_bytes = t
+        .total_size
+        .saturating_sub(resuming_from as u64 * t.chunk_size as u64);
+    if let Some(avail) = available_space(&download) {
+        // One chunk of headroom covers the transient per-piece staging file.
+        if avail < remaining_bytes.saturating_add(t.chunk_size as u64) {
+            let reason = disk_full_reason(&download);
+            on(RecvEvent::Paused {
+                reason: reason.clone(),
+            });
+            return Ok(RecvOutcome::Paused {
+                output: download,
+                reason,
+            });
+        }
+    }
+
     on(RecvEvent::Started {
         total: t.chunks.len(),
-        resuming_from: start,
+        resuming_from,
         total_size: t.total_size,
-        resumed_bytes: start as u64 * t.chunk_size as u64,
+        resumed_bytes: resuming_from as u64 * t.chunk_size as u64,
     });
 
     let receiver = ChunkReceiver::open(relay.clone()).await?;
@@ -856,10 +1011,10 @@ pub async fn recv_chunked(
     // delivery mode; the swarm_id derives from the (sealed) ticket's chunk hashes,
     // so it stays secret to whoever opened the ticket and no stranger can join.
     // We seed the pieces we've verified (via `ChunkSeeder`) and discover/pull from
-    // other peers through the relay tracker. `have` is the count of contiguous
-    // committed pieces — both the seeder (what it may serve) and the announce
-    // bitfield read it; the commit loop bumps it.
-    let have = Arc::new(std::sync::atomic::AtomicUsize::new(start));
+    // other peers through the relay tracker. `have_bf` is a **bitfield of verified
+    // pieces** (arbitrary/disjoint, not a prefix) — the seeder serves any set bit
+    // and the announce advertises the whole bitfield; the commit path sets bits.
+    let have_bf: crate::chunked::HaveBitfield = Arc::new(Mutex::new(have_bits));
     let peers: SwarmPeers = Arc::new(Mutex::new(Vec::new()));
     // Peers (by endpoint id) that served corrupt bytes; filtered out of future
     // provider lists. Populated by `fetch_to_file` on an integrity failure.
@@ -876,7 +1031,7 @@ pub async fn recv_chunked(
                 key,
                 &t.chunks,
                 total_chunks,
-                have.clone(),
+                have_bf.clone(),
                 relay.clone(),
             )
             .await
@@ -889,7 +1044,7 @@ pub async fn recv_chunked(
                             r.http.clone(),
                             crate::swarm::swarm_id(&t.chunks, t.total_size),
                             my_addr,
-                            have.clone(),
+                            have_bf.clone(),
                             total_chunks as usize,
                             peers.clone(),
                             swarm_cancel.clone(),
@@ -904,11 +1059,12 @@ pub async fn recv_chunked(
         }
     }
 
-    // Fetch up to `concurrency` chunks in parallel (pipelining hides latency),
-    // but commit them to the output **in order** so the file grows contiguously
-    // and the length-based resume above stays correct. Each in-flight fetch
-    // stages its ciphertext in a per-index `.arvpart.{i}` file (BLAKE3-verified
-    // by `fetch_to_file`); the committer then decrypts and positions each chunk.
+    // Fetch up to `concurrency` chunks in parallel (pipelining hides latency) and
+    // commit each **out of order** the moment it's verified: decrypt it, write it at
+    // its final offset `i*chunk_size` (a sparse file until complete), set its bit in
+    // `have_bf`, and persist the sidecar. Disjoint pieces are what let a user's
+    // devices swap different pieces. Each in-flight fetch stages its ciphertext in a
+    // per-index `.arvpart.{i}` file (BLAKE3-verified by `fetch_one`).
     // Provider order is re-evaluated live per fetch attempt (see `ordered_providers`).
     let concurrency = fetch_concurrency();
     let total = t.chunks.len();
@@ -964,11 +1120,21 @@ pub async fn recv_chunked(
     // else `Some(Ok/Err)`.
     #[allow(clippy::type_complexity)]
     let mut set: JoinSet<(usize, String, PathBuf, Option<Result<()>>)> = JoinSet::new();
-    let mut remaining: HashSet<usize> = (start..total).collect(); // not yet started
-    let mut next_commit = start;
-    let mut satisfied: HashSet<usize> = HashSet::new();
-    // A committed-pending piece's stage file + which source it came from.
-    let mut winner_stage: HashMap<usize, (PathBuf, ChunkSource)> = HashMap::new();
+    // Pieces still to fetch: everything not already present per the resume sidecar.
+    let mut remaining: HashSet<usize> = {
+        let bf = have_bf.lock().unwrap();
+        (0..total)
+            .filter(|&i| !crate::swarm::bitfield_has(&bf, i))
+            .collect()
+    };
+    // Pieces already committed (seeded from the sidecar), so a late duplicate fetch
+    // is discarded rather than re-committed.
+    let mut satisfied: HashSet<usize> = {
+        let bf = have_bf.lock().unwrap();
+        (0..total)
+            .filter(|&i| crate::swarm::bitfield_has(&bf, i))
+            .collect()
+    };
     let mut in_flight: HashMap<String, usize> = HashMap::new(); // provider id -> outstanding
     let mut piece_srcs: HashMap<usize, HashSet<String>> = HashMap::new(); // piece -> providers fetching it
     let mut piece_cancel: HashMap<usize, CancellationToken> = HashMap::new();
@@ -982,16 +1148,28 @@ pub async fn recv_chunked(
         // peers); once only the last few pieces remain, also give an in-flight piece
         // a second/third source (endgame) so a slow provider can't stall the finish.
         while set.len() < concurrency && !cancel.is_cancelled() {
-            // Phase 1: a fresh, rarest (fewest-provider) piece that isn't backed off.
-            let fresh = remaining
-                .iter()
-                .copied()
-                .filter(|i| piece_backoff.get(i).map(|t| *t <= now).unwrap_or(true))
-                .filter_map(|i| {
-                    let p = providers_having(i, &cooldown, now);
-                    (!p.is_empty()).then_some((i, p))
+            // Phase 1: a fresh piece, rarest-first (fewest providers) with a RANDOM
+            // tie-break among equally-rare pieces. Because the origin has every
+            // piece, a piece a peer already holds has one more provider than one it
+            // lacks, so rarest-first already steers each device toward pieces its
+            // peers are missing; the random tie-break stops two devices in identical
+            // state from picking the same piece, spreading distinct pieces faster.
+            let fresh = {
+                use rand::Rng;
+                let mut cands: Vec<(usize, Vec<(String, iroh::EndpointAddr)>)> = remaining
+                    .iter()
+                    .copied()
+                    .filter(|i| piece_backoff.get(i).map(|t| *t <= now).unwrap_or(true))
+                    .filter_map(|i| {
+                        let p = providers_having(i, &cooldown, now);
+                        (!p.is_empty()).then_some((i, p))
+                    })
+                    .collect();
+                cands.iter().map(|(_, p)| p.len()).min().map(|min| {
+                    cands.retain(|(_, p)| p.len() == min);
+                    cands.swap_remove(rand::rng().random_range(0..cands.len()))
                 })
-                .min_by_key(|(_, p)| p.len());
+            };
             let (i, provs, is_fresh) = if let Some((i, p)) = fresh {
                 (i, p, true)
             } else {
@@ -1072,7 +1250,7 @@ pub async fn recv_chunked(
             // Nothing assignable right now (every source for the remaining pieces is
             // cooled down, or no provider has them yet) — wait briefly, then retry.
             tokio::select! {
-                _ = cancel.cancelled() => { receiver.close().await; return Ok(download); }
+                _ = cancel.cancelled() => { receiver.close().await; return Ok(RecvOutcome::Cancelled(download)); }
                 _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {}
             }
             continue;
@@ -1083,7 +1261,7 @@ pub async fn recv_chunked(
                 // Partial stages are left on disk and can be resumed later.
                 set.shutdown().await;
                 receiver.close().await;
-                return Ok(download);
+                return Ok(RecvOutcome::Cancelled(download));
             }
             r = set.join_next() => r,
         };
@@ -1121,10 +1299,100 @@ pub async fn recv_chunked(
                         i + 1,
                         pid.chars().take(12).collect::<String>()
                     );
-                    winner_stage.insert(i, (stage, source));
+                    // Commit out of order: decrypt, write at the final offset, then
+                    // mark the bit (only after the bytes are flushed) and persist the
+                    // sidecar so a restart resumes exactly the missing pieces.
+                    let mut ct = Vec::new();
+                    std::fs::File::open(&stage)
+                        .with_context(|| format!("open {}", stage.display()))?
+                        .read_to_end(&mut ct)?;
+                    let plain = open_chunk(&key, i as u32, total_chunks, &ct)
+                        .with_context(|| format!("decrypt chunk {}", i + 1))?;
+                    file.seek(SeekFrom::Start(i as u64 * t.chunk_size as u64))?;
+                    if let Err(io) = file.write_all(&plain).and_then(|()| file.flush()) {
+                        let e = anyhow::Error::new(io).context("write chunk");
+                        // Disk full mid-commit: pause resumably (the piece isn't marked
+                        // in the bitfield, so a resume re-fetches it) instead of aborting.
+                        if is_local_storage_error(&e) {
+                            let reason = disk_full_reason(&download);
+                            on(RecvEvent::Paused {
+                                reason: reason.clone(),
+                            });
+                            receiver.close().await;
+                            return Ok(RecvOutcome::Paused {
+                                output: download,
+                                reason,
+                            });
+                        }
+                        return Err(e);
+                    }
+                    let _ = std::fs::remove_file(&stage);
+                    let _ = std::fs::remove_file(stage_path(i));
+                    for n in 1..=ENDGAME_PARALLEL {
+                        let _ = std::fs::remove_file(stage_dup(i, n));
+                    }
+                    piece_cancel.remove(&i);
+                    piece_srcs.remove(&i);
+                    piece_backoff.remove(&i);
+                    remaining.remove(&i);
+                    {
+                        let mut bf = have_bf.lock().unwrap();
+                        crate::swarm::bitfield_set(&mut bf, i);
+                        write_sidecar(&download, &bf);
+                    }
+                    on(RecvEvent::Chunk {
+                        index: i,
+                        total,
+                        source,
+                        bytes: plain.len() as u64,
+                    });
+                    // Ack to the sender (best-effort, via the supervisor — dropped
+                    // while the control channel is down, resumed on reconnect).
+                    if let Some(tx) = &ack_tx {
+                        let _ = tx.send(i as u32);
+                    }
+                    // Free relay-backfilled chunks as we take them, UNLESS swarming —
+                    // then keep the relay's copy so other peers can still fetch it.
+                    if !swarming {
+                        if let Some(r) = &t.relay {
+                            let _ = client
+                                .post(format!(
+                                    "{}/v1/release/{}/{}",
+                                    r.http.trim_end_matches('/'),
+                                    r.token,
+                                    t.chunks[i]
+                                ))
+                                .send()
+                                .await;
+                        }
+                    }
+                    // Surface swarm metrics (peer count + pieces pulled from peers).
+                    if swarming {
+                        on(RecvEvent::Swarm {
+                            peers: peers.lock().unwrap().len(),
+                            pieces_from_peers: from_peers
+                                .load(std::sync::atomic::Ordering::Relaxed),
+                        });
+                    }
                 }
             }
             Some(Err(e)) => {
+                // A local, unrecoverable filesystem error (disk full / quota / read-only)
+                // is NOT a provider fault: reassigning the piece to another peer would
+                // just spin without progress. Stop cleanly and resumably — the partial
+                // output + sidecar stay on disk — and report a pause to the caller.
+                if is_local_storage_error(&e) {
+                    let _ = std::fs::remove_file(&stage);
+                    let reason = disk_full_reason(&download);
+                    on(RecvEvent::Paused {
+                        reason: reason.clone(),
+                    });
+                    receiver.close().await;
+                    return Ok(RecvOutcome::Paused {
+                        output: download,
+                        reason,
+                    });
+                }
                 // This provider failed: cool it down briefly, and re-queue the piece
                 // if no other source is still fetching it.
                 let now = std::time::Instant::now();
@@ -1143,72 +1411,14 @@ pub async fn recv_chunked(
                 }
             }
         }
-
-        // Commit the contiguous prefix, reading each piece from its winning stage.
-        while let Some((sp, source)) = winner_stage.remove(&next_commit) {
-            let i = next_commit;
-            let mut ct = Vec::new();
-            std::fs::File::open(&sp)
-                .with_context(|| format!("open {}", sp.display()))?
-                .read_to_end(&mut ct)?;
-            // Ciphertext (providers never see plaintext); already BLAKE3-verified.
-            let plain = open_chunk(&key, i as u32, total_chunks, &ct)
-                .with_context(|| format!("decrypt chunk {}", i + 1))?;
-            file.seek(SeekFrom::Start(i as u64 * t.chunk_size as u64))?;
-            file.write_all(&plain)?;
-            // Clean up this piece's stage files (winner + any endgame duplicates).
-            let _ = std::fs::remove_file(&sp);
-            let _ = std::fs::remove_file(stage_path(i));
-            for n in 1..=ENDGAME_PARALLEL {
-                let _ = std::fs::remove_file(stage_dup(i, n));
-            }
-            piece_cancel.remove(&i);
-            piece_srcs.remove(&i);
-            piece_backoff.remove(&i);
-            on(RecvEvent::Chunk {
-                index: i,
-                total,
-                source,
-                bytes: plain.len() as u64,
-            });
-            // Ack to the sender (best-effort, via the supervisor — dropped while
-            // the control channel is down, resumed on reconnect).
-            if let Some(tx) = &ack_tx {
-                let _ = tx.send(i as u32);
-            }
-            // Free relay-backfilled chunks as we take them, UNLESS swarming — then
-            // we keep the relay's copy so other peers can still fetch it.
-            if !swarming {
-                if let Some(r) = &t.relay {
-                    let _ = client
-                        .post(format!(
-                            "{}/v1/release/{}/{}",
-                            r.http.trim_end_matches('/'),
-                            r.token,
-                            t.chunks[i]
-                        ))
-                        .send()
-                        .await;
-                }
-            }
-            next_commit += 1;
-            // Publish the newly-committed contiguous prefix so the seeder can serve
-            // it and the tracker announce advertises it.
-            have.store(next_commit, std::sync::atomic::Ordering::Relaxed);
-            // Surface swarm metrics (current peer count + pieces pulled from peers).
-            if swarming {
-                on(RecvEvent::Swarm {
-                    peers: peers.lock().unwrap().len(),
-                    pieces_from_peers: from_peers.load(std::sync::atomic::Ordering::Relaxed),
-                });
-            }
-        }
     }
     // Cancelled before completing (e.g. the token was already tripped): leave the
-    // partial output as-is for a later resume, without finalizing its size.
-    if cancel.is_cancelled() && next_commit < total {
+    // partial output (+ sidecar) as-is for a later resume, without finalizing.
+    if cancel.is_cancelled()
+        && crate::swarm::bitfield_count(&have_bf.lock().unwrap()) < total as u32
+    {
         receiver.close().await;
-        return Ok(download);
+        return Ok(RecvOutcome::Cancelled(download));
     }
     // Stop the control supervisor (drops the ack channel and closes the connection).
     ctrl_cancel.cancel();
@@ -1216,6 +1426,8 @@ pub async fn recv_chunked(
     // Finalize the file so the seeder serves the last piece at its true length.
     file.set_len(t.total_size)?;
     drop(file);
+    // Download complete — the resume sidecar is no longer needed.
+    let _ = std::fs::remove_file(sidecar_path(&download));
     // Seed-after-complete: a fully-downloaded peer keeps serving the swarm for a
     // while (the coordinator keeps announcing, now as a complete seeder). Opt-in
     // via ARVOLO_SEED_AFTER=<seconds> (0/unset = off) so a finished transfer
@@ -1259,12 +1471,12 @@ pub async fn recv_chunked(
             let _ = std::fs::remove_file(&download);
         }
         on(RecvEvent::Saved { path: dir.clone() });
-        Ok(dir)
+        Ok(RecvOutcome::Completed(dir))
     } else {
         on(RecvEvent::Saved {
             path: download.clone(),
         });
-        Ok(download)
+        Ok(RecvOutcome::Completed(download))
     }
 }
 
@@ -1750,6 +1962,44 @@ fn default_from_name(name: &str, chunks: &[crate::reexport::Hash]) -> PathBuf {
     match base {
         Some(n) => PathBuf::from(n),
         None => default_out(&chunks.first().map(|h| h.to_string()).unwrap_or_default()),
+    }
+}
+
+#[cfg(test)]
+mod storage_error_tests {
+    use super::*;
+
+    fn os_err(errno: i32) -> anyhow::Error {
+        anyhow::Error::new(std::io::Error::from_raw_os_error(errno))
+    }
+
+    // ENOSPC (disk full), EROFS (read-only fs) and EDQUOT (over quota) are the
+    // local, non-retryable conditions that should trigger a pause.
+    #[test]
+    fn recognizes_local_storage_errnos() {
+        assert!(is_local_storage_error(&os_err(28)), "ENOSPC");
+        assert!(is_local_storage_error(&os_err(30)), "EROFS");
+        #[cfg(target_os = "linux")]
+        assert!(is_local_storage_error(&os_err(122)), "EDQUOT (linux)");
+        #[cfg(not(target_os = "linux"))]
+        assert!(is_local_storage_error(&os_err(69)), "EDQUOT (bsd/macos)");
+    }
+
+    // A network/other error must NOT be mistaken for a disk-full pause.
+    #[test]
+    fn ignores_non_storage_errors() {
+        assert!(!is_local_storage_error(&os_err(2)), "ENOENT");
+        assert!(!is_local_storage_error(&anyhow::anyhow!(
+            "connect chunk provider: timeout"
+        )));
+    }
+
+    // The classifier walks the whole source chain, so a disk-full error still
+    // counts once it's been wrapped with `.context(...)` (as the commit path does).
+    #[test]
+    fn detects_storage_error_through_context() {
+        let wrapped = os_err(28).context("write chunk").context("commit piece 7");
+        assert!(is_local_storage_error(&wrapped));
     }
 }
 

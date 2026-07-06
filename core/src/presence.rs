@@ -58,6 +58,11 @@ pub struct Offer {
     /// [`crate::flow::fetch_offline`] when the sender was offline). Never shown to
     /// the user; the accept path picks the fetcher by ticket type.
     pub ticket: String,
+    /// An optional short note the sender attached (`send --to --note "…"`). Empty
+    /// when none. It rides *inside* the HPKE-sealed offer, so it's E2E-encrypted and
+    /// sender-authenticated exactly like the ticket — the relay never sees it.
+    #[serde(default)]
+    pub note: String,
 }
 
 /// The on-relay wire form of a deposited offer. The sender's public key travels
@@ -636,6 +641,7 @@ mod tests {
             size: 1234,
             chunks: 1,
             ticket: "arvc-fake".into(),
+            note: "see page 4".into(),
         };
         let plaintext = postcard::to_allocvec(&offer).unwrap();
         let sealed = seal(&plaintext, &recipient.public(), &sender, OFFER_AAD).unwrap();

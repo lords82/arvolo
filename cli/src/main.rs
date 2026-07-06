@@ -169,6 +169,10 @@ enum Command {
         /// online (send-and-forget with a shareable code).
         #[arg(long)]
         ticket: bool,
+        /// With `--to`: attach a short note delivered *with* the file — it rides
+        /// inside the E2E-sealed offer (the relay never sees it).
+        #[arg(long, short = 'm')]
+        note: Option<String>,
         /// Produce a public browser **download link** instead (anyone with the
         /// link decrypts it client-side). `--to` is not used.
         #[arg(long)]
@@ -437,6 +441,7 @@ async fn main() -> Result<()> {
             use_http,
             to,
             ticket,
+            note,
             link,
             ttl,
             max,
@@ -445,7 +450,7 @@ async fn main() -> Result<()> {
             qr,
         } => {
             send(
-                paths, resume, code, relay, use_http, to, ticket, link, ttl, max, password,
+                paths, resume, code, relay, use_http, to, ticket, note, link, ttl, max, password,
                 foreground, qr,
             )
             .await
@@ -1332,7 +1337,7 @@ async fn listen(
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 };
                 match ev {
-                    ManagerEvent::OfferReceived { id, from, name, size } => {
+                    ManagerEvent::OfferReceived { id, from, name, size, note } => {
                         let from_b32 = encode_id(&from);
                         let status = book::sender_status(&from_b32);
                         eprintln!("\n📨 Incoming file offer:");
@@ -1340,6 +1345,9 @@ async fn listen(
                                   if status.verified { " ✓ verified" } else { "" });
                         eprintln!("   fingerprint: {}", from.fingerprint());
                         eprintln!("   file: {name}  ({})", human_size(size));
+                        if !note.is_empty() {
+                            eprintln!("   💬 note: {note}");
+                        }
 
                         let accept = if yes {
                             true
@@ -1419,6 +1427,9 @@ async fn handle_attached_offer(
         if status.verified { " ✓ verified" } else { "" }
     );
     eprintln!("   file: {}  ({})", offer.name, human_size(offer.size));
+    if !offer.note.is_empty() {
+        eprintln!("   💬 note: {}", offer.note);
+    }
 
     let accept = if policy.yes {
         true
@@ -1477,10 +1488,10 @@ async fn listen_attached(
             _ = cancel.cancelled() => break,
             ev = events.next() => {
                 match ev {
-                    Ok(Some(EventDto::OfferReceived { id, from, name, size })) => {
+                    Ok(Some(EventDto::OfferReceived { id, from, name, size, note })) => {
                         handle_attached_offer(
                             &mut client,
-                            OfferDto { id, from, name, size },
+                            OfferDto { id, from, name, size, note },
                             policy,
                         ).await;
                     }
@@ -1596,6 +1607,7 @@ async fn daemon(
                         from,
                         name,
                         size,
+                        note,
                     }) => {
                         let from_b32 = encode_id(&from);
                         // Supersede any older parked offer for the same (sender, file).
@@ -1642,6 +1654,7 @@ async fn daemon(
                                     from: from_b32,
                                     name,
                                     size,
+                                    note,
                                 },
                             );
                         }
@@ -1902,6 +1915,7 @@ async fn push_via_daemon(
     mut client: ipc::client::DaemonClient,
     paths: Vec<PathBuf>,
     to: String,
+    note: String,
 ) -> Result<()> {
     // The daemon resolves paths on *its own* cwd (e.g. `/` under systemd), not
     // ours — so absolutize here, relative to the client's cwd, and validate the
@@ -1917,7 +1931,7 @@ async fn push_via_daemon(
         .context("no such file or folder to push")?;
     eprintln!("Handing off to the daemon (sending to {to})…");
     let id = client
-        .push(to, paths_s)
+        .push(to, paths_s, note)
         .await
         .context("daemon rejected the push")?;
     println!(
@@ -1932,6 +1946,7 @@ async fn push(
     to: String,
     relay: Option<String>,
     use_http: bool,
+    note: &str,
 ) -> Result<()> {
     anyhow::ensure!(
         !paths.is_empty(),
@@ -1943,7 +1958,7 @@ async fn push(
     #[cfg(unix)]
     {
         if let Some(client) = daemon_client().await {
-            return push_via_daemon(client, paths, to).await;
+            return push_via_daemon(client, paths, to, note.to_string()).await;
         }
     }
 
@@ -1978,7 +1993,7 @@ async fn push(
     }
     eprintln!("Sending offer to {to}… (Ctrl-C to abort)\n");
     let id = manager
-        .send_to(&recipient, payload, name.clone(), archive)
+        .send_to(&recipient, payload, name.clone(), archive, note.to_string())
         .await
         .inspect_err(|_| {
             if let Some(t) = &temp {
@@ -2061,6 +2076,7 @@ async fn send(
     use_http: bool,
     to: Option<String>,
     ticket_mode: bool,
+    note: Option<String>,
     link: bool,
     ttl: u64,
     max: Option<u32>,
@@ -2068,6 +2084,17 @@ async fn send(
     foreground: bool,
     qr: bool,
 ) -> Result<()> {
+    // A note only rides a `--to` send; cap it so it fits comfortably in the offer.
+    let note = {
+        let n = note.unwrap_or_default();
+        anyhow::ensure!(n.len() <= 4096, "--note is too long (max 4096 bytes)");
+        if !n.is_empty() && to.is_none() {
+            eprintln!("note: --note only applies to a `--to` send — ignoring it.");
+            String::new()
+        } else {
+            n
+        }
+    };
     // Resume short-circuits the normal flow: re-serve a previous send so the
     // ticket you already handed out stays valid after the sender restarted.
     // Recovery is pure P2P. The argument is either a plain `arvc…` ticket
@@ -2104,7 +2131,7 @@ async fn send(
             "--link can't be combined with --code / --ticket"
         );
         return send_offline(
-            paths, None, true, relay, use_http, ttl, max, password, qr, false,
+            paths, None, true, relay, use_http, ttl, max, password, qr, false, "",
         )
         .await;
     }
@@ -2133,7 +2160,7 @@ async fn send(
                     "note: --max/--password apply to a mailbox send; ignored for a live delivery."
                 );
             }
-            return push(paths, to, Some(relay_url), use_http).await;
+            return push(paths, to, Some(relay_url), use_http, &note).await;
         }
         return send_offline(
             paths,
@@ -2146,6 +2173,7 @@ async fn send(
             password,
             qr,
             true,
+            &note,
         )
         .await;
     }
@@ -2584,6 +2612,14 @@ async fn recv(ticket: String, out: Option<PathBuf>, password: Option<String>) ->
                     Some(pb) => pb.println(message),
                     None => eprintln!("{message}"),
                 },
+                RecvEvent::Paused { reason } => {
+                    // Not a failure: the partial download + sidecar are kept, so
+                    // re-running `receive` resumes. Clear the bar and say why.
+                    if let Some(pb) = slot.take() {
+                        pb.finish_and_clear();
+                    }
+                    eprintln!("Paused: {reason}");
+                }
                 RecvEvent::Saved { path } => {
                     if let Some(pb) = slot.take() {
                         pb.finish_and_clear();
@@ -2625,6 +2661,7 @@ async fn send_offline(
     password: Option<String>,
     qr: bool,
     offer: bool,
+    note: &str,
 ) -> Result<()> {
     anyhow::ensure!(
         !paths.is_empty(),
@@ -2773,6 +2810,7 @@ async fn send_offline(
             size,
             chunks: 0,
             ticket: encoded.clone(),
+            note: note.to_string(),
         };
         if let Err(e) = arvolo_core::presence::post_offer(
             &reqwest::Client::new(),

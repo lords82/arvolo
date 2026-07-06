@@ -90,8 +90,8 @@ impl DaemonClient {
         }
     }
 
-    pub async fn push(&mut self, to: String, paths: Vec<String>) -> Result<u64> {
-        match self.request(Request::Push { to, paths }).await? {
+    pub async fn push(&mut self, to: String, paths: Vec<String>, note: String) -> Result<u64> {
+        match self.request(Request::Push { to, paths, note }).await? {
             Response::TransferId(id) => Ok(id),
             other => unexpected(other),
         }

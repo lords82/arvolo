@@ -209,6 +209,7 @@ dependencies = [
  "ed25519",
  "hpke",
  "iroh",
+ "libc",
  "pkcs8",
  "postcard",
  "rand 0.9.4",

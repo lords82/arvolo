@@ -3,7 +3,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use arvolo_core::flow::{self, RecvEvent};
+use arvolo_core::flow::{self, RecvEvent, RecvOutcome};
 use arvolo_core::transfer::RelayChoice;
 use tokio_util::sync::CancellationToken;
 
@@ -97,7 +97,7 @@ async fn send_then_recv_roundtrip_emits_events() {
     .expect("recv_chunked");
 
     // Integrity.
-    assert_eq!(std::fs::read(&saved).unwrap(), data);
+    assert_eq!(std::fs::read(saved.path()).unwrap(), data);
 
     // Event shape: anonymous Sender first (plain ticket), then Started, one Chunk
     // per chunk, Saved last.
@@ -155,7 +155,7 @@ async fn recv_cancelled_returns_without_saving() {
     cancel.cancel();
     let events = Arc::new(Mutex::new(Vec::new()));
     let ev = events.clone();
-    let path = flow::recv_chunked(
+    let outcome = flow::recv_chunked(
         &ticket,
         Some(out.clone()),
         None,
@@ -165,6 +165,10 @@ async fn recv_cancelled_returns_without_saving() {
     )
     .await
     .expect("recv_chunked returns Ok on cancel");
+    assert!(
+        matches!(outcome, RecvOutcome::Cancelled(_)),
+        "a cancelled recv reports the Cancelled outcome"
+    );
 
     let events = events.lock().unwrap().clone();
     assert!(
@@ -172,7 +176,7 @@ async fn recv_cancelled_returns_without_saving() {
         "cancelled recv must not emit Saved"
     );
     assert_ne!(
-        std::fs::read(&path).unwrap().len(),
+        std::fs::read(outcome.path()).unwrap().len(),
         data.len(),
         "cancelled recv must not have written the whole file"
     );
@@ -215,7 +219,7 @@ async fn archive_roundtrip_packs_and_extracts() {
     )
     .await
     .expect("recv_chunked");
-    assert_eq!(saved, outdir);
+    assert_eq!(saved.into_path(), outdir);
     assert_eq!(
         std::fs::read(outdir.join("folder/a.txt")).unwrap(),
         b"hello alpha"
@@ -369,27 +373,141 @@ async fn parallel_fetch_preserves_integrity_and_order() {
     )
     .await
     .expect("recv_chunked");
-    assert_eq!(std::fs::read(&saved).unwrap(), data);
+    assert_eq!(std::fs::read(saved.path()).unwrap(), data);
 
-    // Chunk events are emitted in ascending (commit) order, one per chunk.
+    // Each chunk is committed exactly once. Commit order is NOT guaranteed (pieces
+    // commit out of order the moment they verify), but the set must be complete and
+    // the file byte-identical (asserted above).
     let events = events.lock().unwrap().clone();
-    let idxs: Vec<usize> = events
+    let mut idxs: Vec<usize> = events
         .iter()
         .filter_map(|e| match e {
             RecvEvent::Chunk { index, .. } => Some(*index),
             _ => None,
         })
         .collect();
-    assert_eq!(idxs, vec![0, 1, 2], "chunks committed in order");
+    idxs.sort_unstable();
+    assert_eq!(idxs, vec![0, 1, 2], "every chunk committed exactly once");
 
     send_cancel.cancel();
     let _ = serve.await;
     std::env::remove_var("ARVOLO_CONCURRENCY");
 }
 
+// Hard test: a REAL partial (not hand-built). Cancel a download after its first
+// committed chunk, leaving a sparse output + resume sidecar, then resume from a
+// fresh server and confirm it completes byte-identically without re-fetching what
+// it already had. Exercises out-of-order commit + sidecar crash-safety end-to-end.
 #[tokio::test]
-async fn resume_after_truncation_with_concurrency() {
-    use std::io::Read;
+async fn resume_mid_transfer_from_real_partial() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    std::env::set_var("ARVOLO_CONCURRENCY", "2");
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("m.bin");
+    let out = dir.path().join("m.out");
+    // 48 MiB -> 3 chunks.
+    let data: Vec<u8> = (0..48 * 1024 * 1024u64)
+        .map(|i| (i * 37 + 11) as u8)
+        .collect();
+    std::fs::write(&src, &data).unwrap();
+
+    // First pass: cancel the moment the first chunk commits, leaving a partial.
+    let session = flow::prepare_send(&src, "m.bin", false, None, None, RelayChoice::Disabled)
+        .await
+        .unwrap();
+    let ticket = session.ticket.clone();
+    let sc = CancellationToken::new();
+    let serve = {
+        let c = sc.clone();
+        tokio::spawn(async move { session.serve(c, |_| {}).await })
+    };
+    let cancel = CancellationToken::new();
+    let c2 = cancel.clone();
+    let seen = Arc::new(AtomicUsize::new(0));
+    let s2 = seen.clone();
+    flow::recv_chunked(
+        &ticket,
+        Some(out.clone()),
+        None,
+        RelayChoice::Disabled,
+        cancel,
+        move |e| {
+            if matches!(e, RecvEvent::Chunk { .. }) && s2.fetch_add(1, Ordering::SeqCst) == 0 {
+                c2.cancel(); // stop right after the first committed chunk
+            }
+        },
+    )
+    .await
+    .unwrap();
+    sc.cancel();
+    let _ = serve.await;
+
+    let partial = seen.load(Ordering::SeqCst);
+    assert!(
+        (1..3).contains(&partial),
+        "left a real partial: {partial}/3"
+    );
+    let sidecar = std::path::PathBuf::from(format!("{}.arvhave", out.display()));
+    assert!(sidecar.exists(), "a partial leaves a resume sidecar");
+
+    // Second pass: resume from the sidecar on a fresh server; must complete.
+    let session2 = flow::prepare_send(&src, "m.bin", false, None, None, RelayChoice::Disabled)
+        .await
+        .unwrap();
+    let ticket2 = session2.ticket.clone();
+    let sc2 = CancellationToken::new();
+    let serve2 = {
+        let c = sc2.clone();
+        tokio::spawn(async move { session2.serve(c, |_| {}).await })
+    };
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let ev = events.clone();
+    flow::recv_chunked(
+        &ticket2,
+        Some(out.clone()),
+        None,
+        RelayChoice::Disabled,
+        CancellationToken::new(),
+        move |e| ev.lock().unwrap().push(e),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        std::fs::read(&out).unwrap(),
+        data,
+        "resumed output is byte-identical"
+    );
+    let events = events.lock().unwrap().clone();
+    let resumed_from = events.iter().find_map(|e| match e {
+        RecvEvent::Started { resuming_from, .. } => Some(*resuming_from),
+        _ => None,
+    });
+    assert_eq!(
+        resumed_from,
+        Some(partial),
+        "resumed exactly the pieces already on disk"
+    );
+    let refetched = events
+        .iter()
+        .filter(|e| matches!(e, RecvEvent::Chunk { .. }))
+        .count();
+    assert_eq!(
+        refetched,
+        3 - partial,
+        "only the missing pieces were re-fetched"
+    );
+    assert!(!sidecar.exists(), "sidecar cleaned up after completion");
+
+    sc2.cancel();
+    let _ = serve2.await;
+    std::env::remove_var("ARVOLO_CONCURRENCY");
+}
+
+#[tokio::test]
+async fn resume_from_sidecar_fetches_only_missing() {
+    use arvolo_core::swarm::{bitfield_new, bitfield_set};
+    use std::path::PathBuf;
     std::env::set_var("ARVOLO_CONCURRENCY", "2");
     let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("r.bin");
@@ -399,7 +517,7 @@ async fn resume_after_truncation_with_concurrency() {
         .collect();
     std::fs::write(&src, &data).unwrap();
 
-    // Full receive once.
+    // Full receive once to lay down a correct output file.
     let session = flow::prepare_send(&src, "r.bin", false, None, None, RelayChoice::Disabled)
         .await
         .unwrap();
@@ -423,10 +541,12 @@ async fn resume_after_truncation_with_concurrency() {
     sc.cancel();
     let _ = serve.await;
 
-    // Truncate to exactly one chunk (16 MiB), then resume from a fresh server.
-    let f = std::fs::OpenOptions::new().write(true).open(&out).unwrap();
-    f.set_len(16 * 1024 * 1024).unwrap();
-    drop(f);
+    // Simulate a partial download: a resume sidecar that marks ONLY chunk 0 present.
+    // Resume must trust the sidecar (not the file length) and re-fetch just 1 and 2.
+    let sidecar = PathBuf::from(format!("{}.arvhave", out.display()));
+    let mut bf = bitfield_new(3);
+    bitfield_set(&mut bf, 0);
+    std::fs::write(&sidecar, &bf).unwrap();
 
     let session2 = flow::prepare_send(&src, "r.bin", false, None, None, RelayChoice::Disabled)
         .await
@@ -450,13 +570,13 @@ async fn resume_after_truncation_with_concurrency() {
     .await
     .unwrap();
 
-    // Byte-identical, and only the missing chunks (1, 2) were fetched, in order.
-    let mut got = Vec::new();
-    std::fs::File::open(&out)
-        .unwrap()
-        .read_to_end(&mut got)
-        .unwrap();
-    assert_eq!(got, data, "resumed output is byte-identical");
+    // Byte-identical, resumed from the sidecar (1 piece present), and only the two
+    // missing chunks fetched (order not guaranteed).
+    assert_eq!(
+        std::fs::read(&out).unwrap(),
+        data,
+        "resumed output is byte-identical"
+    );
     let events = events.lock().unwrap().clone();
     assert!(events.iter().any(|e| matches!(
         e,
@@ -465,14 +585,17 @@ async fn resume_after_truncation_with_concurrency() {
             ..
         }
     )));
-    let idxs: Vec<usize> = events
+    let mut idxs: Vec<usize> = events
         .iter()
         .filter_map(|e| match e {
             RecvEvent::Chunk { index, .. } => Some(*index),
             _ => None,
         })
         .collect();
-    assert_eq!(idxs, vec![1, 2], "only missing chunks fetched, in order");
+    idxs.sort_unstable();
+    assert_eq!(idxs, vec![1, 2], "only the missing chunks were fetched");
+    // Sidecar is removed once the download completes.
+    assert!(!sidecar.exists(), "resume sidecar cleaned up on completion");
 
     sc2.cancel();
     let _ = serve2.await;

@@ -123,7 +123,7 @@ async fn dispatch(d: &Daemon, cmd: Request) -> Response {
                 Err(e) => Response::Error(format!("{e:#}")),
             }
         }
-        Request::Push { to, paths } => push(d, to, paths).await,
+        Request::Push { to, paths, note } => push(d, to, paths, note).await,
         Request::ServeTicket { paths, seed_relay } => serve_ticket(d, paths, seed_relay).await,
         // Handled in `handle_conn` before dispatch; reachable only if a client
         // pipelines Subscribe with other commands, which we don't support.
@@ -133,7 +133,7 @@ async fn dispatch(d: &Daemon, cmd: Request) -> Response {
     }
 }
 
-async fn push(d: &Daemon, to: String, paths: Vec<String>) -> Response {
+async fn push(d: &Daemon, to: String, paths: Vec<String>, note: String) -> Response {
     if paths.is_empty() {
         return Response::Error("provide at least one file or folder to push".into());
     }
@@ -150,7 +150,11 @@ async fn push(d: &Daemon, to: String, paths: Vec<String>) -> Response {
     // Subscribe *before* sending so a temp archive is cleaned up even if the
     // transfer's terminal event fires before we start watching.
     let watch = temp.clone().map(|t| (d.manager.subscribe(), t));
-    match d.manager.send_to(&recipient, payload, name, archive).await {
+    match d
+        .manager
+        .send_to(&recipient, payload, name, archive, note)
+        .await
+    {
         Ok(id) => {
             if let Some((rx, t)) = watch {
                 spawn_temp_cleanup(rx, id, t);

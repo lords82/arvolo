@@ -94,6 +94,8 @@ pub enum ManagerEvent {
         from: PublicId,
         name: String,
         size: u64,
+        /// An optional sender's note attached to the transfer (empty if none).
+        note: String,
     },
     /// A transfer started.
     Started {
@@ -136,6 +138,8 @@ struct Held {
     payload: PathBuf,
     name: String,
     archive: bool,
+    /// Optional sender note to attach to the offer.
+    note: String,
     /// Flipped by [`TransferManager::pause`] so the running loop, once its token is
     /// cancelled, knows to pause (keep the transfer) rather than cancel (drop it).
     pause_flag: Arc<std::sync::atomic::AtomicBool>,
@@ -402,6 +406,7 @@ impl TransferManager {
         payload: PathBuf,
         name: String,
         archive: bool,
+        note: String,
     ) -> Result<u64> {
         let relay = self.inner.relay.clone().context(
             "a relay is required to send to a contact (set ARVOLO_RELAY or config `relay`)",
@@ -417,6 +422,7 @@ impl TransferManager {
                 payload: payload.clone(),
                 name: name.clone(),
                 archive,
+                note: note.clone(),
                 pause_flag: pause_flag.clone(),
             },
         );
@@ -430,6 +436,7 @@ impl TransferManager {
             payload,
             name,
             archive,
+            note,
             pause_flag,
         ));
         Ok(id)
@@ -496,6 +503,7 @@ impl TransferManager {
             h.payload,
             h.name,
             h.archive,
+            h.note,
             h.pause_flag,
         ));
         true
@@ -526,6 +534,7 @@ impl TransferManager {
                 payload: payload.clone(),
                 name: rec.name.clone(),
                 archive: rec.archive,
+                note: rec.note.clone(),
                 pause_flag: pause_flag.clone(),
             },
         );
@@ -550,6 +559,7 @@ impl TransferManager {
                 payload,
                 rec.name,
                 rec.archive,
+                rec.note,
                 pause_flag,
             ));
         }
@@ -707,6 +717,7 @@ impl TransferManager {
                         from: offer.sender.clone(),
                         name: offer.offer.name.clone(),
                         size: offer.offer.size,
+                        note: offer.offer.note.clone(),
                     });
                 })
                 .await;
@@ -887,7 +898,8 @@ impl TransferManager {
                     } => inner_cb.set_swarm(id, peers, pieces_from_peers),
                     RecvEvent::Saved { .. }
                     | RecvEvent::Control { .. }
-                    | RecvEvent::Warning { .. } => {}
+                    | RecvEvent::Warning { .. }
+                    | RecvEvent::Paused { .. } => {}
                 },
             )
             .await;
@@ -896,8 +908,10 @@ impl TransferManager {
             // restart. For an archive `saved` is the unpacked directory, so we seed
             // the staged tar (a file we own and delete when the session ends); for a
             // single file we seed the download itself (owned by the user).
-            if let (Ok(saved), false) = (&result, cancelled.is_cancelled()) {
-                if flow::seeding_enabled() {
+            if let Ok(outcome) = &result {
+                // Only a *fully completed* download is seeded — a cancelled or
+                // disk-full-paused one is partial (`is_complete()` excludes both).
+                if outcome.is_complete() && flow::seeding_enabled() {
                     let mgr = TransferManager {
                         inner: inner.clone(),
                     };
@@ -906,11 +920,19 @@ impl TransferManager {
                             let tar = flow::archive_stage_path(&t.chunks);
                             mgr.seed_file(tar, ticket.clone(), true);
                         }
-                        _ => mgr.seed_file(saved.clone(), ticket.clone(), false),
+                        _ => mgr.seed_file(outcome.path().to_path_buf(), ticket.clone(), false),
                     }
                 }
             }
-            finish(&inner, id, cancelled.is_cancelled(), result.map(Some));
+            // Treat a stopped-but-incomplete outcome (user cancel OR disk-full pause)
+            // as not-completed, so it is never recorded/seeded as a finished download.
+            let stopped_incomplete = matches!(&result, Ok(o) if !o.is_complete());
+            finish(
+                &inner,
+                id,
+                cancelled.is_cancelled() || stopped_incomplete,
+                result.map(|o| Some(o.into_path())),
+            );
         });
         id
     }
@@ -1029,6 +1051,7 @@ fn persist_held_record(inner: &Inner, id: u64, paused: bool, reason: &str) {
                 archive: h.archive,
                 paused,
                 reason: reason.to_string(),
+                note: h.note.clone(),
             },
         );
     }
@@ -1087,6 +1110,7 @@ async fn deliver_to(
     payload: PathBuf,
     name: String,
     archive: bool,
+    note: String,
     pause_flag: Arc<std::sync::atomic::AtomicBool>,
 ) {
     use std::time::{Duration, Instant};
@@ -1118,7 +1142,7 @@ async fn deliver_to(
             .unwrap_or(false);
         if online {
             match serve_live_once(
-                &inner, id, &cancel, &relay, &recipient, &payload, &name, archive,
+                &inner, id, &cancel, &relay, &recipient, &payload, &name, archive, &note,
             )
             .await
             {
@@ -1152,7 +1176,9 @@ async fn deliver_to(
         // 2) Try the relay mailbox — unless it already refused as too large, or
         //    we're backing off after it was unavailable.
         if !too_big && Instant::now() >= next_relay_try {
-            match deposit_offline_and_offer(&inner, &relay, &recipient, &payload, &name).await {
+            match deposit_offline_and_offer(&inner, &relay, &recipient, &payload, &name, &note)
+                .await
+            {
                 Ok(out) => {
                     drop_held(&inner, id);
                     spawn_offline_confirm(&inner, id, relay.clone(), out.size, out.claim);
@@ -1208,6 +1234,7 @@ async fn serve_live_once(
     payload: &Path,
     name: &str,
     archive: bool,
+    note: &str,
 ) -> LiveOutcome {
     let session = match flow::prepare_send(
         payload,
@@ -1228,6 +1255,7 @@ async fn serve_live_once(
         size: session.total_size,
         chunks: session.chunks as u64,
         ticket: session.ticket.clone(),
+        note: note.to_string(),
     };
     let posted = match presence::post_offer(
         &inner.client,
@@ -1362,6 +1390,7 @@ async fn deposit_offline_and_offer(
     recipient: &PublicId,
     payload: &Path,
     name: &str,
+    note: &str,
 ) -> std::result::Result<DepositOutcome, flow::DepositError> {
     let size = std::fs::metadata(payload).map(|m| m.len()).unwrap_or(0);
     let deposited = flow::deposit_offline(
@@ -1380,6 +1409,7 @@ async fn deposit_offline_and_offer(
         size,
         chunks: 0,
         ticket: deposited.ticket.encode(),
+        note: note.to_string(),
     };
     presence::post_offer(
         &inner.client,
@@ -1465,12 +1495,17 @@ async fn serve_session(
             if let (Some(r), Some(addr)) = (&t.relay, t.providers.first()) {
                 if let Ok(my_addr) = crate::chunked::encode_addr(addr) {
                     let n = t.chunks.len();
+                    // A sender/seeder has every piece: announce a full bitfield.
+                    let mut full = crate::swarm::bitfield_new(n);
+                    for i in 0..n {
+                        crate::swarm::bitfield_set(&mut full, i);
+                    }
                     flow::spawn_swarm_coordinator(
                         inner.client.clone(),
                         r.http.clone(),
                         crate::swarm::swarm_id(&t.chunks, t.total_size),
                         my_addr,
-                        Arc::new(std::sync::atomic::AtomicUsize::new(n)),
+                        Arc::new(Mutex::new(full)),
                         n,
                         Arc::new(Mutex::new(Vec::new())),
                         swarm_cancel.clone(),
@@ -1650,6 +1685,8 @@ struct SendToRecord {
     archive: bool,
     paused: bool,
     reason: String,
+    #[serde(default)]
+    note: String,
 }
 
 fn sendto_record_path(dir: &Path, id: u64) -> PathBuf {

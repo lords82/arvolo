@@ -162,16 +162,23 @@ enum ChunkBackend {
     Files { dir: PathBuf },
     /// A receiver re-seeding: regenerate a chunk it has verified by re-sealing it
     /// from its own (plaintext) output file — deterministic sealing reproduces the
-    /// sender's exact ciphertext/hash. `have` is the count of contiguous committed
-    /// chunks; only indices `< have` are served (the rest aren't on disk yet).
+    /// sender's exact ciphertext/hash. `have` is a **bitfield of verified pieces**
+    /// (arbitrary/disjoint, not just a prefix): only pieces whose bit is set are on
+    /// disk and may be served.
     Reseal {
         path: PathBuf,
         key: [u8; crate::crypto::CHUNK_KEY_LEN],
         index: HashMap<Hash, u32>,
         total_chunks: u32,
-        have: Arc<std::sync::atomic::AtomicUsize>,
+        have: HaveBitfield,
     },
 }
+
+/// Shared bitfield of the pieces a receiver has verified and written to its output
+/// file. Set bit `i` ⇒ piece `i` is on disk at offset `i*CHUNK_SIZE` and can be
+/// served. Written by the receiver's commit path, read by the seeder and the swarm
+/// announce. Using a bitfield (vs a prefix count) is what allows disjoint pieces.
+pub type HaveBitfield = Arc<std::sync::Mutex<Vec<u8>>>;
 
 impl ChunkBackend {
     /// Produce the full ciphertext for `hash`, or `None` if not available here.
@@ -201,7 +208,7 @@ impl ChunkBackend {
                 have,
             } => {
                 let idx = *index.get(hash)?;
-                if idx as usize >= have.load(std::sync::atomic::Ordering::Relaxed) {
+                if !crate::swarm::bitfield_has(&have.lock().unwrap(), idx as usize) {
                     return None; // we haven't verified/committed this piece yet
                 }
                 let mut file = std::fs::File::open(path).ok()?;
@@ -650,7 +657,7 @@ impl ChunkSeeder {
         key: [u8; crate::crypto::CHUNK_KEY_LEN],
         chunks: &[Hash],
         total_chunks: u32,
-        have: Arc<std::sync::atomic::AtomicUsize>,
+        have: HaveBitfield,
         relay: RelayChoice,
     ) -> Result<Self> {
         let mut index: HashMap<Hash, u32> = HashMap::new();

@@ -38,7 +38,12 @@ pub enum Request {
     ListPending,
     /// Send files/folders to a contact; paths are on the *daemon's* filesystem.
     /// → [`Response::TransferId`].
-    Push { to: String, paths: Vec<String> },
+    Push {
+        to: String,
+        paths: Vec<String>,
+        #[serde(default)]
+        note: String,
+    },
     /// Serve an anonymous P2P ticket in the background (no recipient); paths are on
     /// the *daemon's* filesystem. → [`Response::Served`].
     ServeTicket {
@@ -143,6 +148,7 @@ pub struct OfferDto {
     pub from: String,
     pub name: String,
     pub size: u64,
+    pub note: String,
 }
 
 /// Serializable mirror of [`ManagerEvent`].
@@ -154,6 +160,8 @@ pub enum EventDto {
         from: String,
         name: String,
         size: u64,
+        #[serde(default)]
+        note: String,
     },
     Started {
         id: u64,
@@ -234,11 +242,13 @@ impl From<&ManagerEvent> for EventDto {
                 from,
                 name,
                 size,
+                note,
             } => EventDto::OfferReceived {
                 id: id.clone(),
                 from: encode_id(from),
                 name: name.clone(),
                 size: *size,
+                note: note.clone(),
             },
             ManagerEvent::Started {
                 id,
@@ -293,6 +303,7 @@ mod tests {
             cmd: Request::Push {
                 to: "alice".into(),
                 paths: vec!["a.txt".into(), "b/".into()],
+                note: "have a look".into(),
             },
         };
         let line = serde_json::to_string(&env).unwrap();

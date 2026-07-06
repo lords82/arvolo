@@ -73,6 +73,7 @@ async fn held_when_relay_unavailable() {
             src.path().to_path_buf(),
             "f.bin".into(),
             false,
+            String::new(),
         )
         .await
         .unwrap();
@@ -104,6 +105,7 @@ async fn held_when_file_too_large() {
             src.path().to_path_buf(),
             "big.bin".into(),
             false,
+            String::new(),
         )
         .await
         .unwrap();
@@ -138,6 +140,7 @@ async fn pause_then_resume() {
             src.path().to_path_buf(),
             "f".into(),
             false,
+            String::new(),
         )
         .await
         .unwrap();
@@ -180,7 +183,13 @@ async fn paused_send_survives_restart() {
             Some(state.path().to_path_buf()),
         );
         let id = m
-            .send_to(&recipient.public(), payload.clone(), "f.bin".into(), false)
+            .send_to(
+                &recipient.public(),
+                payload.clone(),
+                "f.bin".into(),
+                false,
+                String::new(),
+            )
             .await
             .unwrap();
         wait_status(&m, id, |s| matches!(s, TransferStatus::Waiting(_))).await;
