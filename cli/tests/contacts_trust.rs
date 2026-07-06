@@ -49,11 +49,16 @@ fn trust_requires_verification_unless_forced() {
 
     // --force overrides the gate: it trusts but warns.
     let out = arvolo(&cfg, &["contacts", "trust", "alice", "--force"]);
-    assert!(out.status.success(), "trust --force should succeed: {out:?}");
+    assert!(
+        out.status.success(),
+        "trust --force should succeed: {out:?}"
+    );
 
     // Untrust, verify out-of-band (--yes skips the interactive prompt), then a
     // plain trust is accepted.
-    assert!(arvolo(&cfg, &["contacts", "untrust", "alice"]).status.success());
+    assert!(arvolo(&cfg, &["contacts", "untrust", "alice"])
+        .status
+        .success());
     let out = arvolo(&cfg, &["contacts", "verify", "alice", "--yes"]);
     assert!(out.status.success(), "verify --yes should succeed: {out:?}");
     let out = arvolo(&cfg, &["contacts", "trust", "alice"]);
@@ -67,7 +72,9 @@ fn trust_requires_verification_unless_forced() {
 fn verify_needs_yes_when_non_interactive() {
     let cfg = TempDir::new().unwrap();
     let id = fresh_id();
-    assert!(arvolo(&cfg, &["contacts", "add", "bob", &id]).status.success());
+    assert!(arvolo(&cfg, &["contacts", "add", "bob", &id])
+        .status
+        .success());
 
     // Piped (non-TTY) stdin without --yes: verify refuses rather than marking.
     let out = arvolo(&cfg, &["contacts", "verify", "bob"]);
@@ -78,7 +85,10 @@ fn verify_needs_yes_when_non_interactive() {
 
     // The gate that depends on it still holds: trust is refused.
     let out = arvolo(&cfg, &["contacts", "trust", "bob"]);
-    assert!(!out.status.success(), "bob is still unverified → trust refused");
+    assert!(
+        !out.status.success(),
+        "bob is still unverified → trust refused"
+    );
 }
 
 #[test]
@@ -86,18 +96,34 @@ fn list_filters_by_id_and_name() {
     let cfg = TempDir::new().unwrap();
     let alice = fresh_id();
     let bob = fresh_id();
-    assert!(arvolo(&cfg, &["contacts", "add", "alice", &alice]).status.success());
-    assert!(arvolo(&cfg, &["contacts", "add", "bob", &bob]).status.success());
+    assert!(arvolo(&cfg, &["contacts", "add", "alice", &alice])
+        .status
+        .success());
+    assert!(arvolo(&cfg, &["contacts", "add", "bob", &bob])
+        .status
+        .success());
 
     // Filter by full id → only alice's line.
     let out = arvolo(&cfg, &["contacts", "list", &alice]);
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("alice"), "id filter should show alice: {stdout}");
-    assert!(!stdout.contains("bob"), "id filter should exclude bob: {stdout}");
+    assert!(
+        stdout.contains("alice"),
+        "id filter should show alice: {stdout}"
+    );
+    assert!(
+        !stdout.contains("bob"),
+        "id filter should exclude bob: {stdout}"
+    );
 
     // Filter by a name substring works too.
     let out = arvolo(&cfg, &["contacts", "list", "bo"]);
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("bob"), "name filter should show bob: {stdout}");
-    assert!(!stdout.contains("alice"), "name filter should exclude alice: {stdout}");
+    assert!(
+        stdout.contains("bob"),
+        "name filter should show bob: {stdout}"
+    );
+    assert!(
+        !stdout.contains("alice"),
+        "name filter should exclude alice: {stdout}"
+    );
 }
