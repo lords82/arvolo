@@ -47,6 +47,10 @@ pub enum Request {
     },
     /// Cancel a transfer by id → [`Response::Ok`].
     Cancel { id: u64 },
+    /// Pause an in-progress `send --to` by id → [`Response::Ok`].
+    Pause { id: u64 },
+    /// Resume a paused `send --to` by id → [`Response::Ok`].
+    Resume { id: u64 },
     /// Accept a parked offer, optionally to a specific path → [`Response::TransferId`].
     AcceptOffer {
         offer_id: String,
@@ -173,6 +177,10 @@ pub enum EventDto {
         id: u64,
         reason: String,
     },
+    Paused {
+        id: u64,
+        reason: String,
+    },
     Failed {
         id: u64,
         error: String,
@@ -195,6 +203,7 @@ fn status_str(s: &TransferStatus) -> String {
         TransferStatus::Completed => "completed".into(),
         TransferStatus::Deposited => "deposited".into(),
         TransferStatus::Waiting(r) => format!("waiting: {r}"),
+        TransferStatus::Paused(r) => format!("paused: {r}"),
         TransferStatus::Cancelled => "cancelled".into(),
         TransferStatus::Failed(e) => format!("failed: {e}"),
     }
@@ -257,6 +266,10 @@ impl From<&ManagerEvent> for EventDto {
             },
             ManagerEvent::Deposited { id } => EventDto::Deposited { id: *id },
             ManagerEvent::Waiting { id, reason } => EventDto::Waiting {
+                id: *id,
+                reason: reason.clone(),
+            },
+            ManagerEvent::Paused { id, reason } => EventDto::Paused {
                 id: *id,
                 reason: reason.clone(),
             },

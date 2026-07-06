@@ -52,6 +52,11 @@ pub enum TransferStatus {
     /// delivering live P2P as soon as the recipient is online, and re-trying the
     /// relay on a slow interval. The string is a short human reason.
     Waiting(String),
+    /// A send that is **paused** — not actively trying — awaiting a user decision
+    /// (`resume` or `cancel`). Reached when the user pauses it, or automatically
+    /// when it couldn't be delivered for a long time. Durable: it is restored as
+    /// paused after a daemon restart. The string is a short human reason.
+    Paused(String),
     /// Stopped before finishing (e.g. the user cancelled).
     Cancelled,
     /// Ended with an error.
@@ -114,16 +119,34 @@ pub enum ManagerEvent {
     /// the recipient appears, and the relay again on a slow interval. `reason` is
     /// a short human explanation.
     Waiting { id: u64, reason: String },
+    /// A send was paused (by the user, or automatically after a long failure to
+    /// deliver). It stays put until `resume`d or `cancel`led. `reason` explains why.
+    Paused { id: u64, reason: String },
     /// A transfer failed.
     Failed { id: u64, error: String },
     /// A transfer was cancelled.
     Cancelled { id: u64 },
 }
 
+/// Live state for an in-progress `send --to` delivery, so it can be paused,
+/// resumed, or re-driven. Mirrored to disk (a `SendToRecord`) for durability.
+#[derive(Clone)]
+struct Held {
+    recipient: PublicId,
+    payload: PathBuf,
+    name: String,
+    archive: bool,
+    /// Flipped by [`TransferManager::pause`] so the running loop, once its token is
+    /// cancelled, knows to pause (keep the transfer) rather than cancel (drop it).
+    pause_flag: Arc<std::sync::atomic::AtomicBool>,
+}
+
 struct Inner {
     next_id: AtomicU64,
     transfers: Mutex<HashMap<u64, Transfer>>,
     cancels: Mutex<HashMap<u64, CancellationToken>>,
+    /// Delivery state for active/paused `send --to` transfers (for pause/resume).
+    held: Mutex<HashMap<u64, Held>>,
     pending: Mutex<HashMap<String, ReceivedOffer>>,
     events: broadcast::Sender<ManagerEvent>,
     me: Identity,
@@ -147,11 +170,22 @@ impl Inner {
         let _ = self.events.send(ev);
     }
 
+    /// Set a **terminal-or-paused** status: also drops the cancel token, since the
+    /// running task is ending (finished, deposited, or paused — a resume installs a
+    /// fresh token).
     fn set_status(&self, id: u64, status: TransferStatus) {
         if let Some(t) = self.transfers.lock().unwrap().get_mut(&id) {
             t.status = status;
         }
         self.cancels.lock().unwrap().remove(&id);
+    }
+
+    /// Set a **live** status (Active / Waiting) *without* touching the cancel token,
+    /// so a still-running transfer stays cancellable across status changes.
+    fn set_status_live(&self, id: u64, status: TransferStatus) {
+        if let Some(t) = self.transfers.lock().unwrap().get_mut(&id) {
+            t.status = status;
+        }
     }
 
     fn set_progress(&self, id: u64, transferred: u64) {
@@ -220,6 +254,7 @@ impl TransferManager {
                 next_id: AtomicU64::new(1),
                 transfers: Mutex::new(HashMap::new()),
                 cancels: Mutex::new(HashMap::new()),
+                held: Mutex::new(HashMap::new()),
                 pending: Mutex::new(HashMap::new()),
                 events,
                 me,
@@ -269,7 +304,10 @@ impl TransferManager {
         self.inner.transfers.lock().unwrap().retain(|_, t| {
             matches!(
                 t.status,
-                TransferStatus::Active | TransferStatus::Deposited | TransferStatus::Waiting(_)
+                TransferStatus::Active
+                    | TransferStatus::Deposited
+                    | TransferStatus::Waiting(_)
+                    | TransferStatus::Paused(_)
             )
         });
     }
@@ -320,6 +358,19 @@ impl TransferManager {
 
     /// Cancel a transfer by id (no-op if it already finished).
     pub fn cancel(&self, id: u64) {
+        // A paused send has no running loop to cancel — end it directly.
+        let paused = self
+            .inner
+            .transfers
+            .lock()
+            .unwrap()
+            .get(&id)
+            .map(|t| matches!(t.status, TransferStatus::Paused(_)))
+            .unwrap_or(false);
+        if paused {
+            finish(&self.inner, id, true, Ok(None));
+            return;
+        }
         if let Some(c) = self.inner.cancels.lock().unwrap().get(&id) {
             c.cancel();
         }
@@ -358,6 +409,18 @@ impl TransferManager {
         let size = std::fs::metadata(&payload).map(|m| m.len()).unwrap_or(0);
         let (id, cancel) =
             self.register(Direction::Send, Some(recipient.clone()), name.clone(), size);
+        let pause_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.inner.held.lock().unwrap().insert(
+            id,
+            Held {
+                recipient: recipient.clone(),
+                payload: payload.clone(),
+                name: name.clone(),
+                archive,
+                pause_flag: pause_flag.clone(),
+            },
+        );
+        persist_held_record(&self.inner, id, false, "");
         tokio::spawn(deliver_to(
             self.inner.clone(),
             id,
@@ -367,8 +430,129 @@ impl TransferManager {
             payload,
             name,
             archive,
+            pause_flag,
         ));
         Ok(id)
+    }
+
+    /// Pause an in-progress `send --to` (Active or Waiting): stop actively trying
+    /// and hold it as `Paused` until `resume`d or `cancel`led. No-op for anything
+    /// that isn't a live send. Returns whether it was paused.
+    pub fn pause(&self, id: u64) -> bool {
+        let can = self
+            .inner
+            .transfers
+            .lock()
+            .unwrap()
+            .get(&id)
+            .map(|t| {
+                matches!(
+                    t.status,
+                    TransferStatus::Active | TransferStatus::Waiting(_)
+                )
+            })
+            .unwrap_or(false);
+        let held = self.inner.held.lock().unwrap().get(&id).cloned();
+        let (true, Some(h)) = (can, held) else {
+            return false;
+        };
+        h.pause_flag.store(true, Ordering::Relaxed);
+        if let Some(c) = self.inner.cancels.lock().unwrap().get(&id) {
+            c.cancel(); // wakes the loop, which sees the flag and pauses
+        }
+        true
+    }
+
+    /// Resume a `Paused` send: start delivering again. Returns whether it resumed.
+    pub fn resume(&self, id: u64) -> bool {
+        let paused = self
+            .inner
+            .transfers
+            .lock()
+            .unwrap()
+            .get(&id)
+            .map(|t| matches!(t.status, TransferStatus::Paused(_)))
+            .unwrap_or(false);
+        let held = self.inner.held.lock().unwrap().get(&id).cloned();
+        let relay = self.inner.relay.clone();
+        let (true, Some(h), Some(relay)) = (paused, held, relay) else {
+            return false;
+        };
+        h.pause_flag.store(false, Ordering::Relaxed);
+        let cancel = CancellationToken::new();
+        self.inner
+            .cancels
+            .lock()
+            .unwrap()
+            .insert(id, cancel.clone());
+        self.inner.set_status_live(id, TransferStatus::Active);
+        persist_held_record(&self.inner, id, false, "");
+        tokio::spawn(deliver_to(
+            self.inner.clone(),
+            id,
+            cancel,
+            relay,
+            h.recipient,
+            h.payload,
+            h.name,
+            h.archive,
+            h.pause_flag,
+        ));
+        true
+    }
+
+    /// Re-register a `send --to` restored from disk after a daemon restart: paused
+    /// ones come back `Paused` (awaiting the user); active ones resume delivering.
+    fn restore_sendto(&self, rec: SendToRecord) {
+        let Ok(recipient) = PublicId::from_bytes(&rec.recipient) else {
+            return;
+        };
+        let Some(relay) = self.inner.relay.clone() else {
+            return; // can't deliver without a relay; drop the stale record
+        };
+        let payload = PathBuf::from(&rec.payload);
+        let size = std::fs::metadata(&payload).map(|m| m.len()).unwrap_or(0);
+        let (id, cancel) = self.register(
+            Direction::Send,
+            Some(recipient.clone()),
+            rec.name.clone(),
+            size,
+        );
+        let pause_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.inner.held.lock().unwrap().insert(
+            id,
+            Held {
+                recipient: recipient.clone(),
+                payload: payload.clone(),
+                name: rec.name.clone(),
+                archive: rec.archive,
+                pause_flag: pause_flag.clone(),
+            },
+        );
+        if rec.paused {
+            // Restore paused: don't run; drop the fresh token, mark Paused.
+            self.inner.cancels.lock().unwrap().remove(&id);
+            persist_held_record(&self.inner, id, true, &rec.reason);
+            self.inner
+                .set_status(id, TransferStatus::Paused(rec.reason.clone()));
+            self.inner.emit(ManagerEvent::Paused {
+                id,
+                reason: rec.reason,
+            });
+        } else {
+            persist_held_record(&self.inner, id, false, "");
+            tokio::spawn(deliver_to(
+                self.inner.clone(),
+                id,
+                cancel,
+                relay,
+                recipient,
+                payload,
+                rec.name,
+                rec.archive,
+                pause_flag,
+            ));
+        }
     }
 
     /// Serve an **anonymous** P2P ticket (no `--to`) in the background: returns the
@@ -740,7 +924,13 @@ impl TransferManager {
         };
         let downloads = load_downloads(&dir);
         let sends = load_sends(&dir);
-        let n = downloads.len() + sends.len();
+        let sendtos = load_sendtos(&dir);
+        let n = downloads.len() + sends.len() + sendtos.len();
+        for rec in sendtos {
+            // Re-registers under a fresh id; drop the stale record either way.
+            remove_sendto(&dir, rec.id);
+            self.restore_sendto(rec);
+        }
         for rec in downloads {
             // Drop the stale record; start_download writes a fresh one (new id).
             remove_download(&dir, rec.id);
@@ -817,11 +1007,63 @@ enum LiveOutcome {
 }
 
 fn set_waiting(inner: &Arc<Inner>, id: u64, reason: &str) {
-    inner.set_status(id, TransferStatus::Waiting(reason.to_string()));
+    // Live status: keep the cancel token so pause/cancel still reach the loop.
+    inner.set_status_live(id, TransferStatus::Waiting(reason.to_string()));
     inner.emit(ManagerEvent::Waiting {
         id,
         reason: reason.to_string(),
     });
+}
+
+/// Write/refresh the on-disk record for a held `send --to` (for durable restore).
+fn persist_held_record(inner: &Inner, id: u64, paused: bool, reason: &str) {
+    let Some(dir) = &inner.state_dir else { return };
+    if let Some(h) = inner.held.lock().unwrap().get(&id) {
+        persist_sendto(
+            dir,
+            &SendToRecord {
+                id,
+                recipient: h.recipient.to_bytes(),
+                payload: h.payload.to_string_lossy().into_owned(),
+                name: h.name.clone(),
+                archive: h.archive,
+                paused,
+                reason: reason.to_string(),
+            },
+        );
+    }
+}
+
+/// Forget a `send --to`'s delivery state (memory + disk) — called on any terminal
+/// end (delivered, deposited, cancelled, failed).
+fn drop_held(inner: &Inner, id: u64) {
+    inner.held.lock().unwrap().remove(&id);
+    if let Some(dir) = &inner.state_dir {
+        remove_sendto(dir, id);
+    }
+}
+
+/// Move a held send to the `Paused` state (keeps its delivery state so it can be
+/// resumed) and persist that so a restart restores it paused.
+fn set_paused(inner: &Arc<Inner>, id: u64, reason: &str) {
+    // The running loop is ending; drop its (now spent) token — resume installs a
+    // fresh one. Persist *before* clearing so the record reflects the pause.
+    persist_held_record(inner, id, true, reason);
+    inner.set_status(id, TransferStatus::Paused(reason.to_string()));
+    inner.emit(ManagerEvent::Paused {
+        id,
+        reason: reason.to_string(),
+    });
+}
+
+/// The loop's token was cancelled: pause (keep the send) if a pause was requested,
+/// else cancel it (drop everything).
+fn handle_stop(inner: &Arc<Inner>, id: u64, pause_flag: &std::sync::atomic::AtomicBool) {
+    if pause_flag.load(Ordering::Relaxed) {
+        set_paused(inner, id, "paused");
+    } else {
+        finish(inner, id, true, Ok(None));
+    }
 }
 
 /// Background delivery loop for a `send --to`. Prefers live P2P whenever the
@@ -845,6 +1087,7 @@ async fn deliver_to(
     payload: PathBuf,
     name: String,
     archive: bool,
+    pause_flag: Arc<std::sync::atomic::AtomicBool>,
 ) {
     use std::time::{Duration, Instant};
     let mut too_big = false;
@@ -852,20 +1095,19 @@ async fn deliver_to(
     let give_up_at = Instant::now() + Duration::from_secs(MAX_WAITING_SECS);
     loop {
         if cancel.is_cancelled() {
-            finish(&inner, id, true, Ok(None));
+            handle_stop(&inner, id, &pause_flag);
             return;
         }
-        // Give up rather than hold a payload + task forever (e.g. a too-large file
-        // to a recipient who never comes back online).
+        // Held too long with no delivery → auto-pause (keep it, tell the user) so a
+        // too-large file to a recipient who never returns doesn't retry forever.
         if Instant::now() >= give_up_at {
-            finish(
+            set_paused(
                 &inner,
                 id,
-                false,
-                Err(anyhow::anyhow!(
-                    "gave up after {} days: the recipient never came online and the relay couldn't hold the file",
+                &format!(
+                    "still undelivered after {} days — paused; resume to keep trying, or cancel",
                     MAX_WAITING_SECS / 86_400
-                )),
+                ),
             );
             return;
         }
@@ -896,7 +1138,7 @@ async fn deliver_to(
                     return;
                 }
                 LiveOutcome::Cancelled => {
-                    finish(&inner, id, true, Ok(None));
+                    handle_stop(&inner, id, &pause_flag);
                     return;
                 }
                 LiveOutcome::Fatal(e) => {
@@ -912,6 +1154,7 @@ async fn deliver_to(
         if !too_big && Instant::now() >= next_relay_try {
             match deposit_offline_and_offer(&inner, &relay, &recipient, &payload, &name).await {
                 Ok(out) => {
+                    drop_held(&inner, id);
                     spawn_offline_confirm(&inner, id, relay.clone(), out.size, out.claim);
                     return;
                 }
@@ -940,10 +1183,10 @@ async fn deliver_to(
             }
         }
 
-        // 3) Idle briefly, then re-check presence (bail immediately on cancel).
+        // 3) Idle briefly, then re-check presence (react immediately to pause/cancel).
         tokio::select! {
             _ = cancel.cancelled() => {
-                finish(&inner, id, true, Ok(None));
+                handle_stop(&inner, id, &pause_flag);
                 return;
             }
             _ = tokio::time::sleep(Duration::from_secs(WAITING_POLL_SECS)) => {}
@@ -1281,6 +1524,8 @@ fn finish(inner: &Inner, id: u64, cancelled: bool, result: Result<Option<PathBuf
         remove_download(dir, id);
         remove_send(dir, id);
     }
+    // Drop any held `send --to` delivery state (memory + its durable record).
+    drop_held(inner, id);
     match result {
         Ok(path) if cancelled => {
             inner.set_status(id, TransferStatus::Cancelled);
@@ -1391,6 +1636,39 @@ fn remove_send(dir: &Path, id: u64) {
 
 fn load_sends(dir: &Path) -> Vec<SendRecord> {
     load_records(dir, "send-")
+}
+
+/// On-disk record of an in-progress `send --to` delivery, so the daemon can
+/// restore it after a restart: a paused one comes back paused, an active one
+/// resumes delivering. Small (a recipient id + a path + status).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SendToRecord {
+    id: u64,
+    recipient: Vec<u8>,
+    payload: String,
+    name: String,
+    archive: bool,
+    paused: bool,
+    reason: String,
+}
+
+fn sendto_record_path(dir: &Path, id: u64) -> PathBuf {
+    dir.join(format!("sendto-{id}.pc"))
+}
+
+fn persist_sendto(dir: &Path, rec: &SendToRecord) {
+    if let Ok(bytes) = postcard::to_allocvec(rec) {
+        let _ = std::fs::create_dir_all(dir);
+        let _ = write_record_private(&sendto_record_path(dir, rec.id), &bytes);
+    }
+}
+
+fn remove_sendto(dir: &Path, id: u64) {
+    let _ = std::fs::remove_file(sendto_record_path(dir, id));
+}
+
+fn load_sendtos(dir: &Path) -> Vec<SendToRecord> {
+    load_records(dir, "sendto-")
 }
 
 /// Read every postcard record whose filename starts with `prefix` from `dir`.

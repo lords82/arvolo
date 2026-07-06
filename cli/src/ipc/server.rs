@@ -99,6 +99,14 @@ async fn dispatch(d: &Daemon, cmd: Request) -> Response {
             d.manager.cancel(id);
             Response::Ok
         }
+        Request::Pause { id } => {
+            d.manager.pause(id);
+            Response::Ok
+        }
+        Request::Resume { id } => {
+            d.manager.resume(id);
+            Response::Ok
+        }
         Request::RejectOffer { offer_id } => {
             d.pending.lock().unwrap().remove(&offer_id);
             d.manager.reject_offer(&offer_id).await;

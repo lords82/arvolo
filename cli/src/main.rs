@@ -299,6 +299,18 @@ enum Command {
         /// The transfer id shown by `arvolo transfers`.
         id: u64,
     },
+    /// Pause an in-progress `send --to` (hold it; resume or cancel later).
+    #[cfg(unix)]
+    Pause {
+        /// The transfer id shown by `arvolo transfers`.
+        id: u64,
+    },
+    /// Resume a paused `send --to`.
+    #[cfg(unix)]
+    Resume {
+        /// The transfer id shown by `arvolo transfers`.
+        id: u64,
+    },
 }
 
 #[derive(Subcommand)]
@@ -424,6 +436,10 @@ async fn main() -> Result<()> {
         Command::Reject { offer_id } => reject_cmd(offer_id).await,
         #[cfg(unix)]
         Command::Cancel { id } => cancel_cmd(id).await,
+        #[cfg(unix)]
+        Command::Pause { id } => pause_cmd(id).await,
+        #[cfg(unix)]
+        Command::Resume { id } => resume_cmd(id).await,
     }
 }
 
@@ -1740,6 +1756,28 @@ async fn cancel_cmd(id: u64) -> Result<()> {
     Ok(())
 }
 
+/// `arvolo pause <id>` — hold a `send --to` running in the daemon.
+#[cfg(unix)]
+async fn pause_cmd(id: u64) -> Result<()> {
+    let mut client = daemon_client()
+        .await
+        .context("no daemon running (start `arvolo daemon`)")?;
+    client.pause(id).await?;
+    eprintln!("paused transfer {id} — `arvolo resume {id}` to continue, or `arvolo cancel {id}`.");
+    Ok(())
+}
+
+/// `arvolo resume <id>` — continue a paused `send --to`.
+#[cfg(unix)]
+async fn resume_cmd(id: u64) -> Result<()> {
+    let mut client = daemon_client()
+        .await
+        .context("no daemon running (start `arvolo daemon`)")?;
+    client.resume(id).await?;
+    eprintln!("resumed transfer {id}.");
+    Ok(())
+}
+
 /// Hand a plain ticket send to the daemon: it serves in the background. Prints the
 /// `arvc…` ticket and returns immediately; the transfer is tracked in the daemon.
 #[cfg(unix)]
@@ -1903,6 +1941,12 @@ async fn push(
                             "   The daemon keeps trying in the background — see `arvolo transfers`."
                         );
                         record_history(&manager, id, &format!("waiting: {reason}"));
+                        break;
+                    }
+                    Ok(ManagerEvent::Paused { id: eid, reason }) if eid == id => {
+                        eprintln!("\n⏸  paused: {reason}");
+                        eprintln!("   `arvolo resume {id}` to continue, or `arvolo cancel {id}`.");
+                        record_history(&manager, id, &format!("paused: {reason}"));
                         break;
                     }
                     Ok(ManagerEvent::Failed { id: eid, error }) if eid == id => {

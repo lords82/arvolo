@@ -119,3 +119,92 @@ async fn held_when_file_too_large() {
     m.cancel(id);
     std::env::remove_var("ARVOLO_MAX_BLOB_BYTES");
 }
+
+#[tokio::test]
+async fn pause_then_resume() {
+    let sender = Identity::generate();
+    let recipient = Identity::generate();
+    let dl = tempfile::tempdir().unwrap();
+    // Dead relay: the send lands in Waiting, where we can pause it.
+    let m = TransferManager::new(
+        sender,
+        Some("http://127.0.0.1:1".into()),
+        dl.path().to_path_buf(),
+    );
+    let src = tmpfile(b"hi");
+    let id = m
+        .send_to(
+            &recipient.public(),
+            src.path().to_path_buf(),
+            "f".into(),
+            false,
+        )
+        .await
+        .unwrap();
+
+    wait_status(&m, id, |s| matches!(s, TransferStatus::Waiting(_))).await;
+
+    assert!(m.pause(id), "a held send should be pausable");
+    let st = wait_status(&m, id, |s| matches!(s, TransferStatus::Paused(_))).await;
+    assert!(matches!(st, TransferStatus::Paused(_)), "got {st:?}");
+
+    assert!(m.resume(id), "a paused send should resume");
+    let st = wait_status(&m, id, |s| {
+        matches!(s, TransferStatus::Active | TransferStatus::Waiting(_))
+    })
+    .await;
+    assert!(
+        matches!(st, TransferStatus::Active | TransferStatus::Waiting(_)),
+        "resumed send should be trying again, got {st:?}"
+    );
+    m.cancel(id);
+}
+
+#[tokio::test]
+async fn paused_send_survives_restart() {
+    let me_bytes = Identity::generate().secret_bytes();
+    let recipient = Identity::generate();
+    let dl = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let payload = work.path().join("f.bin");
+    std::fs::write(&payload, b"hello").unwrap();
+    let relay = "http://127.0.0.1:1".to_string();
+
+    // First daemon: send to an offline recipient, wait until held, pause it.
+    {
+        let m = TransferManager::with_state_dir(
+            Identity::from_secret_bytes(&me_bytes).unwrap(),
+            Some(relay.clone()),
+            dl.path().to_path_buf(),
+            Some(state.path().to_path_buf()),
+        );
+        let id = m
+            .send_to(&recipient.public(), payload.clone(), "f.bin".into(), false)
+            .await
+            .unwrap();
+        wait_status(&m, id, |s| matches!(s, TransferStatus::Waiting(_))).await;
+        assert!(m.pause(id));
+        wait_status(&m, id, |s| matches!(s, TransferStatus::Paused(_))).await;
+        // `m` drops here — the daemon "shut down" with the send paused on disk.
+    }
+
+    // Second daemon: same identity + state dir → the paused send is restored.
+    let m2 = TransferManager::with_state_dir(
+        Identity::from_secret_bytes(&me_bytes).unwrap(),
+        Some(relay),
+        dl.path().to_path_buf(),
+        Some(state.path().to_path_buf()),
+    );
+    let restored = m2.resume_incomplete();
+    assert!(
+        restored >= 1,
+        "the paused send should be restored, got {restored}"
+    );
+    assert!(
+        m2.list()
+            .into_iter()
+            .any(|t| matches!(t.status, TransferStatus::Paused(_))),
+        "the send must come back paused after a restart"
+    );
+}

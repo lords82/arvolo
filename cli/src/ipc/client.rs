@@ -116,6 +116,14 @@ impl DaemonClient {
         expect_ok(self.request(Request::Cancel { id }).await?)
     }
 
+    pub async fn pause(&mut self, id: u64) -> Result<()> {
+        expect_ok(self.request(Request::Pause { id }).await?)
+    }
+
+    pub async fn resume(&mut self, id: u64) -> Result<()> {
+        expect_ok(self.request(Request::Resume { id }).await?)
+    }
+
     pub async fn accept(&mut self, offer_id: String, out: Option<PathBuf>) -> Result<u64> {
         let out = out.map(|p| p.to_string_lossy().into_owned());
         match self.request(Request::AcceptOffer { offer_id, out }).await? {
