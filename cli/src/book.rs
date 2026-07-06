@@ -243,6 +243,27 @@ pub fn default_relay() -> Option<String> {
     Some(normalize_relay(&raw, false))
 }
 
+/// The compiled-in public default relay, so a fresh install works with zero
+/// configuration for relay-requiring features (short codes, `--to`, the mailbox).
+/// Overridable at build time with `ARVOLO_DEFAULT_RELAY`; build with
+/// `ARVOLO_DEFAULT_RELAY=""` to ship no default (relay then always explicit).
+pub const BUILTIN_RELAY: &str = match option_env!("ARVOLO_DEFAULT_RELAY") {
+    Some(v) => v,
+    None => "arvolo.duckdns.org",
+};
+
+/// Like [`default_relay`] but falls back to the compiled-in [`BUILTIN_RELAY`] when
+/// neither `ARVOLO_RELAY` nor config sets one. Use only on paths that *require* a
+/// relay (short codes, `--to`, mailbox, code receive) — never for opportunistic
+/// seeding of a P2P ticket, which must stay pure-P2P unless the user configured a
+/// relay of their own.
+pub fn default_relay_or_builtin() -> Option<String> {
+    default_relay().or_else(|| {
+        let b = BUILTIN_RELAY.trim();
+        (!b.is_empty()).then(|| normalize_relay(b, false))
+    })
+}
+
 /// The configured download directory for accepted files: the `ARVOLO_DOWNLOAD_DIR`
 /// env var wins, else the config file's `download_dir` key. `None` if neither is
 /// set — callers fall back to [`default_home_downloads`] (`~/Arvolo`).

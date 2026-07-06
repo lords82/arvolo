@@ -1140,7 +1140,7 @@ fn human_duration(secs: u64) -> String {
 fn require_relay(relay: Option<String>, use_http: bool) -> Result<String> {
     let resolved = relay
         .map(|r| book::normalize_relay(&r, use_http))
-        .or_else(book::default_relay)
+        .or_else(book::default_relay_or_builtin)
         .context(
             "a relay is required: pass --relay <host>, set ARVOLO_RELAY, or configure `relay`",
         )?;
@@ -2230,7 +2230,7 @@ async fn send_with_code(
     // otherwise fall back to the default relay (short code, shared default).
     let (relay_url, embed) = match relay {
         Some(r) => (r, true),
-        None => match book::default_relay() {
+        None => match book::default_relay_or_builtin() {
             Some(r) => (r, false),
             None => anyhow::bail!("--code needs a relay: pass --relay <host>, set ARVOLO_RELAY, or configure `relay` in config.toml"),
         },
@@ -2319,7 +2319,7 @@ async fn recv(ticket: String, out: Option<PathBuf>, password: Option<String>) ->
     // A short pairing code is resolved to the real ticket over a rendezvous first.
     let ticket = if code::looks_like_code(&ticket) {
         eprintln!("Pairing… (waiting for the sender)");
-        let default_relay = book::default_relay();
+        let default_relay = book::default_relay_or_builtin();
         vprintln!(
             "input looks like a pairing code — resolving to a ticket over rendezvous relay {}",
             default_relay.as_deref().unwrap_or("(embedded in code)")
@@ -2479,7 +2479,7 @@ async fn send_offline(
     let me = my_identity()?;
     let relay = relay
         .map(|r| book::normalize_relay(&r, use_http))
-        .or_else(book::default_relay)
+        .or_else(book::default_relay_or_builtin)
         .context("no relay: pass --relay <host>, set ARVOLO_RELAY, or configure `relay`")?;
     vprintln!("using relay: {relay}");
     let (payload, name, archive, temp) = resolve_payload(&paths)?;
