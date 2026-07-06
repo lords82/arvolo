@@ -168,3 +168,31 @@ fn persists_across_restart() {
     assert_eq!(claimed.ciphertext, b"persist me");
     assert_eq!(claimed.encapped_key, vec![5, 6]);
 }
+
+/// Per-session relay-offload meter: cumulative within the TTL window, isolated by
+/// swarm id, reads zero once the window lapses (so a genuinely new transfer of the
+/// same file starts fresh), and the reaper drops the stale row.
+#[test]
+fn session_offload_meter_accumulates_and_expires() {
+    let mb = Mailbox::in_memory().unwrap();
+    let (a, b) = ("swarm-a", "swarm-b");
+
+    // Unknown session starts at zero.
+    assert_eq!(mb.session_bytes(a, 1_000), 0);
+
+    // Bytes accumulate within the live window (expires_at = 2_000, in the future).
+    mb.add_session_bytes(a, 100, 2_000).unwrap();
+    mb.add_session_bytes(a, 50, 2_000).unwrap();
+    assert_eq!(mb.session_bytes(a, 1_000), 150);
+
+    // Sessions are isolated by swarm id.
+    assert_eq!(mb.session_bytes(b, 1_000), 0);
+
+    // Once the window has lapsed the tally reads as zero…
+    assert_eq!(mb.session_bytes(a, 2_001), 0);
+
+    // …and the reaper drops the stale row, so a re-send starts a fresh count.
+    mb.reap_session_bytes(2_001);
+    mb.add_session_bytes(a, 10, 5_000).unwrap();
+    assert_eq!(mb.session_bytes(a, 3_000), 10);
+}

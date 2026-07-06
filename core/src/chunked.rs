@@ -961,12 +961,19 @@ impl ChunkTicket {
 }
 
 /// What the sender hands the relay to backfill chunks: the sender's address, the
-/// chunk hashes to fetch, and the transfer token. Base32 `arvs…`.
+/// chunk hashes to fetch, the transfer token, and the content-derived swarm id.
+/// Base32 `arvs…`.
+///
+/// `swarm_id` is [`crate::swarm::swarm_id`] over the *whole* file (not just the
+/// chunks in this request): it is the durable, content-derived key the relay uses
+/// to meter how many bytes a single transfer offloads onto it — stable across the
+/// sender suspending, resuming, or restarting.
 #[derive(Serialize, Deserialize)]
 pub struct SeedRequest {
     pub sender: EndpointAddr,
     pub chunks: Vec<Hash>,
     pub token: String,
+    pub swarm_id: String,
 }
 
 impl SeedRequest {

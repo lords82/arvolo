@@ -715,8 +715,7 @@ async fn contacts_cmd(action: ContactAction) -> Result<()> {
             if let Some(q) = &filter {
                 let needle = q.to_lowercase();
                 list.retain(|(name, id)| {
-                    id.to_lowercase().starts_with(&needle)
-                        || name.to_lowercase().contains(&needle)
+                    id.to_lowercase().starts_with(&needle) || name.to_lowercase().contains(&needle)
                 });
                 if list.is_empty() {
                     eprintln!("(no contact matching '{q}')");
@@ -1106,6 +1105,23 @@ fn human_size(bytes: u64) -> String {
     } else {
         format!("{v:.1} {}", UNITS[u])
     }
+}
+
+/// User-facing message when a transfer hits the relay's per-session offload cap:
+/// explain it's a free/shared relay carrying only part of the transfer, and that a
+/// private relay lifts the cap. `limit_bytes` is 0 when the relay didn't report one.
+fn relay_capped_line(limit_bytes: u64) -> String {
+    let cap = if limit_bytes > 0 {
+        format!(" (~{} per transfer)", human_size(limit_bytes))
+    } else {
+        String::new()
+    };
+    format!(
+        "Relay offload limit reached{cap}. This relay is free and shared, so it \
+         carries only part of any single transfer — the rest goes over direct P2P \
+         (both devices must be online at once). To offload more through a relay, run \
+         your own private relay (arvolo-relay) and point at it with ARVOLO_RELAY."
+    )
 }
 
 /// Current unix time in seconds.
@@ -2137,6 +2153,7 @@ async fn serve_session(session: flow::SendSession, qr: bool) -> Result<()> {
                 eprintln!("Backfilled. You can close this; the relay can finish the delivery.")
             }
             SendEvent::BackfillFailed { reason } => eprintln!("Relay backfill failed: {reason}"),
+            SendEvent::RelayCapped { limit_bytes } => eprintln!("{}", relay_capped_line(limit_bytes)),
             SendEvent::Peers { count } => {
                 vprintln!("{count} peer(s) downloading");
             }
@@ -2287,6 +2304,9 @@ async fn send_with_code(
                 eprintln!("Backfilled. You can close this; the relay can finish the delivery.")
             }
             SendEvent::BackfillFailed { reason } => eprintln!("Relay backfill failed: {reason}"),
+            SendEvent::RelayCapped { limit_bytes } => {
+                eprintln!("{}", relay_capped_line(limit_bytes))
+            }
             SendEvent::Delivered => eprintln!("✓ A receiver got the whole file."),
             SendEvent::ReceiverConnected => vprintln!("receiver connected — chunk pull started"),
             SendEvent::Peers { count } => vprintln!("{count} peer(s) downloading"),

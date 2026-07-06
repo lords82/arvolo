@@ -56,6 +56,11 @@ pub enum SendEvent {
     Backfilled,
     /// A backfill attempt failed (transfer can still be retried).
     BackfillFailed { reason: String },
+    /// The relay refused further backfill because this transfer hit the relay's
+    /// per-session offload cap (a free, shared relay bounds how much any one
+    /// transfer may lean on it). The rest must go over direct P2P — or via a
+    /// private relay without the cap. `limit_bytes` is the relay's cap.
+    RelayCapped { limit_bytes: u64 },
     /// The number of distinct peers currently downloading from us changed
     /// (0, 1, or many — a shared ticket can serve a whole swarm).
     Peers { count: usize },
@@ -337,6 +342,12 @@ impl SendSession {
                         sender: self.sender.addr(),
                         chunks,
                         token: r.token.clone(),
+                        // Whole-file id (not just this tail) so the relay meters
+                        // the transfer as one durable session across resumes.
+                        swarm_id: crate::swarm::swarm_id(
+                            self.sender.chunks(),
+                            self.total_size,
+                        ),
                     };
                     match self
                         .client
@@ -348,6 +359,17 @@ impl SendSession {
                         Ok(resp) if resp.status().is_success() => {
                             self.sender.mark_on_relay(&undelivered);
                             on(SendEvent::Backfilled);
+                        }
+                        Ok(resp) if resp.status() == reqwest::StatusCode::PAYMENT_REQUIRED => {
+                            // The relay's per-session offload cap (free shared tier).
+                            // Body carries the cap in bytes; fall back to P2P.
+                            let limit_bytes = resp
+                                .text()
+                                .await
+                                .ok()
+                                .and_then(|b| b.trim().parse().ok())
+                                .unwrap_or(0);
+                            on(SendEvent::RelayCapped { limit_bytes });
                         }
                         Ok(resp) => on(SendEvent::BackfillFailed {
                             reason: format!("relay rejected: {}", resp.status()),

@@ -495,7 +495,8 @@ impl TransferManager {
                     SendEvent::Ready { .. }
                     | SendEvent::ReceiverDropped { .. }
                     | SendEvent::Backfilled
-                    | SendEvent::BackfillFailed { .. } => {}
+                    | SendEvent::BackfillFailed { .. }
+                    | SendEvent::RelayCapped { .. } => {}
                 })
                 .await;
             watchdog.abort();
@@ -1137,7 +1138,8 @@ async fn serve_session(
             | SendEvent::ReceiverConnected
             | SendEvent::ReceiverDropped { .. }
             | SendEvent::Backfilled
-            | SendEvent::BackfillFailed { .. } => {}
+            | SendEvent::BackfillFailed { .. }
+            | SendEvent::RelayCapped { .. } => {}
         })
         .await;
     swarm_cancel.cancel(); // stop announcing / deregister from the tracker

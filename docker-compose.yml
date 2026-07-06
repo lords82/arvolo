@@ -14,12 +14,16 @@ services:
     # large blobs, long retention) are reserved for self-hosted / paid relays.
     #   - DISABLE_LINKS: no re-downloadable public links → egress stays ~= ingest.
     #   - MAX_TTL 48h, MAX_BLOB 64 MiB, MAX_ENTRIES 20k → bounded worst-case disk.
+    #   - MAX_SESSION_RELAY_BYTES 0.5 GiB: how many bytes a single P2P transfer may
+    #     lean on this relay (backfill). Past it the sender falls back to direct
+    #     P2P. The software default (0 = unlimited) is left for private relays.
     # A private relay can drop this block to run with the generous defaults.
     environment:
       ARVOLO_DISABLE_LINKS: "1"
       ARVOLO_MAX_TTL: "172800"
       ARVOLO_MAX_BLOB_BYTES: "67108864"
       ARVOLO_MAX_ENTRIES: "20000"
+      ARVOLO_MAX_SESSION_RELAY_BYTES: "536870912"
     # No host port publish in production: a TLS-terminating reverse proxy on the
     # same Docker network reaches the relay by its service name (arvolo-relay:6282).
     # Publishing 6282 to the host would expose the relay in plaintext, bypassing

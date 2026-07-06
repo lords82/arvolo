@@ -142,6 +142,9 @@ async fn main() -> Result<()> {
                     n if n > 0 => tracing::info!(removed = n, "reaped stale presence beacons"),
                     _ => {}
                 }
+                // Per-session offload meters whose TTL has passed (so a genuinely
+                // new transfer of the same file later starts with a fresh cap).
+                state.mailbox.reap_session_bytes(now);
             }
         });
     }

@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use arvolo_core::backfill::BlobNode;
-use arvolo_core::chunked::SeedRequest;
+use arvolo_core::chunked::{SeedRequest, CHUNK_SIZE};
 use arvolo_core::swarm::{AnnounceReq, AnnounceResp, PeerInfo};
 use axum::{
     body::Bytes,
@@ -183,6 +183,15 @@ fn max_seeded_rows() -> i64 {
     env_usize("ARVOLO_MAX_SEEDED_ROWS", DEFAULT_MAX_SEEDED_ROWS as usize) as i64
 }
 
+/// Per-session relay-offload cap in bytes (env `ARVOLO_MAX_SESSION_RELAY_BYTES`).
+/// `0` (the default) means **unlimited**: by default the relay meters nothing and
+/// carries as much of a transfer as it is asked to. A public/shared relay sets a
+/// non-zero value to bound how many bytes any one transfer may lean on it —
+/// forcing the remainder onto direct P2P once the cap is reached.
+pub fn max_session_relay_bytes() -> u64 {
+    env_usize("ARVOLO_MAX_SESSION_RELAY_BYTES", 0) as u64
+}
+
 const ENCAPPED_KEY_HEADER: &str = "x-arvolo-encapped-key";
 /// Base32 BLAKE3 hash of the revoke token, sent at deposit (optional).
 const REVOKE_HASH_HEADER: &str = "x-arvolo-revoke-hash";
@@ -337,6 +346,11 @@ impl Mailbox {
             CREATE INDEX IF NOT EXISTS inbox_by_slot ON inbox (slot, expires_at);
             CREATE TABLE IF NOT EXISTS beacon (
                 slot        TEXT PRIMARY KEY,
+                expires_at  INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS session_bytes (
+                swarm_id    TEXT PRIMARY KEY,
+                bytes       INTEGER NOT NULL,
                 expires_at  INTEGER NOT NULL
             );",
         )
@@ -588,6 +602,55 @@ impl Mailbox {
             )
             .map_err(backend)?;
         Ok(())
+    }
+
+    // ---- per-session relay-offload metering -------------------------------
+
+    /// Bytes already offloaded to the relay for `swarm_id` within the live TTL
+    /// window (0 if unknown / expired).
+    pub fn session_bytes(&self, swarm_id: &str, now: u64) -> u64 {
+        self.conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT bytes FROM session_bytes WHERE swarm_id = ?1 AND expires_at > ?2",
+                params![swarm_id, now as i64],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap_or(0)
+            .max(0) as u64
+    }
+
+    /// Add `delta` bytes to `swarm_id`'s running total and (re)set its expiry.
+    /// Cumulative within the TTL window: the row is reaped once no bytes are added
+    /// for the seed TTL, so a genuinely new transfer of the same file later starts
+    /// fresh while a suspend/resume/restart keeps counting toward the same cap.
+    pub fn add_session_bytes(
+        &self,
+        swarm_id: &str,
+        delta: u64,
+        expires_at: u64,
+    ) -> Result<(), MailboxError> {
+        self.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO session_bytes (swarm_id, bytes, expires_at) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(swarm_id) DO UPDATE SET
+                     bytes = bytes + excluded.bytes,
+                     expires_at = excluded.expires_at",
+                params![swarm_id, delta as i64, expires_at as i64],
+            )
+            .map_err(backend)?;
+        Ok(())
+    }
+
+    /// Drop per-session meters whose TTL has passed.
+    pub fn reap_session_bytes(&self, now: u64) {
+        let _ = self.conn.lock().unwrap().execute(
+            "DELETE FROM session_bytes WHERE expires_at <= ?1",
+            params![now as i64],
+        );
     }
 
     /// Number of pending seeded chunk rows (disk-footprint guard).
@@ -1704,6 +1767,23 @@ async fn seed_handler(
             "relay at seed capacity".into(),
         ));
     }
+    // Free-tier per-session offload cap: bound how many bytes any one transfer may
+    // lean on this relay (keyed on the content-derived swarm id, so it is durable
+    // across the sender suspending/resuming/restarting). `0` = unlimited. Meter by
+    // nominal chunk size (16 MiB); the last chunk is smaller, so this slightly
+    // over-counts, which only makes the cap marginally stricter. On PAYMENT_REQUIRED
+    // the sender falls back to direct P2P (or a private, uncapped relay).
+    let cap = max_session_relay_bytes();
+    let add_bytes = (req.chunks.len() as u64).saturating_mul(CHUNK_SIZE as u64);
+    if cap > 0
+        && state
+            .mailbox
+            .session_bytes(&req.swarm_id, now_unix())
+            .saturating_add(add_bytes)
+            > cap
+    {
+        return Err((StatusCode::PAYMENT_REQUIRED, cap.to_string()));
+    }
     state
         .blobs
         .seed_chunks(req.sender, &req.chunks)
@@ -1715,6 +1795,11 @@ async fn seed_handler(
             .mailbox
             .record_seed(&req.token, &hash.to_string(), exp)
             .map_err(err_response)?;
+    }
+    if cap > 0 {
+        let _ = state
+            .mailbox
+            .add_session_bytes(&req.swarm_id, add_bytes, exp);
     }
     Ok("ok".into())
 }
