@@ -211,7 +211,7 @@ Everything below is **optional** (defaults shown).
 | `ARVOLO_RELAY_BLOBS` | `arvolo-blobs` | Blob directory. |
 | `ARVOLO_RELAY_BLOBSTORE` | `arvolo-blobstore` | Blobstore directory. |
 | `ARVOLO_DISABLE_LINKS` | off | `1`/`true`/`yes`/`on` disables browser download links. |
-| `ARVOLO_MAX_BLOB_BYTES` | 256 MiB | Max deposited-blob size. |
+| `ARVOLO_MAX_BLOB_BYTES` | 0 (unlimited) | Max size of a single deposited file (mailbox/link). The deposit streams to disk, so `0` = unlimited (bounded by disk + `MAX_ENTRIES`), safe on memory. A shared/public relay sets e.g. `536870912` (0.5 GiB). |
 | `ARVOLO_MAX_SESSION_RELAY_BYTES` | 0 (unlimited) | Max bytes one P2P transfer may offload to this relay (backfill), keyed on the content-derived swarm id so it's durable across suspend/resume/restart. Past it the sender falls back to direct P2P. `0` = unlimited; a shared/public relay sets e.g. `536870912` (0.5 GiB). |
 | `ARVOLO_MAX_TTL` | 30 days | Max mailbox/blob TTL (seconds). |
 | `ARVOLO_SEED_TTL` | 24 h | TTL for seeded chunks not yet released (seconds). |

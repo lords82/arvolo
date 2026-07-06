@@ -93,11 +93,17 @@ impl AppState {
     }
 }
 
-/// Default cap on a single deposited blob. The relay buffers the whole body in
-/// memory, so this is deliberately memory-safe rather than the aspirational
-/// large-file size — big transfers use the streaming P2P chunk path instead.
-/// Override with `ARVOLO_MAX_BLOB_BYTES`.
-pub const DEFAULT_MAX_BLOB_BYTES: usize = 256 * 1024 * 1024; // 256 MiB
+/// Default cap on a single deposited blob. `0` = **unlimited**: the deposit path
+/// streams the body straight to disk (never buffering it in memory), so the only
+/// bounds are disk space and the entry cap. A public/shared relay sets
+/// `ARVOLO_MAX_BLOB_BYTES` to a finite value to keep any one file small.
+pub const DEFAULT_MAX_BLOB_BYTES: usize = 0; // 0 = unlimited
+
+/// Fixed request-body limit for the small control-plane routes (rendezvous,
+/// inbox, presence, seed, swarm — all a few hundred KiB at most). Comfortably
+/// above every per-route check; the streaming `/v1/deposit` route is exempt and
+/// enforces [`max_blob_bytes`] itself as it writes.
+const CONTROL_PLANE_BODY_LIMIT: usize = 16 * 1024 * 1024; // 16 MiB
 /// Default cap on the number of stored mailbox entries (disk-fill guard).
 /// Override with `ARVOLO_MAX_ENTRIES`.
 pub const DEFAULT_MAX_ENTRIES: i64 = 100_000;
@@ -151,7 +157,9 @@ fn env_usize(var: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
-/// Max deposited-blob size (env `ARVOLO_MAX_BLOB_BYTES`, default 256 MiB).
+/// Max deposited-blob size in bytes (env `ARVOLO_MAX_BLOB_BYTES`). `0` (the
+/// default) means **unlimited** — the deposit streams to disk, so it's bounded by
+/// disk and the entry cap, not memory.
 pub fn max_blob_bytes() -> usize {
     env_usize("ARVOLO_MAX_BLOB_BYTES", DEFAULT_MAX_BLOB_BYTES)
 }
@@ -370,44 +378,82 @@ impl Mailbox {
         })
     }
 
-    fn blob_path(&self, claim: &str) -> PathBuf {
+    /// On-disk path of a blob's ciphertext. The streaming deposit handler writes
+    /// here directly; `commit_deposit` then records the metadata row.
+    pub fn blob_path(&self, claim: &str) -> PathBuf {
         self.blob_dir.join(format!("{claim}.bin"))
     }
 
-    /// Store `deposit`, returning a random claim token. `now` is unix seconds.
-    pub fn deposit(&self, deposit: Deposit, now: u64) -> Result<String, MailboxError> {
-        if deposit.ciphertext.len() > max_blob_bytes() {
-            return Err(MailboxError::TooLarge);
-        }
-        // Disk-fill guard: refuse new blobs once the store is at capacity.
-        if self.len() as i64 >= max_entries() {
-            return Err(MailboxError::Capacity);
-        }
-        // Clamp caller-supplied policy: bound the TTL (no immortal entries / no
-        // i64 overflow) and the download budget.
-        let ttl = deposit.ttl_secs.min(max_ttl_secs());
-        let max_downloads = deposit.max_downloads.clamp(1, MAX_DOWNLOADS_CAP);
-        let claim = random_claim();
-        std::fs::write(self.blob_path(&claim), &deposit.ciphertext).map_err(backend)?;
-        let revoke_hash: Option<Vec<u8>> = if deposit.revoke_hash.is_empty() {
+    /// Whether the store is at its entry cap (disk-fill guard) — checked before a
+    /// streaming deposit starts writing.
+    pub fn at_capacity(&self) -> bool {
+        self.len() as i64 >= max_entries()
+    }
+
+    /// A fresh, random claim token to write a blob under.
+    pub fn new_claim(&self) -> String {
+        random_claim()
+    }
+
+    /// Record the metadata row for a blob whose ciphertext is already written at
+    /// [`blob_path`](Self::blob_path). Clamps the caller's TTL (no immortal entries
+    /// / no i64 overflow) and download budget.
+    pub fn commit_deposit(
+        &self,
+        claim: &str,
+        encapped_key: Vec<u8>,
+        ttl_secs: u64,
+        max_downloads: u32,
+        revoke_hash: Vec<u8>,
+        now: u64,
+    ) -> Result<(), MailboxError> {
+        let ttl = ttl_secs.min(max_ttl_secs());
+        let max_downloads = max_downloads.clamp(1, MAX_DOWNLOADS_CAP);
+        let revoke_hash: Option<Vec<u8>> = if revoke_hash.is_empty() {
             None
         } else {
-            Some(deposit.revoke_hash)
+            Some(revoke_hash)
         };
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "INSERT INTO entries
+        self.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO entries
                 (claim, encapped_key, expires_at, max_downloads, downloads, revoke_hash)
              VALUES (?1, ?2, ?3, ?4, 0, ?5)",
-            params![
-                claim,
-                deposit.encapped_key,
-                now.saturating_add(ttl) as i64,
-                max_downloads as i64,
-                revoke_hash,
-            ],
-        )
-        .map_err(backend)?;
+                params![
+                    claim,
+                    encapped_key,
+                    now.saturating_add(ttl) as i64,
+                    max_downloads as i64,
+                    revoke_hash,
+                ],
+            )
+            .map_err(backend)?;
+        Ok(())
+    }
+
+    /// Store an in-memory `deposit`, returning a random claim token. Used by tests
+    /// and any non-streaming caller; the HTTP path streams to disk instead. `now`
+    /// is unix seconds. A `max_blob_bytes()` of 0 means unlimited.
+    pub fn deposit(&self, deposit: Deposit, now: u64) -> Result<String, MailboxError> {
+        let cap = max_blob_bytes();
+        if cap != 0 && deposit.ciphertext.len() > cap {
+            return Err(MailboxError::TooLarge);
+        }
+        if self.at_capacity() {
+            return Err(MailboxError::Capacity);
+        }
+        let claim = self.new_claim();
+        std::fs::write(self.blob_path(&claim), &deposit.ciphertext).map_err(backend)?;
+        self.commit_deposit(
+            &claim,
+            deposit.encapped_key,
+            deposit.ttl_secs,
+            deposit.max_downloads,
+            deposit.revoke_hash,
+            now,
+        )?;
         Ok(claim)
     }
 
@@ -1231,9 +1277,9 @@ async fn swarm_peers_handler(
 
 /// Build the relay HTTP router over the shared [`AppState`].
 ///
-/// A global request-body limit (`max_blob_bytes()`) is applied so the relay
-/// never buffers an unbounded body into memory — the deposit path materializes
-/// the whole body, so this is the primary OOM guard.
+/// A fixed global request-body limit ([`CONTROL_PLANE_BODY_LIMIT`]) bounds every
+/// small route. `/v1/deposit` is exempt: it streams the body straight to disk and
+/// enforces [`max_blob_bytes`] itself, so it never buffers a whole file in memory.
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/v1/deposit", post(deposit_handler))
@@ -1273,9 +1319,12 @@ pub fn router(state: AppState) -> Router {
         .route("/dl.js", get(dl_js_handler))
         .route("/arvolo-sw.js", get(dl_sw_handler))
         .route("/healthz", get(|| async { "ok" }))
-        // Applied after the routes so it wraps them all: bounds every request
-        // body, so no handler can buffer an unbounded body into memory.
-        .layer(axum::extract::DefaultBodyLimit::max(max_blob_bytes()))
+        // Applied after the routes so it wraps them all: bounds the small
+        // control-plane bodies. `/v1/deposit` reads a raw `Body` (not a
+        // length-limited extractor), so it is unaffected and self-enforces.
+        .layer(axum::extract::DefaultBodyLimit::max(
+            CONTROL_PLANE_BODY_LIMIT,
+        ))
         .with_state(state)
 }
 
@@ -1648,8 +1697,11 @@ async fn deposit_handler(
     State(state): State<AppState>,
     Query(q): Query<DepositQuery>,
     headers: HeaderMap,
-    body: Bytes,
+    body: axum::body::Body,
 ) -> Result<String, (StatusCode, String)> {
+    use futures_util::StreamExt;
+    use tokio::io::AsyncWriteExt;
+
     let mb = &state.mailbox;
     let encapped_key = headers
         .get(ENCAPPED_KEY_HEADER)
@@ -1682,14 +1734,79 @@ async fn deposit_handler(
         })
         .unwrap_or_default();
 
-    let deposit = Deposit {
-        encapped_key,
-        ciphertext: body.to_vec(),
-        ttl_secs: q.ttl,
-        max_downloads: q.max,
-        revoke_hash,
+    // Disk-fill guard before we start writing anything.
+    if mb.at_capacity() {
+        return Err((StatusCode::INSUFFICIENT_STORAGE, "relay at capacity".into()));
+    }
+
+    // Stream the ciphertext straight to disk — never buffer the whole file in
+    // memory — enforcing the per-blob size cap as we go (`0` = unlimited). On any
+    // error or overflow the partial file is removed.
+    let cap = max_blob_bytes();
+    let claim = mb.new_claim();
+    let path = mb.blob_path(&claim);
+    let mut file = tokio::fs::File::create(&path).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("create blob: {e}"),
+        )
+    })?;
+    let mut written: u64 = 0;
+    let mut stream = body.into_data_stream();
+    let abort = |path: &std::path::Path, err: (StatusCode, String)| {
+        let path = path.to_path_buf();
+        async move {
+            let _ = tokio::fs::remove_file(&path).await;
+            err
+        }
     };
-    mb.deposit(deposit, now_unix()).map_err(err_response)
+    while let Some(chunk) = stream.next().await {
+        let chunk = match chunk {
+            Ok(c) => c,
+            Err(e) => {
+                return Err(
+                    abort(&path, (StatusCode::BAD_REQUEST, format!("body read: {e}"))).await,
+                )
+            }
+        };
+        written = written.saturating_add(chunk.len() as u64);
+        if cap != 0 && written > cap as u64 {
+            return Err(abort(
+                &path,
+                (StatusCode::PAYLOAD_TOO_LARGE, "blob too large".into()),
+            )
+            .await);
+        }
+        if let Err(e) = file.write_all(&chunk).await {
+            return Err(abort(
+                &path,
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("write blob: {e}"),
+                ),
+            )
+            .await);
+        }
+    }
+    if let Err(e) = file.flush().await {
+        return Err(abort(
+            &path,
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("flush blob: {e}"),
+            ),
+        )
+        .await);
+    }
+    drop(file);
+
+    match mb.commit_deposit(&claim, encapped_key, q.ttl, q.max, revoke_hash, now_unix()) {
+        Ok(()) => Ok(claim),
+        Err(e) => {
+            let _ = tokio::fs::remove_file(&path).await;
+            Err(err_response(e))
+        }
+    }
 }
 
 /// Revoke (delete) an entry, authorized by the sender's revoke token supplied in

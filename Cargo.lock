@@ -233,6 +233,7 @@ dependencies = [
  "axum",
  "blake3",
  "data-encoding",
+ "futures-util",
  "http-body-util",
  "rand 0.9.4",
  "reqwest 0.12.28",

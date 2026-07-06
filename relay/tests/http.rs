@@ -99,6 +99,46 @@ async fn deposit_fetch_then_burn() {
 }
 
 #[tokio::test]
+async fn deposit_streams_large_multiframe_body() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app(dir.path()).await;
+
+    // A multi-frame body of several MiB must stream straight to disk and come back
+    // byte-identical — this exercises the streaming deposit path (no in-RAM buffer)
+    // that lets the mailbox carry large files.
+    let frame = vec![7u8; 512 * 1024];
+    let n = 9usize; // 4.5 MiB across 9 frames
+    let expected = vec![7u8; frame.len() * n];
+    let stream = futures_util::stream::iter((0..n).map(move |_| {
+        Ok::<axum::body::Bytes, std::io::Error>(axum::body::Bytes::from(frame.clone()))
+    }));
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/deposit?ttl=3600&max=1")
+                .header("x-arvolo-encapped-key", "AAAAAAAA")
+                .body(Body::from_stream(stream))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let claim = String::from_utf8(body_bytes(resp).await).unwrap();
+
+    let resp = app
+        .oneshot(
+            Request::get(format!("/v1/fetch/{claim}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(body_bytes(resp).await, expected);
+}
+
+#[tokio::test]
 async fn fetch_unknown_claim_404() {
     let dir = tempfile::tempdir().unwrap();
     let app = app(dir.path()).await;
