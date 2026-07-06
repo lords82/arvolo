@@ -1,9 +1,12 @@
 # Arvolo
 
-Secure, cross-platform file sending. **P2P-first** when both devices are online;
-**store-and-forward via a self-hostable, expiring relay** when the recipient is
-away. Every transfer is **end-to-end encrypted** and the relay is **zero-knowledge**
-(it only ever holds ciphertext).
+Secure, cross-platform file sending that reaches people **even when they're
+offline**. When both devices are up, files travel P2P directly between them — not
+through a server. When the recipient is away, Arvolo encrypts to their identity and
+**leaves it in an expiring mailbox** until they fetch it; or you hand anyone a
+**browser download link that decrypts with no install and no account**. Every
+transfer is end-to-end encrypted, and the relay only ever holds ciphertext (a
+zero-knowledge store) — which you self-host.
 
 **Your data never leaves your infrastructure — or the EU.** Files travel P2P
 directly between devices; when a relay is needed it holds only ciphertext and you
@@ -14,8 +17,9 @@ can read, retain, or be compelled to hand over your files — which makes GDPR d
 residency and digital-sovereignty requirements straightforward to meet.
 
 > Status: **working CLI** (v0.6). P2P + relay-backfill transfer with resume,
-> per-chunk E2E encryption, short human pairing codes, send-to-a-contact, folders,
-> and an expiring zero-knowledge mailbox. Plus an **always-open client**
+> per-chunk E2E encryption, short human pairing codes, send-to-a-contact
+> (delivered live when they're online, left in an expiring mailbox when they're
+> not), folders, and burn-after-read pickup. Plus an **always-open client**
 > (`listen`/`push`) that receives pushed files with a live watchdog, and
 > **browser download links** — share a URL that decrypts in any browser, no
 > install. Desktop GUI, relay federation, and mobile are planned (see Roadmap).
