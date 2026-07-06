@@ -1838,20 +1838,32 @@ async fn fetch_handler(
         .mailbox
         .fetch_plan(&claim, now_unix())
         .map_err(err_response)?;
-    let ciphertext = tokio::fs::read(&plan.blob_path).await.map_err(|e| {
-        tracing::error!(error = %e, "read blob file");
+    // Stream the blob straight off disk — never buffer a whole (possibly multi-GB)
+    // file in memory. Open first, then, for a burn-after-read claim, unlink the
+    // path immediately: the open handle keeps the bytes alive until this response
+    // finishes, so they are still served while the file is already gone.
+    let file = tokio::fs::File::open(&plan.blob_path).await.map_err(|e| {
+        tracing::error!(error = %e, "open blob file");
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             "internal error".to_string(),
         )
     })?;
+    let len = file.metadata().await.ok().map(|m| m.len());
     if plan.burn {
         let _ = tokio::fs::remove_file(&plan.blob_path).await;
     }
-    let mut resp = ciphertext.into_response();
+    let body = axum::body::Body::from_stream(tokio_util::io::ReaderStream::new(file));
+    let mut resp = Response::new(body);
     let encoded = data_encoding::BASE32_NOPAD.encode(&plan.encapped_key);
     if let Ok(val) = encoded.parse() {
         resp.headers_mut().insert(ENCAPPED_KEY_HEADER, val);
+    }
+    if let Some(len) = len {
+        if let Ok(val) = len.to_string().parse() {
+            resp.headers_mut()
+                .insert(axum::http::header::CONTENT_LENGTH, val);
+        }
     }
     Ok(resp)
 }
