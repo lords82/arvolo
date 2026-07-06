@@ -18,16 +18,39 @@ pub enum RelayChoice {
     N0Default,
     /// No relay — direct only (LAN / tests).
     Disabled,
-    /// A self-hosted iroh relay URL (production / full sovereignty).
+    /// A self-hosted iroh relay URL that *replaces* n0 entirely (full sovereignty
+    /// — the user's explicit `ARVOLO_IROH_RELAY`).
     Custom(String),
+    /// The compiled-in default relay URL, kept alongside n0's relays as fallback:
+    /// prefer our own infrastructure but stay reachable if it is down. This is the
+    /// zero-config default, where reliability matters more than strict sovereignty.
+    BuiltinPlusN0(String),
 }
 
+/// The compiled-in default iroh NAT-traversal relay, so a fresh install gets
+/// relay-assisted P2P without configuring `ARVOLO_IROH_RELAY`. Overridable at
+/// build time with `ARVOLO_DEFAULT_IROH_RELAY`; build with an empty value to fall
+/// back to n0's public relays only.
+pub const BUILTIN_IROH_RELAY: &str = match option_env!("ARVOLO_DEFAULT_IROH_RELAY") {
+    Some(v) => v,
+    None => "https://arvolo.duckdns.org:8443",
+};
+
 impl RelayChoice {
-    /// Read from `ARVOLO_IROH_RELAY`: a self-hosted relay URL if set, else n0 defaults.
+    /// Resolve the relay set. An explicit `ARVOLO_IROH_RELAY` wins and replaces n0
+    /// (full sovereignty). Otherwise use the compiled-in [`BUILTIN_IROH_RELAY`]
+    /// with n0 as fallback — or n0 alone if the builtin was compiled out.
     pub fn from_env() -> Self {
         match std::env::var("ARVOLO_IROH_RELAY") {
             Ok(u) if !u.trim().is_empty() => RelayChoice::Custom(u.trim().to_string()),
-            _ => RelayChoice::N0Default,
+            _ => {
+                let b = BUILTIN_IROH_RELAY.trim();
+                if b.is_empty() {
+                    RelayChoice::N0Default
+                } else {
+                    RelayChoice::BuiltinPlusN0(b.to_string())
+                }
+            }
         }
     }
 }
@@ -49,6 +72,26 @@ pub async fn bind_endpoint_with_key(relay: RelayChoice, secret: SecretKey) -> Re
                 .parse()
                 .map_err(|e| anyhow::anyhow!("invalid ARVOLO_IROH_RELAY url {url:?}: {e}"))?;
             Endpoint::empty_builder(RelayMode::Custom(iroh::RelayMap::from(parsed)))
+        }
+        RelayChoice::BuiltinPlusN0(url) => {
+            use iroh::defaults::prod;
+            let parsed: iroh::RelayUrl = url
+                .parse()
+                .map_err(|e| anyhow::anyhow!("invalid default iroh relay url {url:?}: {e}"))?;
+            // Our relay is used for relaying only (`quic: None`) — QUIC address
+            // discovery is left to n0's nodes, so a closed QUIC port on our VPS
+            // never costs a failed probe. n0's relays stay in the map as fallback.
+            let map = iroh::RelayMap::from_iter([
+                iroh::RelayConfig {
+                    url: parsed,
+                    quic: None,
+                },
+                prod::default_na_east_relay(),
+                prod::default_na_west_relay(),
+                prod::default_eu_relay(),
+                prod::default_ap_relay(),
+            ]);
+            Endpoint::empty_builder(RelayMode::Custom(map))
         }
     };
     // With `ARVOLO_IPV4_ONLY=1`, keep the IPv6 socket on loopback so iroh never
