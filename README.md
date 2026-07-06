@@ -198,7 +198,6 @@ Everything below is **optional** (defaults shown).
 | `ARVOLO_CONCURRENCY` | `4` | Parallel chunk fetches (clamped to 1–16). |
 | `ARVOLO_IPV4_ONLY` | auto | `1` forces IPv4-only (auto-detected when there's no IPv6 route). |
 | `ARVOLO_IROH_RELAY` | n0 public | Self-hosted **iroh** NAT relay for P2P hole-punching. |
-| `ARVOLO_MAX_FETCH_BYTES` | 512 MiB | Max size a single download link/blob will fetch. |
 | `ARVOLO_DEBUG` | off | Extra diagnostics. |
 | `RUST_LOG` | `info` | `tracing` log level. |
 

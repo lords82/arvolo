@@ -241,6 +241,11 @@ use aes_gcm::{Aes256Gcm as ChunkCipher, Key, Nonce};
 /// Length of a chunk content key.
 pub const CHUNK_KEY_LEN: usize = 32;
 
+/// AES-256-GCM authentication tag length appended to each sealed chunk, so a
+/// sealed chunk is `plaintext.len() + CHUNK_TAG_LEN` bytes. Lets a streaming
+/// receiver frame the ciphertext without a length prefix.
+pub const CHUNK_TAG_LEN: usize = 16;
+
 /// A fresh random 32-byte content key for one transfer.
 pub fn random_chunk_key() -> [u8; CHUNK_KEY_LEN] {
     use rand::RngCore;

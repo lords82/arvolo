@@ -23,6 +23,13 @@ pub struct OfflineTicket {
     pub sender: Vec<u8>,
     /// Argon2 salt for the password-wrap layer. Empty ⇒ no link password.
     pub salt: Vec<u8>,
+    /// Chunked format: the HPKE-sealed **content key** ciphertext (the relay blob
+    /// is then a stream of AES-GCM chunks, not one HPKE blob). Empty ⇒ the legacy
+    /// whole-file HPKE format (the blob itself is the sealed file).
+    pub wrapped_key: Vec<u8>,
+    /// Chunked format: plaintext size of the file, so the receiver can frame the
+    /// chunk stream. 0 for the legacy format.
+    pub total_size: u64,
 }
 
 /// Postcard wire form — a self-describing, length-prefixed layout so raw byte
@@ -33,6 +40,8 @@ struct OfflineWire {
     claim: String,
     sender: Vec<u8>,
     salt: Vec<u8>,
+    wrapped_key: Vec<u8>,
+    total_size: u64,
 }
 
 impl OfflineTicket {
@@ -48,6 +57,8 @@ impl OfflineTicket {
             claim: self.claim.clone(),
             sender: self.sender.clone(),
             salt: self.salt.clone(),
+            wrapped_key: self.wrapped_key.clone(),
+            total_size: self.total_size,
         })
         .expect("serialize offline ticket");
         format!("{PREFIX}{}", data_encoding::BASE32_NOPAD.encode(&bytes))
@@ -68,6 +79,8 @@ impl OfflineTicket {
             claim: w.claim,
             sender: w.sender,
             salt: w.salt,
+            wrapped_key: w.wrapped_key,
+            total_size: w.total_size,
         })
     }
 }
@@ -83,6 +96,8 @@ mod tests {
             claim: "abc123xyz".into(),
             sender: vec![1, 2, 3, 4, 5, 6, 7, 8],
             salt: Vec::new(),
+            wrapped_key: vec![9, 8, 7, 6],
+            total_size: 1_234_567,
         };
         let decoded = OfflineTicket::decode(&t.encode()).unwrap();
         assert_eq!(t, decoded);
@@ -97,6 +112,8 @@ mod tests {
             claim: "claim".into(),
             sender: vec![0xff, b'|', 0x00, 0x7c],
             salt: vec![1, b'|', 2, 3, 0xff, 0x00, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9],
+            wrapped_key: vec![b'|', 0x00, 0xff],
+            total_size: 0,
         };
         let decoded = OfflineTicket::decode(&t.encode()).unwrap();
         assert_eq!(t, decoded);
