@@ -8,6 +8,18 @@ services:
     #   dockerfile: relay/Dockerfile
     container_name: arvolo-relay
     restart: always
+    # Public shared-relay cost controls. This is the free "bootstrap + short-lived
+    # mailbox" tier: pairing codes, direct P2P, and offline delivery for small
+    # files. The expensive, amplifying features (public browser download links,
+    # large blobs, long retention) are reserved for self-hosted / paid relays.
+    #   - DISABLE_LINKS: no re-downloadable public links → egress stays ~= ingest.
+    #   - MAX_TTL 48h, MAX_BLOB 64 MiB, MAX_ENTRIES 20k → bounded worst-case disk.
+    # A private relay can drop this block to run with the generous defaults.
+    environment:
+      ARVOLO_DISABLE_LINKS: "1"
+      ARVOLO_MAX_TTL: "172800"
+      ARVOLO_MAX_BLOB_BYTES: "67108864"
+      ARVOLO_MAX_ENTRIES: "20000"
     # No host port publish in production: a TLS-terminating reverse proxy on the
     # same Docker network reaches the relay by its service name (arvolo-relay:6282).
     # Publishing 6282 to the host would expose the relay in plaintext, bypassing
