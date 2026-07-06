@@ -7,6 +7,58 @@ use arvolo_core::flow::{self, RecvEvent};
 use arvolo_core::transfer::RelayChoice;
 use tokio_util::sync::CancellationToken;
 
+/// Fase 4 enabling property: two devices that share one identity recover the same
+/// content key from a `--to` sealed delivery, so they re-seal byte-identical
+/// pieces and derive the same `swarm_id` — the basis for co-swarming a sealed
+/// transfer. A stranger can't open the key, so can't join.
+#[test]
+fn shared_identity_devices_co_swarm_a_sealed_transfer() {
+    use arvolo_core::crypto::{open, random_chunk_key, seal, seal_chunk, Identity};
+    use arvolo_core::hash::Hash;
+    use arvolo_core::swarm::swarm_id;
+
+    let sender = Identity::generate();
+    let account = Identity::generate(); // the shared identity across devices
+    let dev_a = Identity::from_secret_bytes(&account.secret_bytes()).unwrap();
+    let dev_b = Identity::from_secret_bytes(&account.secret_bytes()).unwrap();
+    let stranger = Identity::generate();
+
+    let content_key = random_chunk_key();
+    let aad = b"test/content-key";
+    let sealed = seal(&content_key, &account.public(), &sender, aad).unwrap();
+
+    // Both devices unseal the identical content key.
+    let ka: [u8; 32] = open(&sealed, &dev_a, &sender.public(), aad)
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let kb: [u8; 32] = open(&sealed, &dev_b, &sender.public(), aad)
+        .unwrap()
+        .try_into()
+        .unwrap();
+    assert_eq!(ka, kb);
+    assert_eq!(ka, content_key);
+
+    // Deterministic re-seal → identical piece hashes → identical swarm id.
+    let chunks: Vec<&[u8]> = vec![b"chunk-zero-data.", b"chunk-one-data!!"];
+    let swarm_id_for = |k: &[u8; 32]| {
+        let hashes: Vec<Hash> = chunks
+            .iter()
+            .enumerate()
+            .map(|(i, p)| Hash::new(seal_chunk(k, i as u32, chunks.len() as u32, p).unwrap()))
+            .collect();
+        swarm_id(&hashes, 32)
+    };
+    assert_eq!(
+        swarm_id_for(&ka),
+        swarm_id_for(&kb),
+        "same content key → identical pieces → same swarm"
+    );
+
+    // A stranger cannot open the sealed key, so cannot compute the pieces/join.
+    assert!(open(&sealed, &stranger, &sender.public(), aad).is_err());
+}
+
 #[tokio::test]
 async fn send_then_recv_roundtrip_emits_events() {
     let dir = tempfile::tempdir().unwrap();

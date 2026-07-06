@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use arvolo_core::crypto::PublicId;
+use arvolo_core::sync::{self, ContactReg, DeviceId, Lamport, MarkReg, SyncSnapshot, SyncState};
 use serde::{Deserialize, Serialize};
 
 /// The user's home directory, cross-platform: `$HOME` on Unix/macOS, else
@@ -70,7 +71,12 @@ pub fn config_exists() -> bool {
 /// must not be able to read or tamper with them. On non-unix, permissions are not
 /// applied (accepted limitation; the file still lands in the user's profile dir).
 fn write_private(path: &Path, contents: &str) -> std::io::Result<()> {
-    std::fs::write(path, contents)?;
+    write_private_bytes(path, contents.as_bytes())
+}
+
+/// Binary counterpart of [`write_private`] for the postcard-encoded sync sidecar.
+fn write_private_bytes(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    std::fs::write(path, bytes)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -107,6 +113,13 @@ struct Config {
     max_fetch_bytes: Option<u64>,
     debug: Option<bool>,
     log: Option<String>,
+    sync: Option<bool>,
+}
+
+/// Whether automatic multi-device address-book sync runs in `listen`/`daemon`.
+/// Defaults to on; set `sync = false` in config to disable (or pass `--no-sync`).
+pub fn sync_enabled() -> bool {
+    load_config().sync.unwrap_or(true)
 }
 
 fn load_config() -> Config {
@@ -234,6 +247,9 @@ pub fn write_default_config(relay: Option<&str>) -> Result<()> {
 
 # Log level (tracing / RUST_LOG syntax).
 #log = "info"
+
+# Automatically sync your address book across your linked devices (see `device`).
+#sync = true
 "#,
         relay_line = relay_line,
         downloads = downloads.display(),
@@ -366,6 +382,12 @@ fn load_seen() -> Seen {
         .ok()
         .and_then(|s| toml::from_str(&s).ok())
         .unwrap_or_default()
+}
+
+fn save_seen(s: &Seen) -> Result<()> {
+    std::fs::create_dir_all(config_dir()).ok();
+    let text = toml::to_string_pretty(s).context("serialize seen")?;
+    write_private(&seen_path(), &text).context("write seen")
 }
 
 /// Contact name + whether this sender id has been seen before + verified + trusted.
@@ -543,6 +565,233 @@ pub fn contact_list() -> Vec<(String, String)> {
     load_contacts().contacts.into_iter().collect()
 }
 
+// ---- CRDT sync sidecar ----------------------------------------------------
+//
+// The four TOML ledgers stay the authoritative projection every existing read
+// path uses. Alongside them we keep a postcard sidecar under `<config>/sync/`
+// holding the CRDT state (Lamport clocks + tombstones) so edits can be merged
+// across a user's devices. `build_local_snapshot` reconciles the sidecar with the
+// current TOMLs (capturing edits made out-of-band, e.g. by `contact_add`) and
+// returns a full snapshot to publish; `apply_merged_state` folds an incoming
+// snapshot in and re-projects the merged state back into the TOMLs.
+
+fn sync_dir() -> PathBuf {
+    config_dir().join("sync")
+}
+fn meta_path() -> PathBuf {
+    sync_dir().join("meta.bin")
+}
+fn device_path() -> PathBuf {
+    sync_dir().join("device.bin")
+}
+
+/// This device's local id (a random tiebreak for the Lamport clock, **not** the
+/// shared identity). Minted and persisted on first use.
+fn load_or_init_device() -> DeviceId {
+    if let Ok(bytes) = std::fs::read(device_path()) {
+        if bytes.len() == 16 {
+            let mut id = [0u8; 16];
+            id.copy_from_slice(&bytes);
+            return id;
+        }
+    }
+    let id = sync::random_device_id();
+    std::fs::create_dir_all(sync_dir()).ok();
+    let _ = write_private_bytes(&device_path(), &id);
+    id
+}
+
+/// Load the CRDT sidecar: `(state, lamport, device)`. Missing/corrupt → empty.
+fn load_meta() -> (SyncState, u64, DeviceId) {
+    let device = load_or_init_device();
+    match std::fs::read(meta_path())
+        .ok()
+        .and_then(|b| sync::decode_snapshot(&b).ok())
+    {
+        Some(snap) => (SyncState::from_snapshot(&snap), snap.lamport, device),
+        None => (SyncState::default(), 0, device),
+    }
+}
+
+fn save_meta(state: &SyncState, lamport: u64, device: DeviceId) -> Result<()> {
+    std::fs::create_dir_all(sync_dir()).ok();
+    let snap = state.to_snapshot(lamport, device);
+    let bytes = sync::encode_snapshot(&snap).context("serialize sync meta")?;
+    write_private_bytes(&meta_path(), &bytes).context("write sync meta")
+}
+
+fn tombstone_marks(
+    state: &mut BTreeMap<String, MarkReg>,
+    present: &BTreeSet<String>,
+    lamport: &mut u64,
+    device: DeviceId,
+) {
+    // A pubkey present in the ledger but not yet active in the sidecar → add.
+    for pk in present {
+        let need = !matches!(state.get(pk), Some(r) if !r.deleted);
+        if need {
+            *lamport += 1;
+            state.insert(
+                pk.clone(),
+                MarkReg {
+                    clock: Lamport {
+                        counter: *lamport,
+                        device,
+                    },
+                    deleted: false,
+                },
+            );
+        }
+    }
+    // Active in the sidecar but no longer in the ledger → tombstone. This is what
+    // carries `contact_add`'s key-change clearing (which already removed the old
+    // pubkey from the verified/trusted TOMLs) into the CRDT and out to peers.
+    let stale: Vec<String> = state
+        .iter()
+        .filter(|(pk, r)| !r.deleted && !present.contains(*pk))
+        .map(|(pk, _)| pk.clone())
+        .collect();
+    for pk in stale {
+        *lamport += 1;
+        state.insert(
+            pk.clone(),
+            MarkReg {
+                clock: Lamport {
+                    counter: *lamport,
+                    device,
+                },
+                deleted: true,
+            },
+        );
+    }
+}
+
+/// Reconcile the sidecar with the current TOML ledgers and return a full snapshot
+/// to publish to the user's other devices. Any TOML edit made without touching
+/// the sidecar (e.g. via `contact_add`/`contact_remove`) is captured here as a
+/// fresh-clock add or tombstone, so the published snapshot always reflects the
+/// authoritative ledgers.
+pub fn build_local_snapshot() -> Result<SyncSnapshot> {
+    let (mut state, mut lamport, device) = load_meta();
+
+    let contacts = load_contacts().contacts;
+    // Adds / key-changes.
+    for (name, pubkey) in &contacts {
+        let changed =
+            !matches!(state.contacts.get(name), Some(r) if !r.deleted && &r.pubkey == pubkey);
+        if changed {
+            lamport += 1;
+            state.contacts.insert(
+                name.clone(),
+                ContactReg {
+                    pubkey: pubkey.clone(),
+                    clock: Lamport {
+                        counter: lamport,
+                        device,
+                    },
+                    deleted: false,
+                },
+            );
+        }
+    }
+    // Contacts removed out-of-band → tombstone.
+    let removed: Vec<(String, String)> = state
+        .contacts
+        .iter()
+        .filter(|(name, r)| !r.deleted && !contacts.contains_key(*name))
+        .map(|(name, r)| (name.clone(), r.pubkey.clone()))
+        .collect();
+    for (name, pubkey) in removed {
+        lamport += 1;
+        state.contacts.insert(
+            name,
+            ContactReg {
+                pubkey,
+                clock: Lamport {
+                    counter: lamport,
+                    device,
+                },
+                deleted: true,
+            },
+        );
+    }
+
+    // Marks: set-membership reconciliation (carries key-change clearing too).
+    tombstone_marks(
+        &mut state.verified,
+        &load_verified().verified,
+        &mut lamport,
+        device,
+    );
+    tombstone_marks(
+        &mut state.trusted,
+        &load_trusted().trusted,
+        &mut lamport,
+        device,
+    );
+
+    // Seen counters: monotone max into the sidecar.
+    for (pk, cnt) in load_seen().seen {
+        let e = state.seen.entry(pk).or_insert(0);
+        *e = (*e).max(cnt);
+    }
+
+    save_meta(&state, lamport, device)?;
+    Ok(state.to_snapshot(lamport, device))
+}
+
+/// Merge an incoming snapshot into the sidecar and re-project the merged state
+/// into the four TOML ledgers. Idempotent and order-independent (CRDT).
+pub fn apply_merged_state(incoming: &SyncSnapshot) -> Result<()> {
+    // Fold local out-of-band edits in first so a merge never silently reverts an
+    // un-published local change.
+    build_local_snapshot()?;
+
+    let (mut state, mut lamport, device) = load_meta();
+    let incoming_state = SyncState::from_snapshot(incoming);
+    state.merge(&incoming_state);
+    lamport = lamport.max(incoming.lamport).max(state.max_counter());
+    save_meta(&state, lamport, device)?;
+
+    project_to_ledgers(&state)?;
+    Ok(())
+}
+
+/// Project the merged CRDT state into the four authoritative TOML ledgers: a
+/// non-deleted register becomes a live row, a tombstone becomes absence.
+fn project_to_ledgers(state: &SyncState) -> Result<()> {
+    let mut c = Contacts::default();
+    for (name, r) in &state.contacts {
+        if !r.deleted {
+            c.contacts.insert(name.clone(), r.pubkey.clone());
+        }
+    }
+    save_contacts(&c)?;
+
+    let mut v = Verified::default();
+    for (pk, r) in &state.verified {
+        if !r.deleted {
+            v.verified.insert(pk.clone());
+        }
+    }
+    save_verified(&v)?;
+
+    let mut t = Trusted::default();
+    for (pk, r) in &state.trusted {
+        if !r.deleted {
+            t.trusted.insert(pk.clone());
+        }
+    }
+    save_trusted(&t)?;
+
+    let mut s = Seen::default();
+    for (pk, cnt) in &state.seen {
+        s.seen.insert(pk.clone(), *cnt);
+    }
+    save_seen(&s)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -662,6 +911,85 @@ mod tests {
 
         assert!(contact_remove("alice").unwrap());
         assert!(contact_list().is_empty());
+
+        std::env::remove_var("ARVOLO_CONFIG_DIR");
+    }
+
+    fn b32(id: &PublicId) -> String {
+        data_encoding::BASE32_NOPAD
+            .encode(&id.to_bytes())
+            .to_lowercase()
+    }
+
+    #[test]
+    fn sync_merge_propagates_add_and_key_change() {
+        let _guard = crate::testlock::ENV
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir_a = tempfile::tempdir().unwrap();
+        let dir_b = tempfile::tempdir().unwrap();
+        let id1 = b32(&Identity::generate().public());
+        let id2 = b32(&Identity::generate().public());
+
+        // Device A: alice=id1, verified + trusted; publish snapshot.
+        std::env::set_var("ARVOLO_CONFIG_DIR", dir_a.path());
+        contact_add("alice", &id1).unwrap();
+        mark_verified("alice").unwrap();
+        mark_trusted("alice").unwrap();
+        let snap1 = build_local_snapshot().unwrap();
+
+        // Device B: apply → alice=id1 with both marks.
+        std::env::set_var("ARVOLO_CONFIG_DIR", dir_b.path());
+        apply_merged_state(&snap1).unwrap();
+        assert_eq!(
+            resolve_recipient("alice").unwrap().to_bytes(),
+            decode_id(&id1).unwrap().to_bytes()
+        );
+        assert!(is_verified(&id1) && is_trusted(&id1));
+
+        // Device A: alice's key changes to id2 (clears id1's marks locally).
+        std::env::set_var("ARVOLO_CONFIG_DIR", dir_a.path());
+        assert!(contact_add("alice", &id2).unwrap().is_some());
+        assert!(!is_verified(&id1));
+        let snap2 = build_local_snapshot().unwrap();
+
+        // Device B: apply → alice=id2, id1's marks cleared, id2 not auto-verified.
+        std::env::set_var("ARVOLO_CONFIG_DIR", dir_b.path());
+        apply_merged_state(&snap2).unwrap();
+        assert_eq!(
+            resolve_recipient("alice").unwrap().to_bytes(),
+            decode_id(&id2).unwrap().to_bytes()
+        );
+        assert!(!is_verified(&id1), "old key's verified mark cleared on B");
+        assert!(!is_trusted(&id1), "old key's trust cleared on B");
+        assert!(!is_verified(&id2), "new key is not auto-verified");
+
+        std::env::remove_var("ARVOLO_CONFIG_DIR");
+    }
+
+    #[test]
+    fn sync_merge_propagates_removal() {
+        let _guard = crate::testlock::ENV
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir_a = tempfile::tempdir().unwrap();
+        let dir_b = tempfile::tempdir().unwrap();
+        let id = b32(&Identity::generate().public());
+
+        std::env::set_var("ARVOLO_CONFIG_DIR", dir_a.path());
+        contact_add("bob", &id).unwrap();
+        let s1 = build_local_snapshot().unwrap();
+        std::env::set_var("ARVOLO_CONFIG_DIR", dir_b.path());
+        apply_merged_state(&s1).unwrap();
+        assert_eq!(contact_list().len(), 1);
+
+        // A removes bob → tombstone propagates → B drops it.
+        std::env::set_var("ARVOLO_CONFIG_DIR", dir_a.path());
+        assert!(contact_remove("bob").unwrap());
+        let s2 = build_local_snapshot().unwrap();
+        std::env::set_var("ARVOLO_CONFIG_DIR", dir_b.path());
+        apply_merged_state(&s2).unwrap();
+        assert!(contact_list().is_empty(), "removal propagated to B");
 
         std::env::remove_var("ARVOLO_CONFIG_DIR");
     }

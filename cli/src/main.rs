@@ -39,6 +39,7 @@ mod ipc;
 #[cfg(unix)]
 mod notify;
 mod sessions;
+mod sync;
 
 /// Serializes tests that mutate the process-global `ARVOLO_CONFIG_DIR`, which
 /// several stores read; without this they race under the parallel test runner.
@@ -208,6 +209,18 @@ enum Command {
         #[command(subcommand)]
         action: ContactAction,
     },
+    /// Link another device to share one identity, so your contacts see a single
+    /// id and any device can open files sent to you. Also carries your address
+    /// book between devices.
+    Device {
+        #[command(subcommand)]
+        action: DeviceAction,
+    },
+    /// Synchronize your address book across your linked devices (see `device`).
+    Sync {
+        #[command(subcommand)]
+        action: Option<SyncAction>,
+    },
     /// List or delete resumable send sessions (used by `send --resume`).
     Sessions {
         #[command(subcommand)]
@@ -260,6 +273,9 @@ enum Command {
         /// Accept every incoming offer without prompting.
         #[arg(long)]
         yes: bool,
+        /// Don't auto-sync your address book across your linked devices.
+        #[arg(long)]
+        no_sync: bool,
     },
     /// Run the always-on background engine: stays online, receives files, and
     /// exposes a local control socket so `send`/`transfers`/etc. drive one shared
@@ -277,6 +293,9 @@ enum Command {
         /// Treat a bare relay address as `http://` instead of `https://`.
         #[arg(long)]
         use_http: bool,
+        /// Don't auto-sync your address book across your linked devices.
+        #[arg(long)]
+        no_sync: bool,
     },
     /// Accept a parked offer by its id (see `arvolo transfers`) and download it.
     #[cfg(unix)]
@@ -348,6 +367,42 @@ enum ContactAction {
 }
 
 #[derive(Subcommand)]
+enum DeviceAction {
+    /// On a device you already use: show a pairing code for a new device to
+    /// join. Shares this device's identity + address book once it connects.
+    Pair {
+        /// Rendezvous relay (host or URL). Embedded in the code so the new device
+        /// needs no config. Defaults to ARVOLO_RELAY / config / built-in.
+        #[arg(long)]
+        relay: Option<String>,
+        /// Treat a bare relay address as `http://` instead of `https://`.
+        #[arg(long)]
+        use_http: bool,
+        /// Also render the pairing code as a scannable QR code.
+        #[arg(long)]
+        qr: bool,
+    },
+    /// On the new device: join using the code shown by `device pair`. Overwrites
+    /// this device's identity with the shared one and imports the address book.
+    Join {
+        /// The pairing code from `device pair` (e.g. 4821-crater-mango@relay).
+        code: String,
+        /// Overwrite an existing identity without the confirmation prompt
+        /// (required in a non-interactive shell).
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum SyncAction {
+    /// Publish this device's address book and merge any pending updates now.
+    Now,
+    /// Show sync state (identity fingerprint, contact count, last sync).
+    Status,
+}
+
+#[derive(Subcommand)]
 enum TransferAction {
     /// Delete all transfer history.
     Clear,
@@ -403,6 +458,18 @@ async fn main() -> Result<()> {
         Command::Id => id(),
         Command::Version => version_cmd().await,
         Command::Contacts { action } => contacts_cmd(action).await,
+        Command::Device { action } => match action {
+            DeviceAction::Pair {
+                relay,
+                use_http,
+                qr,
+            } => sync::device_pair(relay, use_http, qr).await,
+            DeviceAction::Join { code, yes } => sync::device_join(code, yes).await,
+        },
+        Command::Sync { action } => match action.unwrap_or(SyncAction::Now) {
+            SyncAction::Now => sync::sync_now(None, false).await,
+            SyncAction::Status => sync::sync_status().await,
+        },
         Command::Sessions { action } => sessions_cmd(action).await,
         Command::Transfers { watch, action } => transfers_cmd(watch, action).await,
         Command::Revoke { target, token } => revoke(target, token).await,
@@ -413,6 +480,7 @@ async fn main() -> Result<()> {
             auto_accept_contacts,
             auto_accept_verified,
             yes,
+            no_sync,
         } => {
             listen(
                 download_dir,
@@ -421,6 +489,7 @@ async fn main() -> Result<()> {
                 auto_accept_contacts,
                 auto_accept_verified,
                 yes,
+                no_sync,
             )
             .await
         }
@@ -429,7 +498,8 @@ async fn main() -> Result<()> {
             download_dir,
             relay,
             use_http,
-        } => daemon(download_dir, relay, use_http).await,
+            no_sync,
+        } => daemon(download_dir, relay, use_http, no_sync).await,
         #[cfg(unix)]
         Command::Accept { offer_id, out } => accept_cmd(offer_id, out).await,
         #[cfg(unix)]
@@ -946,7 +1016,7 @@ async fn sessions_cmd(action: SessionAction) -> Result<()> {
 
 // ---- identity -------------------------------------------------------------
 
-fn identity_path() -> PathBuf {
+pub(crate) fn identity_path() -> PathBuf {
     if let Ok(p) = std::env::var("ARVOLO_IDENTITY") {
         return PathBuf::from(p);
     }
@@ -954,7 +1024,7 @@ fn identity_path() -> PathBuf {
     PathBuf::from(home).join(".config/arvolo/identity.key")
 }
 
-fn my_identity() -> Result<Identity> {
+pub(crate) fn my_identity() -> Result<Identity> {
     Identity::load_or_create(&identity_path()).context("load identity")
 }
 
@@ -967,7 +1037,7 @@ fn id() -> Result<()> {
     Ok(())
 }
 
-fn encode_id(p: &PublicId) -> String {
+pub(crate) fn encode_id(p: &PublicId) -> String {
     data_encoding::BASE32_NOPAD
         .encode(&p.to_bytes())
         .to_lowercase()
@@ -1063,7 +1133,7 @@ fn print_sender_banner(id: Option<&[u8]>) {
 }
 
 /// Render a ticket as a QR code on stdout (best-effort).
-fn print_qr(data: &str) {
+pub(crate) fn print_qr(data: &str) {
     match qrcode::QrCode::new(data) {
         Ok(code) => {
             let art = code
@@ -1203,6 +1273,7 @@ async fn listen(
     auto_accept_contacts: bool,
     auto_accept_verified: bool,
     yes: bool,
+    no_sync: bool,
 ) -> Result<()> {
     // If a daemon is already receiving, attach to it as a viewer/approver instead
     // of standing up a second engine (which would fight over presence/inbox).
@@ -1229,6 +1300,11 @@ async fn listen(
     let manager = TransferManager::new(me, Some(relay.clone()), download_dir.clone());
     let mut events = manager.subscribe();
     let inbox = manager.spawn_inbox()?;
+    let auto_sync =
+        (!no_sync && book::sync_enabled()).then(|| sync::spawn_auto_sync(relay.clone()));
+    if auto_sync.is_some() {
+        vprintln!("multi-device address-book sync enabled");
+    }
     vprintln!("inbox poller started — publishing presence and watching for offers on the relay");
     if yes {
         vprintln!("auto-accepting ALL offers (--yes)");
@@ -1307,6 +1383,9 @@ async fn listen(
         }
     }
     inbox.cancel();
+    if let Some(h) = auto_sync {
+        h.abort();
+    }
     Ok(())
 }
 
@@ -1448,6 +1527,7 @@ async fn daemon(
     download_dir: Option<PathBuf>,
     relay: Option<String>,
     use_http: bool,
+    no_sync: bool,
 ) -> Result<()> {
     use std::collections::HashMap;
     use std::os::unix::fs::PermissionsExt;
@@ -1470,6 +1550,8 @@ async fn daemon(
         Some(state_dir),
     );
     let inbox = manager.spawn_inbox()?;
+    let _auto_sync =
+        (!no_sync && book::sync_enabled()).then(|| sync::spawn_auto_sync(relay.clone()));
 
     // Single-instance guard: if the socket answers, a daemon is already up.
     let sock = ipc::socket_path();

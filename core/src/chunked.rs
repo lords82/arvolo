@@ -667,12 +667,21 @@ impl ChunkSeeder {
             }),
             peers: PeerCount::default(),
         };
+        // Mirror `ChunkSender::serve`: only wait to come "online" via a relay when
+        // one is configured. With `RelayChoice::Disabled` there is no relay to
+        // become reachable through, so `online()` would block forever — use the
+        // local direct address instead (LAN / relay-less swarming).
+        let use_relay = !matches!(&relay, RelayChoice::Disabled);
         let endpoint = bind_endpoint(relay).await?;
         let router = Router::builder(endpoint.clone())
             .accept(CHUNK_ALPN, chunk_server)
             .spawn();
-        endpoint.online().await;
-        let addr = endpoint.addr();
+        let addr = if use_relay {
+            endpoint.online().await;
+            endpoint.addr()
+        } else {
+            local_addr_of(&endpoint)
+        };
         Ok(Self {
             router,
             endpoint,

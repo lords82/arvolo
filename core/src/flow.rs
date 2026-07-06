@@ -845,12 +845,20 @@ pub async fn recv_chunked(
         connected: sender_addr.is_some(),
     });
 
-    // Swarm (multi-peer) coordination — only for shared `arvc…` tickets: a Plain,
-    // ticket-carried key means every holder has the same key and piece hashes, so
-    // pieces are shareable. We seed the pieces we've verified (via `ChunkSeeder`)
-    // and discover/pull from other peers through the relay tracker. `have` is the
-    // count of contiguous committed pieces — both the seeder (what it may serve)
-    // and the announce bitfield read it; the commit loop bumps it.
+    // Swarm (multi-peer) coordination. A piece is addressed by BLAKE3 of its
+    // ciphertext and re-sealed deterministically from the content key, so any two
+    // downloaders holding the **same content key** produce byte-identical,
+    // interchangeable pieces and can swarm together. That holds for a shared
+    // `arvc…` ticket (Plain key) and — because we share one identity across a
+    // user's devices — also for a `--to` ticket Sealed to that identity: every
+    // device unseals the same content key, so your own devices co-swarm a sealed
+    // transfer. By this point `key` is the recovered content key regardless of
+    // delivery mode; the swarm_id derives from the (sealed) ticket's chunk hashes,
+    // so it stays secret to whoever opened the ticket and no stranger can join.
+    // We seed the pieces we've verified (via `ChunkSeeder`) and discover/pull from
+    // other peers through the relay tracker. `have` is the count of contiguous
+    // committed pieces — both the seeder (what it may serve) and the announce
+    // bitfield read it; the commit loop bumps it.
     let have = Arc::new(std::sync::atomic::AtomicUsize::new(start));
     let peers: SwarmPeers = Arc::new(Mutex::new(Vec::new()));
     // Peers (by endpoint id) that served corrupt bytes; filtered out of future
@@ -861,7 +869,7 @@ pub async fn recv_chunked(
     let swarm_cancel = cancel.child_token();
     let mut seeder: Option<crate::chunked::ChunkSeeder> = None;
     let mut swarming = false;
-    if swarm_enabled() && matches!(&t.key, KeyDelivery::Plain(_)) {
+    if swarm_enabled() {
         if let Some(r) = &t.relay {
             match crate::chunked::ChunkSeeder::start(
                 download.clone(),

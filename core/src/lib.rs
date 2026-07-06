@@ -22,6 +22,7 @@ pub mod offline;
 pub mod pairing;
 pub mod presence;
 pub mod swarm;
+pub mod sync;
 pub mod transfer;
 pub mod wordlist;
 

@@ -125,7 +125,7 @@ async fn poll_get(client: &reqwest::Client, url: &str, what: &str) -> Result<Vec
 pub struct PairComplete {
     slot: String,
     relay: String,
-    ticket: String,
+    payload: Vec<u8>,
     pairing: pairing::Pairing,
     client: reqwest::Client,
 }
@@ -135,6 +135,16 @@ pub struct PairComplete {
 /// the exchange. Retries on a slot collision.
 pub async fn publish_ticket(
     ticket: &str,
+    relay: &str,
+    embed_relay: bool,
+) -> Result<(String, PairComplete)> {
+    publish_bytes(ticket.as_bytes().to_vec(), relay, embed_relay).await
+}
+
+/// Like [`publish_ticket`] but transfers arbitrary bytes (e.g. a postcard-encoded
+/// device-pairing payload) instead of a UTF-8 ticket string.
+pub async fn publish_bytes(
+    payload: Vec<u8>,
     relay: &str,
     embed_relay: bool,
 ) -> Result<(String, PairComplete)> {
@@ -167,7 +177,7 @@ pub async fn publish_ticket(
         PairComplete {
             slot,
             relay,
-            ticket: ticket.to_string(),
+            payload,
             pairing,
             client,
         },
@@ -176,7 +186,7 @@ pub async fn publish_ticket(
 
 impl PairComplete {
     /// Wait for the receiver, derive the shared key, and publish the encrypted
-    /// ticket. Completes once the receiver has shown up.
+    /// payload. Completes once the receiver has shown up.
     pub async fn run(self) -> Result<()> {
         let mr = poll_get(
             &self.client,
@@ -185,7 +195,7 @@ impl PairComplete {
         )
         .await?;
         let key = key32(&self.pairing.finish(&mr)?);
-        let ct = seal_chunk(&key, 0, 1, self.ticket.as_bytes())?;
+        let ct = seal_chunk(&key, 0, 1, &self.payload)?;
         self.client
             .post(rz_url(&self.relay, &self.slot, K_TKT))
             .body(ct)
@@ -201,6 +211,13 @@ impl PairComplete {
 /// Resolve a pairing code to its `arvc` ticket via the relay rendezvous. Uses the
 /// relay embedded in the code, else `default_relay`.
 pub async fn resolve_code(code: &str, default_relay: Option<&str>) -> Result<String> {
+    let bytes = resolve_bytes(code, default_relay).await?;
+    String::from_utf8(bytes).context("ticket is not valid UTF-8")
+}
+
+/// Like [`resolve_code`] but returns the raw transferred bytes (for a
+/// device-pairing payload rather than a UTF-8 ticket).
+pub async fn resolve_bytes(code: &str, default_relay: Option<&str>) -> Result<Vec<u8>> {
     let (slot, secret, relay_in_code) = parse_code(code)?;
     let relay = relay_in_code
         .or_else(|| default_relay.map(|s| s.to_string()))
@@ -225,10 +242,9 @@ pub async fn resolve_code(code: &str, default_relay: Option<&str>) -> Result<Str
         .context("post pairing message")?;
     let key = key32(&pairing.finish(&ms)?);
 
-    // Fetch and decrypt the ticket (wrong code -> decrypt fails).
+    // Fetch and decrypt the payload (wrong code -> decrypt fails).
     let ct = poll_get(&client, &rz_url(&relay, &slot, K_TKT), "the ticket").await?;
-    let ticket = open_chunk(&key, 0, 1, &ct).context("decrypt ticket (wrong code?)")?;
-    String::from_utf8(ticket).context("ticket is not valid UTF-8")
+    open_chunk(&key, 0, 1, &ct).context("decrypt ticket (wrong code?)")
 }
 
 #[cfg(test)]

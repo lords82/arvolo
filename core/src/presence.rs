@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 use crate::crypto::{open, open_anon, seal, seal_anon, Identity, PublicId, Sealed};
+use crate::sync::SyncNote;
 
 /// Domain separator for the inbox slot derivation.
 const SLOT_CONTEXT: &str = "arvolo/inbox/slot/v1";
@@ -155,6 +156,30 @@ pub struct ReceivedOffer {
 /// The inbox path on a relay for a given slot.
 fn inbox_url(relay: &str, slot: &str) -> String {
     format!("{}/v1/inbox/{slot}", relay.trim_end_matches('/'))
+}
+
+// ---- multi-device sync notes ----------------------------------------------
+//
+// A user's devices share one identity, hence one inbox slot. Address-book
+// synchronization rides that slot as encrypted CRDT snapshots. A sync note is
+// tagged with a magic prefix so the offer path can tell it apart from an
+// [`Envelope`] (postcard is not self-describing) and leave it alone.
+
+/// Magic prefix identifying an inbox blob as a sync note (Arvolo Sync Note v1).
+const SYNC_NOTE_MAGIC: &[u8; 4] = b"ASN1";
+
+/// Encode a [`SyncNote`] for deposit into an inbox slot (magic prefix + postcard).
+pub fn encode_sync_note(note: &SyncNote) -> Result<Vec<u8>> {
+    let mut out = SYNC_NOTE_MAGIC.to_vec();
+    out.extend_from_slice(&postcard::to_allocvec(note).context("encode sync note")?);
+    Ok(out)
+}
+
+/// Decode an inbox blob as a [`SyncNote`], or `None` if it isn't one (missing
+/// magic prefix or malformed). Never confuses an offer for a sync note.
+pub fn decode_sync_note(blob: &[u8]) -> Option<SyncNote> {
+    let rest = blob.strip_prefix(&SYNC_NOTE_MAGIC[..])?;
+    postcard::from_bytes(rest).ok()
 }
 
 /// Header carrying the base32 BLAKE3 hash of an offer's retract token (POST).
@@ -428,6 +453,12 @@ impl InboxSubscription {
         let me = self.me()?;
         let mut out = Vec::new();
         for item in items {
+            // A sync note shares our slot but is not an offer — leave it on the
+            // relay for the sync engine and never ack it here (only the sync
+            // writer clears these; acking would strip other devices' updates).
+            if decode_sync_note(&item.blob).is_some() {
+                continue;
+            }
             match decode_offer(&item.blob, &me) {
                 Some((sender, offer)) => out.push(ReceivedOffer {
                     id: item.id,
@@ -442,6 +473,44 @@ impl InboxSubscription {
             }
         }
         Ok(out)
+    }
+
+    /// Fetch the raw inbox items (authenticated), holding the connection up to
+    /// `wait_secs`. Used by the sync engine, which needs the relay-assigned ids to
+    /// clean up superseded sync notes.
+    pub async fn raw_items(&self, wait_secs: u64) -> Result<Vec<InboxItem>> {
+        let url = format!("{}?wait={}", inbox_url(&self.relay, &self.slot), wait_secs);
+        let bytes = self.authed(reqwest::Method::GET, &url).await?;
+        if bytes.is_empty() {
+            return Ok(Vec::new());
+        }
+        postcard::from_bytes(&bytes).context("decode inbox items")
+    }
+
+    /// Deposit a raw blob into **our own** inbox slot (unauthenticated POST, like
+    /// any depositor). `ttl_secs` sets how long the relay keeps it — the sync cell
+    /// uses a long TTL and is refreshed on each publish. Returns the relay id.
+    pub async fn post_raw(&self, body: Vec<u8>, ttl_secs: Option<u64>) -> Result<String> {
+        let mut url = inbox_url(&self.relay, &self.slot);
+        if let Some(ttl) = ttl_secs {
+            url = format!("{url}?ttl={ttl}");
+        }
+        let resp = self
+            .client
+            .post(&url)
+            .body(body)
+            .send()
+            .await
+            .context("post to inbox")?;
+        if !resp.status().is_success() {
+            anyhow::bail!("relay rejected inbox post: {}", resp.status());
+        }
+        Ok(resp
+            .text()
+            .await
+            .context("read post id")?
+            .trim()
+            .to_string())
     }
 
     /// Delete a handled offer from the inbox by its id.

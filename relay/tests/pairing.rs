@@ -4,7 +4,8 @@
 use std::sync::Arc;
 
 use arvolo_core::backfill::BlobNode;
-use arvolo_core::code::{publish_ticket, resolve_code};
+use arvolo_core::code::{publish_bytes, publish_ticket, resolve_bytes, resolve_code};
+use arvolo_core::sync::{PairPayload, SyncSnapshot};
 use arvolo_core::transfer::RelayChoice;
 use arvolo_relay::{router, AppState, Mailbox};
 
@@ -59,5 +60,37 @@ async fn self_contained_code_needs_no_default_relay() {
         .await
         .expect("resolve with no default");
     assert_eq!(got, ticket);
+    sender.await.unwrap().expect("sender completes");
+}
+
+#[tokio::test]
+async fn device_pair_payload_roundtrips() {
+    // Device pairing carries the shared identity secret + address-book snapshot as
+    // an opaque byte payload over the same rendezvous the ticket flow uses.
+    let relay = spawn_relay().await;
+    let payload = PairPayload {
+        identity_secret: [7u8; 32],
+        snapshot: SyncSnapshot {
+            lamport: 5,
+            device: [1u8; 16],
+            contacts: vec![],
+            verified: vec![],
+            trusted: vec![],
+            seen: vec![],
+        },
+    };
+    let bytes = payload.encode().unwrap();
+
+    let (code, complete) = publish_bytes(bytes.clone(), &relay, true)
+        .await
+        .expect("publish");
+    let sender = tokio::spawn(complete.run());
+
+    let got = resolve_bytes(&code, None).await.expect("resolve");
+    let recovered = PairPayload::decode(&got).expect("decode");
+    assert_eq!(
+        recovered, payload,
+        "new device recovers the exact pair payload"
+    );
     sender.await.unwrap().expect("sender completes");
 }
