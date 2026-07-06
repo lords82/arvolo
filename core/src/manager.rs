@@ -798,6 +798,10 @@ const OFFLINE_CONFIRM_POLL_SECS: u64 = 3;
 const RELAY_RETRY_SECS: u64 = 15 * 60;
 /// How often to re-check the recipient's presence while a send is held.
 const WAITING_POLL_SECS: u64 = 15;
+/// Upper bound on how long a held (`Waiting`) send keeps trying before it gives up
+/// and fails — so a too-large file to a recipient who never returns doesn't pin a
+/// payload and a task forever. Mirrors the offline mailbox/offer lifetime.
+const MAX_WAITING_SECS: u64 = OFFLINE_TTL_SECS;
 
 /// Outcome of one live-P2P delivery attempt to a recipient believed online.
 enum LiveOutcome {
@@ -845,9 +849,24 @@ async fn deliver_to(
     use std::time::{Duration, Instant};
     let mut too_big = false;
     let mut next_relay_try = Instant::now();
+    let give_up_at = Instant::now() + Duration::from_secs(MAX_WAITING_SECS);
     loop {
         if cancel.is_cancelled() {
             finish(&inner, id, true, Ok(None));
+            return;
+        }
+        // Give up rather than hold a payload + task forever (e.g. a too-large file
+        // to a recipient who never comes back online).
+        if Instant::now() >= give_up_at {
+            finish(
+                &inner,
+                id,
+                false,
+                Err(anyhow::anyhow!(
+                    "gave up after {} days: the recipient never came online and the relay couldn't hold the file",
+                    MAX_WAITING_SECS / 86_400
+                )),
+            );
             return;
         }
 
@@ -1298,10 +1317,24 @@ fn download_record_path(dir: &Path, id: u64) -> PathBuf {
     dir.join(format!("dl-{id}.pc"))
 }
 
+/// Write a resume record with owner-only permissions (`0o600`) on unix. These
+/// records embed the ticket, which for a `Plain` key delivery carries the file's
+/// content key in the clear — so another local user must not be able to read them.
+/// Non-unix keeps the default perms (accepted limitation).
+fn write_record_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    std::fs::write(path, bytes)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
 fn persist_download(dir: &Path, rec: &DownloadRecord) {
     if let Ok(bytes) = postcard::to_allocvec(rec) {
         let _ = std::fs::create_dir_all(dir);
-        let _ = std::fs::write(download_record_path(dir, rec.id), bytes);
+        let _ = write_record_private(&download_record_path(dir, rec.id), &bytes);
     }
 }
 
@@ -1338,7 +1371,7 @@ fn send_record_path(dir: &Path, id: u64) -> PathBuf {
 fn persist_send(dir: &Path, rec: &SendRecord) {
     if let Ok(bytes) = postcard::to_allocvec(rec) {
         let _ = std::fs::create_dir_all(dir);
-        let _ = std::fs::write(send_record_path(dir, rec.id), bytes);
+        let _ = write_record_private(&send_record_path(dir, rec.id), &bytes);
     }
 }
 

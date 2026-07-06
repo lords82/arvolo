@@ -24,7 +24,7 @@ open core and are out of scope here.
 |---|---|
 | **Identity** | A long-term X25519 keypair. The public half is your **id** (no PII). |
 | **Contact id** | Another party's X25519 public key, base32-encoded. What you send **to**. |
-| **Fingerprint** | A six-word BLAKE3 digest of a public id, for out-of-band verification. |
+| **Fingerprint** | An eight-word BLAKE3 digest (64 bits) of a public id, for out-of-band verification. |
 | **Ticket** | A self-describing capability string that lets the holder receive a transfer (`arvc…` / `arvm…`). |
 | **Claim** | A random 16-byte capability token addressing one blob on the relay. |
 | **Slot** | An opaque per-identity address on the relay (inbox / presence), derived from a public id so the relay never sees the id. |
@@ -96,9 +96,11 @@ dictionary attack, so two short words are safe; the relay only sees PAKE message
 and the encrypted ticket.
 
 ### 2.7 Fingerprint
-`PublicId::fingerprint()` is six words derived from BLAKE3 of the public key
-(~48 bits), a display aid for out-of-band verification. The full base32 id remains
-authoritative for matching contacts.
+`PublicId::fingerprint()` is eight words derived from BLAKE3 of the public key
+(**64 bits**, context `arvolo/fp/v2`), a display aid for out-of-band verification.
+Widened from the original six words (~48 bits), which an active MITM could grind a
+matching keypair against. The full base32 id remains authoritative for matching
+contacts.
 
 ---
 
@@ -237,6 +239,14 @@ receiver: arvolo recv arvc…
 ```
 Both online ⇒ data flows **directly**; the relay is never touched.
 
+> **No trusted relay required for P2P.** A pure `arvc` transfer (ticket shared
+> out-of-band, both peers online) involves **no relay at all** — there is nothing to
+> trust. With short-code pairing (§7.2) a relay is used only as a **rendezvous**: the
+> SPAKE2 PAKE means a malicious relay can neither read the data nor MITM the exchange
+> without the code — it can only deny service. So the relay never needs to be trusted
+> for confidentiality or integrity on the P2P paths; the hostile-relay caveat in §7.6
+> is specific to the **browser link** path, where the relay serves the decryptor.
+
 ### 7.2 Short-code pairing (SPAKE2 over rendezvous)
 ```
 sender:  arvolo send --code --relay R file  → 4821-crater-mango[@R]
@@ -347,9 +357,18 @@ encapped-key header (there is no HPKE recipient) and an optional revoke-hash.
      - a same-origin service worker with back-pressure (Firefox/Edge)
    otherwise it buffers in memory and shows a "not fully compatible" notice.
 ```
-Because the key is only in the fragment and decryption is client-side, the relay
-serves the page and the ciphertext but **never** sees the key or plaintext — the
-same end-to-end property as every other path.
+Because the key is only in the fragment and decryption is client-side, an **honest**
+relay serves the page and the ciphertext but never sees the key or plaintext.
+
+> **Trust caveat (honest-relay assumption).** Unlike the CLI paths (`arvc` / `arvm` /
+> `--to`), where the code that touches the key runs on your own machine, the browser
+> link path runs JavaScript **served by the relay itself**. A *malicious* relay could
+> serve a modified `dl.js` that reads the fragment key from `location.hash` and posts
+> it back — the CSP (`connect-src 'self'`) still permits requests to the relay's own
+> origin. So the browser link is zero-knowledge only against an **honest** relay; it
+> is not a defense against a hostile relay operator, exactly like Firefox Send and any
+> other "server serves the decryptor" scheme. **For confidentiality against a hostile
+> relay, use a recipient-sealed send (`--to`)**, whose key never reaches the relay.
 
 **Download caps.** A link has **no download limit by default** (`max` unlimited),
 so it works for many recipients and tolerates retries; `--max N` sets a burn count.
@@ -398,7 +417,7 @@ TTLs and row caps (abuse/disk-fill guards); see the constants in
 | End-to-end confidentiality | HPKE / AES-256-GCM; relay & network see only ciphertext |
 | Integrity & tamper-evidence | AEAD tag on every chunk + BLAKE3 content addressing |
 | Sender authentication | HPKE **auth mode** binds the sender's identity (contact/offline sends) |
-| Zero-knowledge relay | Content key is out-of-band (ticket / URL fragment); relay stores opaque ciphertext and derived slots |
+| Zero-knowledge relay | Content key is out-of-band (ticket / URL fragment); relay stores opaque ciphertext and derived slots. *Caveat:* the **browser download link** trusts the relay to serve honest `dl.js` — see §7.6 and §9.1(5). CLI paths do not. |
 | Reorder/truncation resistance | Per-chunk AAD binds `index ‖ total` |
 | Short-code safety | SPAKE2 PAKE — no offline dictionary attack |
 | Inbox read authorization | HPKE proof-of-possession → relay-MAC session token |
@@ -476,3 +495,20 @@ asked for when you chose a "share by link" flow.
 - *Mitigations (not a fix, a choice):* set **`--max N`** (burn after N downloads),
   a short **`--ttl`**, and **`arvolo sessions rm <id>`** to revoke it the moment
   you're done — controls most link services don't even offer.
+
+**5. The browser download link trusts the relay to serve honest code.**
+The `--link` path is the *only* one where the code that handles the key runs on a
+page **served by the relay** (`dl.js`). The key lives in the URL fragment, so an
+*honest* relay never sees it — but a *malicious* relay could serve a modified `dl.js`
+that exfiltrates `location.hash` to its own origin (permitted by `connect-src 'self'`).
+
+- *Example:* an operator who wants your plaintext replaces the download script; every
+  link opened against that relay leaks its key, while looking identical to the user.
+- *Same everywhere:* this is inherent to "the server serves the decryptor" — **Firefox
+  Send** had the exact caveat; any web-based E2E download does. Only an out-of-band,
+  independently-obtained client (a native app / extension) removes it.
+- *Not solvable for the browser path:* the relay serves the page, the script, and the
+  ciphertext, so SRI / pinning can't help (the attacker controls all three). **The fix
+  is to choose the channel:** a recipient-sealed send (`--to`) keeps the key entirely
+  off the relay and is safe even against a hostile operator; reserve `--link` for when
+  the relay is one you trust (e.g. self-hosted).

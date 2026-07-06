@@ -465,6 +465,61 @@ fn remove_stage_files(download: &Path) {
     }
 }
 
+/// Unpack a tar archive into `dir`, hardened against path-traversal and symlink
+/// escapes. The archive may come from an anonymous `arvc` sender, so every entry is
+/// validated explicitly (defense in depth, not trusting the extractor):
+///
+/// - entry paths (and link targets) must contain only normal components — no
+///   absolute paths, no root/prefix, no `..`;
+/// - symlink and hardlink entries are refused outright. Our own [`pack_tar`] only
+///   ever emits `Directory`/`Regular` entries (symlinks are dereferenced when
+///   packing), so a legitimate transfer never contains a link — a link entry is a
+///   red flag and dropping it can't break an honest send.
+///
+/// Attacker-chosen unix permissions/mtime are also not restored.
+fn unpack_archive_safely(archive: &Path, dir: &Path) -> Result<()> {
+    use std::path::Component;
+
+    // True only if every component is a plain name or `.` (rejects absolute paths,
+    // a root/prefix, and any `..`).
+    fn stays_inside(p: &Path) -> bool {
+        p.components()
+            .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
+    }
+
+    let f = std::fs::File::open(archive).context("open downloaded archive")?;
+    let mut ar = tar::Archive::new(f);
+    ar.set_preserve_permissions(false);
+    ar.set_preserve_mtime(false);
+    ar.set_overwrite(true);
+
+    for entry in ar.entries().context("read archive entries")? {
+        let mut entry = entry.context("read archive entry")?;
+        let path = entry.path().context("entry path")?.into_owned();
+        anyhow::ensure!(
+            stays_inside(&path),
+            "archive entry escapes target dir: {}",
+            path.display()
+        );
+        let etype = entry.header().entry_type();
+        anyhow::ensure!(
+            !matches!(etype, tar::EntryType::Symlink | tar::EntryType::Link),
+            "archive contains a link entry ({}), refused",
+            path.display()
+        );
+        // `unpack_in` runs its own containment check and returns Ok(false) if it
+        // still refused the entry — treat that as an error rather than a silent skip.
+        anyhow::ensure!(
+            entry
+                .unpack_in(dir)
+                .with_context(|| format!("unpack {}", path.display()))?,
+            "archive entry refused by extractor: {}",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
 /// Fetch the file described by `ticket` into `out` (default derived from the
 /// ticket). Resumes a partial output, prefers P2P, falls back to the relay, and
 /// releases relay chunks as they're taken. Returns the output path. If `cancel`
@@ -1183,11 +1238,10 @@ pub async fn recv_chunked(
     remove_stage_files(&download);
 
     if let Some(dir) = archive_dir {
-        // Unpack the tar into the target directory.
+        // Unpack the tar into the target directory, hardened against path-traversal
+        // and symlink escapes (the archive comes from a possibly-anonymous sender).
         std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
-        let f = std::fs::File::open(&download).context("open downloaded archive")?;
-        tar::Archive::new(f)
-            .unpack(&dir)
+        unpack_archive_safely(&download, &dir)
             .with_context(|| format!("extract into {}", dir.display()))?;
         // Keep the staged tar iff we'll seed it (its bytes are exactly what the
         // sender sealed, so re-sealing reproduces the ticket's hashes). The manager
@@ -1688,5 +1742,94 @@ fn default_from_name(name: &str, chunks: &[crate::reexport::Hash]) -> PathBuf {
     match base {
         Some(n) => PathBuf::from(n),
         None => default_out(&chunks.first().map(|h| h.to_string()).unwrap_or_default()),
+    }
+}
+
+#[cfg(test)]
+mod archive_tests {
+    use super::*;
+
+    // A benign archive (dir + regular file, exactly what `pack_tar` emits) unpacks.
+    #[test]
+    fn benign_archive_unpacks() {
+        let src = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(src.path().join("folder")).unwrap();
+        std::fs::write(src.path().join("folder/hello.txt"), b"hi").unwrap();
+        let tar_path = src.path().join("a.tar");
+        pack_tar(&[src.path().join("folder")], &tar_path).unwrap();
+
+        let out = tempfile::tempdir().unwrap();
+        unpack_archive_safely(&tar_path, out.path()).unwrap();
+        assert_eq!(
+            std::fs::read(out.path().join("folder/hello.txt")).unwrap(),
+            b"hi"
+        );
+    }
+
+    // An entry whose path traverses out of the target dir is refused, and nothing
+    // is written outside `dir`. `tar`'s high-level builder refuses to WRITE a `..`
+    // path, so we hand-forge the header (as a real attacker would) by patching the
+    // name field of a benign entry and recomputing the ustar checksum.
+    #[test]
+    fn path_traversal_entry_is_refused() {
+        // A one-entry tar with a benign name + 5 bytes of data.
+        let mut bytes = {
+            let mut buf = Vec::new();
+            {
+                let mut b = tar::Builder::new(&mut buf);
+                let data = b"pwned";
+                let mut h = tar::Header::new_ustar();
+                h.set_entry_type(tar::EntryType::Regular);
+                h.set_size(data.len() as u64);
+                h.set_mode(0o644);
+                h.set_cksum();
+                b.append_data(&mut h, "x", &data[..]).unwrap();
+                b.finish().unwrap();
+            }
+            buf
+        };
+        // Patch the first header's name field (bytes 0..100) to `../escape.txt`.
+        let name = b"../escape.txt";
+        for byte in bytes.iter_mut().take(100) {
+            *byte = 0;
+        }
+        bytes[..name.len()].copy_from_slice(name);
+        // Recompute the ustar checksum (field 148..156): sum of all 512 header bytes
+        // with the checksum field treated as spaces, written as 6 octal digits, NUL,
+        // then a space.
+        for byte in bytes.iter_mut().take(156).skip(148) {
+            *byte = b' ';
+        }
+        let sum: u32 = bytes[..512].iter().map(|&b| b as u32).sum();
+        let chk = format!("{sum:06o}\0 ");
+        bytes[148..156].copy_from_slice(chk.as_bytes());
+
+        let dir = tempfile::tempdir().unwrap();
+        let tar_path = dir.path().join("evil.tar");
+        std::fs::write(&tar_path, &bytes).unwrap();
+
+        let out = tempfile::tempdir().unwrap();
+        assert!(unpack_archive_safely(&tar_path, out.path()).is_err());
+        // The sibling of the target dir must not have been created.
+        assert!(!out.path().parent().unwrap().join("escape.txt").exists());
+    }
+
+    // A symlink entry is refused outright (our packer never emits one).
+    #[test]
+    fn symlink_entry_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let tar_path = dir.path().join("link.tar");
+        {
+            let out = std::fs::File::create(&tar_path).unwrap();
+            let mut b = tar::Builder::new(out);
+            let mut h = tar::Header::new_gnu();
+            h.set_entry_type(tar::EntryType::Symlink);
+            h.set_size(0);
+            h.set_mode(0o777);
+            b.append_link(&mut h, "pwn", "/etc/passwd").unwrap();
+            b.finish().unwrap();
+        }
+        let out = tempfile::tempdir().unwrap();
+        assert!(unpack_archive_safely(&tar_path, out.path()).is_err());
     }
 }

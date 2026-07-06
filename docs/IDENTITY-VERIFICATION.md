@@ -43,9 +43,11 @@ after the fact. It is the right model for consumer P2P and for self-hosting
 without an IdP.
 
 ### 1. Human-readable fingerprint (already present)
-- 6 words derived via BLAKE3 from the public key (~48 bits) —
-  [`PublicId::fingerprint`](../core/src/crypto.rs#L116).
-- It is a *display aid* for the out-of-band comparison ("read me your six words").
+- 8 words derived via BLAKE3 from the public key (**64 bits**) —
+  [`PublicId::fingerprint`](../core/src/crypto.rs). Widened from the original six
+  words (~48 bits), which were grindable: an active MITM could brute-force a
+  substitute keypair whose words matched and defeat the check.
+- It is a *display aid* for the out-of-band comparison ("read me your eight words").
   The full base32 remains the authoritative value for matching.
 
 ### 2. Explicit verify command (to do)
@@ -70,7 +72,7 @@ without an IdP.
 
 ### 5. QR verification (to do, optional)
 - Show the fingerprint / key as a **QR**; scanning it in person is equivalent to
-  comparing the six words but without typos. Useful for the future GUI/mobile.
+  comparing the eight words but without typos. Useful for the future GUI/mobile.
 
 ---
 

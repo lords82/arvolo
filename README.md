@@ -16,10 +16,12 @@ WeTransfer, Dropbox, or other US SaaS, there is **no vendor in the middle** that
 can read, retain, or be compelled to hand over your files — which makes GDPR data
 residency and digital-sovereignty requirements straightforward to meet.
 
-> Status: **working CLI** (v0.6). P2P + relay-backfill transfer with resume,
+> Status: **working CLI** (v0.9). P2P + relay-backfill transfer with resume,
 > per-chunk E2E encryption, short human pairing codes, send-to-a-contact
-> (delivered live when they're online, left in an expiring mailbox when they're
-> not), folders, and burn-after-read pickup. Plus an **always-open client**
+> (delivered live when they're online, **held and retried** when the relay can't
+> take it — never silently failed), a **chunked, streamed offline mailbox** (big
+> files aren't buffered in RAM), folders, and burn-after-read pickup. Plus an
+> **always-open client**
 > (`listen`/`push`) that receives pushed files with a live watchdog, and
 > **browser download links** — share a URL that decrypts in any browser, no
 > install. Desktop GUI, relay federation, and mobile are planned (see Roadmap).
@@ -81,6 +83,11 @@ default relay (see [Config](#config)) the code is even shorter, just
 `4821-crater-mango`. Plain `arvolo send ./file` (no `--code`) prints a
 self-contained `arvc…` ticket instead — no relay needed at all.
 
+> **No trusted relay needed for P2P.** A pure `arvc` transfer touches no relay at
+> all; with `--code`, the relay is only a SPAKE2 rendezvous — it can't read your data
+> or MITM the exchange without the code, only deny service. (The one path where a
+> relay must be trusted is the browser `--link`, whose decryptor the relay serves.)
+
 Relay without TLS (LAN / dev)? Add `--use-http`:
 
 ```sh
@@ -112,7 +119,11 @@ arvolo send ./photo.jpg --to alice
 
 **Browser download link** — share a URL anyone can open in a browser to download
 and decrypt the file, **no arvolo install and no account**. The key lives only in
-the link's `#fragment`, so the relay stays zero-knowledge:
+the link's `#fragment`, so an **honest** relay stays zero-knowledge. Note: the
+browser path runs `dl.js` *served by the relay*, so a **hostile** relay operator
+could serve modified code that grabs the key (like Firefox Send) — for
+confidentiality against an untrusted relay use a recipient-sealed `--to` send, or
+only link against a relay you host/trust. See [PROTOCOL.md §7.6](docs/PROTOCOL.md):
 
 ```sh
 arvolo send ./report.pdf --link
@@ -243,7 +254,9 @@ Everything below is **optional** (defaults shown).
   container; the relay serves a self-contained page that fetches the ciphertext and
   decrypts it in the browser (key only in the URL `#fragment`), streaming to disk
   without buffering the whole file. Each link is a local **session** whose removal
-  revokes the blob on the relay.
+  revokes the blob on the relay. Zero-knowledge against an *honest* relay only —
+  the decryptor is served by the relay, so a hostile operator could exfiltrate the
+  fragment key; use `--to` for confidentiality against an untrusted relay.
 - **Resume**: interrupted receives resume — both across chunks and *within* a chunk.
 
 For the full wire protocol (ticket formats, relay HTTP API, and every flow), see

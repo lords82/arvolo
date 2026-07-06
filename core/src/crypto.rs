@@ -123,17 +123,27 @@ impl PublicId {
         ))
     }
 
-    /// A short, human-comparable fingerprint of this identity: six words derived
-    /// from `BLAKE3` of the public key (~48 bits). It is a *display aid* for
-    /// out-of-band verification ("read me your six words") — the full base32 id
+    /// Number of words in a fingerprint. Eight words = **64 bits** of the
+    /// public-key digest. A shorter fingerprint (the old six words, ~48 bits) is
+    /// grindable: an active MITM could brute-force a substitute keypair whose
+    /// words match the victim's and defeat the out-of-band check, so we widen it to
+    /// match the strength of Signal/WhatsApp safety numbers.
+    pub const FINGERPRINT_WORDS: usize = 8;
+
+    /// A short, human-comparable fingerprint of this identity: eight words derived
+    /// from `BLAKE3` of the public key (**64 bits**). It is a *display aid* for
+    /// out-of-band verification ("read me your eight words") — the full base32 id
     /// remains the authoritative value for matching contacts.
     pub fn fingerprint(&self) -> String {
+        // Context is versioned (`v2`): the previous `v1` produced six words. The
+        // stored authoritative value is the base32 id, not the words, so widening
+        // the display fingerprint breaks no persisted data — only what humans read.
         let mut h = blake3::Hasher::new();
-        h.update(b"arvolo/fp/v1");
+        h.update(b"arvolo/fp/v2");
         h.update(&self.to_bytes());
         let digest = h.finalize();
         let bytes = digest.as_bytes();
-        bytes[..6]
+        bytes[..Self::FINGERPRINT_WORDS]
             .iter()
             .map(|b| crate::wordlist::WORDS[*b as usize])
             .collect::<Vec<_>>()
@@ -320,13 +330,40 @@ pub fn open_chunk(
 // out-of-band. Without the password the inner ciphertext cannot be recovered, so
 // even the intended recipient cannot decrypt — the relay can never bypass it.
 
-use argon2::Argon2;
+use argon2::{Algorithm, Argon2, Params, Version};
 
 /// Length of the random salt used for password key derivation.
 pub const PW_SALT_LEN: usize = 16;
 
 /// AAD tag binding the password-wrap layer to this protocol/version.
 const PW_AAD: &[u8] = b"arvolo/pw/v1";
+
+/// Explicit, pinned Argon2id cost parameters for the link-password wrap, rather
+/// than relying on the library default (which can shift between crate versions and
+/// silently change the derived key). Chosen for a hardened offline-guessing cost:
+/// 64 MiB memory, 3 passes, 1 lane — comfortably above OWASP's Argon2id minimum
+/// and still fast enough on the desktop/CLI targets that do this once per file.
+/// The wrap runs only in Rust (send/recv); the browser link path never derives an
+/// Argon2 key, so the memory cost is not a WebCrypto concern.
+///
+/// NOTE: these parameters are part of the on-the-wire contract — a payload wrapped
+/// with one set can only be unwrapped with the same. Changing them invalidates
+/// previously wrapped links (an accepted breaking change).
+const PW_ARGON2_M_COST: u32 = 64 * 1024; // 64 MiB, in KiB
+const PW_ARGON2_T_COST: u32 = 3; // iterations
+const PW_ARGON2_P_COST: u32 = 1; // lanes
+
+/// The pinned Argon2id instance used for both wrap and unwrap.
+fn pw_argon2() -> Result<Argon2<'static>> {
+    let params = Params::new(
+        PW_ARGON2_M_COST,
+        PW_ARGON2_T_COST,
+        PW_ARGON2_P_COST,
+        Some(CHUNK_KEY_LEN),
+    )
+    .map_err(|e| anyhow!("argon2 params: {e}"))?;
+    Ok(Argon2::new(Algorithm::Argon2id, Version::V0x13, params))
+}
 
 /// A fresh random salt for password wrapping.
 pub fn random_pw_salt() -> [u8; PW_SALT_LEN] {
@@ -336,10 +373,20 @@ pub fn random_pw_salt() -> [u8; PW_SALT_LEN] {
     s
 }
 
-/// Derive a 32-byte wrap key from `password` and `salt` (Argon2id, default cost).
+/// Derive a 32-byte wrap key from `password` and `salt` (Argon2id, pinned cost).
+///
+/// Enforces the salt-length invariant at runtime (not just a `debug_assert!`): the
+/// all-zero nonce used by [`wrap_with_password`] is safe **only** because a fresh,
+/// sufficiently long random salt makes the derived key unique per payload. A short
+/// or empty salt would break that, so we refuse it here in every build.
 fn pw_key(password: &str, salt: &[u8]) -> Result<[u8; 32]> {
+    if salt.len() < PW_SALT_LEN {
+        return Err(anyhow!(
+            "password-wrap salt must be >= {PW_SALT_LEN} bytes and unique per payload"
+        ));
+    }
     let mut key = [0u8; CHUNK_KEY_LEN];
-    Argon2::default()
+    pw_argon2()?
         .hash_password_into(password.as_bytes(), salt, &mut key)
         .map_err(|e| anyhow!("password key derivation: {e}"))?;
     Ok(key)
@@ -350,12 +397,8 @@ fn pw_key(password: &str, salt: &[u8]) -> Result<[u8; 32]> {
 /// is not secret. A fresh salt yields a unique key, so a fixed nonce is safe.
 pub fn wrap_with_password(password: &str, salt: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
     // The all-zero nonce below is safe ONLY because the key is unique per payload,
-    // which holds iff the salt is random and unique (see `random_pw_salt`). Guard
-    // against a degenerate (empty/too-short) salt that would break that invariant.
-    debug_assert!(
-        salt.len() >= PW_SALT_LEN,
-        "password-wrap salt must be >= PW_SALT_LEN and unique per payload"
-    );
+    // which holds iff the salt is random and unique (see `random_pw_salt`). The
+    // salt-length invariant is enforced at runtime inside `pw_key`.
     let key = pw_key(password, salt)?;
     let cipher = ChunkCipher::new(Key::<ChunkCipher>::from_slice(&key));
     cipher
@@ -371,10 +414,6 @@ pub fn wrap_with_password(password: &str, salt: &[u8], plaintext: &[u8]) -> Resu
 
 /// Reverse of [`wrap_with_password`]. Fails on the wrong password or tampering.
 pub fn unwrap_with_password(password: &str, salt: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>> {
-    debug_assert!(
-        salt.len() >= PW_SALT_LEN,
-        "password-wrap salt must be >= PW_SALT_LEN and unique per payload"
-    );
     let key = pw_key(password, salt)?;
     let cipher = ChunkCipher::new(Key::<ChunkCipher>::from_slice(&key));
     cipher
@@ -515,9 +554,14 @@ mod tests {
         let bob = Identity::generate();
 
         let fp = alice.public().fingerprint();
-        // Six dash-separated words, all from the shared wordlist.
+        // Dash-separated words, all from the shared wordlist.
         let words: Vec<&str> = fp.split('-').collect();
-        assert_eq!(words.len(), 6, "fingerprint is six words: {fp}");
+        assert_eq!(
+            words.len(),
+            PublicId::FINGERPRINT_WORDS,
+            "fingerprint is {} words: {fp}",
+            PublicId::FINGERPRINT_WORDS
+        );
         assert!(words.iter().all(|w| crate::wordlist::WORDS.contains(w)));
 
         // Deterministic: same id -> same fingerprint (via a byte roundtrip too).

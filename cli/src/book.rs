@@ -1,7 +1,7 @@
 //! Local config + contacts (address book), stored under ~/.config/arvolo.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use arvolo_core::crypto::PublicId;
@@ -64,6 +64,21 @@ pub fn config_path() -> PathBuf {
 pub fn config_exists() -> bool {
     config_path().exists()
 }
+/// Write a file with owner-only permissions (`0o600`) on unix — same posture as the
+/// identity key. These ledgers hold privacy-sensitive data (who you talk to) and
+/// the trust marks that gate the daemon's auto-download, so another local user
+/// must not be able to read or tamper with them. On non-unix, permissions are not
+/// applied (accepted limitation; the file still lands in the user's profile dir).
+fn write_private(path: &Path, contents: &str) -> std::io::Result<()> {
+    std::fs::write(path, contents)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
 fn contacts_path() -> PathBuf {
     config_dir().join("contacts.toml")
 }
@@ -114,40 +129,41 @@ pub fn apply_config_to_env() {
             std::env::set_var(key, val);
         }
     }
+    // String keys ignore a blank value; bools map to the core's "1"/"0".
+    fn nonempty(s: String) -> Option<String> {
+        Some(s).filter(|s| !s.trim().is_empty())
+    }
+    fn bool_env(b: bool) -> String {
+        if b { "1" } else { "0" }.to_string()
+    }
 
-    if let Some(v) = cfg.temp_dir.filter(|s| !s.trim().is_empty()) {
-        set_if_unset("ARVOLO_TEMP_DIR", v);
-    }
-    if let Some(v) = cfg.identity.filter(|s| !s.trim().is_empty()) {
-        set_if_unset("ARVOLO_IDENTITY", v);
-    }
-    if let Some(v) = cfg.iroh_relay.filter(|s| !s.trim().is_empty()) {
-        set_if_unset("ARVOLO_IROH_RELAY", v);
-    }
-    if let Some(b) = cfg.seed {
-        set_if_unset("ARVOLO_SEED", if b { "1" } else { "0" });
-    }
-    if let Some(n) = cfg.seed_after {
-        set_if_unset("ARVOLO_SEED_AFTER", n.to_string());
-    }
-    if let Some(v) = cfg.swarm.filter(|s| !s.trim().is_empty()) {
-        set_if_unset("ARVOLO_SWARM", v);
-    }
-    if let Some(n) = cfg.concurrency {
-        set_if_unset("ARVOLO_CONCURRENCY", n.to_string());
-    }
-    if let Some(b) = cfg.ipv4_only {
-        set_if_unset("ARVOLO_IPV4_ONLY", if b { "1" } else { "0" });
-    }
-    if let Some(n) = cfg.max_fetch_bytes {
-        set_if_unset("ARVOLO_MAX_FETCH_BYTES", n.to_string());
-    }
-    // Core treats *any* value of ARVOLO_DEBUG as on, so only set it when enabled.
-    if cfg.debug == Some(true) {
-        set_if_unset("ARVOLO_DEBUG", "1");
-    }
-    if let Some(v) = cfg.log.filter(|s| !s.trim().is_empty()) {
-        set_if_unset("RUST_LOG", v);
+    // One row per config key → its ARVOLO_* env var, each normalized to the string
+    // the env expects (or `None` to leave the env untouched). `debug` maps to "1"
+    // only when on, since core treats *any* value of ARVOLO_DEBUG as enabled.
+    // Bridged with env > config > default precedence via `set_if_unset`.
+    let bridges: [(&str, Option<String>); 11] = [
+        ("ARVOLO_TEMP_DIR", cfg.temp_dir.and_then(nonempty)),
+        ("ARVOLO_IDENTITY", cfg.identity.and_then(nonempty)),
+        ("ARVOLO_IROH_RELAY", cfg.iroh_relay.and_then(nonempty)),
+        ("ARVOLO_SEED", cfg.seed.map(bool_env)),
+        ("ARVOLO_SEED_AFTER", cfg.seed_after.map(|n| n.to_string())),
+        ("ARVOLO_SWARM", cfg.swarm.and_then(nonempty)),
+        ("ARVOLO_CONCURRENCY", cfg.concurrency.map(|n| n.to_string())),
+        ("ARVOLO_IPV4_ONLY", cfg.ipv4_only.map(bool_env)),
+        (
+            "ARVOLO_MAX_FETCH_BYTES",
+            cfg.max_fetch_bytes.map(|n| n.to_string()),
+        ),
+        (
+            "ARVOLO_DEBUG",
+            cfg.debug.filter(|&b| b).map(|_| "1".to_string()),
+        ),
+        ("RUST_LOG", cfg.log.and_then(nonempty)),
+    ];
+    for (key, val) in bridges {
+        if let Some(v) = val {
+            set_if_unset(key, v);
+        }
     }
 
     // Always pin the scratch dir to a concrete path (config value if bridged
@@ -291,7 +307,7 @@ fn load_contacts() -> Contacts {
 fn save_contacts(c: &Contacts) -> Result<()> {
     std::fs::create_dir_all(config_dir()).ok();
     let s = toml::to_string_pretty(c).context("serialize contacts")?;
-    std::fs::write(contacts_path(), s).context("write contacts")?;
+    write_private(&contacts_path(), &s).context("write contacts")?;
     Ok(())
 }
 
@@ -379,7 +395,7 @@ fn load_verified() -> Verified {
 fn save_verified(v: &Verified) -> Result<()> {
     std::fs::create_dir_all(config_dir()).ok();
     let text = toml::to_string_pretty(v).context("serialize verified")?;
-    std::fs::write(verified_path(), text).context("write verified")
+    write_private(&verified_path(), &text).context("write verified")
 }
 
 /// Has the user verified this identity's fingerprint out-of-band?
@@ -428,7 +444,7 @@ fn load_trusted() -> Trusted {
 fn save_trusted(t: &Trusted) -> Result<()> {
     std::fs::create_dir_all(config_dir()).ok();
     let text = toml::to_string_pretty(t).context("serialize trusted")?;
-    std::fs::write(trusted_path(), text).context("write trusted")
+    write_private(&trusted_path(), &text).context("write trusted")
 }
 
 /// Does the user trust this identity to auto-download without a prompt? Distinct
@@ -468,7 +484,7 @@ pub fn record_seen(id_b32: &str) {
     *s.seen.entry(id_b32.to_string()).or_insert(0) += 1;
     if let Ok(text) = toml::to_string_pretty(&s) {
         std::fs::create_dir_all(config_dir()).ok();
-        let _ = std::fs::write(seen_path(), text);
+        let _ = write_private(&seen_path(), &text);
     }
 }
 

@@ -97,10 +97,11 @@ code:
   code simply derives a different key and fails to decrypt.
 
 ### 3.5 Human-verifiable fingerprint
-Each identity has a **six-word fingerprint** derived via BLAKE3 from the public
-key (~48 bits) ([`core/src/crypto.rs`](../core/src/crypto.rs)). It is a display
-aid for **out-of-band** verification ("read me your six words"); the full base32
-id remains authoritative.
+Each identity has an **eight-word fingerprint** derived via BLAKE3 from the public
+key (**64 bits**) ([`core/src/crypto.rs`](../core/src/crypto.rs)). It is a display
+aid for **out-of-band** verification ("read me your eight words"); the full base32
+id remains authoritative. (Widened from six words / ~48 bits, which an active MITM
+could brute-force a matching keypair against.)
 
 ---
 

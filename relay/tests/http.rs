@@ -253,10 +253,19 @@ async fn rz_claim_put_get_and_conflict() {
         StatusCode::CONFLICT
     );
 
-    // Receiver posts its message (non-claim key overwrites freely).
+    // Receiver posts its message once (first write wins).
     assert_eq!(
         rz_post(&app, "42", "mr", b"recv-pake").await,
         StatusCode::OK
+    );
+    assert_eq!(rz_get(&app, "42", "mr").await.1, b"recv-pake");
+
+    // A second write to ANY key (not just the slot claim) is refused, so a
+    // stranger who guesses the slot can't clobber an in-flight message/ticket
+    // and grief the pairing (F6). The stored value is unchanged.
+    assert_eq!(
+        rz_post(&app, "42", "mr", b"attacker").await,
+        StatusCode::CONFLICT
     );
     assert_eq!(rz_get(&app, "42", "mr").await.1, b"recv-pake");
 }

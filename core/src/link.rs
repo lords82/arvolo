@@ -164,7 +164,12 @@ pub fn decrypt_link(blob: &[u8], key: &[u8; CHUNK_KEY_LEN]) -> Result<(String, V
     let meta_pt = open_chunk(key, META_INDEX, total_chunks, meta_ct).context("decrypt metadata")?;
     let name = String::from_utf8(meta_pt).context("file name is not valid UTF-8")?;
 
-    let mut out = Vec::with_capacity(size as usize);
+    // `size` is an unauthenticated header field. It IS bound into the meta chunk's
+    // AAD (via `total_chunks`), so a tampered size fails the meta decrypt above —
+    // but never pre-allocate a full attacker-declared `size` up front regardless:
+    // cap the reservation and let the vec grow as real, tag-verified bytes arrive.
+    const MAX_PREALLOC: usize = 64 * 1024 * 1024; // 64 MiB
+    let mut out = Vec::with_capacity((size as usize).min(MAX_PREALLOC));
     for i in 0..total_chunks {
         let ct_len = c.u32()? as usize;
         let ct = c.take(ct_len)?;
@@ -297,6 +302,18 @@ mod tests {
         let (mut blob, key, _n, _s) = encrypt_link(&p).unwrap();
         let last = blob.len() - 1;
         blob[last] ^= 0xff;
+        assert!(decrypt_link(&blob, &key).is_err());
+    }
+
+    #[test]
+    fn huge_declared_size_fails_gracefully_no_oom() {
+        // The `size` header (bytes 12..20, little-endian u64) is unauthenticated.
+        // Overwriting it with a gigantic value must NOT trigger a multi-exabyte
+        // pre-allocation — it must fail cleanly (the size is bound into the meta
+        // chunk AAD, and the pre-alloc is capped regardless). See F8.
+        let (_d, p) = write_tmp(b"payload");
+        let (mut blob, key, _n, _s) = encrypt_link(&p).unwrap();
+        blob[12..20].copy_from_slice(&u64::MAX.to_le_bytes());
         assert!(decrypt_link(&blob, &key).is_err());
     }
 

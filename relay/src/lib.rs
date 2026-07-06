@@ -775,26 +775,6 @@ impl Mailbox {
         Ok(n == 1)
     }
 
-    /// Write (or overwrite) a rendezvous value.
-    pub fn rz_put(
-        &self,
-        slot: &str,
-        key: &str,
-        value: &[u8],
-        expires_at: u64,
-    ) -> Result<(), MailboxError> {
-        self.conn
-            .lock()
-            .unwrap()
-            .execute(
-                "INSERT OR REPLACE INTO rendezvous (slot, key, value, expires_at)
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![slot, key, value, expires_at as i64],
-            )
-            .map_err(backend)?;
-        Ok(())
-    }
-
     /// Read a rendezvous value (if present and unexpired).
     pub fn rz_get(&self, slot: &str, key: &str, now: u64) -> Option<Vec<u8>> {
         self.conn
@@ -1354,19 +1334,23 @@ async fn rz_post_handler(
         return Err((StatusCode::INSUFFICIENT_STORAGE, "relay at capacity".into()));
     }
     let exp = now_unix().saturating_add(RZ_TTL);
-    if key == RZ_CLAIM_KEY {
-        let claimed = state
-            .mailbox
-            .rz_claim(&slot, &key, &body, exp)
-            .map_err(err_response)?;
-        if !claimed {
-            return Err((StatusCode::CONFLICT, "slot already taken".into()));
-        }
-    } else {
-        state
-            .mailbox
-            .rz_put(&slot, &key, &body, exp)
-            .map_err(err_response)?;
+    // First-writer-wins for EVERY rendezvous key, not just the slot claim (`ms`).
+    // Each key of a pairing (`ms` sender msg, `mr` receiver msg, `tkt` encrypted
+    // ticket) is legitimately written exactly once; allowing overwrite (the old
+    // INSERT-OR-REPLACE on `mr`/`tkt`) let anyone who guesses the slot (a 4-digit
+    // nameplate, only 10k values) clobber an in-flight ticket/message and grief the
+    // pairing. Claiming on first write closes that without affecting the honest flow.
+    let claimed = state
+        .mailbox
+        .rz_claim(&slot, &key, &body, exp)
+        .map_err(err_response)?;
+    if !claimed {
+        let msg = if key == RZ_CLAIM_KEY {
+            "slot already taken"
+        } else {
+            "rendezvous key already written"
+        };
+        return Err((StatusCode::CONFLICT, msg.into()));
     }
     Ok("ok".into())
 }

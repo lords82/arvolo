@@ -127,6 +127,50 @@ mailbox.example.com {
 (nginx equivalent: a `limit_req_zone` keyed on `$binary_remote_addr` scoped to a
 `location /v1/inbox/`.) Tune the budget to your expected legitimate offer rate.
 
+**Rate-limit every unauthenticated route, not just inbox.** All control-plane
+endpoints (`/v1/deposit`, `/v1/seed`, `/v1/rz/*`, `/v1/presence/*`,
+`/v1/swarm/*`, `/v1/inbox/*`) are unauthenticated by design. The per-endpoint row
+caps bound **disk**, but an attacker can still cheaply fill a *global* cap
+(`ARVOLO_MAX_INBOX_ROWS`, `ARVOLO_MAX_RZ_ROWS`, `ARVOLO_MAX_PRESENCE_ROWS`, …) and
+deny service to legitimate users. On a public relay, apply a per-IP `limit_req` /
+`rate_limit` (and a `limit_conn` / connection cap) at the proxy across the whole
+`/v1/` prefix — the relay itself ships **no** in-process rate limiter. nginx:
+
+```nginx
+limit_req_zone  $binary_remote_addr zone=arvolo:10m rate=10r/s;
+limit_conn_zone $binary_remote_addr zone=arvolo_conn:10m;
+server {
+    # … TLS + proxy_pass to 127.0.0.1:6282 …
+    location /v1/ {
+        limit_req  zone=arvolo burst=40 nodelay;
+        limit_conn arvolo_conn 32;
+        proxy_pass http://127.0.0.1:6282;
+    }
+    location = /healthz { proxy_pass http://127.0.0.1:6282; }  # keep liveness un-throttled
+}
+```
+
+**Cap blob and seed sizes.** By default the relay meters neither a single blob nor
+the per-transfer seed offload (`ARVOLO_MAX_BLOB_BYTES=0` and
+`ARVOLO_MAX_SESSION_RELAY_BYTES=0` both mean *unlimited*), so an unauthenticated
+client can disk-fill or make the relay pull large amounts over the (also
+unauthenticated) `/v1/seed` path. On a public relay set finite values, e.g.:
+
+```ini
+Environment=ARVOLO_MAX_BLOB_BYTES=536870912          # 512 MiB per blob
+Environment=ARVOLO_MAX_SESSION_RELAY_BYTES=536870912 # 512 MiB offload per transfer
+```
+
+The relay logs a startup **warning** whenever either is left unlimited, or when it
+binds a non-loopback address in plaintext without `ARVOLO_INSECURE=1`.
+
+**Never publish the plaintext port.** The relay speaks plain HTTP; only the reverse
+proxy should be reachable from the network. Bind the relay to `127.0.0.1` (as the
+unit above does) so capability tokens (claim / revoke / inbox session) never travel
+in cleartext. If you *intentionally* run plaintext behind an upstream TLS
+terminator on another host, set `ARVOLO_INSECURE=1` to acknowledge it and silence
+the warning — do **not** set it merely to quiet the log on a directly-exposed relay.
+
 ### Disabling browser download links (optional)
 
 Public browser download links (`send --link`) let anyone with the link

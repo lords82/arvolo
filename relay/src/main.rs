@@ -24,6 +24,15 @@ fn relay_log_filter(verbosity: u8) -> String {
     }
 }
 
+/// Whether `addr` binds only the loopback interface (so plaintext HTTP never leaves
+/// the host). A bare unspecified/public bind (`0.0.0.0:…`, a LAN/public IP) or an
+/// unparseable host is treated as non-loopback → warn.
+fn is_loopback_bind(addr: &str) -> bool {
+    addr.parse::<std::net::SocketAddr>()
+        .map(|s| s.ip().is_loopback())
+        .unwrap_or(false)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // The relay takes no positional args — it's configured entirely via the
@@ -147,6 +156,41 @@ async fn main() -> Result<()> {
                 state.mailbox.reap_session_bytes(now);
             }
         });
+    }
+
+    // Deploy-safety warnings (F2/F9). The relay speaks plaintext HTTP and relies on
+    // an upstream TLS terminator; and by default it meters neither blob size nor the
+    // per-transfer seed offload. Warn loudly when exposed without those bounds so a
+    // misconfigured public relay is obvious in the logs. `ARVOLO_INSECURE=1`
+    // acknowledges an intentional plaintext bind (TLS handled upstream).
+    let insecure_ok = matches!(
+        std::env::var("ARVOLO_INSECURE")
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "1" | "true" | "yes" | "on"
+    );
+    if !is_loopback_bind(&addr) && !insecure_ok {
+        tracing::warn!(
+            %addr,
+            "relay is listening in PLAINTEXT HTTP on a non-loopback address — it MUST sit behind \
+             a TLS-terminating reverse proxy, or capability tokens (claim / revoke / inbox \
+             session) travel in cleartext. Set ARVOLO_INSECURE=1 to silence this once TLS is \
+             handled upstream."
+        );
+    }
+    if arvolo_relay::max_blob_bytes() == 0 {
+        tracing::warn!(
+            "ARVOLO_MAX_BLOB_BYTES is unset (unlimited): any unauthenticated client can deposit \
+             arbitrarily large blobs (disk-fill). Set a finite value on a public relay."
+        );
+    }
+    if arvolo_relay::max_session_relay_bytes() == 0 {
+        tracing::warn!(
+            "ARVOLO_MAX_SESSION_RELAY_BYTES is unset (unlimited): the seed/backfill path has no \
+             per-transfer offload cap. Set a finite value on a public relay."
+        );
     }
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
