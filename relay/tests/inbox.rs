@@ -45,6 +45,7 @@ async fn offer_round_trips_and_acks() {
         chunks: 1,
         ticket: "arvcFAKETICKET".into(),
         note: String::new(),
+        sender_name: String::new(),
     };
     post_offer(&client, &relay, &recipient.public(), &sender, &offer, None)
         .await
@@ -85,6 +86,7 @@ async fn poster_can_retract_its_own_offer() {
             chunks: 1,
             ticket: "arvcLIVE".into(),
             note: String::new(),
+            sender_name: String::new(),
         },
         None,
     )
@@ -142,6 +144,7 @@ async fn offer_status_flips_to_fetched_when_a_live_recipient_polls() {
             chunks: 1,
             ticket: "arvcLIVE".into(),
             note: String::new(),
+            sender_name: String::new(),
         },
         None,
     )
@@ -214,6 +217,7 @@ async fn wrong_recipient_sees_nothing_in_its_own_inbox() {
             chunks: 1,
             ticket: "arvcX".into(),
             note: String::new(),
+            sender_name: String::new(),
         },
         None,
     )

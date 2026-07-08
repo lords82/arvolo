@@ -96,6 +96,9 @@ pub enum ManagerEvent {
         size: u64,
         /// An optional sender's note attached to the transfer (empty if none).
         note: String,
+        /// The sender's self-advertised display name (empty if none). A petname
+        /// claim carried inside the sealed offer — never an authenticated identity.
+        sender_name: String,
     },
     /// A transfer started.
     Started {
@@ -166,6 +169,10 @@ struct Inner {
     /// Shared inbox subscription (present iff a relay is configured). One instance
     /// so its proof-of-possession session token is reused across polls and acks.
     inbox: Option<Arc<InboxSubscription>>,
+    /// The local user's self-chosen display name, advertised inside every outgoing
+    /// offer ([`Offer::sender_name`]). Empty = don't advertise a name. Set once at
+    /// startup via [`TransferManager::set_display_name`] before any `send_to`.
+    display_name: Mutex<String>,
 }
 
 impl Inner {
@@ -267,8 +274,17 @@ impl TransferManager {
                 download_dir,
                 state_dir,
                 inbox,
+                display_name: Mutex::new(String::new()),
             }),
         }
+    }
+
+    /// Set the local user's display name, advertised inside every outgoing offer.
+    /// Call once at startup (from the client's config); empty means no name is
+    /// advertised. It is a petname claim, not an authenticated identity — see
+    /// [`Offer::sender_name`].
+    pub fn set_display_name(&self, name: String) {
+        *self.inner.display_name.lock().unwrap() = name;
     }
 
     /// Subscribe to the manager's event stream.
@@ -718,6 +734,7 @@ impl TransferManager {
                         name: offer.offer.name.clone(),
                         size: offer.offer.size,
                         note: offer.offer.note.clone(),
+                        sender_name: offer.offer.sender_name.clone(),
                     });
                 })
                 .await;
@@ -762,7 +779,18 @@ impl TransferManager {
             .remove(offer_id)
             .context("no such pending offer")?;
 
-        let out_path = out.unwrap_or_else(|| self.inner.download_dir.join(&offer.offer.name));
+        // The offer name is sender-supplied and untrusted (even a "trusted"
+        // contact is auto-downloaded via this path): reduce it to a single safe
+        // path component so it can't traverse out of the download dir, and fall
+        // back to a ticket-derived name if nothing usable remains.
+        let out_path = out.unwrap_or_else(|| {
+            let base = crate::flow::safe_download_name(&offer.offer.name).unwrap_or_else(|| {
+                crate::flow::default_out(&offer.offer.ticket)
+                    .display()
+                    .to_string()
+            });
+            self.inner.download_dir.join(base)
+        });
         if let Some(parent) = out_path.parent() {
             if !parent.as_os_str().is_empty() {
                 std::fs::create_dir_all(parent).ok();
@@ -1256,6 +1284,7 @@ async fn serve_live_once(
         chunks: session.chunks as u64,
         ticket: session.ticket.clone(),
         note: note.to_string(),
+        sender_name: inner.display_name.lock().unwrap().clone(),
     };
     let posted = match presence::post_offer(
         &inner.client,
@@ -1410,6 +1439,7 @@ async fn deposit_offline_and_offer(
         chunks: 0,
         ticket: deposited.ticket.encode(),
         note: note.to_string(),
+        sender_name: inner.display_name.lock().unwrap().clone(),
     };
     presence::post_offer(
         &inner.client,

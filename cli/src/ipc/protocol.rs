@@ -149,6 +149,8 @@ pub struct OfferDto {
     pub name: String,
     pub size: u64,
     pub note: String,
+    #[serde(default)]
+    pub sender_name: String,
 }
 
 /// Serializable mirror of [`ManagerEvent`].
@@ -162,6 +164,8 @@ pub enum EventDto {
         size: u64,
         #[serde(default)]
         note: String,
+        #[serde(default)]
+        sender_name: String,
     },
     Started {
         id: u64,
@@ -243,12 +247,14 @@ impl From<&ManagerEvent> for EventDto {
                 name,
                 size,
                 note,
+                sender_name,
             } => EventDto::OfferReceived {
                 id: id.clone(),
                 from: encode_id(from),
                 name: name.clone(),
                 size: *size,
                 note: note.clone(),
+                sender_name: sender_name.clone(),
             },
             ManagerEvent::Started {
                 id,

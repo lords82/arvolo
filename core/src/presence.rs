@@ -7,11 +7,13 @@
 //! from its public id) and others deposit an [`Offer`] there.
 //!
 //! An offer carries an `arvc…` ticket already **sealed to the recipient** (`--to`),
-//! plus display metadata (name/size). The whole offer is HPKE-sealed in auth-mode
-//! to the recipient, so the relay only learns *presence* metadata (which identity
-//! is receiving), never the offer's contents. On accept, the recipient drives a
-//! normal [`crate::flow::recv_chunked`] with the embedded ticket — the ticket is
-//! never shown to the user.
+//! plus display metadata (name/size). The offer is HPKE-sealed in auth-mode to
+//! the recipient, and that authenticated envelope (sender key included) is then
+//! wrapped in an **anonymous outer seal** to the same recipient — a sealed-sender
+//! construction, so the relay learns only *which slot* receives, never *who*
+//! sends (no public id ever appears on the wire in the clear). On accept, the
+//! recipient drives a normal [`crate::flow::recv_chunked`] with the embedded
+//! ticket — the ticket is never shown to the user.
 //!
 //! Slot = `base32(blake3_derive_key("arvolo/inbox/slot/v1", pubkey))` — an opaque
 //! stand-in for the raw public key (still linkable by anyone who knows the key).
@@ -30,6 +32,8 @@ const SLOT_CONTEXT: &str = "arvolo/inbox/slot/v1";
 const PRESENCE_SLOT_CONTEXT: &str = "arvolo/presence/slot/v1";
 /// AAD binding a sealed offer to its purpose (rejects cross-protocol reuse).
 const OFFER_AAD: &[u8] = b"arvolo/offer/v1";
+/// AAD for the anonymous **outer** envelope seal (the sealed-sender layer).
+const ENVELOPE_AAD: &[u8] = b"arvolo/offer/env/v1";
 
 /// The inbox slot for a public id: an opaque, domain-separated hash of its bytes.
 pub fn slot_for(pubkey: &[u8]) -> String {
@@ -63,15 +67,35 @@ pub struct Offer {
     /// sender-authenticated exactly like the ticket — the relay never sees it.
     #[serde(default)]
     pub note: String,
+    /// The sender's self-chosen display name (`arvolo name "…"`), or empty when
+    /// unset. A *petname claim*: it rides inside the sealed, sender-authenticated
+    /// offer (so it's bound to the sender's key and the relay never sees it), but it
+    /// is attacker-controllable text — the receiver treats it as unverified and it
+    /// never substitutes the fingerprint in any trust decision.
+    #[serde(default)]
+    pub sender_name: String,
 }
 
-/// The on-relay wire form of a deposited offer. The sender's public key travels
-/// in the clear because auth-mode HPKE `open` needs it to verify the sender; the
-/// relay already sees the recipient slot, so this reveals only who-sends-to-whom,
-/// not the contents (name/size/ticket stay encrypted).
+/// The authenticated **inner** envelope: the sender's public key plus the
+/// auth-mode HPKE seal of the offer (`open` needs the sender key to verify it).
+/// It never travels bare: [`SealedEnvelope`] wraps it in an anonymous outer seal
+/// so the relay never sees the sender's public id (sealed sender). Earlier
+/// releases deposited this struct in the clear; [`decode_offer`] still accepts
+/// that legacy form for offers already queued on a relay.
 #[derive(Serialize, Deserialize)]
 struct Envelope {
     sender: Vec<u8>,
+    encapped_key: Vec<u8>,
+    ciphertext: Vec<u8>,
+}
+
+/// The on-relay wire form of a deposited offer: an **anonymous** (base-mode)
+/// HPKE seal, to the recipient, of the postcard-encoded [`Envelope`]. The relay
+/// sees only the recipient slot and this opaque blob — who is sending stays
+/// end-to-end encrypted, and the sender is still cryptographically verified by
+/// the inner auth-mode layer once the recipient unwraps it.
+#[derive(Serialize, Deserialize)]
+struct SealedEnvelope {
     encapped_key: Vec<u8>,
     ciphertext: Vec<u8>,
 }
@@ -220,14 +244,7 @@ pub async fn post_offer(
     offer: &Offer,
     ttl_secs: Option<u64>,
 ) -> Result<PostedOffer> {
-    let plaintext = postcard::to_allocvec(offer).context("encode offer")?;
-    let sealed = seal(&plaintext, recipient, me, OFFER_AAD).context("seal offer")?;
-    let env = Envelope {
-        sender: me.public().to_bytes(),
-        encapped_key: sealed.encapped_key,
-        ciphertext: sealed.ciphertext,
-    };
-    let body = postcard::to_allocvec(&env).context("encode envelope")?;
+    let body = encode_offer_blob(offer, recipient, me)?;
     let slot = slot_for(&recipient.to_bytes());
     let mut url = inbox_url(relay, &slot);
     if let Some(ttl) = ttl_secs {
@@ -595,10 +612,46 @@ impl InboxSubscription {
     }
 }
 
+/// Seal `offer` to `recipient` as `me` in its on-relay wire form: inner
+/// auth-mode seal (sender-verifying), then the anonymous outer envelope so the
+/// relay never sees the sender's public id.
+fn encode_offer_blob(offer: &Offer, recipient: &PublicId, me: &Identity) -> Result<Vec<u8>> {
+    let plaintext = postcard::to_allocvec(offer).context("encode offer")?;
+    let sealed = seal(&plaintext, recipient, me, OFFER_AAD).context("seal offer")?;
+    let env = Envelope {
+        sender: me.public().to_bytes(),
+        encapped_key: sealed.encapped_key,
+        ciphertext: sealed.ciphertext,
+    };
+    let env_bytes = postcard::to_allocvec(&env).context("encode envelope")?;
+    let outer = seal_anon(&env_bytes, recipient, ENVELOPE_AAD).context("seal envelope")?;
+    let wire = SealedEnvelope {
+        encapped_key: outer.encapped_key,
+        ciphertext: outer.ciphertext,
+    };
+    postcard::to_allocvec(&wire).context("encode sealed envelope")
+}
+
 /// Decode + open one inbox blob with `me`, returning the authenticated sender and
 /// offer. `None` if the row is malformed or fails authentication/decryption.
 fn decode_offer(blob: &[u8], me: &Identity) -> Option<(PublicId, Offer)> {
-    let env: Envelope = postcard::from_bytes(blob).ok()?;
+    // Sealed-sender wire form: anonymous outer seal, then the inner envelope.
+    // Fall back to the legacy clear-sender envelope (pre-sealed-sender clients /
+    // offers already queued on a relay); the inner auth-mode open is identical.
+    let env: Envelope = match postcard::from_bytes::<SealedEnvelope>(blob)
+        .ok()
+        .and_then(|wire| {
+            let outer = Sealed {
+                encapped_key: wire.encapped_key,
+                ciphertext: wire.ciphertext,
+            };
+            open_anon(&outer, me, ENVELOPE_AAD).ok()
+        })
+        .and_then(|env_bytes| postcard::from_bytes(&env_bytes).ok())
+    {
+        Some(env) => env,
+        None => postcard::from_bytes(blob).ok()?,
+    };
     let sender = PublicId::from_bytes(&env.sender).ok()?;
     let sealed = Sealed {
         encapped_key: env.encapped_key,
@@ -632,17 +685,57 @@ mod tests {
         );
     }
 
-    #[test]
-    fn offer_round_trips_through_envelope() {
-        let sender = Identity::generate();
-        let recipient = Identity::generate();
-        let offer = Offer {
+    fn test_offer() -> Offer {
+        Offer {
             name: "photo.jpg".into(),
             size: 1234,
             chunks: 1,
             ticket: "arvc-fake".into(),
             note: "see page 4".into(),
-        };
+            sender_name: "Lorenzo".into(),
+        }
+    }
+
+    #[test]
+    fn offer_round_trips_through_sealed_envelope() {
+        let sender = Identity::generate();
+        let recipient = Identity::generate();
+        let offer = test_offer();
+        let blob = encode_offer_blob(&offer, &recipient.public(), &sender).unwrap();
+
+        let (got_sender, got_offer) = decode_offer(&blob, &recipient).expect("decode");
+        assert_eq!(got_sender.to_bytes(), sender.public().to_bytes());
+        assert_eq!(got_offer, offer);
+
+        // A different recipient can't open it.
+        let other = Identity::generate();
+        assert!(decode_offer(&blob, &other).is_none());
+    }
+
+    #[test]
+    fn sealed_envelope_hides_the_sender_from_the_relay() {
+        let sender = Identity::generate();
+        let recipient = Identity::generate();
+        let blob = encode_offer_blob(&test_offer(), &recipient.public(), &sender).unwrap();
+
+        // The relay-visible blob must not contain the sender's public id anywhere
+        // (that is the whole point of the sealed-sender outer layer).
+        let pk = sender.public().to_bytes();
+        assert!(
+            !blob.windows(pk.len()).any(|w| w == &pk[..]),
+            "sender public id must not appear in the on-relay blob"
+        );
+        // And it must never be mistaken for a sync note.
+        assert!(decode_sync_note(&blob).is_none());
+    }
+
+    #[test]
+    fn legacy_clear_sender_envelope_still_decodes() {
+        // Offers deposited by pre-sealed-sender clients (bare `Envelope` on the
+        // wire) must remain readable so queued offers survive an upgrade.
+        let sender = Identity::generate();
+        let recipient = Identity::generate();
+        let offer = test_offer();
         let plaintext = postcard::to_allocvec(&offer).unwrap();
         let sealed = seal(&plaintext, &recipient.public(), &sender, OFFER_AAD).unwrap();
         let env = Envelope {
@@ -652,12 +745,8 @@ mod tests {
         };
         let blob = postcard::to_allocvec(&env).unwrap();
 
-        let (got_sender, got_offer) = decode_offer(&blob, &recipient).expect("decode");
+        let (got_sender, got_offer) = decode_offer(&blob, &recipient).expect("legacy decode");
         assert_eq!(got_sender.to_bytes(), sender.public().to_bytes());
         assert_eq!(got_offer, offer);
-
-        // A different recipient can't open it.
-        let other = Identity::generate();
-        assert!(decode_offer(&blob, &other).is_none());
     }
 }

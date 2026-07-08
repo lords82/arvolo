@@ -37,3 +37,6 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 tempfile = "3"
 arvolo-core.workspace = true
 data-encoding = "2"
+# Spin up a real relay in-process for the multi-device CLI end-to-end test.
+arvolo-relay = { path = "../relay" }
+axum = "0.8"

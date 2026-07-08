@@ -182,8 +182,15 @@ async fn main() -> Result<()> {
     }
     if arvolo_relay::max_blob_bytes() == 0 {
         tracing::warn!(
-            "ARVOLO_MAX_BLOB_BYTES is unset (unlimited): any unauthenticated client can deposit \
-             arbitrarily large blobs (disk-fill). Set a finite value on a public relay."
+            "ARVOLO_MAX_BLOB_BYTES is set to 0 (unlimited): any unauthenticated client can deposit \
+             arbitrarily large blobs. Set a finite value on a public relay (default 16 GiB)."
+        );
+    }
+    if arvolo_relay::max_total_blob_bytes() == 0 {
+        tracing::warn!(
+            "ARVOLO_MAX_TOTAL_BLOB_BYTES is unset (unlimited): the per-blob cap alone does not \
+             stop many deposits from filling the disk. Set it to the disk budget you are willing \
+             to lend on a public relay."
         );
     }
     if arvolo_relay::max_session_relay_bytes() == 0 {
@@ -195,6 +202,13 @@ async fn main() -> Result<()> {
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("arvolo relay listening on {addr}");
-    axum::serve(listener, router(state)).await?;
+    // Serve with connect info so the rendezvous rate limiter can key on the
+    // client IP (behind a reverse proxy, set ARVOLO_TRUST_PROXY to use
+    // X-Forwarded-For instead).
+    axum::serve(
+        listener,
+        router(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }

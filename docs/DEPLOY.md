@@ -150,19 +150,29 @@ server {
 }
 ```
 
-**Cap blob and seed sizes.** By default the relay meters neither a single blob nor
-the per-transfer seed offload (`ARVOLO_MAX_BLOB_BYTES=0` and
-`ARVOLO_MAX_SESSION_RELAY_BYTES=0` both mean *unlimited*), so an unauthenticated
-client can disk-fill or make the relay pull large amounts over the (also
-unauthenticated) `/v1/seed` path. On a public relay set finite values, e.g.:
+**Cap blob and seed sizes.** A single blob is capped at `ARVOLO_MAX_BLOB_BYTES`,
+which now **defaults to 2 GiB** (`0` lifts the limit for a private relay). The
+per-transfer seed offload meter (`ARVOLO_MAX_SESSION_RELAY_BYTES`) still defaults to
+`0` = *unlimited*; on a public relay set a finite value so an unauthenticated client
+can't make the relay pull large amounts over the `/v1/seed` path. For a stricter
+public relay, e.g.:
 
 ```ini
 Environment=ARVOLO_MAX_BLOB_BYTES=536870912          # 512 MiB per blob
 Environment=ARVOLO_MAX_SESSION_RELAY_BYTES=536870912 # 512 MiB offload per transfer
 ```
 
-The relay logs a startup **warning** whenever either is left unlimited, or when it
-binds a non-loopback address in plaintext without `ARVOLO_INSECURE=1`.
+**Rate-limit the write routes.** The unauthenticated write routes (deposit, seed,
+inbox-post, swarm-announce, presence) share a per-IP budget of
+`ARVOLO_WRITES_PER_MIN` (default **240/min**; `0` disables it). This throttles
+peer-list poisoning, offer replay, and disk-fill churn from a single source without
+affecting a normal client. When the relay sits behind a reverse proxy, set
+`ARVOLO_TRUST_PROXY=1` so the limiter keys on the real client IP (`X-Forwarded-For`)
+rather than the proxy's — and only then, since a directly-exposed relay would let a
+client spoof it. The nginx `limit_req` above is still recommended as a first line.
+
+The relay logs a startup **warning** whenever the seed offload is left unlimited, or
+when it binds a non-loopback address in plaintext without `ARVOLO_INSECURE=1`.
 
 **Never publish the plaintext port.** The relay speaks plain HTTP; only the reverse
 proxy should be reachable from the network. Bind the relay to `127.0.0.1` (as the

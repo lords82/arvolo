@@ -150,8 +150,9 @@ arvolo sessions rm <id>
 | &nbsp;&nbsp;`--relay --use-http --qr` | Relay for `--code`/mailbox/link; `http://` for bare hosts (LAN/dev); render the ticket/code/link as a QR. |
 | `arvolo recv <ticket\|code> [-o out] [--password]` | Receive from **any** ticket or code — auto-detects: `arvc…`/pairing-code fetch live P2P (resumes, unpacks folders), `arvm…`/download-link decrypt from the relay. |
 | `arvolo id` | Show your public id (created on first use). |
+| `arvolo name ["…"]` | Show or set your display name — the self-chosen name advertised to recipients inside each sealed offer (a petname claim, never a verified identity; empty clears it). |
 | `arvolo version` | CLI version + whether the daemon is running (and its version). |
-| `arvolo contacts add\|list\|verify\|remove\|trust\|untrust` | Address book of recipients (used by `--to`); TOFU + out-of-band fingerprint verification. `trust` lets the daemon auto-download that contact's files (default: ask). |
+| `arvolo contacts add\|list\|verify\|remove\|trust\|untrust\|accept-name` | Address book of recipients (used by `--to`); TOFU + out-of-band fingerprint verification. `trust` lets the daemon auto-download that contact's files (default: ask). `accept-name` approves a sender's advertised display name — first use pins it, a later change is quarantined (old name kept) until you approve. |
 | `arvolo listen [--download-dir --auto-accept-contacts --auto-accept-verified]` | Stay online and receive files contacts send to you (offers, live watchdog, transparent download). |
 | `arvolo sessions list\|rm <id>` | List relay deposits (link / sealed) with live relay status + resumable sends; `rm` **revokes on the relay**, deleting the file/link. |
 | `arvolo revoke <arvm…\|link> --token <t>` | Delete a deposited mailbox ticket **or** a browser download link from the relay (auto-detects which). |

@@ -97,6 +97,20 @@ pub struct SeenEntry {
     pub count: u64,
 }
 
+/// One advertised-name binding, keyed by pubkey (last-writer-wins, like a
+/// contact). `pinned` is the name the user approved ("gave for good"); `pending`
+/// is the last advertised name that differs from it, awaiting approval. A cleared
+/// contact is a tombstone rather than an omission, same as [`ContactEntry`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NameEntry {
+    pub pubkey: String,
+    pub pinned: String,
+    #[serde(default)]
+    pub pending: Option<String>,
+    pub clock: Lamport,
+    pub deleted: bool,
+}
+
 /// A full, self-contained snapshot of the address book — the on-the-wire form of
 /// [`SyncState`]. It is *state*, not a delta: it always carries the complete
 /// current book (plus tombstones), so a device that missed earlier snapshots
@@ -111,6 +125,10 @@ pub struct SyncSnapshot {
     pub verified: Vec<MarkEntry>,
     pub trusted: Vec<MarkEntry>,
     pub seen: Vec<SeenEntry>,
+    /// Approved/pending advertised names, keyed by pubkey. `#[serde(default)]` so
+    /// a snapshot written by an older device (no `names`) still deserializes.
+    #[serde(default)]
+    pub names: Vec<NameEntry>,
 }
 
 /// The sealed inbox payload carrying a snapshot to the user's other devices.
@@ -163,6 +181,17 @@ pub struct MarkReg {
     pub deleted: bool,
 }
 
+/// A name register: the approved (`pinned`) and awaiting-approval (`pending`)
+/// advertised names for a pubkey, plus clock and tombstone. Merged last-writer-wins
+/// by [`Lamport`], exactly like [`ContactReg`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NameReg {
+    pub pinned: String,
+    pub pending: Option<String>,
+    pub clock: Lamport,
+    pub deleted: bool,
+}
+
 /// The canonical, in-memory CRDT state — the merge target and the source of the
 /// projection into the four TOML ledgers. Kept as maps for O(log n) merge.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -175,6 +204,8 @@ pub struct SyncState {
     pub trusted: BTreeMap<String, MarkReg>,
     /// pubkey → seen counter.
     pub seen: BTreeMap<String, u64>,
+    /// pubkey → advertised-name register.
+    pub names: BTreeMap<String, NameReg>,
 }
 
 impl SyncState {
@@ -211,6 +242,17 @@ impl SyncState {
         }
         for e in &s.seen {
             state.seen.insert(e.pubkey.clone(), e.count);
+        }
+        for n in &s.names {
+            state.names.insert(
+                n.pubkey.clone(),
+                NameReg {
+                    pinned: n.pinned.clone(),
+                    pending: n.pending.clone(),
+                    clock: n.clock,
+                    deleted: n.deleted,
+                },
+            );
         }
         state
     }
@@ -258,6 +300,17 @@ impl SyncState {
                     count: *count,
                 })
                 .collect(),
+            names: self
+                .names
+                .iter()
+                .map(|(pubkey, r)| NameEntry {
+                    pubkey: pubkey.clone(),
+                    pinned: r.pinned.clone(),
+                    pending: r.pending.clone(),
+                    clock: r.clock,
+                    deleted: r.deleted,
+                })
+                .collect(),
         }
     }
 
@@ -281,6 +334,14 @@ impl SyncState {
             let e = self.seen.entry(pubkey.clone()).or_insert(0);
             *e = (*e).max(*count);
         }
+        for (pubkey, incoming) in &other.names {
+            match self.names.get(pubkey) {
+                Some(cur) if cur.clock >= incoming.clock => {}
+                _ => {
+                    self.names.insert(pubkey.clone(), incoming.clone());
+                }
+            }
+        }
     }
 
     /// The highest Lamport counter observed anywhere in this state — used to
@@ -294,6 +355,9 @@ impl SyncState {
             m = m.max(r.clock.counter);
         }
         for r in self.trusted.values() {
+            m = m.max(r.clock.counter);
+        }
+        for r in self.names.values() {
             m = m.max(r.clock.counter);
         }
         m
@@ -416,6 +480,7 @@ mod tests {
             verified: vec![],
             trusted: vec![],
             seen: vec![],
+            names: vec![],
         })
     }
 
@@ -432,6 +497,7 @@ mod tests {
                 pubkey: "aaaa".into(),
                 count: 2,
             }],
+            names: vec![],
         };
         let blob = encrypt_snapshot(&key, &snap).unwrap();
         assert_ne!(blob, postcard::to_allocvec(&snap).unwrap());
@@ -447,6 +513,7 @@ mod tests {
             verified: vec![],
             trusted: vec![],
             seen: vec![],
+            names: vec![],
         };
         let blob = encrypt_snapshot(&snapshot_key(b"secret-one"), &snap).unwrap();
         assert!(decrypt_snapshot(&snapshot_key(b"secret-two"), &blob).is_err());
@@ -502,6 +569,7 @@ mod tests {
                 pubkey: "k".into(),
                 count: 3,
             }],
+            names: vec![],
         });
         let b = SyncState::from_snapshot(&SyncSnapshot {
             lamport: 0,
@@ -517,6 +585,7 @@ mod tests {
                 pubkey: "k".into(),
                 count: 5,
             }],
+            names: vec![],
         });
         a.merge(&b);
         assert!(a.verified["k"].deleted, "later remove wins the 2P-set");
@@ -553,5 +622,116 @@ mod tests {
         backward.merge(&s1);
 
         assert_eq!(forward, backward, "any order → same state");
+    }
+
+    fn name_state(pubkey: &str, pinned: &str, pending: Option<&str>, clock: Lamport) -> SyncState {
+        SyncState::from_snapshot(&SyncSnapshot {
+            lamport: 0,
+            device: [0u8; 16],
+            contacts: vec![],
+            verified: vec![],
+            trusted: vec![],
+            seen: vec![],
+            names: vec![NameEntry {
+                pubkey: pubkey.into(),
+                pinned: pinned.into(),
+                pending: pending.map(Into::into),
+                clock,
+                deleted: false,
+            }],
+        })
+    }
+
+    #[test]
+    fn names_last_writer_wins_and_commute() {
+        // An approval of the new name (higher clock, pending cleared) wins over the
+        // old pinned+pending, regardless of merge order.
+        let a = name_state("k", "Lorenzo", Some("Lore"), lam(1, 1));
+        let b = name_state("k", "Lore", None, lam(2, 2));
+
+        let mut ab = a.clone();
+        ab.merge(&b);
+        let mut ba = b.clone();
+        ba.merge(&a);
+
+        assert_eq!(ab, ba, "name merge is commutative");
+        assert_eq!(ab.names["k"].pinned, "Lore");
+        assert_eq!(
+            ab.names["k"].pending, None,
+            "approval cleared the pending name"
+        );
+    }
+
+    /// A helper that builds a name state carrying an explicit tombstone.
+    fn name_tombstone(pubkey: &str, clock: Lamport) -> SyncState {
+        SyncState::from_snapshot(&SyncSnapshot {
+            lamport: 0,
+            device: [0u8; 16],
+            contacts: vec![],
+            verified: vec![],
+            trusted: vec![],
+            seen: vec![],
+            names: vec![NameEntry {
+                pubkey: pubkey.into(),
+                pinned: "Lorenzo".into(),
+                pending: None,
+                clock,
+                deleted: true,
+            }],
+        })
+    }
+
+    #[test]
+    fn names_merge_is_idempotent() {
+        let base = name_state("k", "Lorenzo", Some("Lore"), lam(1, 1));
+        let other = name_state("k", "Lore", None, lam(2, 2));
+        let mut once = base.clone();
+        once.merge(&other);
+        let mut twice = once.clone();
+        twice.merge(&other);
+        assert_eq!(once, twice, "re-merging the same name snapshot is a no-op");
+    }
+
+    #[test]
+    fn names_converge_regardless_of_order() {
+        // Three concurrent writers for the same id; the highest clock must win from
+        // any application order (device id breaks the counter tie deterministically).
+        let s1 = name_state("k", "One", None, lam(1, 1));
+        let s2 = name_state("k", "Two", None, lam(2, 2));
+        let s3 = name_state("k", "Three", None, lam(2, 3));
+
+        let mut forward = s1.clone();
+        forward.merge(&s2);
+        forward.merge(&s3);
+        let mut backward = s3.clone();
+        backward.merge(&s2);
+        backward.merge(&s1);
+
+        assert_eq!(forward, backward, "any order → same state");
+        // lam(2,3) is the max (counter tie broken by the larger device id).
+        assert_eq!(forward.names["k"].pinned, "Three");
+    }
+
+    #[test]
+    fn name_tombstone_wins_by_clock_and_can_be_superseded() {
+        // A tombstone at a higher clock removes the name...
+        let mut has = name_state("k", "Lorenzo", None, lam(1, 1));
+        has.merge(&name_tombstone("k", lam(2, 1)));
+        assert!(has.names["k"].deleted, "higher-clock tombstone wins");
+
+        // ...but a still-higher re-observation revives it (last intent wins).
+        has.merge(&name_state("k", "Lorenzo", Some("Lore"), lam(3, 1)));
+        assert!(!has.names["k"].deleted, "later re-add beats the tombstone");
+        assert_eq!(has.names["k"].pending.as_deref(), Some("Lore"));
+    }
+
+    #[test]
+    fn names_are_keyed_independently_per_id() {
+        // Two identities with different names must never bleed into each other.
+        let mut a = name_state("k1", "Alice", None, lam(1, 1));
+        let b = name_state("k2", "Bob", None, lam(1, 2));
+        a.merge(&b);
+        assert_eq!(a.names["k1"].pinned, "Alice");
+        assert_eq!(a.names["k2"].pinned, "Bob");
     }
 }
