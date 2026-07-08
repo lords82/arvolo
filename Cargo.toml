@@ -3,7 +3,7 @@ resolver = "2"
 members = ["core", "cli", "relay"]
 
 [workspace.package]
-version = "0.9.1"
+version = "0.9.2"
 edition = "2021"
 rust-version = "1.88"
 license = "AGPL-3.0-only"
