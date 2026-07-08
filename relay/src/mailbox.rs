@@ -217,6 +217,7 @@ impl Mailbox {
     /// Record the metadata row for a blob whose ciphertext is already written at
     /// [`blob_path`](Self::blob_path). Clamps the caller's TTL (no immortal entries
     /// / no i64 overflow) and download budget.
+    #[allow(clippy::too_many_arguments)]
     pub fn commit_deposit(
         &self,
         claim: &str,
