@@ -192,7 +192,7 @@ impl TransferManager {
     /// Set the local user's display name, advertised inside every outgoing offer.
     /// Call once at startup (from the client's config); empty means no name is
     /// advertised. It is a petname claim, not an authenticated identity — see
-    /// [`Offer::sender_name`].
+    /// [`Offer::sender_name`](crate::presence::Offer::sender_name).
     pub fn set_display_name(&self, name: String) {
         *self.inner.display_name.lock().unwrap() = name;
     }
@@ -322,7 +322,7 @@ impl TransferManager {
     // ---- sending ----------------------------------------------------------
 
     /// Send `payload` to `recipient`, robustly. Registers the transfer and returns
-    /// its id immediately; delivery runs in the background (see [`deliver_to`]):
+    /// its id immediately; delivery runs in the background (see `deliver_to`):
     /// live P2P whenever the recipient is online, else the relay mailbox. If the
     /// relay can't take it (too large / unreachable / error) the send is *held*
     /// (`Waiting`) and keeps retrying rather than failing.

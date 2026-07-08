@@ -59,7 +59,7 @@ pub(super) fn unpack_archive_safely(archive: &Path, dir: &Path) -> Result<()> {
 
 /// Pack files and/or directories into a tar archive at `dest` (each top-level
 /// input keeps its base name inside the archive). Used to send folders/multiple
-/// files as one transfer; the receiver unpacks it (see [`recv_chunked`]).
+/// files as one transfer; the receiver unpacks it (see [`crate::flow::recv_chunked`]).
 /// Pack `paths` into a tar at `dest` *deterministically*: entries are emitted in
 /// a stable sorted order with normalized metadata (mtime/uid/gid zeroed, fixed
 /// mode), so the same inputs always yield byte-identical output. That is what

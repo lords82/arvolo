@@ -47,7 +47,7 @@ pub fn presence_slot_for(pubkey: &[u8]) -> String {
     data_encoding::BASE32_NOPAD.encode(&key).to_lowercase()
 }
 
-/// A proposed transfer, sealed to the recipient inside an [`Envelope`].
+/// A proposed transfer, sealed to the recipient inside an `Envelope`.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Offer {
     /// Suggested file/bundle name (display + default output name).
@@ -101,7 +101,7 @@ struct SealedEnvelope {
 }
 
 /// One inbox row as returned by the relay's GET: the relay-assigned id (used to
-/// ack/delete) and the opaque [`Envelope`] bytes.
+/// ack/delete) and the opaque `Envelope` bytes.
 #[derive(Serialize, Deserialize)]
 pub struct InboxItem {
     pub id: String,
@@ -455,7 +455,7 @@ impl InboxSubscription {
         Ok(bearer)
     }
 
-    /// One long-poll round with the default [`LONG_POLL_SECS`] hold time.
+    /// One long-poll round with the default `LONG_POLL_SECS` hold time.
     pub async fn poll(&self) -> Result<Vec<ReceivedOffer>> {
         self.poll_wait(LONG_POLL_SECS).await
     }

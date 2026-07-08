@@ -2,7 +2,7 @@
 //! primitives ([`crate::chunked`], [`crate::crypto`], [`crate::backfill`]).
 //!
 //! The CLI and any UI (desktop/browser/mobile) drive transfers through here,
-//! reporting progress via a callback and cancelling via a [`CancellationToken`]
+//! reporting progress via a callback and cancelling via a [`CancellationToken`](tokio_util::sync::CancellationToken)
 //! — so orchestration lives once, in the core, not in each front-end.
 
 mod archive;

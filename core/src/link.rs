@@ -23,7 +23,7 @@
 //!     [ct_len] chunk_ct      seal_chunk(key, i, total_chunks, plaintext_chunk)
 //! ```
 //!
-//! The metadata unit is sealed as chunk index [`META_INDEX`] (`u32::MAX`), whose
+//! The metadata unit is sealed as chunk index `META_INDEX` (`u32::MAX`), whose
 //! nonce can never collide with a real data chunk (a file can't reach `u32::MAX`
 //! chunks at [`LINK_CHUNK_SIZE`]), so the per-transfer random key is never reused
 //! against the same nonce — the one invariant AES-GCM requires.
