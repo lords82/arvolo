@@ -1,3 +1,4 @@
+#[cfg(unix)]
 use std::time::Duration;
 
 use anyhow::Result;
@@ -10,6 +11,7 @@ use crate::ipc;
 use crate::args::TransferAction;
 #[cfg(unix)]
 use crate::commands::daemon::{daemon_client, daemon_events, print_transfer_dto};
+#[cfg(unix)]
 use crate::ui::*;
 use crate::util::*;
 
