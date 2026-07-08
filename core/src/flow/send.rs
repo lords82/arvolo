@@ -4,12 +4,8 @@ use anyhow::{Context, Result};
 use tokio_util::sync::CancellationToken;
 
 use crate::backfill::RelayRelease;
-use crate::chunked::{
-    ChunkSender, ChunkTicket, KeyDelivery, SeedRequest,
-};
-use crate::crypto::{
-    seal, Identity, PublicId,
-};
+use crate::chunked::{ChunkSender, ChunkTicket, KeyDelivery, SeedRequest};
+use crate::crypto::{seal, Identity, PublicId};
 use crate::transfer::RelayChoice;
 
 use super::CHUNK_KEY_AAD;

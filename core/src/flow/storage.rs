@@ -1,7 +1,5 @@
 use std::path::Path;
 
-
-
 /// True if `e` (or anything in its source chain) is a *local* filesystem error
 /// that won't fix itself by retrying: the disk is full (`ENOSPC`), a quota is
 /// exhausted (`EDQUOT`), or the target is read-only (`EROFS`). Such an error is

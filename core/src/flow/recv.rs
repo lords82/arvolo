@@ -4,12 +4,8 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Context, Result};
 use tokio_util::sync::CancellationToken;
 
-use crate::chunked::{
-    ChunkReceiver, ChunkTicket, KeyDelivery,
-};
-use crate::crypto::{
-    open, open_chunk, Identity, PublicId, Sealed,
-};
+use crate::chunked::{ChunkReceiver, ChunkTicket, KeyDelivery};
+use crate::crypto::{open, open_chunk, Identity, PublicId, Sealed};
 use crate::transfer::RelayChoice;
 
 use super::archive::unpack_archive_safely;

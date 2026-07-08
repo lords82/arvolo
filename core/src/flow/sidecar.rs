@@ -1,7 +1,5 @@
 use std::path::{Path, PathBuf};
 
-
-
 /// Path of the resume sidecar: a bitfield of the pieces already verified and
 /// written into `download` (parallel to the sparse output an out-of-order piece
 /// swarm produces). It is the sole resume state — there is no length-based resume.

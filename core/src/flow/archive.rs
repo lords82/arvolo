@@ -2,7 +2,6 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-
 /// Unpack a tar archive into `dir`, hardened against path-traversal and symlink
 /// escapes. The archive may come from an anonymous `arvc` sender, so every entry is
 /// validated explicitly (defense in depth, not trusting the extractor):
