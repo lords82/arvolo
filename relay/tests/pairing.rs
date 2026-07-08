@@ -77,6 +77,7 @@ async fn device_pair_payload_roundtrips() {
             verified: vec![],
             trusted: vec![],
             seen: vec![],
+            names: vec![],
         },
     };
     let bytes = payload.encode().unwrap();

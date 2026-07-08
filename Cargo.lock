@@ -180,6 +180,8 @@ version = "0.9.1"
 dependencies = [
  "anyhow",
  "arvolo-core",
+ "arvolo-relay",
+ "axum",
  "clap",
  "data-encoding",
  "indicatif",

@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use arvolo_core::crypto::PublicId;
-use arvolo_core::sync::{self, ContactReg, DeviceId, Lamport, MarkReg, SyncSnapshot, SyncState};
+use arvolo_core::sync::{
+    self, ContactReg, DeviceId, Lamport, MarkReg, NameReg, SyncSnapshot, SyncState,
+};
 use serde::{Deserialize, Serialize};
 
 /// The user's home directory, cross-platform: `$HOME` on Unix/macOS, else
@@ -97,6 +99,9 @@ fn verified_path() -> PathBuf {
 fn trusted_path() -> PathBuf {
     config_dir().join("trusted.toml")
 }
+fn names_path() -> PathBuf {
+    config_dir().join("names.toml")
+}
 
 #[derive(Default, Deserialize)]
 struct Config {
@@ -114,6 +119,61 @@ struct Config {
     debug: Option<bool>,
     log: Option<String>,
     sync: Option<bool>,
+    display_name: Option<String>,
+}
+
+/// The local user's self-chosen display name, advertised inside every outgoing
+/// offer (`arvolo name "…"`). Empty string when unset — meaning "don't advertise a
+/// name", the pre-existing behavior. It is a petname claim, never an authenticated
+/// identity.
+pub fn my_display_name() -> String {
+    load_config()
+        .display_name
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_default()
+}
+
+/// Persist the local user's display name into `config.toml` (creating the file if
+/// missing). An empty/blank value clears it. Edits the single `display_name` line
+/// in place — replacing an existing (possibly commented) one, else appending —
+/// so the file's comments and other keys are preserved. Values are TOML-escaped.
+pub fn set_my_display_name(name: &str) -> Result<()> {
+    let path = config_path();
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let name = name.trim();
+    // The line the key should become: an active assignment, or the commented
+    // default when clearing (so `arvolo name ""` restores the documented stub).
+    let new_line = if name.is_empty() {
+        "#display_name = \"\"".to_string()
+    } else {
+        format!("display_name = {}", toml::Value::String(name.to_string()))
+    };
+
+    // Replace the first line that assigns `display_name` (commented or not).
+    let is_display_line = |l: &str| {
+        let t = l.trim_start().trim_start_matches('#').trim_start();
+        t.strip_prefix("display_name")
+            .is_some_and(|r| r.trim_start().starts_with('='))
+    };
+    let mut out: Vec<String> = Vec::new();
+    let mut replaced = false;
+    for line in existing.lines() {
+        if !replaced && is_display_line(line) {
+            out.push(new_line.clone());
+            replaced = true;
+        } else {
+            out.push(line.to_string());
+        }
+    }
+    if !replaced {
+        out.push(new_line);
+    }
+    let mut text = out.join("\n");
+    text.push('\n');
+
+    std::fs::create_dir_all(config_dir()).ok();
+    std::fs::write(&path, text).context("write config.toml")
 }
 
 /// Whether automatic multi-device address-book sync runs in `listen`/`daemon`.
@@ -250,6 +310,10 @@ pub fn write_default_config(relay: Option<&str>) -> Result<()> {
 
 # Automatically sync your address book across your linked devices (see `device`).
 #sync = true
+
+# Your display name, advertised to recipients inside each sealed offer (a petname
+# claim, never a verified identity). Set with `arvolo name "…"`; empty = none.
+#display_name = ""
 "#,
         relay_line = relay_line,
         downloads = downloads.display(),
@@ -499,6 +563,156 @@ pub fn unmark_trusted(name: &str) -> Result<()> {
     Ok(())
 }
 
+// ---- advertised display names (TOFU on the sender's self-chosen name) ------
+//
+// A sender may advertise a self-chosen display name inside the sealed offer
+// (`Offer::sender_name`). It is a *petname claim*, never an authenticated
+// identity: it never enters the verified/trusted trust decision. We pin the name
+// the user approved (`pinned`) and quarantine any later change (`pending`) until
+// they approve it — a TOFU on the name, mirroring the key-change flow.
+
+/// One advertised-name record, keyed by base32 id: the approved name and the last
+/// advertised name still awaiting approval (if any).
+#[derive(Default, Clone, Serialize, Deserialize)]
+struct NameRow {
+    #[serde(default)]
+    pinned: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pending: Option<String>,
+}
+
+#[derive(Default, Serialize, Deserialize)]
+struct Names {
+    #[serde(default)]
+    names: BTreeMap<String, NameRow>,
+}
+
+fn load_names() -> Names {
+    std::fs::read_to_string(names_path())
+        .ok()
+        .and_then(|s| toml::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn save_names(n: &Names) -> Result<()> {
+    std::fs::create_dir_all(config_dir()).ok();
+    let text = toml::to_string_pretty(n).context("serialize names")?;
+    write_private(&names_path(), &text).context("write names")
+}
+
+/// The outcome of observing a sender's advertised name on receipt.
+pub enum NameStatus {
+    /// The sender advertised no name (empty) — nothing to show.
+    None,
+    /// First advertised name ever seen for this id — awaiting the user's approval.
+    New(String),
+    /// Advertised name matches the approved (pinned) name — nothing to do.
+    Unchanged(String),
+    /// Advertised name differs from the pinned one — quarantined until approved.
+    Changed { old: String, new: String },
+}
+
+/// Observe a sender's advertised name on receipt and record any change as
+/// `pending`. Never pins on its own — approval is always explicit
+/// (`accept_name`), matching the user's "then I accept the name" requirement.
+/// Best-effort persistence: a write failure degrades to a no-op, never breaks the
+/// transfer.
+pub fn observe_advertised_name(id_b32: &str, advertised: &str) -> NameStatus {
+    let advertised = advertised.trim();
+    if advertised.is_empty() {
+        return NameStatus::None;
+    }
+    let mut names = load_names();
+    let row = names.names.entry(id_b32.to_string()).or_default();
+
+    if row.pinned.is_empty() {
+        // Never approved a name for this id yet → brand-new.
+        if row.pending.as_deref() != Some(advertised) {
+            row.pending = Some(advertised.to_string());
+            let _ = save_names(&names);
+        }
+        NameStatus::New(advertised.to_string())
+    } else if row.pinned == advertised {
+        // Back to the approved name → drop any stale pending.
+        if row.pending.is_some() {
+            row.pending = None;
+            let _ = save_names(&names);
+        }
+        NameStatus::Unchanged(advertised.to_string())
+    } else {
+        let old = row.pinned.clone();
+        if row.pending.as_deref() != Some(advertised) {
+            row.pending = Some(advertised.to_string());
+            let _ = save_names(&names);
+        }
+        NameStatus::Changed {
+            old,
+            new: advertised.to_string(),
+        }
+    }
+}
+
+/// Approve the pending advertised name for a contact alias or raw id: pin it and
+/// clear the pending. Returns the newly pinned name. Errors if there's nothing to
+/// approve.
+pub fn accept_name(who: &str) -> Result<String> {
+    let id_b32 = resolve_recipient_id(who)?;
+    let mut names = load_names();
+    let row = names
+        .names
+        .get_mut(&id_b32)
+        .filter(|r| r.pending.is_some())
+        .with_context(|| format!("no pending name to approve for '{who}'"))?;
+    let approved = row.pending.take().unwrap();
+    row.pinned = approved.clone();
+    save_names(&names)?;
+    Ok(approved)
+}
+
+/// Approve every pending advertised name. Returns the count approved.
+pub fn accept_all_names() -> Result<usize> {
+    let mut names = load_names();
+    let mut n = 0;
+    for row in names.names.values_mut() {
+        if let Some(p) = row.pending.take() {
+            row.pinned = p;
+            n += 1;
+        }
+    }
+    if n > 0 {
+        save_names(&names)?;
+    }
+    Ok(n)
+}
+
+/// The approved (pinned) advertised name for an id, if any.
+pub fn display_name_of(id_b32: &str) -> Option<String> {
+    load_names()
+        .names
+        .get(id_b32)
+        .map(|r| r.pinned.clone())
+        .filter(|s| !s.is_empty())
+}
+
+/// The pending (awaiting-approval) advertised name for an id, if any.
+pub fn pending_name_of(id_b32: &str) -> Option<String> {
+    load_names()
+        .names
+        .get(id_b32)
+        .and_then(|r| r.pending.clone())
+}
+
+/// Resolve a contact alias or raw base32 id to the canonical base32 id string
+/// (lowercased), so name records key consistently with the other id-keyed ledgers.
+fn resolve_recipient_id(who: &str) -> Result<String> {
+    if let Some(id) = load_contacts().contacts.get(who) {
+        return Ok(id.clone());
+    }
+    // Validate + normalize a raw id.
+    decode_id(who).context("not a known contact name or a valid public id")?;
+    Ok(who.trim().to_lowercase())
+}
+
 /// Record a receipt from `id_b32` (TOFU ledger): increments its counter. Best
 /// effort — a failure to persist must not break a completed transfer.
 pub fn record_seen(id_b32: &str) {
@@ -736,6 +950,52 @@ pub fn build_local_snapshot() -> Result<SyncSnapshot> {
         *e = (*e).max(cnt);
     }
 
+    // Advertised names: last-writer-wins per id, tombstoning removals (same shape
+    // as contacts). A row counts as present when it has a pinned or pending name.
+    let names = load_names().names;
+    for (id, row) in &names {
+        let present = !row.pinned.is_empty() || row.pending.is_some();
+        let changed = !matches!(state.names.get(id), Some(r)
+            if !r.deleted && r.pinned == row.pinned && r.pending == row.pending);
+        if present && changed {
+            lamport += 1;
+            state.names.insert(
+                id.clone(),
+                NameReg {
+                    pinned: row.pinned.clone(),
+                    pending: row.pending.clone(),
+                    clock: Lamport {
+                        counter: lamport,
+                        device,
+                    },
+                    deleted: false,
+                },
+            );
+        }
+    }
+    // Names removed out-of-band → tombstone.
+    let name_removed: Vec<String> = state
+        .names
+        .iter()
+        .filter(|(id, r)| {
+            !r.deleted
+                && !names
+                    .get(*id)
+                    .is_some_and(|row| !row.pinned.is_empty() || row.pending.is_some())
+        })
+        .map(|(id, _)| id.clone())
+        .collect();
+    for id in name_removed {
+        lamport += 1;
+        if let Some(r) = state.names.get_mut(&id) {
+            r.deleted = true;
+            r.clock = Lamport {
+                counter: lamport,
+                device,
+            };
+        }
+    }
+
     save_meta(&state, lamport, device)?;
     Ok(state.to_snapshot(lamport, device))
 }
@@ -757,7 +1017,7 @@ pub fn apply_merged_state(incoming: &SyncSnapshot) -> Result<()> {
     Ok(())
 }
 
-/// Project the merged CRDT state into the four authoritative TOML ledgers: a
+/// Project the merged CRDT state into the authoritative TOML ledgers: a
 /// non-deleted register becomes a live row, a tombstone becomes absence.
 fn project_to_ledgers(state: &SyncState) -> Result<()> {
     let mut c = Contacts::default();
@@ -789,6 +1049,20 @@ fn project_to_ledgers(state: &SyncState) -> Result<()> {
         s.seen.insert(pk.clone(), *cnt);
     }
     save_seen(&s)?;
+
+    let mut n = Names::default();
+    for (id, r) in &state.names {
+        if !r.deleted {
+            n.names.insert(
+                id.clone(),
+                NameRow {
+                    pinned: r.pinned.clone(),
+                    pending: r.pending.clone(),
+                },
+            );
+        }
+    }
+    save_names(&n)?;
     Ok(())
 }
 
@@ -990,6 +1264,331 @@ mod tests {
         std::env::set_var("ARVOLO_CONFIG_DIR", dir_b.path());
         apply_merged_state(&s2).unwrap();
         assert!(contact_list().is_empty(), "removal propagated to B");
+
+        std::env::remove_var("ARVOLO_CONFIG_DIR");
+    }
+
+    #[test]
+    fn advertised_name_tofu_flow() {
+        let _guard = crate::testlock::ENV
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("ARVOLO_CONFIG_DIR", dir.path());
+        let id = b32(&Identity::generate().public());
+
+        // Empty advertised name → nothing recorded.
+        assert!(matches!(observe_advertised_name(&id, ""), NameStatus::None));
+        assert_eq!(display_name_of(&id), None);
+
+        // First real name → New, quarantined as pending (not auto-pinned).
+        assert!(matches!(
+            observe_advertised_name(&id, "Lorenzo"),
+            NameStatus::New(_)
+        ));
+        assert_eq!(display_name_of(&id), None, "first name is not auto-pinned");
+        assert_eq!(pending_name_of(&id).as_deref(), Some("Lorenzo"));
+
+        // Approve by raw id → pinned, pending cleared.
+        assert_eq!(accept_name(&id).unwrap(), "Lorenzo");
+        assert_eq!(display_name_of(&id).as_deref(), Some("Lorenzo"));
+        assert_eq!(pending_name_of(&id), None);
+
+        // Same name again → Unchanged, still no pending.
+        assert!(matches!(
+            observe_advertised_name(&id, "Lorenzo"),
+            NameStatus::Unchanged(_)
+        ));
+        assert_eq!(pending_name_of(&id), None);
+
+        // A changed name → Changed, old kept pinned until approved.
+        match observe_advertised_name(&id, "Lore") {
+            NameStatus::Changed { old, new } => {
+                assert_eq!(old, "Lorenzo");
+                assert_eq!(new, "Lore");
+            }
+            _ => panic!("expected a Changed status"),
+        }
+        assert_eq!(
+            display_name_of(&id).as_deref(),
+            Some("Lorenzo"),
+            "pinned name unchanged until approval"
+        );
+        assert_eq!(pending_name_of(&id).as_deref(), Some("Lore"));
+
+        // Approve the change via a contact alias resolving to the same id.
+        contact_add("lorenzo", &id).unwrap();
+        assert_eq!(accept_name("lorenzo").unwrap(), "Lore");
+        assert_eq!(display_name_of(&id).as_deref(), Some("Lore"));
+        assert_eq!(pending_name_of(&id), None);
+
+        // Nothing pending → accept_name errors.
+        assert!(accept_name("lorenzo").is_err());
+
+        std::env::remove_var("ARVOLO_CONFIG_DIR");
+    }
+
+    #[test]
+    fn sync_propagates_approved_name() {
+        let _guard = crate::testlock::ENV
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir_a = tempfile::tempdir().unwrap();
+        let dir_b = tempfile::tempdir().unwrap();
+        let id = b32(&Identity::generate().public());
+
+        // Device A: observe + approve a name, publish snapshot.
+        std::env::set_var("ARVOLO_CONFIG_DIR", dir_a.path());
+        observe_advertised_name(&id, "Lorenzo");
+        accept_name(&id).unwrap();
+        let snap = build_local_snapshot().unwrap();
+
+        // Device B: applying the snapshot pins the same approved name.
+        std::env::set_var("ARVOLO_CONFIG_DIR", dir_b.path());
+        apply_merged_state(&snap).unwrap();
+        assert_eq!(display_name_of(&id).as_deref(), Some("Lorenzo"));
+        assert_eq!(pending_name_of(&id), None);
+
+        std::env::remove_var("ARVOLO_CONFIG_DIR");
+    }
+
+    #[test]
+    fn display_name_config_roundtrip() {
+        let _guard = crate::testlock::ENV
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("ARVOLO_CONFIG_DIR", dir.path());
+
+        assert_eq!(my_display_name(), "", "unset by default");
+        set_my_display_name("Lorenzo").unwrap();
+        assert_eq!(my_display_name(), "Lorenzo");
+        // Setting another key-free config value keeps the name (preserves the file).
+        set_my_display_name("  Lore  ").unwrap();
+        assert_eq!(my_display_name(), "Lore", "trimmed on set");
+        set_my_display_name("").unwrap();
+        assert_eq!(my_display_name(), "", "cleared");
+
+        std::env::remove_var("ARVOLO_CONFIG_DIR");
+    }
+
+    #[test]
+    fn observe_advertised_name_edge_cases() {
+        let _guard = crate::testlock::ENV
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("ARVOLO_CONFIG_DIR", dir.path());
+        let id = b32(&Identity::generate().public());
+
+        // Whitespace-only advertised name is treated as "none" (trimmed away).
+        assert!(matches!(
+            observe_advertised_name(&id, "   "),
+            NameStatus::None
+        ));
+        assert_eq!(pending_name_of(&id), None);
+
+        // Two different names arrive before any approval: pending tracks the LATEST.
+        assert!(matches!(
+            observe_advertised_name(&id, "First"),
+            NameStatus::New(_)
+        ));
+        assert!(matches!(
+            observe_advertised_name(&id, "Second"),
+            NameStatus::New(_)
+        ));
+        assert_eq!(
+            pending_name_of(&id).as_deref(),
+            Some("Second"),
+            "pending follows the most recent advertised name"
+        );
+
+        // Approve, then the sender advertises a change, then reverts to the pinned
+        // name → the pending change is cleared (nothing to approve anymore).
+        accept_name(&id).unwrap();
+        assert_eq!(display_name_of(&id).as_deref(), Some("Second"));
+        assert!(matches!(
+            observe_advertised_name(&id, "Third"),
+            NameStatus::Changed { .. }
+        ));
+        assert_eq!(pending_name_of(&id).as_deref(), Some("Third"));
+        assert!(matches!(
+            observe_advertised_name(&id, "Second"),
+            NameStatus::Unchanged(_)
+        ));
+        assert_eq!(
+            pending_name_of(&id),
+            None,
+            "reverting to the pinned name clears the pending change"
+        );
+
+        // A now-empty advertised name never disturbs the pinned name.
+        assert!(matches!(observe_advertised_name(&id, ""), NameStatus::None));
+        assert_eq!(display_name_of(&id).as_deref(), Some("Second"));
+
+        std::env::remove_var("ARVOLO_CONFIG_DIR");
+    }
+
+    #[test]
+    fn accept_name_variants() {
+        let _guard = crate::testlock::ENV
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("ARVOLO_CONFIG_DIR", dir.path());
+        let id1 = b32(&Identity::generate().public());
+        let id2 = b32(&Identity::generate().public());
+
+        // Unknown alias / invalid id → a clear error (not a silent no-op).
+        assert!(accept_name("nobody").is_err());
+        assert!(accept_name("not-valid-base32!!").is_err());
+
+        // Two pending names → accept_all approves both at once.
+        observe_advertised_name(&id1, "Alice");
+        observe_advertised_name(&id2, "Bob");
+        assert_eq!(accept_all_names().unwrap(), 2);
+        assert_eq!(display_name_of(&id1).as_deref(), Some("Alice"));
+        assert_eq!(display_name_of(&id2).as_deref(), Some("Bob"));
+        // Nothing left pending → accept_all is a no-op returning 0.
+        assert_eq!(accept_all_names().unwrap(), 0);
+
+        std::env::remove_var("ARVOLO_CONFIG_DIR");
+    }
+
+    #[test]
+    fn contact_key_change_does_not_leak_advertised_name() {
+        // A contact's advertised name is keyed by identity, so re-pointing a contact
+        // alias at a NEW id must not carry the old id's name onto the new key.
+        let _guard = crate::testlock::ENV
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("ARVOLO_CONFIG_DIR", dir.path());
+        let old_id = b32(&Identity::generate().public());
+        let new_id = b32(&Identity::generate().public());
+
+        contact_add("boss", &old_id).unwrap();
+        observe_advertised_name(&old_id, "Lorenzo");
+        accept_name("boss").unwrap();
+        assert_eq!(display_name_of(&old_id).as_deref(), Some("Lorenzo"));
+
+        // The contact's key changes (a new identity under the same alias).
+        assert!(contact_add("boss", &new_id).unwrap().is_some());
+        assert_eq!(
+            display_name_of(&new_id),
+            None,
+            "the new key has no advertised name of its own"
+        );
+        // The old id still carries its own record — it's a different identity.
+        assert_eq!(display_name_of(&old_id).as_deref(), Some("Lorenzo"));
+
+        std::env::remove_var("ARVOLO_CONFIG_DIR");
+    }
+
+    #[test]
+    fn build_local_snapshot_is_stable_for_names() {
+        // Re-publishing without any change must not keep bumping the Lamport clock
+        // (which would make every sync look like a fresh edit and never converge).
+        let _guard = crate::testlock::ENV
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("ARVOLO_CONFIG_DIR", dir.path());
+        let id = b32(&Identity::generate().public());
+
+        observe_advertised_name(&id, "Lorenzo");
+        accept_name(&id).unwrap();
+        let s1 = build_local_snapshot().unwrap();
+        let s2 = build_local_snapshot().unwrap();
+        let n1 = s1.names.iter().find(|n| n.pubkey == id).unwrap();
+        let n2 = s2.names.iter().find(|n| n.pubkey == id).unwrap();
+        assert_eq!(
+            n1.clock, n2.clock,
+            "an unchanged name keeps its clock across snapshots"
+        );
+
+        std::env::remove_var("ARVOLO_CONFIG_DIR");
+    }
+
+    #[test]
+    fn sync_propagates_pending_and_tombstone() {
+        let _guard = crate::testlock::ENV
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir_a = tempfile::tempdir().unwrap();
+        let dir_b = tempfile::tempdir().unwrap();
+        let id = b32(&Identity::generate().public());
+
+        // A observes a name (pending, not yet approved) and publishes.
+        std::env::set_var("ARVOLO_CONFIG_DIR", dir_a.path());
+        observe_advertised_name(&id, "Lorenzo");
+        let s1 = build_local_snapshot().unwrap();
+
+        // B sees the SAME pending name → a change is surfaced on every device.
+        std::env::set_var("ARVOLO_CONFIG_DIR", dir_b.path());
+        apply_merged_state(&s1).unwrap();
+        assert_eq!(pending_name_of(&id).as_deref(), Some("Lorenzo"));
+        assert_eq!(display_name_of(&id), None, "pending is not yet pinned on B");
+
+        // A approves; B converges to the pinned name with no pending.
+        std::env::set_var("ARVOLO_CONFIG_DIR", dir_a.path());
+        accept_name(&id).unwrap();
+        let s2 = build_local_snapshot().unwrap();
+        std::env::set_var("ARVOLO_CONFIG_DIR", dir_b.path());
+        apply_merged_state(&s2).unwrap();
+        assert_eq!(display_name_of(&id).as_deref(), Some("Lorenzo"));
+        assert_eq!(pending_name_of(&id), None);
+
+        std::env::remove_var("ARVOLO_CONFIG_DIR");
+    }
+
+    #[test]
+    fn display_name_config_escapes_special_chars() {
+        // A name with quotes / unicode / a leading '#' must round-trip through the
+        // config file intact (TOML-escaped, not truncated or misparsed) and must not
+        // corrupt the file into an unreadable state.
+        let _guard = crate::testlock::ENV
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("ARVOLO_CONFIG_DIR", dir.path());
+
+        for name in [
+            "O'Brien \"the Boss\"",
+            "名前",
+            "# not a comment",
+            "a = b",
+            "line\ttab",
+        ] {
+            set_my_display_name(name).unwrap();
+            assert_eq!(my_display_name(), name, "round-trips: {name:?}");
+        }
+
+        std::env::remove_var("ARVOLO_CONFIG_DIR");
+    }
+
+    #[test]
+    fn set_display_name_replaces_not_duplicates() {
+        // Repeated sets must edit the single line in place, never accumulate.
+        let _guard = crate::testlock::ENV
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("ARVOLO_CONFIG_DIR", dir.path());
+
+        set_my_display_name("One").unwrap();
+        set_my_display_name("Two").unwrap();
+        set_my_display_name("Three").unwrap();
+        let text = std::fs::read_to_string(config_path()).unwrap();
+        let occurrences = text
+            .lines()
+            .filter(|l| {
+                let t = l.trim_start().trim_start_matches('#').trim_start();
+                t.starts_with("display_name")
+            })
+            .count();
+        assert_eq!(occurrences, 1, "exactly one display_name line: {text:?}");
+        assert_eq!(my_display_name(), "Three");
 
         std::env::remove_var("ARVOLO_CONFIG_DIR");
     }

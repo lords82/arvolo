@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use arvolo_core::backfill::BlobNode;
+use arvolo_core::crypto::Identity;
 use arvolo_core::flow::{self, RecvEvent};
 use arvolo_core::swarm::{bitfield_new, bitfield_set};
 use arvolo_core::transfer::RelayChoice;
@@ -275,4 +276,91 @@ async fn three_peers_each_with_one_third_complete_the_swarm() {
             "peer {p} must have pulled its two missing thirds from the others"
         );
     }
+}
+
+// The two features compose: a `--to` **sealed** transfer to a shared identity can
+// be co-swarmed with DISJOINT pieces. Two devices sharing one identity unseal the
+// same content key, so their pieces are interchangeable; starting with
+// complementary halves and no origin, they complete each other.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn disjoint_exchange_works_on_a_sealed_to_transfer() {
+    std::env::set_var("ARVOLO_SEED_AFTER", "120");
+    let relay = spawn_relay().await;
+
+    let account = Identity::generate();
+    let dev_a = Identity::from_secret_bytes(&account.secret_bytes()).unwrap();
+    let dev_b = Identity::from_secret_bytes(&account.secret_bytes()).unwrap();
+    let sender = Identity::generate();
+
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("f.bin");
+    let data: Vec<u8> = (0..64 * 1024 * 1024u64)
+        .map(|i| (i * 179 + 13) as u8)
+        .collect();
+    std::fs::write(&src, &data).unwrap();
+
+    // Sealed to the shared identity, relay embedded (swarm on).
+    let session = flow::prepare_send(
+        &src,
+        "f.bin",
+        false,
+        Some((&sender, &account.public())),
+        Some(relay.clone()),
+        RelayChoice::Disabled,
+    )
+    .await
+    .expect("prepare_send");
+    assert_eq!(session.chunks, 4);
+    let ticket = session.ticket.clone();
+    let send_cancel = CancellationToken::new();
+    let serve = {
+        let c = send_cancel.clone();
+        tokio::spawn(async move { session.serve(c, |_| {}).await })
+    };
+    send_cancel.cancel();
+    let _ = serve.await;
+
+    let out_a = dir.path().join("a.out");
+    let out_b = dir.path().join("b.out");
+    seed_partial(&out_a, &data, 4, &[0, 2]);
+    seed_partial(&out_b, &data, 4, &[1, 3]);
+
+    let spawn = |out: PathBuf, id: Identity| {
+        let ticket = ticket.clone();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let ev = events.clone();
+        let handle = tokio::spawn(async move {
+            let _ = flow::recv_chunked(
+                &ticket,
+                Some(out),
+                Some(&id),
+                RelayChoice::Disabled,
+                CancellationToken::new(),
+                move |e| ev.lock().unwrap().push(e),
+            )
+            .await;
+        });
+        (handle, events)
+    };
+    let (recv_a, events_a) = spawn(out_a.clone(), dev_a);
+    let (recv_b, events_b) = spawn(out_b.clone(), dev_b);
+
+    let ok_a = wait_for_file(&out_a, &data, Duration::from_secs(90)).await;
+    let ok_b = wait_for_file(&out_b, &data, Duration::from_secs(90)).await;
+
+    recv_a.abort();
+    recv_b.abort();
+    std::env::remove_var("ARVOLO_SEED_AFTER");
+
+    assert!(
+        ok_a,
+        "sealed device A completed (from_peers={})",
+        max_from_peers(&events_a)
+    );
+    assert!(
+        ok_b,
+        "sealed device B completed (from_peers={})",
+        max_from_peers(&events_b)
+    );
+    assert!(max_from_peers(&events_a) > 0 && max_from_peers(&events_b) > 0);
 }

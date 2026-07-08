@@ -47,6 +47,13 @@ pub struct AppState {
     /// Purely a rendezvous for peers of one shared `arvc…` ticket to find each
     /// other; the relay learns node addresses + bitfields, never the key/plaintext.
     pub swarm: Arc<Mutex<HashMap<String, HashMap<String, SwarmPeer>>>>,
+    /// Per-IP rate-limiter state for the rendezvous routes (nameplate-sweep and
+    /// pairing-griefing guard; see the rendezvous rate-limiting section).
+    pub rz_limiter: Arc<RzLimiter>,
+    /// Per-IP rate-limiter state for the unauthenticated *write* routes (deposit,
+    /// seed, inbox-post, swarm-announce, presence). Bounds cheap disk/peer-list
+    /// abuse from a single source; see the write rate-limiting section.
+    pub write_limiter: Arc<WriteLimiter>,
 }
 
 /// One tracked peer of a swarm (in-memory tracker row).
@@ -89,15 +96,26 @@ impl AppState {
             blobs,
             auth_secret: Arc::new(rand::random()),
             swarm: Arc::new(Mutex::new(HashMap::new())),
+            rz_limiter: Arc::new(Mutex::new(HashMap::new())),
+            write_limiter: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
 
-/// Default cap on a single deposited blob. `0` = **unlimited**: the deposit path
-/// streams the body straight to disk (never buffering it in memory), so the only
-/// bounds are disk space and the entry cap. A public/shared relay sets
-/// `ARVOLO_MAX_BLOB_BYTES` to a finite value to keep any one file small.
-pub const DEFAULT_MAX_BLOB_BYTES: usize = 0; // 0 = unlimited
+/// Default cap on a single deposited blob (2 GiB). The deposit path streams the
+/// body straight to disk (never buffering it in memory) and enforces this as it
+/// writes, so the bound is on disk footprint, not memory. Finite by default so an
+/// unauthenticated deposit can't fill the disk with one huge blob; a private relay
+/// can raise or lift it by setting `ARVOLO_MAX_BLOB_BYTES` (`0` = unlimited).
+pub const DEFAULT_MAX_BLOB_BYTES: usize = 16 * 1024 * 1024 * 1024;
+
+/// Default cap on the **aggregate** bytes of all stored blobs. `0` = unlimited
+/// (the relay warns at startup): the per-blob cap above is a *functional* bound
+/// (the largest file an offline send / link can carry), while this is the real
+/// disk-fill guard — without it, an attacker can fill the disk with many
+/// blob-cap-sized deposits regardless of how small the per-blob cap is. Override
+/// with `ARVOLO_MAX_TOTAL_BLOB_BYTES`.
+pub const DEFAULT_MAX_TOTAL_BLOB_BYTES: u64 = 0;
 
 /// Fixed request-body limit for the small control-plane routes (rendezvous,
 /// inbox, presence, seed, swarm — all a few hundred KiB at most). Comfortably
@@ -157,11 +175,23 @@ fn env_usize(var: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
-/// Max deposited-blob size in bytes (env `ARVOLO_MAX_BLOB_BYTES`). `0` (the
-/// default) means **unlimited** — the deposit streams to disk, so it's bounded by
-/// disk and the entry cap, not memory.
+/// Max deposited-blob size in bytes (env `ARVOLO_MAX_BLOB_BYTES`). Defaults to
+/// [`DEFAULT_MAX_BLOB_BYTES`] (16 GiB — this bounds the largest single file an
+/// offline send or link can carry, so it is deliberately roomy); `0` lifts the
+/// limit for a private relay. Disk-fill protection comes from
+/// [`max_total_blob_bytes`], not from this per-blob bound.
 pub fn max_blob_bytes() -> usize {
     env_usize("ARVOLO_MAX_BLOB_BYTES", DEFAULT_MAX_BLOB_BYTES)
+}
+
+/// Aggregate cap on all stored blob bytes (env `ARVOLO_MAX_TOTAL_BLOB_BYTES`).
+/// `0` (the default) means unlimited; a public relay should set it to the disk
+/// budget it is willing to lend out.
+pub fn max_total_blob_bytes() -> u64 {
+    env_usize(
+        "ARVOLO_MAX_TOTAL_BLOB_BYTES",
+        DEFAULT_MAX_TOTAL_BLOB_BYTES as usize,
+    ) as u64
 }
 
 fn max_entries() -> i64 {
@@ -198,6 +228,225 @@ fn max_seeded_rows() -> i64 {
 /// forcing the remainder onto direct P2P once the cap is reached.
 pub fn max_session_relay_bytes() -> u64 {
     env_usize("ARVOLO_MAX_SESSION_RELAY_BYTES", 0) as u64
+}
+
+// ---- rendezvous rate limiting ----------------------------------------------
+//
+// The rendezvous nameplate space is deliberately tiny (a 4-digit slot the user
+// types), so an attacker can cheaply sweep every slot to find in-flight pairings
+// and then grief them (claim `mr` first, or burn the ticket) — each hijack also
+// buys one online SPAKE2 guess at the two code words. The PAKE already caps the
+// damage at one guess per exchange with visible failure; per-IP rate limits on
+// the rendezvous routes make the sweep itself slow and noisy.
+
+/// Default per-IP cap on rendezvous **POSTs** per minute. A legitimate pairing
+/// writes at most three values (`ms`, `mr`, `tkt`); the default leaves headroom
+/// for several concurrent pairings behind one NAT. `0` disables the limit.
+/// Override with `ARVOLO_RZ_POSTS_PER_MIN`.
+pub const DEFAULT_RZ_POSTS_PER_MIN: u32 = 30;
+/// Default per-IP cap on **distinct rendezvous slots** touched by GETs per
+/// minute. A legitimate peer polls one slot (however frequently — polling is
+/// never throttled); sweeping the 10k-nameplate space needs thousands. `0`
+/// disables the limit. Override with `ARVOLO_RZ_SLOTS_PER_MIN`.
+pub const DEFAULT_RZ_SLOTS_PER_MIN: u32 = 60;
+/// Bound on tracked client IPs (memory guard for the limiter map).
+const MAX_RZ_LIMITER_IPS: usize = 100_000;
+/// The per-IP accounting window.
+const RZ_LIMITER_WINDOW_SECS: u64 = 60;
+
+fn rz_posts_per_min() -> u32 {
+    env_usize("ARVOLO_RZ_POSTS_PER_MIN", DEFAULT_RZ_POSTS_PER_MIN as usize) as u32
+}
+
+fn rz_slots_per_min() -> u32 {
+    env_usize("ARVOLO_RZ_SLOTS_PER_MIN", DEFAULT_RZ_SLOTS_PER_MIN as usize) as u32
+}
+
+/// Whether to trust `X-Forwarded-For` for the client IP (set `ARVOLO_TRUST_PROXY`
+/// when the relay sits behind a reverse proxy such as nginx — and only then:
+/// trusting it on a directly exposed relay lets clients spoof their IP).
+fn trust_proxy() -> bool {
+    matches!(
+        std::env::var("ARVOLO_TRUST_PROXY")
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+/// One IP's rendezvous activity inside the current window. Public only because
+/// it appears in [`AppState`]'s limiter type; fields stay private.
+#[derive(Default)]
+pub struct RzIpWindow {
+    window_start: u64,
+    posts: u32,
+    slots: std::collections::HashSet<String>,
+}
+
+/// Per-IP rendezvous limiter state (keyed by client IP).
+pub type RzLimiter = Mutex<HashMap<std::net::IpAddr, RzIpWindow>>;
+
+/// The client IP for rate-limiting: `X-Forwarded-For` when the administrator
+/// opted in via `ARVOLO_TRUST_PROXY`, else the socket peer address. `None` when
+/// neither is available (e.g. unit tests driving the router without connect
+/// info), in which case the limiter is bypassed.
+struct ClientIp(Option<std::net::IpAddr>);
+
+impl<S: Send + Sync> axum::extract::FromRequestParts<S> for ClientIp {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        if trust_proxy() {
+            if let Some(ip) = parts
+                .headers
+                .get("x-forwarded-for")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.split(',').next())
+                .and_then(|v| v.trim().parse().ok())
+            {
+                return Ok(ClientIp(Some(ip)));
+            }
+        }
+        Ok(ClientIp(
+            parts
+                .extensions
+                .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+                .map(|c| c.0.ip()),
+        ))
+    }
+}
+
+/// What a rendezvous request is asking the limiter to account for.
+enum RzAction<'a> {
+    /// One write (`POST /v1/rz/…`).
+    Post,
+    /// One read touching this slot (`GET /v1/rz/{slot}/…`).
+    GetSlot(&'a str),
+}
+
+/// Enforce the per-IP rendezvous limits. `Ok(())` admits the request; `Err` is
+/// the 429 to return. An unknown client IP (no connect info, no trusted XFF)
+/// bypasses the limiter — `main` serves with connect info, so that only happens
+/// in tests.
+fn rz_rate_limit(
+    limiter: &RzLimiter,
+    ip: Option<std::net::IpAddr>,
+    action: RzAction<'_>,
+    now: u64,
+    post_cap: u32,
+    slot_cap: u32,
+) -> Result<(), (StatusCode, String)> {
+    let Some(ip) = ip else { return Ok(()) };
+    let mut map = limiter.lock().unwrap();
+    // Memory guard: on pressure, drop windows that have already elapsed; if the
+    // map is still saturated (an active flood from many IPs), fail open rather
+    // than letting the limiter itself become the DoS.
+    if map.len() >= MAX_RZ_LIMITER_IPS && !map.contains_key(&ip) {
+        map.retain(|_, w| now < w.window_start + RZ_LIMITER_WINDOW_SECS);
+        if map.len() >= MAX_RZ_LIMITER_IPS {
+            return Ok(());
+        }
+    }
+    let w = map.entry(ip).or_default();
+    if now >= w.window_start + RZ_LIMITER_WINDOW_SECS {
+        w.window_start = now;
+        w.posts = 0;
+        w.slots.clear();
+    }
+    match action {
+        RzAction::Post => {
+            if post_cap > 0 && w.posts >= post_cap {
+                return Err((
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "rendezvous rate limit exceeded".into(),
+                ));
+            }
+            w.posts += 1;
+        }
+        RzAction::GetSlot(slot) => {
+            if !w.slots.contains(slot) {
+                if slot_cap > 0 && w.slots.len() as u32 >= slot_cap {
+                    return Err((
+                        StatusCode::TOO_MANY_REQUESTS,
+                        "rendezvous rate limit exceeded".into(),
+                    ));
+                }
+                w.slots.insert(slot.to_string());
+            }
+        }
+    }
+    Ok(())
+}
+
+// ---- write-route rate limiting ---------------------------------------------
+//
+// The unauthenticated write routes (deposit, seed, inbox-post, swarm-announce,
+// presence) are each individually bounded (size caps, per-slot caps, row caps),
+// but nothing stopped one source from churning them as fast as it liked —
+// poisoning peer lists, replaying offers, and racing toward the disk-fill caps.
+// A single per-IP request budget across all of them makes that abuse slow and
+// noisy without affecting a normal client (which writes a handful of times).
+
+/// Default per-IP cap on writes per minute across all unauthenticated write
+/// routes. Generous enough for concurrent transfers behind one NAT; `0` disables
+/// the limit. Override with `ARVOLO_WRITES_PER_MIN`.
+pub const DEFAULT_WRITES_PER_MIN: u32 = 240;
+
+fn writes_per_min() -> u32 {
+    env_usize("ARVOLO_WRITES_PER_MIN", DEFAULT_WRITES_PER_MIN as usize) as u32
+}
+
+/// One IP's write count inside the current window.
+#[derive(Default)]
+pub struct WriteIpWindow {
+    window_start: u64,
+    writes: u32,
+}
+
+/// Per-IP write-limiter state (keyed by client IP). Public only because it
+/// appears in [`AppState`]'s type; fields stay private.
+pub type WriteLimiter = Mutex<HashMap<std::net::IpAddr, WriteIpWindow>>;
+
+/// Enforce the per-IP write budget. `Ok(())` admits the request; `Err` is the 429
+/// to return. An unknown client IP (no connect info, no trusted XFF) bypasses the
+/// limiter — that only happens in tests, since `main` serves with connect info.
+fn write_rate_limit(
+    limiter: &WriteLimiter,
+    ip: Option<std::net::IpAddr>,
+    now: u64,
+    cap: u32,
+) -> Result<(), (StatusCode, String)> {
+    if cap == 0 {
+        return Ok(());
+    }
+    let Some(ip) = ip else { return Ok(()) };
+    let mut map = limiter.lock().unwrap();
+    // Same memory guard as the rendezvous limiter: shed elapsed windows under
+    // pressure, and fail open rather than letting the limiter be the DoS.
+    if map.len() >= MAX_RZ_LIMITER_IPS && !map.contains_key(&ip) {
+        map.retain(|_, w| now < w.window_start + RZ_LIMITER_WINDOW_SECS);
+        if map.len() >= MAX_RZ_LIMITER_IPS {
+            return Ok(());
+        }
+    }
+    let w = map.entry(ip).or_default();
+    if now >= w.window_start + RZ_LIMITER_WINDOW_SECS {
+        w.window_start = now;
+        w.writes = 0;
+    }
+    if w.writes >= cap {
+        return Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            "write rate limit exceeded".into(),
+        ));
+    }
+    w.writes += 1;
+    Ok(())
 }
 
 const ENCAPPED_KEY_HEADER: &str = "x-arvolo-encapped-key";
@@ -372,6 +621,9 @@ impl Mailbox {
         // Migrate databases whose inbox predates fetched_at (stamped when a live
         // recipient polls the offer, so the sender knows it was seen).
         let _ = conn.execute("ALTER TABLE inbox ADD COLUMN fetched_at INTEGER", []);
+        // Migrate entries that predate the size column (backs the aggregate
+        // stored-bytes cap; pre-existing rows count as 0 until they expire).
+        let _ = conn.execute("ALTER TABLE entries ADD COLUMN size INTEGER", []);
         Ok(Self {
             conn: Mutex::new(conn),
             blob_dir,
@@ -390,6 +642,22 @@ impl Mailbox {
         self.len() as i64 >= max_entries()
     }
 
+    /// Aggregate bytes of all stored blobs (per the metadata rows; rows that
+    /// predate the size column count as 0 until they expire). Backs the
+    /// `ARVOLO_MAX_TOTAL_BLOB_BYTES` disk-budget cap.
+    pub fn stored_bytes(&self) -> u64 {
+        self.conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COALESCE(SUM(COALESCE(size, 0)), 0) FROM entries",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap_or(0)
+            .max(0) as u64
+    }
+
     /// A fresh, random claim token to write a blob under.
     pub fn new_claim(&self) -> String {
         random_claim()
@@ -405,6 +673,7 @@ impl Mailbox {
         ttl_secs: u64,
         max_downloads: u32,
         revoke_hash: Vec<u8>,
+        size: u64,
         now: u64,
     ) -> Result<(), MailboxError> {
         let ttl = ttl_secs.min(max_ttl_secs());
@@ -419,14 +688,15 @@ impl Mailbox {
             .unwrap()
             .execute(
                 "INSERT INTO entries
-                (claim, encapped_key, expires_at, max_downloads, downloads, revoke_hash)
-             VALUES (?1, ?2, ?3, ?4, 0, ?5)",
+                (claim, encapped_key, expires_at, max_downloads, downloads, revoke_hash, size)
+             VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6)",
                 params![
                     claim,
                     encapped_key,
                     now.saturating_add(ttl) as i64,
                     max_downloads as i64,
                     revoke_hash,
+                    size as i64,
                 ],
             )
             .map_err(backend)?;
@@ -444,7 +714,18 @@ impl Mailbox {
         if self.at_capacity() {
             return Err(MailboxError::Capacity);
         }
+        // Aggregate disk-budget guard (`0` = unlimited).
+        let total_cap = max_total_blob_bytes();
+        if total_cap != 0
+            && self
+                .stored_bytes()
+                .saturating_add(deposit.ciphertext.len() as u64)
+                > total_cap
+        {
+            return Err(MailboxError::Capacity);
+        }
         let claim = self.new_claim();
+        let size = deposit.ciphertext.len() as u64;
         std::fs::write(self.blob_path(&claim), &deposit.ciphertext).map_err(backend)?;
         self.commit_deposit(
             &claim,
@@ -452,6 +733,7 @@ impl Mailbox {
             deposit.ttl_secs,
             deposit.max_downloads,
             deposit.revoke_hash,
+            size,
             now,
         )?;
         Ok(claim)
@@ -1181,8 +1463,14 @@ async fn features_handler(State(state): State<AppState>) -> impl IntoResponse {
 async fn swarm_announce_handler(
     State(state): State<AppState>,
     AxumPath(swarm_id): AxumPath<String>,
+    ip: ClientIp,
     Json(req): Json<AnnounceReq>,
 ) -> Response {
+    if let Err((code, _)) =
+        write_rate_limit(&state.write_limiter, ip.0, now_unix(), writes_per_min())
+    {
+        return code.into_response();
+    }
     if req.n_chunks > MAX_SWARM_CHUNKS
         || req.node_addr.is_empty()
         || req.node_addr.len() > 4096
@@ -1321,8 +1609,17 @@ const RZ_TICKET_KEY: &str = "tkt";
 async fn rz_post_handler(
     State(state): State<AppState>,
     AxumPath((slot, key)): AxumPath<(String, String)>,
+    ip: ClientIp,
     body: Bytes,
 ) -> Result<String, (StatusCode, String)> {
+    rz_rate_limit(
+        &state.rz_limiter,
+        ip.0,
+        RzAction::Post,
+        now_unix(),
+        rz_posts_per_min(),
+        rz_slots_per_min(),
+    )?;
     if body.len() > MAX_RZ_VALUE_BYTES {
         return Err((
             StatusCode::PAYLOAD_TOO_LARGE,
@@ -1359,7 +1656,18 @@ async fn rz_post_handler(
 async fn rz_get_handler(
     State(state): State<AppState>,
     AxumPath((slot, key)): AxumPath<(String, String)>,
+    ip: ClientIp,
 ) -> Result<Bytes, (StatusCode, String)> {
+    // Polling one slot is never throttled; touching many *distinct* slots (a
+    // nameplate sweep hunting for in-flight pairings) is.
+    rz_rate_limit(
+        &state.rz_limiter,
+        ip.0,
+        RzAction::GetSlot(&slot),
+        now_unix(),
+        rz_posts_per_min(),
+        rz_slots_per_min(),
+    )?;
     match state.mailbox.rz_get(&slot, &key, now_unix()) {
         Some(v) => {
             if key == RZ_TICKET_KEY {
@@ -1471,13 +1779,15 @@ async fn inbox_post_handler(
     State(state): State<AppState>,
     AxumPath(slot): AxumPath<String>,
     Query(q): Query<InboxDepositQuery>,
+    ip: ClientIp,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<String, (StatusCode, String)> {
+    let now = now_unix();
+    write_rate_limit(&state.write_limiter, ip.0, now, writes_per_min())?;
     if body.len() > MAX_INBOX_VALUE_BYTES {
         return Err((StatusCode::PAYLOAD_TOO_LARGE, "offer too large".into()));
     }
-    let now = now_unix();
     // Global disk-fill guard, then per-slot flood guard (one victim's inbox can't
     // be filled without bound, and the sender can't drown real offers).
     if state.mailbox.inbox_count() >= max_inbox_rows() {
@@ -1513,7 +1823,9 @@ async fn inbox_post_handler(
 async fn presence_post_handler(
     State(state): State<AppState>,
     AxumPath(slot): AxumPath<String>,
+    ip: ClientIp,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    write_rate_limit(&state.write_limiter, ip.0, now_unix(), writes_per_min())?;
     if state.mailbox.beacon_count() >= max_presence_rows()
         && !state.mailbox.beacon_alive(&slot, now_unix())
     {
@@ -1680,12 +1992,14 @@ fn err_response(e: MailboxError) -> (StatusCode, String) {
 async fn deposit_handler(
     State(state): State<AppState>,
     Query(q): Query<DepositQuery>,
+    ip: ClientIp,
     headers: HeaderMap,
     body: axum::body::Body,
 ) -> Result<String, (StatusCode, String)> {
     use futures_util::StreamExt;
     use tokio::io::AsyncWriteExt;
 
+    write_rate_limit(&state.write_limiter, ip.0, now_unix(), writes_per_min())?;
     let mb = &state.mailbox;
     let encapped_key = headers
         .get(ENCAPPED_KEY_HEADER)
@@ -1723,10 +2037,32 @@ async fn deposit_handler(
         return Err((StatusCode::INSUFFICIENT_STORAGE, "relay at capacity".into()));
     }
 
+    // Aggregate disk-budget guard: refuse when the store is already over budget,
+    // and bound this deposit to the remaining budget while it streams (so one
+    // in-flight deposit can't blow past the total either).
+    let total_cap = max_total_blob_bytes();
+    let remaining_total = if total_cap != 0 {
+        let stored = mb.stored_bytes();
+        if stored >= total_cap {
+            return Err((
+                StatusCode::INSUFFICIENT_STORAGE,
+                "relay at storage capacity".into(),
+            ));
+        }
+        total_cap - stored
+    } else {
+        u64::MAX
+    };
+
     // Stream the ciphertext straight to disk — never buffer the whole file in
-    // memory — enforcing the per-blob size cap as we go (`0` = unlimited). On any
-    // error or overflow the partial file is removed.
-    let cap = max_blob_bytes();
+    // memory — enforcing the per-blob size cap as we go (`0` = unlimited) and the
+    // remaining aggregate budget. On any error or overflow the partial file is
+    // removed.
+    let cap = match max_blob_bytes() as u64 {
+        0 => remaining_total,
+        per_blob => per_blob.min(remaining_total),
+    };
+    let cap = usize::try_from(cap).unwrap_or(usize::MAX);
     let claim = mb.new_claim();
     let path = mb.blob_path(&claim);
     let mut file = tokio::fs::File::create(&path).await.map_err(|e| {
@@ -1784,7 +2120,15 @@ async fn deposit_handler(
     }
     drop(file);
 
-    match mb.commit_deposit(&claim, encapped_key, q.ttl, q.max, revoke_hash, now_unix()) {
+    match mb.commit_deposit(
+        &claim,
+        encapped_key,
+        q.ttl,
+        q.max,
+        revoke_hash,
+        written,
+        now_unix(),
+    ) {
         Ok(()) => Ok(claim),
         Err(e) => {
             let _ = tokio::fs::remove_file(&path).await;
@@ -1857,8 +2201,10 @@ async fn fetch_handler(
 /// advertise the relay as a fallback provider.
 async fn seed_handler(
     State(state): State<AppState>,
+    ip: ClientIp,
     body: String,
 ) -> Result<String, (StatusCode, String)> {
+    write_rate_limit(&state.write_limiter, ip.0, now_unix(), writes_per_min())?;
     let req = SeedRequest::decode(body.trim())
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("bad seed request: {e}")))?;
     if req.chunks.len() > MAX_SEED_CHUNKS_PER_REQ {
@@ -1951,4 +2297,122 @@ async fn release_handler(
         let _ = state.mailbox.delete_seed_one(&token, &hash);
     }
     Ok("ok".into())
+}
+
+#[cfg(test)]
+mod rz_limiter_tests {
+    use super::*;
+    use std::net::{IpAddr, Ipv4Addr};
+
+    fn ip(last: u8) -> Option<IpAddr> {
+        Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, last)))
+    }
+
+    #[test]
+    fn posts_are_capped_per_ip_and_window_resets() {
+        let lim: RzLimiter = Mutex::new(HashMap::new());
+        for _ in 0..3 {
+            assert!(rz_rate_limit(&lim, ip(1), RzAction::Post, 100, 3, 10).is_ok());
+        }
+        // Fourth post inside the window is refused; another IP is unaffected.
+        assert!(rz_rate_limit(&lim, ip(1), RzAction::Post, 100, 3, 10).is_err());
+        assert!(rz_rate_limit(&lim, ip(2), RzAction::Post, 100, 3, 10).is_ok());
+        // A new window admits again.
+        assert!(rz_rate_limit(
+            &lim,
+            ip(1),
+            RzAction::Post,
+            100 + RZ_LIMITER_WINDOW_SECS,
+            3,
+            10
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn distinct_slot_sweep_is_capped_but_polling_one_slot_is_not() {
+        let lim: RzLimiter = Mutex::new(HashMap::new());
+        // Polling the same slot any number of times is fine.
+        for _ in 0..100 {
+            assert!(rz_rate_limit(&lim, ip(1), RzAction::GetSlot("42"), 100, 10, 2).is_ok());
+        }
+        // A second distinct slot is fine, a third (over the cap of 2) is not.
+        assert!(rz_rate_limit(&lim, ip(1), RzAction::GetSlot("43"), 100, 10, 2).is_ok());
+        assert!(rz_rate_limit(&lim, ip(1), RzAction::GetSlot("44"), 100, 10, 2).is_err());
+        // Already-counted slots keep working (the legit peer is never cut off).
+        assert!(rz_rate_limit(&lim, ip(1), RzAction::GetSlot("42"), 100, 10, 2).is_ok());
+    }
+
+    #[test]
+    fn zero_cap_disables_and_unknown_ip_bypasses() {
+        let lim: RzLimiter = Mutex::new(HashMap::new());
+        for _ in 0..1000 {
+            assert!(rz_rate_limit(&lim, ip(1), RzAction::Post, 100, 0, 0).is_ok());
+            assert!(rz_rate_limit(&lim, None, RzAction::Post, 100, 1, 1).is_ok());
+        }
+    }
+
+    #[test]
+    fn write_limit_caps_per_ip_resets_and_respects_zero_and_unknown() {
+        let lim: WriteLimiter = Mutex::new(HashMap::new());
+        // Up to `cap` writes admitted in a window; the next is refused.
+        for _ in 0..3 {
+            assert!(write_rate_limit(&lim, ip(1), 100, 3).is_ok());
+        }
+        assert!(write_rate_limit(&lim, ip(1), 100, 3).is_err());
+        // A different IP has its own budget.
+        assert!(write_rate_limit(&lim, ip(2), 100, 3).is_ok());
+        // A new window admits again.
+        assert!(write_rate_limit(&lim, ip(1), 100 + RZ_LIMITER_WINDOW_SECS, 3).is_ok());
+        // cap == 0 disables; an unknown IP (no connect info) bypasses.
+        for _ in 0..1000 {
+            assert!(write_rate_limit(&lim, ip(3), 100, 0).is_ok());
+            assert!(write_rate_limit(&lim, None, 100, 1).is_ok());
+        }
+    }
+}
+
+#[cfg(test)]
+mod stored_bytes_tests {
+    use super::*;
+
+    #[test]
+    fn stored_bytes_tracks_deposits_and_deletions() {
+        let dir = tempfile::tempdir().unwrap();
+        let mb = Mailbox::open(
+            dir.path().join("db.sqlite").to_str().unwrap(),
+            dir.path().join("blobs").to_str().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(mb.stored_bytes(), 0);
+
+        let claim = mb
+            .deposit(
+                Deposit {
+                    encapped_key: vec![1, 2, 3],
+                    ciphertext: vec![0u8; 1000],
+                    ttl_secs: 60,
+                    max_downloads: 1,
+                    revoke_hash: Vec::new(),
+                },
+                1,
+            )
+            .unwrap();
+        mb.deposit(
+            Deposit {
+                encapped_key: vec![4, 5, 6],
+                ciphertext: vec![0u8; 500],
+                ttl_secs: 60,
+                max_downloads: 1,
+                revoke_hash: Vec::new(),
+            },
+            1,
+        )
+        .unwrap();
+        assert_eq!(mb.stored_bytes(), 1500);
+
+        // A burn-after-read fetch deletes the row and frees its budget.
+        let _plan = mb.fetch_plan(&claim, 2).unwrap();
+        assert_eq!(mb.stored_bytes(), 500);
+    }
 }

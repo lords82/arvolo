@@ -242,6 +242,14 @@ enum Command {
     },
     /// Show your public id (creates an identity on first use).
     Id,
+    /// Show or set your display name — the self-chosen name advertised to
+    /// recipients inside each sealed offer (a petname claim, never a verified
+    /// identity). No argument prints the current name; pass a name to set it, or
+    /// an empty string to clear it.
+    Name {
+        /// The display name to set. Omit to show the current one.
+        name: Option<String>,
+    },
     /// Show the CLI version and whether the daemon is running (and its version).
     Version,
     /// Revoke a mailbox send or a browser link, deleting its blob from the relay.
@@ -368,6 +376,16 @@ enum ContactAction {
     },
     /// Stop auto-downloading from a contact (their files will ask again).
     Untrust { name: String },
+    /// Approve a contact's advertised display name (the name they chose for
+    /// themselves). Pins the pending name so it's shown from now on. Pass a
+    /// contact name or a raw id, or `--all` to approve every pending name.
+    AcceptName {
+        /// Contact name or base32 id. Omit when using `--all`.
+        who: Option<String>,
+        /// Approve every pending advertised name at once.
+        #[arg(long)]
+        all: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -461,6 +479,7 @@ async fn main() -> Result<()> {
             password,
         } => recv(ticket, out, password).await,
         Command::Id => id(),
+        Command::Name { name } => name_cmd(name),
         Command::Version => version_cmd().await,
         Command::Contacts { action } => contacts_cmd(action).await,
         Command::Device { action } => match action {
@@ -835,9 +854,21 @@ async fn contacts_cmd(action: ContactAction) -> Result<()> {
                     }
                     _ => "?",
                 };
+                // The sender's advertised (self-chosen) name: pinned shown inline,
+                // a pending change flagged for approval. The local contact name
+                // stays the primary label.
+                let advertised = match book::display_name_of(&id) {
+                    Some(n) => format!("  “{}”", sanitize_display(&n)),
+                    None => String::new(),
+                };
                 match book::fingerprint_of(&id) {
-                    Some(fp) => println!("{status} {name}{verified}{trusted}\t{id}\t({fp})"),
-                    None => println!("{status} {name}{verified}{trusted}\t{id}"),
+                    Some(fp) => {
+                        println!("{status} {name}{verified}{trusted}{advertised}\t{id}\t({fp})")
+                    }
+                    None => println!("{status} {name}{verified}{trusted}{advertised}\t{id}"),
+                }
+                if let Some(p) = book::pending_name_of(&id) {
+                    println!("    ⚠ wants to be called “{}” — approve: arvolo contacts accept-name {name}", sanitize_display(&p));
                 }
             }
         }
@@ -911,6 +942,22 @@ async fn contacts_cmd(action: ContactAction) -> Result<()> {
         ContactAction::Untrust { name } => {
             book::unmark_trusted(&name)?;
             println!("Cleared trust for '{name}' — their files will ask for approval again.");
+        }
+        ContactAction::AcceptName { who, all } => {
+            if all {
+                let n = book::accept_all_names()?;
+                match n {
+                    0 => eprintln!("(no pending names to approve)"),
+                    1 => println!("Approved 1 advertised name."),
+                    n => println!("Approved {n} advertised names."),
+                }
+            } else {
+                let who = who.context(
+                    "give a contact name or id (or --all): arvolo contacts accept-name <who>",
+                )?;
+                let approved = book::accept_name(&who)?;
+                println!("Approved “{approved}” as the advertised name for '{who}'.");
+            }
         }
     }
     Ok(())
@@ -1042,6 +1089,30 @@ fn id() -> Result<()> {
     Ok(())
 }
 
+/// `arvolo name [NAME]` — show or set the local display name advertised in offers.
+fn name_cmd(name: Option<String>) -> Result<()> {
+    match name {
+        None => {
+            let current = book::my_display_name();
+            if current.is_empty() {
+                eprintln!("(no display name set — set one: arvolo name \"Your Name\")");
+            } else {
+                println!("{current}");
+            }
+        }
+        Some(n) => {
+            book::set_my_display_name(&n)?;
+            let n = n.trim();
+            if n.is_empty() {
+                println!("Cleared your display name (offers will no longer advertise one).");
+            } else {
+                println!("Display name set to “{n}” — advertised inside offers you send.");
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn encode_id(p: &PublicId) -> String {
     data_encoding::BASE32_NOPAD
         .encode(&p.to_bytes())
@@ -1135,6 +1206,55 @@ fn print_sender_banner(id: Option<&[u8]>) {
         }
     }
     book::record_seen(&id_b32);
+}
+
+/// Make a remote-supplied, untrusted string safe to print on one terminal line.
+/// A sender fully controls the offer's file name, note, and advertised display
+/// name; printed raw they could carry ANSI escape sequences (to forge output such
+/// as a fake "verified" banner or to hide a traversal name) or bidirectional
+/// override characters (to reverse the visible reading order). We drop every
+/// control character and Unicode bidi/format override, and bound the length.
+fn sanitize_display(s: &str) -> String {
+    // Unicode bidi/format overrides that can reorder or hide visible text.
+    fn is_bidi_override(c: char) -> bool {
+        matches!(c,
+            '\u{200E}' | '\u{200F}' | '\u{061C}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2066}'..='\u{2069}')
+    }
+    s.chars()
+        .filter(|c| !c.is_control() && !is_bidi_override(*c))
+        .take(256)
+        .collect()
+}
+
+/// Observe a sender's advertised display name on an incoming offer and print its
+/// TOFU status (new / changed), recording any change as pending. Never blocks the
+/// transfer — the name is a petname claim, shown as unverified and never a trust
+/// signal. Prints nothing when no name is advertised or it matches the approved one.
+fn note_advertised_name(id_b32: &str, sender_name: &str) {
+    match book::observe_advertised_name(id_b32, sender_name) {
+        book::NameStatus::None => {}
+        book::NameStatus::Unchanged(name) => {
+            eprintln!("   🏷  calls themselves: {}", sanitize_display(&name));
+        }
+        book::NameStatus::New(name) => {
+            eprintln!(
+                "   🏷  NEW sender — calls themselves \"{}\" (unverified name)",
+                sanitize_display(&name)
+            );
+            eprintln!("      approve with: arvolo contacts accept-name {id_b32}");
+        }
+        book::NameStatus::Changed { old, new } => {
+            eprintln!(
+                "   ⚠  now calls themselves \"{}\" (was \"{}\") — keeping \"{}\" for now",
+                sanitize_display(&new),
+                sanitize_display(&old),
+                sanitize_display(&old)
+            );
+            eprintln!("      approve the new name: arvolo contacts accept-name {id_b32}");
+        }
+    }
 }
 
 /// Render a ticket as a QR code on stdout (best-effort).
@@ -1337,17 +1457,18 @@ async fn listen(
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 };
                 match ev {
-                    ManagerEvent::OfferReceived { id, from, name, size, note } => {
+                    ManagerEvent::OfferReceived { id, from, name, size, note, sender_name } => {
                         let from_b32 = encode_id(&from);
                         let status = book::sender_status(&from_b32);
                         eprintln!("\n📨 Incoming file offer:");
                         eprintln!("   from: {}{}", status.name.clone().unwrap_or_else(|| from_b32.clone()),
                                   if status.verified { " ✓ verified" } else { "" });
                         eprintln!("   fingerprint: {}", from.fingerprint());
-                        eprintln!("   file: {name}  ({})", human_size(size));
+                        eprintln!("   file: {}  ({})", sanitize_display(&name), human_size(size));
                         if !note.is_empty() {
-                            eprintln!("   💬 note: {note}");
+                            eprintln!("   💬 note: {}", sanitize_display(&note));
                         }
+                        note_advertised_name(&from_b32, &sender_name);
 
                         let accept = if yes {
                             true
@@ -1372,7 +1493,7 @@ async fn listen(
                         }
                     }
                     ManagerEvent::Started { direction: Direction::Recv, name, total_size, .. } => {
-                        eprintln!("↓ receiving {name} ({})", human_size(total_size));
+                        eprintln!("↓ receiving {} ({})", sanitize_display(&name), human_size(total_size));
                     }
                     ManagerEvent::Completed { id, path } => {
                         if let Some(p) = &path {
@@ -1418,7 +1539,13 @@ async fn handle_attached_offer(
     // Trusted senders are auto-downloaded by the daemon itself; don't also prompt
     // for them here (the daemon already accepted or will).
     if status.trusted {
-        eprintln!("⬇ auto-downloading {} from trusted {who}", offer.name);
+        // Record any advertised-name change silently (it's surfaced later in
+        // `contacts list`); never block or prompt for a trusted sender.
+        book::observe_advertised_name(&offer.from, &offer.sender_name);
+        eprintln!(
+            "⬇ auto-downloading {} from trusted {who}",
+            sanitize_display(&offer.name)
+        );
         return;
     }
     eprintln!("\n📨 Incoming file offer:");
@@ -1426,10 +1553,15 @@ async fn handle_attached_offer(
         "   from: {who}{}",
         if status.verified { " ✓ verified" } else { "" }
     );
-    eprintln!("   file: {}  ({})", offer.name, human_size(offer.size));
+    eprintln!(
+        "   file: {}  ({})",
+        sanitize_display(&offer.name),
+        human_size(offer.size)
+    );
     if !offer.note.is_empty() {
-        eprintln!("   💬 note: {}", offer.note);
+        eprintln!("   💬 note: {}", sanitize_display(&offer.note));
     }
+    note_advertised_name(&offer.from, &offer.sender_name);
 
     let accept = if policy.yes {
         true
@@ -1488,10 +1620,10 @@ async fn listen_attached(
             _ = cancel.cancelled() => break,
             ev = events.next() => {
                 match ev {
-                    Ok(Some(EventDto::OfferReceived { id, from, name, size, note })) => {
+                    Ok(Some(EventDto::OfferReceived { id, from, name, size, note, sender_name })) => {
                         handle_attached_offer(
                             &mut client,
-                            OfferDto { id, from, name, size, note },
+                            OfferDto { id, from, name, size, note, sender_name },
                             policy,
                         ).await;
                     }
@@ -1560,6 +1692,7 @@ async fn daemon(
         download_dir.clone(),
         Some(state_dir),
     );
+    manager.set_display_name(book::my_display_name());
     let inbox = manager.spawn_inbox()?;
     let _auto_sync =
         (!no_sync && book::sync_enabled()).then(|| sync::spawn_auto_sync(relay.clone()));
@@ -1568,6 +1701,10 @@ async fn daemon(
     let sock = ipc::socket_path();
     if let Some(parent) = sock.parent() {
         std::fs::create_dir_all(parent).ok();
+        // Owner-only parent dir: closes the bind()→chmod(0o600) race on the socket
+        // itself — another local user can't traverse into the dir to connect during
+        // the window when the freshly-bound socket may still carry umask perms.
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).ok();
     }
     if tokio::net::UnixStream::connect(&sock).await.is_ok() {
         anyhow::bail!(
@@ -1608,8 +1745,12 @@ async fn daemon(
                         name,
                         size,
                         note,
+                        sender_name,
                     }) => {
                         let from_b32 = encode_id(&from);
+                        // Record any advertised-name change durably (surfaced later in
+                        // `contacts list` / to an attached front-end); never blocks.
+                        book::observe_advertised_name(&from_b32, &sender_name);
                         // Supersede any older parked offer for the same (sender, file).
                         // A live→mailbox fallback posts a fresh offer and retracts the
                         // stale live one, but we may already have pulled that stale copy
@@ -1632,7 +1773,10 @@ async fn daemon(
                         // waits for the user's approval (the default).
                         if status.trusted {
                             let size_h = human_size(size);
-                            eprintln!("⬇ auto-downloading {name} ({size_h}) from trusted {who}");
+                            eprintln!(
+                                "⬇ auto-downloading {} ({size_h}) from trusted {who}",
+                                sanitize_display(&name)
+                            );
                             // Auto-accept, but still surface a notification so the
                             // user knows a trusted download is happening.
                             notify::auto_downloading(&name, &who, &size_h);
@@ -1655,6 +1799,7 @@ async fn daemon(
                                     name,
                                     size,
                                     note,
+                                    sender_name,
                                 },
                             );
                         }
@@ -1981,6 +2126,7 @@ async fn push(
     );
 
     let manager = TransferManager::new(me, Some(relay.clone()), PathBuf::from("."));
+    manager.set_display_name(book::my_display_name());
     let mut events = manager.subscribe();
 
     // `send_to` decides live-vs-mailbox itself (with a presence grace window and a
@@ -2811,6 +2957,7 @@ async fn send_offline(
             chunks: 0,
             ticket: encoded.clone(),
             note: note.to_string(),
+            sender_name: book::my_display_name(),
         };
         if let Err(e) = arvolo_core::presence::post_offer(
             &reqwest::Client::new(),
@@ -2920,4 +3067,38 @@ fn parse_dl_link(link: &str) -> Result<(String, String)> {
     let claim = claim.trim_matches('/');
     anyhow::ensure!(!claim.is_empty(), "download link is missing its claim");
     Ok((relay.trim_end_matches('/').to_string(), claim.to_string()))
+}
+
+#[cfg(test)]
+mod sanitize_tests {
+    use super::sanitize_display;
+
+    // A remote-supplied name/note/display-name must have terminal control sequences
+    // and bidi overrides stripped before printing, so a malicious sender can't forge
+    // output or reverse the visible reading order.
+    #[test]
+    fn strips_ansi_and_control_chars() {
+        // ANSI escape (ESC [ 31m … ESC [ 0m) is removed; the letters survive.
+        assert_eq!(
+            sanitize_display("\u{1b}[31mVERIFIED\u{1b}[0m"),
+            "[31mVERIFIED[0m"
+        );
+        // CR/LF/NUL/tab can't inject new lines or overwrite the current one.
+        assert_eq!(sanitize_display("a\r\nb\tc\0d"), "abcd");
+        // Plain text (incl. non-control unicode) is preserved.
+        assert_eq!(sanitize_display("Lorénzo 名前"), "Lorénzo 名前");
+    }
+
+    #[test]
+    fn strips_bidi_overrides() {
+        // A right-to-left override that would display "gpj.exe" as "exe.jpg".
+        assert_eq!(sanitize_display("photo\u{202e}gpj.exe"), "photogpj.exe");
+        assert_eq!(sanitize_display("\u{2066}x\u{2069}"), "x");
+    }
+
+    #[test]
+    fn bounds_length() {
+        let long = "a".repeat(1000);
+        assert_eq!(sanitize_display(&long).chars().count(), 256);
+    }
 }

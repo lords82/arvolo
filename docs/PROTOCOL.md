@@ -176,8 +176,17 @@ stores opaque ciphertext and opaque tokens, addressed by random claims or by slo
 derived from public ids. Metadata lives in SQLite, blobs as files on disk; both
 survive restarts and are reaped on TTL.
 
-A global request-body limit (default 256 MiB, `ARVOLO_MAX_BLOB_BYTES`) wraps every
-route so no handler can buffer an unbounded body.
+A fixed 16 MiB request-body limit wraps every control-plane route (rendezvous,
+inbox, presence, seed, swarm) so no handler can buffer an unbounded body. The
+streaming `/v1/deposit` route is exempt and enforces two caps of its own as it
+streams to disk (never through memory): a per-blob cap, `ARVOLO_MAX_BLOB_BYTES`
+(default 16 GiB — this is the *functional* bound on the largest file an offline
+send or link can carry; `0` lifts it), and an **aggregate** stored-bytes cap,
+`ARVOLO_MAX_TOTAL_BLOB_BYTES` (default unlimited with a startup warning — this
+is the actual disk-fill guard; set it to the disk budget you lend out). All
+unauthenticated **write** routes (deposit, seed, inbox post, presence,
+swarm announce) additionally share a per-IP write-rate limit
+(`ARVOLO_WRITES_PER_MIN`, default 240; §6.4).
 
 ### 6.1 Endpoint reference
 
@@ -190,12 +199,14 @@ route so no handler can buffer an unbounded body.
 | GET | `/v1/addr` | none | The relay blob node's iroh address + a seed token (for backfill). |
 | POST | `/v1/seed` | seed token | Seed (backfill) a sender's chunks into the relay's blob store so a transfer finishes even if the sender goes offline. Capped per request and in total. |
 | POST | `/v1/release/{token}/{hash}` | release token | Release a seeded chunk. |
-| POST / GET | `/v1/rz/{slot}/{key}` | none | **Rendezvous** for short-code pairing: the sender PUTs its SPAKE2 message and the encrypted ticket; the receiver GETs them. Values are size-capped; slots TTL out. |
-| POST / GET | `/v1/inbox/{slot}` | session (GET) | Post a sealed **offer** to a recipient's inbox / long-poll for offers. |
+| POST / GET | `/v1/rz/{slot}/{key}` | none, rate-limited | **Rendezvous** for short-code pairing: each key (`ms`, `mr`, `tkt`) is first-writer-wins; reading `tkt` burns the slot. Values are size-capped; slots TTL out. Per-IP rate limits (POSTs/min and *distinct slots* touched by GET/min — polling one slot is never throttled) blunt nameplate sweeps and pairing griefing (§7.2). |
+| POST / GET | `/v1/inbox/{slot}` | session (GET) | Post a sealed-sender **offer** to a recipient's inbox / long-poll for offers. |
 | POST | `/v1/inbox/{slot}/session` | proof-of-possession | Start a read session: returns a nonce sealed to the slot owner + a relay MAC over `(slot, nonce, exp)`. |
 | DELETE | `/v1/inbox/{slot}/{id}` | poster token | Retract your own offer. |
 | GET | `/v1/inbox/{slot}/{id}/status` | poster token | `pending` vs `fetched` (was the offer picked up by a live reader?). |
-| POST / GET | `/v1/presence/{slot}` | none | Publish / read a **presence beacon** (is this identity online right now?). |
+| POST / GET | `/v1/presence/{slot}` | none | Publish / read a **presence beacon** (is this identity online right now?). Unauthenticated by design; see the presence caveat in §7.5. |
+| POST | `/v1/swarm/{swarm_id}/announce` | none | **Swarm tracker**: announce this peer (iroh addr + piece bitfield) for a shared `arvc…` transfer so co-downloaders find each other. The swarm id is derived from ticket content — a capability; the relay learns node addresses and bitfields, never keys or plaintext. Rows TTL out (~60 s); peers/swarms are capped. |
+| GET | `/v1/swarm/{swarm_id}/peers` | none | List the live peers announced for a swarm. A poisoned/fake announce can only waste a dial: every chunk is verified by BLAKE3 hash + AEAD, so bad providers are detected, not trusted. |
 | GET | `/dl/{claim}` | none | The browser **download page** (static HTML, strict CSP). |
 | GET | `/dl.js`, `/arvolo-sw.js` | none | The download script and streaming service worker (embedded in the binary). |
 | GET | `/v1/features` | none | Advertise optional features so a client can fail fast, e.g. `{"links":true}`. |
@@ -222,6 +233,41 @@ to a public id.
   hash-only, constant-time pattern.
 - **session token** — a relay MAC (keyed by a per-process secret) over
   `(slot, nonce, exp)`, presented to authorize inbox reads for a while (§7.5).
+
+### 6.4 Operating a public relay (hardening)
+
+End-to-end encryption means a hostile network or relay never reads content — but
+an **open** relay is still an unauthenticated public service, and its
+availability guards need configuring:
+
+- **TLS**: terminate HTTPS in front of the relay (e.g. nginx + certbot). Session
+  tokens travel as `Authorization: Bearer`, and claims/tickets in URLs/headers,
+  so plaintext HTTP lets an on-path attacker burn download counters and grief
+  transfers (never read them). Bare hostnames in codes/config default to
+  `https://`.
+- **Finite caps**: set `ARVOLO_MAX_TOTAL_BLOB_BYTES` to the disk budget you are
+  willing to lend — it is the real disk-fill guard (unlimited by default; the
+  relay warns at startup). `ARVOLO_MAX_BLOB_BYTES` (default 16 GiB, `0` lifts
+  it) only bounds a *single* deposit — i.e. the largest file an offline send or
+  link can carry — not the total. Set `ARVOLO_MAX_SESSION_RELAY_BYTES` to meter
+  seed/backfill offload (unlimited by default, warned at startup). The row caps
+  (entries, rendezvous, inbox, presence, seeded chunks) default on, but note
+  they are *global*: a flood can fill them and deny service to legitimate users
+  until TTLs reap — that is the accepted failure mode of an account-less relay
+  (degraded availability, never confidentiality).
+- **Rate limiting**: the relay itself rate-limits per client IP — the rendezvous
+  routes (`ARVOLO_RZ_POSTS_PER_MIN`, `ARVOLO_RZ_SLOTS_PER_MIN`) and all
+  unauthenticated writes (`ARVOLO_WRITES_PER_MIN`, default 240, shared across
+  deposit/seed/inbox-post/presence/swarm-announce). Set `ARVOLO_TRUST_PROXY=1`
+  behind a reverse proxy so the limiters key on `X-Forwarded-For` — only then,
+  or clients could spoof it. Proxy-level rate limits on top add defense in
+  depth.
+- **Abuse surface**: `/v1/deposit` is unauthenticated by design (anyone may
+  leave you a sealed file), which also makes an open relay free anonymous
+  ciphertext storage. TTLs (default 7 days, capped at 30) and the blob cap bound
+  it; a private relay can additionally sit behind network-level allow-lists.
+- **Links**: `ARVOLO_DISABLE_LINKS=1` if you don't want to serve the browser
+  download path (§7.6).
 
 ---
 
@@ -258,6 +304,18 @@ receiver: arvolo recv 4821-crater-mango[@R]
 The relay sees only PAKE messages and the encrypted ticket; a wrong code derives a
 different key and simply fails — no offline dictionary attack.
 
+> **Active-attack model (what a short code buys you).** The nameplate (the digit
+> part) *is* the rendezvous slot, so an attacker can sweep the 10k-nameplate space
+> to find an in-flight pairing, then race the real receiver: post `mr` first with a
+> *guessed* word pair. SPAKE2 makes that exactly **one online guess per exchange**
+> (1 in 65,536 with the 256-word list) with **visible failure** — the honest
+> receiver hits `409 CONFLICT` or a ticket that won't decrypt, so a hijack never
+> goes unnoticed; the attacker can also fetch-and-burn `tkt` outright. Either way
+> the worst realistic outcome is denial of service of that one pairing, not
+> disclosure — the same model as magic-wormhole. First-writer-wins on every
+> rendezvous key plus the per-IP rate limits (§6.1, §6.4) make sweeping slow and
+> noisy; if a pairing fails unexpectedly, just generate a new code.
+
 ### 7.3 Relay backfill (sender may go offline)
 With `--seed-relay`, the sender also seeds its chunks to the relay's blob node
 (`/v1/addr` → `/v1/seed`), and the ticket lists the relay as an **additional
@@ -279,6 +337,13 @@ receiver: arvolo recv arvm…
 The sender can later confirm delivery via `/v1/entry/{claim}/status` (gone ⇒
 fetched) or delete it early via `/v1/entry/{claim}` with the revoke token.
 
+> Share the `arvm…` ticket over a reasonably private channel. Its contents are
+> HPKE-sealed — only the recipient's key can ever decrypt — but the claim inside
+> is the *fetch* capability: someone who intercepts the ticket can download the
+> ciphertext (useless to them) and thereby **burn** the one-shot download before
+> the recipient gets it. A denial-of-service, never a disclosure; prefer
+> `send --to` over `listen`/pairing when no private channel exists.
+
 ### 7.5 Always-open client (presence + inbox)
 The always-open model lets a sender **push** a file to a contact who is running
 `listen`, delivering live when possible and via the mailbox otherwise.
@@ -287,25 +352,48 @@ The always-open model lets a sender **push** a file to a contact who is running
 `/v1/presence/{presence_slot}` (TTL ~30 s). A sender checks the beacon to decide
 whether the recipient is online.
 
+> **Presence caveat.** The beacon is unauthenticated in both directions, on
+> purpose. *Reads*: anyone who knows your public id can compute your presence
+> slot and poll it — running `listen` broadcasts an online/offline signal to
+> every contact (and anyone they share your id with). Don't run `listen` if that
+> metadata matters to you; content is unaffected either way. *Writes*: anyone
+> can spoof "online" for a slot, but a fake beacon only makes a sender attempt a
+> live offer that no one fetches — the two-phase watchdog (below) falls back to
+> the mailbox on the real signal, and nobody can force you to *appear offline*
+> (there is no beacon delete).
+
 **Inbox read auth (proof of possession).** Reading an inbox must be limited to its
 owner, but the relay has no account for them. Instead of a signature it uses a
 one-time **proof-of-possession** handshake, then a cheap session token:
 
 ```
-1. reader: POST /v1/inbox/{slot}/session
-2. relay:  seals a random nonce to the slot's public key (base-mode HPKE) and
+1. reader: POST /v1/inbox/{slot}/session with its public id as the body;
+           the relay refuses (403) unless blake3_derive(pubkey) == slot
+2. relay:  seals a random nonce to that public key (base-mode HPKE) and
            returns it + a MAC over (slot, nonce, exp) + exp   [context arvolo/inbox/session/v1]
 3. reader: HPKE-opens the seal with its identity → recovers the nonce → assembles
            a session token; only the key owner can do this
 4. reader: long-polls GET /v1/inbox/{slot} with the session token until it expires
 ```
 
-**Offers.** A sender posts an **offer** to the recipient's `inbox_slot`: a sealed
-record of `{ name, size, chunks, ticket }`, plus a **poster token** (hash stored)
-so the sender can retract it or query whether a live reader fetched it. The
-recipient's `listen` surfaces each offer (sender, name, size) and, on accept,
-runs the underlying transfer (an `arvc` ticket over P2P, or an `arvm` fetch)
-transparently.
+**Offers (sealed sender).** A sender posts an **offer** to the recipient's
+`inbox_slot`: a record of `{ name, size, chunks, ticket, note, sender_name }`
+sealed in **two layers** —
+
+1. an **inner auth-mode HPKE seal** to the recipient (AAD `arvolo/offer/v1`),
+   which cryptographically proves *who* sent it, wrapped together with the
+   sender's public id in
+2. an **anonymous (base-mode) outer seal** to the same recipient (AAD
+   `arvolo/offer/env/v1`), so the sender's public id never appears on the wire.
+
+The relay therefore sees only *which slot* received an offer and when — never
+who sent it (the same goal as Signal's sealed sender). The recipient unwraps the
+outer layer, reads the sender id, and verifies it against the inner auth-mode
+seal; a forged sender fails to open. The POST also carries a **poster token**
+(hash stored) so the sender can retract the offer or query whether a live reader
+fetched it. The recipient's `listen` surfaces each offer (sender, name, size)
+and, on accept, runs the underlying transfer (an `arvc` ticket over P2P, or an
+`arvm` fetch) transparently.
 
 **Two-phase watchdog (`send --to`).** `arvolo send --to` decides live-vs-mailbox on a real
 signal rather than a blind timer:
@@ -418,6 +506,8 @@ TTLs and row caps (abuse/disk-fill guards); see the constants in
 | Integrity & tamper-evidence | AEAD tag on every chunk + BLAKE3 content addressing |
 | Sender authentication | HPKE **auth mode** binds the sender's identity (contact/offline sends) |
 | Zero-knowledge relay | Content key is out-of-band (ticket / URL fragment); relay stores opaque ciphertext and derived slots. *Caveat:* the **browser download link** trusts the relay to serve honest `dl.js` — see §7.6 and §9.1(5). CLI paths do not. |
+| Sender privacy vs relay | Inbox offers are **sealed-sender**: the sender's id travels only inside an anonymous outer seal to the recipient, so the relay never sees who is sending — only which slot receives (§7.5). |
+| Presence privacy (opt-in surface) | Running `listen` publishes an online beacon readable by anyone who knows your public id; spoofable "online", unforgeable "offline" — see the caveat in §7.5. |
 | Reorder/truncation resistance | Per-chunk AAD binds `index ‖ total` |
 | Short-code safety | SPAKE2 PAKE — no offline dictionary attack |
 | Inbox read authorization | HPKE proof-of-possession → relay-MAC session token |
@@ -446,7 +536,8 @@ cannot, by itself, prove that key belongs to the human you think it does.
   certificate authorities. All of them default to trust-on-first-use in practice.
 - *Not solvable by math:* the only fix is an **out-of-band trust anchor** — a
   channel the attacker doesn't control. Arvolo gives you the smallest possible
-  one: a **six-word fingerprint** you compare once (in person, by phone), plus
+  one: an **eight-word fingerprint** (64 bits, §2.7) you compare once (in person,
+  by phone), plus
   **key-change warnings** if a saved contact's key ever changes (exactly Signal's
   model). There is no cryptographic way to remove this step.
 

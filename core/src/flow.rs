@@ -875,10 +875,19 @@ pub async fn recv_chunked(
     let t = ChunkTicket::decode(ticket).context("invalid ticket")?;
     let user_out = out;
     // For an archive the payload is unpacked into this directory; the tar itself is
-    // staged as a hidden sibling (see `archive_stage_path`).
-    let archive_dir: Option<PathBuf> = t
-        .archive
-        .then(|| user_out.clone().unwrap_or_else(|| PathBuf::from(&t.name)));
+    // staged as a hidden sibling (see `archive_stage_path`). The ticket `name` is
+    // attacker-authored, so the default unpack dir must be reduced to a single safe
+    // component (`safe_download_name`) — otherwise an `arvc` ticket with an absolute
+    // or `..` name would let `unpack_in` write entries outside the download dir even
+    // though each entry itself is a normal component.
+    let archive_dir: Option<PathBuf> = t.archive.then(|| {
+        user_out.clone().unwrap_or_else(|| {
+            PathBuf::from(
+                safe_download_name(&t.name)
+                    .unwrap_or_else(|| default_out(&t.name).display().to_string()),
+            )
+        })
+    });
     // Where the payload lands on disk: the staged tar for archives (so a partial
     // resumes and — with ARVOLO_SEED — the tar can keep being seeded), else the
     // requested path or a default from the name.
@@ -1952,14 +1961,22 @@ fn collect_dir(
     Ok(())
 }
 
+/// Reduce a sender-supplied (untrusted) name to a single, safe path component,
+/// stripping any directory parts so a malicious `name` like `../../.ssh/x` or an
+/// absolute path can't escape the intended download directory. Returns `None` when
+/// nothing usable remains (empty, `.`, `..`) so the caller can fall back to a
+/// generated name.
+pub fn safe_download_name(name: &str) -> Option<String> {
+    std::path::Path::new(name)
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .filter(|s| !s.is_empty() && s != "." && s != "..")
+}
+
 /// Default single-file output: the ticket's suggested name (its final path
 /// component, to avoid traversal), falling back to a seed-derived name.
 fn default_from_name(name: &str, chunks: &[crate::reexport::Hash]) -> PathBuf {
-    let base = std::path::Path::new(name)
-        .file_name()
-        .map(|s| s.to_string_lossy().to_string())
-        .filter(|s| !s.is_empty() && s != "." && s != "..");
-    match base {
+    match safe_download_name(name) {
         Some(n) => PathBuf::from(n),
         None => default_out(&chunks.first().map(|h| h.to_string()).unwrap_or_default()),
     }
@@ -2072,6 +2089,28 @@ mod archive_tests {
         assert!(!out.path().parent().unwrap().join("escape.txt").exists());
     }
 
+    // A malicious `arvc` ticket controls the archive `name`; the default unpack dir
+    // must be reduced to a single safe component so it can't escape (an absolute
+    // path, a `..` traversal, or a nested dir all collapse to their final segment).
+    #[test]
+    fn attacker_ticket_name_cannot_escape_download_dir() {
+        assert_eq!(safe_download_name("photos").as_deref(), Some("photos"));
+        assert_eq!(
+            safe_download_name("../../.ssh/authorized_keys").as_deref(),
+            Some("authorized_keys")
+        );
+        assert_eq!(
+            safe_download_name("/home/victim/.config/autostart").as_deref(),
+            Some("autostart")
+        );
+        assert_eq!(safe_download_name("a/b/c").as_deref(), Some("c"));
+        // Names with nothing usable left fall through to the caller's generated name.
+        assert_eq!(safe_download_name(".."), None);
+        assert_eq!(safe_download_name("."), None);
+        assert_eq!(safe_download_name(""), None);
+        assert_eq!(safe_download_name("/"), None);
+    }
+
     // A symlink entry is refused outright (our packer never emits one).
     #[test]
     fn symlink_entry_is_refused() {
@@ -2089,5 +2128,42 @@ mod archive_tests {
         }
         let out = tempfile::tempdir().unwrap();
         assert!(unpack_archive_safely(&tar_path, out.path()).is_err());
+    }
+}
+
+#[cfg(test)]
+mod sidecar_tests {
+    use super::*;
+    use crate::swarm::{bitfield_count, bitfield_has, bitfield_new, bitfield_set};
+
+    // The resume sidecar round-trips an arbitrary (disjoint) piece set, and a
+    // missing or wrong-size (corrupt) sidecar is ignored so the download restarts
+    // fresh rather than trusting garbage about which pieces are on disk.
+    #[test]
+    fn sidecar_roundtrip_and_corruption_starts_fresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("f.out");
+
+        // Missing sidecar → empty bitfield (start fresh).
+        assert_eq!(bitfield_count(&read_sidecar(&out, 5)), 0);
+
+        // Round-trip a disjoint set {0, 3}.
+        let mut bf = bitfield_new(5);
+        bitfield_set(&mut bf, 0);
+        bitfield_set(&mut bf, 3);
+        write_sidecar(&out, &bf);
+        let got = read_sidecar(&out, 5);
+        assert!(bitfield_has(&got, 0) && bitfield_has(&got, 3));
+        assert!(!bitfield_has(&got, 1) && !bitfield_has(&got, 2) && !bitfield_has(&got, 4));
+        assert_eq!(bitfield_count(&got), 2);
+
+        // A wrong-size sidecar (e.g. truncated/corrupt, or a stale one for a
+        // different chunk count) is discarded → fresh.
+        std::fs::write(sidecar_path(&out), vec![0xffu8; 999]).unwrap();
+        assert_eq!(
+            bitfield_count(&read_sidecar(&out, 5)),
+            0,
+            "corrupt/wrong-size sidecar must start fresh, not trust garbage"
+        );
     }
 }

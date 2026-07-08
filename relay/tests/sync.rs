@@ -47,6 +47,7 @@ fn sample_snapshot() -> SyncSnapshot {
         verified: vec![],
         trusted: vec![],
         seen: vec![],
+        names: vec![],
     }
 }
 
@@ -93,4 +94,87 @@ async fn sync_note_travels_between_devices_sharing_identity() {
     sub_b.ack(&posted_id).await.expect("ack");
     let after = sub_b.raw_items(0).await.expect("read after ack");
     assert!(after.is_empty(), "note removed after owner ack");
+}
+
+// The mutable-cell invariant `sync now` relies on: a writer, after merging the
+// notes currently in the cell, publishes a fresh full snapshot AND deletes the
+// notes it merged — so the slot converges to a single current snapshot, and a
+// later reader (another device) sees exactly that latest snapshot.
+#[tokio::test]
+async fn sync_cell_writer_supersedes_and_cleans_up() {
+    let relay = spawn_relay().await;
+
+    let identity = Identity::generate();
+    let dev_a = Identity::from_secret_bytes(&identity.secret_bytes()).unwrap();
+    let dev_b = Identity::from_secret_bytes(&identity.secret_bytes()).unwrap();
+    let dev_c = Identity::from_secret_bytes(&identity.secret_bytes()).unwrap();
+    let key = snapshot_key(&identity.secret_bytes());
+
+    // Device A publishes snapshot v1.
+    let v1 = sample_snapshot();
+    let sub_a = InboxSubscription::new(relay.clone(), &dev_a);
+    let id1 = sub_a
+        .post_raw(
+            encode_sync_note(&SyncNote::Snapshot {
+                blob: encrypt_snapshot(&key, &v1).unwrap(),
+            })
+            .unwrap(),
+            Some(3600),
+        )
+        .await
+        .unwrap();
+
+    // Device B does a writer round: read the cell, merge (here: build v2), publish
+    // the fresh snapshot, then delete the note(s) it merged.
+    let sub_b = InboxSubscription::new(relay.clone(), &dev_b);
+    let items = sub_b.raw_items(0).await.unwrap();
+    assert_eq!(items.len(), 1, "B sees A's note");
+    // (B would decrypt+merge here; the merge itself is covered by book.rs tests.)
+    let mut v2 = sample_snapshot();
+    v2.lamport = 9;
+    v2.contacts.push(ContactEntry {
+        name: "bob".into(),
+        pubkey: "bbbb".into(),
+        clock: Lamport {
+            counter: 8,
+            device: [2u8; 16],
+        },
+        deleted: false,
+    });
+    sub_b
+        .post_raw(
+            encode_sync_note(&SyncNote::Snapshot {
+                blob: encrypt_snapshot(&key, &v2).unwrap(),
+            })
+            .unwrap(),
+            Some(3600),
+        )
+        .await
+        .unwrap();
+    for it in &items {
+        sub_b.ack(&it.id).await.unwrap(); // delete the merged note(s)
+    }
+    assert_ne!(id1, "", "posted id is non-empty");
+
+    // The cell now holds exactly one note — the current snapshot.
+    let after = sub_b.raw_items(0).await.unwrap();
+    assert_eq!(after.len(), 1, "cell converged to a single current note");
+
+    // A third device pulling the cell decrypts exactly the latest snapshot.
+    let sub_c = InboxSubscription::new(relay.clone(), &dev_c);
+    let seen = sub_c.raw_items(0).await.unwrap();
+    assert_eq!(seen.len(), 1);
+    let note = decode_sync_note(&seen[0].blob).expect("sync note");
+    let SyncNote::Snapshot { blob } = note else {
+        panic!("expected inline snapshot")
+    };
+    let got = decrypt_snapshot(&key, &blob).unwrap();
+    assert_eq!(
+        got, v2,
+        "third device sees the latest (superseding) snapshot"
+    );
+    assert!(
+        got.contacts.iter().any(|c| c.name == "bob"),
+        "the superseding snapshot carries the merged addition"
+    );
 }
