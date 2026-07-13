@@ -15,7 +15,8 @@ use tokio::sync::broadcast::error::RecvError;
 use tokio_util::sync::CancellationToken;
 
 use super::protocol::{
-    EventDto, OfferDto, Request, RequestEnvelope, Response, ServerMessage, StatusDto, TransferDto,
+    ContactDto, EventDto, OfferDto, Request, RequestEnvelope, Response, ServerMessage, StatusDto,
+    TransferDto,
 };
 
 /// Shared daemon state handed to every connection handler. Cheap to clone.
@@ -23,6 +24,9 @@ use super::protocol::{
 pub struct Daemon {
     pub manager: TransferManager,
     pub relay: Option<String>,
+    /// Where accepted downloads land by default (surfaced in `Status` so a UI can
+    /// show the real folder in its accept dialog).
+    pub download_dir: PathBuf,
     /// Offers parked awaiting the user's approval (populated by the daemon's
     /// engine task; drained on accept/reject).
     pub pending: Arc<Mutex<HashMap<String, OfferDto>>>,
@@ -95,10 +99,19 @@ async fn dispatch(d: &Daemon, cmd: Request) -> Response {
             v.sort_by(|a, b| a.name.cmp(&b.name));
             Response::Pending(v)
         }
+        Request::ListContacts => Response::Contacts(list_contacts()),
         Request::Cancel { id } => {
             d.manager.cancel(id);
             Response::Ok
         }
+        Request::Remove { id } => {
+            d.manager.remove(id);
+            Response::Ok
+        }
+        Request::MarkVerified { name } => match crate::book::mark_verified(&name) {
+            Ok(_) => Response::Ok,
+            Err(e) => Response::Error(format!("{e:#}")),
+        },
         Request::Pause { id } => {
             d.manager.pause(id);
             Response::Ok
@@ -125,6 +138,7 @@ async fn dispatch(d: &Daemon, cmd: Request) -> Response {
         }
         Request::Push { to, paths, note } => push(d, to, paths, note).await,
         Request::ServeTicket { paths, seed_relay } => serve_ticket(d, paths, seed_relay).await,
+        Request::CreateLink { path, ttl, max } => create_link(d, path, ttl, max).await,
         // Handled in `handle_conn` before dispatch; reachable only if a client
         // pipelines Subscribe with other commands, which we don't support.
         Request::Subscribe => {
@@ -202,6 +216,63 @@ async fn serve_ticket(d: &Daemon, paths: Vec<String>, seed_relay: Option<String>
     }
 }
 
+/// The saved address book, projected to serializable [`ContactDto`]s for the
+/// GUI's "Persone" grid.
+fn list_contacts() -> Vec<ContactDto> {
+    crate::book::contact_list()
+        .into_iter()
+        .map(|(name, id)| ContactDto {
+            fingerprint: crate::book::fingerprint_of(&id).unwrap_or_default(),
+            verified: crate::book::is_verified(&id),
+            name,
+            id,
+        })
+        .collect()
+}
+
+/// Encrypt `path` (a single file, or a folder packed into an archive) locally and
+/// deposit a public, browser-openable download link on the relay. The key rides
+/// in the URL fragment; the relay only ever sees ciphertext. Mirrors the CLI's
+/// `--link` send, including saving a revocable deposit record.
+async fn create_link(d: &Daemon, path: String, ttl: Option<u64>, max: Option<u32>) -> Response {
+    let relay = match d.relay.as_deref() {
+        Some(r) => r.to_string(),
+        None => return Response::Error("no relay configured — links need a relay".into()),
+    };
+    let ttl = ttl.unwrap_or(7 * 24 * 3600);
+    let max = max.unwrap_or(crate::deposits::UNLIMITED);
+
+    let (payload, _name, _archive, temp) = match crate::resolve_payload(&[PathBuf::from(path)]) {
+        Ok(v) => v,
+        Err(e) => return Response::Error(format!("{e:#}")),
+    };
+
+    let outcome = arvolo_core::link::deposit_link(&payload, &relay, ttl, max).await;
+    if let Some(t) = &temp {
+        let _ = std::fs::remove_file(t);
+    }
+    match outcome {
+        Ok(out) => {
+            // Save a revocable record so a GUI-created link can still be cancelled
+            // from `arvolo deposits`, exactly like a link made from the CLI.
+            let _ = crate::deposits::save(
+                crate::deposits::KIND_LINK,
+                &relay,
+                &out.claim,
+                &out.revoke_token,
+                &out.name,
+                out.size,
+                max,
+                Some(out.link.clone()),
+                None,
+                ttl,
+            );
+            Response::Link(out.link)
+        }
+        Err(e) => Response::Error(format!("{e:#}")),
+    }
+}
+
 /// Remove a packed-archive temp once its transfer reaches a terminal state.
 fn spawn_temp_cleanup(
     mut rx: tokio::sync::broadcast::Receiver<ManagerEvent>,
@@ -257,6 +328,7 @@ fn status(d: &Daemon) -> StatusDto {
         relay: d.relay.clone(),
         transfers: d.manager.list().len(),
         pending: d.pending.lock().unwrap().len(),
+        download_dir: d.download_dir.display().to_string(),
     }
 }
 

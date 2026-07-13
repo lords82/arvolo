@@ -1,0 +1,4 @@
+node_modules/
+dist/
+# Tauri codegen output
+src-tauri/gen/

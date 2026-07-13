@@ -1,6 +1,6 @@
 //! Client side of the daemon IPC: a thin typed wrapper over the newline-delimited
 //! JSON socket. `connect()` fails cleanly when no daemon is listening, so callers
-//! can fall back to running the engine in-process.
+//! can fall back to running the engine in-process (CLI) or spawning the daemon (GUI).
 
 use std::path::PathBuf;
 
@@ -9,10 +9,11 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::UnixStream;
 
-use super::protocol::{
-    EventDto, OfferDto, Request, RequestEnvelope, Response, ServerMessage, StatusDto, TransferDto,
+use crate::protocol::{
+    ContactDto, EventDto, OfferDto, Request, RequestEnvelope, Response, ServerMessage, StatusDto,
+    TransferDto,
 };
-use super::socket_path;
+use crate::socket_path;
 
 /// An RPC connection to the running daemon.
 pub struct DaemonClient {
@@ -90,6 +91,13 @@ impl DaemonClient {
         }
     }
 
+    pub async fn list_contacts(&mut self) -> Result<Vec<ContactDto>> {
+        match self.request(Request::ListContacts).await? {
+            Response::Contacts(v) => Ok(v),
+            other => unexpected(other),
+        }
+    }
+
     pub async fn push(&mut self, to: String, paths: Vec<String>, note: String) -> Result<u64> {
         match self.request(Request::Push { to, paths, note }).await? {
             Response::TransferId(id) => Ok(id),
@@ -112,8 +120,32 @@ impl DaemonClient {
         }
     }
 
+    /// Deposit a public browser download link for `path` (on the daemon's
+    /// filesystem); returns the shareable URL.
+    pub async fn create_link(
+        &mut self,
+        path: String,
+        ttl: Option<u64>,
+        max: Option<u32>,
+    ) -> Result<String> {
+        match self.request(Request::CreateLink { path, ttl, max }).await? {
+            Response::Link(url) => Ok(url),
+            other => unexpected(other),
+        }
+    }
+
     pub async fn cancel(&mut self, id: u64) -> Result<()> {
         expect_ok(self.request(Request::Cancel { id }).await?)
+    }
+
+    /// Drop one finished transfer from the daemon's list (per-row "Elimina").
+    pub async fn remove(&mut self, id: u64) -> Result<()> {
+        expect_ok(self.request(Request::Remove { id }).await?)
+    }
+
+    /// Mark a saved contact verified after an out-of-band fingerprint check.
+    pub async fn mark_verified(&mut self, name: String) -> Result<()> {
+        expect_ok(self.request(Request::MarkVerified { name }).await?)
     }
 
     pub async fn pause(&mut self, id: u64) -> Result<()> {

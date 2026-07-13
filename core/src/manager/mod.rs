@@ -242,6 +242,30 @@ impl TransferManager {
         });
     }
 
+    /// Drop one **finished** (completed/failed/cancelled) transfer from the list —
+    /// the per-row "remove from history" a UI offers next to
+    /// [`clear_finished`](Self::clear_finished). Refuses (returns `false`) for
+    /// anything still in flight — including a Deposited send awaiting its pickup
+    /// confirmation — so a UI can't orphan a live task.
+    pub fn remove(&self, id: u64) -> bool {
+        let mut transfers = self.inner.transfers.lock().unwrap();
+        let terminal = transfers
+            .get(&id)
+            .map(|t| {
+                matches!(
+                    t.status,
+                    TransferStatus::Completed
+                        | TransferStatus::Failed(_)
+                        | TransferStatus::Cancelled
+                )
+            })
+            .unwrap_or(false);
+        if terminal {
+            transfers.remove(&id);
+        }
+        terminal
+    }
+
     fn register(
         &self,
         direction: Direction,

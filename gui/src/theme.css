@@ -1,0 +1,126 @@
+/* Arvolo GUI — global theme. Design tokens from the README; native-feel rules
+   (system fonts, OS scrollbars, no text selection except inputs/codes) adapted
+   from the mock's `.win` class. The window chrome is the real OS title bar. */
+
+:root {
+  /* Neutrals */
+  --canvas: #faf8f6;
+  --card: #ffffff;
+  --ink: #171514;
+  --ink-sec: #57534c;
+  --ink-mut: #a8a29a;
+  --ink-weak: #c9c2ba;
+  --line: rgba(0, 0, 0, 0.06);
+  --line-strong: rgba(0, 0, 0, 0.1);
+  /* Direction */
+  --out: #f97316;
+  --out-stall: #e8c4a8;
+  --in: #0369a1;
+  --in-stall: #a9c6dd;
+  /* Semantics */
+  --green: #16a34a;
+  --red: #dc2626;
+  --amber: #b45309;
+  --teal: #0f766e;
+  --teal-bg: #e6f4ef;
+  --grey: #6b7280;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  /* System fonts for a native look on every platform. */
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Ubuntu",
+    "Noto Sans", sans-serif;
+  color: var(--ink);
+  background: var(--canvas);
+  -webkit-font-smoothing: antialiased;
+  /* No selection anywhere by default (feels native)… */
+  -webkit-user-select: none;
+  user-select: none;
+  overflow: hidden;
+}
+
+/* …except in inputs and monospace codes/ids, which stay selectable. */
+input,
+.mono,
+.selectable {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.mono {
+  font-family: ui-monospace, "SF Mono", "Segoe UI Mono", "Roboto Mono", monospace;
+}
+
+img {
+  -webkit-user-drag: none;
+  user-drag: none;
+  max-width: 100%;
+}
+
+button {
+  font-family: inherit;
+}
+
+/* OS-style scrollbars. */
+::-webkit-scrollbar {
+  width: 11px;
+  height: 11px;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.16);
+  border-radius: 9px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.28);
+  background-clip: content-box;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Progress bar. */
+.prog {
+  height: 5px;
+  border-radius: 3px;
+  overflow: hidden;
+}
+.prog > span {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+}
+
+.avatar {
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 600;
+  flex: none;
+  color: #fff;
+}
+
+/* A small fade-in for overlays. */
+@keyframes pop {
+  from {
+    opacity: 0;
+    transform: translateY(4px) scale(0.99);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}

@@ -16,6 +16,7 @@ path = "src/main.rs"
 
 [dependencies]
 arvolo-core.workspace = true
+arvolo-ipc.workspace = true
 anyhow.workspace = true
 tokio.workspace = true
 clap.workspace = true
@@ -32,6 +33,10 @@ toml = "0.8"
 # (D-Bus/macOS/WinRT); best-effort — degrades to a log line when unavailable.
 notify-rust = "4"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+
+# flock(2) for the daemon's kernel-enforced single-instance lock (unix only).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"

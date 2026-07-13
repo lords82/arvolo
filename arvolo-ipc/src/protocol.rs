@@ -1,4 +1,5 @@
-//! IPC wire contract shared by the daemon (`server`) and its clients (`client`).
+//! IPC wire contract shared by the daemon (`server`, in the CLI crate) and its
+//! clients (`client`, here).
 //!
 //! The transport is a local socket carrying **newline-delimited JSON**: one JSON
 //! value per line. A client sends a [`RequestEnvelope`] and the daemon answers
@@ -36,6 +37,9 @@ pub enum Request {
     ListTransfers,
     /// Offers parked awaiting the user's approval → [`Response::Pending`].
     ListPending,
+    /// The saved address book → [`Response::Contacts`]. Feeds the GUI's "Persone"
+    /// grid; the daemon resolves names/fingerprints/verified marks from its ledgers.
+    ListContacts,
     /// Send files/folders to a contact; paths are on the *daemon's* filesystem.
     /// → [`Response::TransferId`].
     Push {
@@ -50,8 +54,22 @@ pub enum Request {
         paths: Vec<String>,
         seed_relay: Option<String>,
     },
+    /// Deposit a public, browser-openable **download link** for `path` (on the
+    /// daemon's filesystem) on the relay → [`Response::Link`]. `ttl` defaults to
+    /// 7 days, `max` to unlimited when omitted.
+    CreateLink {
+        path: String,
+        ttl: Option<u64>,
+        max: Option<u32>,
+    },
     /// Cancel a transfer by id → [`Response::Ok`].
     Cancel { id: u64 },
+    /// Drop one **finished** transfer from the list (per-row "Elimina" in a UI).
+    /// No-op for anything still in flight → [`Response::Ok`].
+    Remove { id: u64 },
+    /// Mark a saved contact (by name) verified after an out-of-band fingerprint
+    /// check → [`Response::Ok`] (error if the name isn't a saved contact).
+    MarkVerified { name: String },
     /// Pause an in-progress `send --to` by id → [`Response::Ok`].
     Pause { id: u64 },
     /// Resume a paused `send --to` by id → [`Response::Ok`].
@@ -79,8 +97,11 @@ pub enum Response {
         id: u64,
         ticket: String,
     },
+    /// A public download link (`{relay}/dl/{claim}#{key}`).
+    Link(String),
     Transfers(Vec<TransferDto>),
     Pending(Vec<OfferDto>),
+    Contacts(Vec<ContactDto>),
     Ok,
     Error(String),
 }
@@ -117,6 +138,10 @@ pub struct StatusDto {
     pub relay: Option<String>,
     pub transfers: usize,
     pub pending: usize,
+    /// Where accepted downloads land by default. Optional on the wire so a newer
+    /// client can still read an older daemon's status.
+    #[serde(default)]
+    pub download_dir: String,
 }
 
 /// Serializable mirror of [`Transfer`] with a base32 peer id.
@@ -151,6 +176,21 @@ pub struct OfferDto {
     pub note: String,
     #[serde(default)]
     pub sender_name: String,
+}
+
+/// An address-book entry for the send panel's "Persone" grid.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ContactDto {
+    /// The saved petname (the key passed back as `to` on a [`Request::Push`]).
+    pub name: String,
+    /// Base32 public id.
+    pub id: String,
+    /// Word fingerprint for display, if the stored id parses.
+    #[serde(default)]
+    pub fingerprint: String,
+    /// Whether the contact's key has been verified out-of-band.
+    #[serde(default)]
+    pub verified: bool,
 }
 
 /// Serializable mirror of [`ManagerEvent`].
@@ -353,6 +393,18 @@ mod tests {
     #[test]
     fn response_error_roundtrips() {
         let r = Response::Error("nope".into());
+        let s = serde_json::to_string(&r).unwrap();
+        assert_eq!(serde_json::from_str::<Response>(&s).unwrap(), r);
+    }
+
+    #[test]
+    fn contacts_response_roundtrips() {
+        let r = Response::Contacts(vec![ContactDto {
+            name: "alice".into(),
+            id: "if2xmne".into(),
+            fingerprint: "able-otter-nine".into(),
+            verified: true,
+        }]);
         let s = serde_json::to_string(&r).unwrap();
         assert_eq!(serde_json::from_str::<Response>(&s).unwrap(), r);
     }

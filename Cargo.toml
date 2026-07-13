@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["core", "cli", "relay"]
+members = ["core", "cli", "relay", "arvolo-ipc", "gui/src-tauri"]
 
 [workspace.package]
 version = "0.9.2"
@@ -20,3 +20,5 @@ clap = { version = "4", features = ["derive"] }
 # Both a path (for local builds) and a version (required so the binary crates
 # can be published to crates.io referencing a released core).
 arvolo-core = { path = "core", version = "0.9.0" }
+# The IPC wire contract + daemon client, shared by the CLI and the GUI backend.
+arvolo-ipc = { path = "arvolo-ipc", version = "0.9.2" }

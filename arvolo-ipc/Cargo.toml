@@ -1,0 +1,20 @@
+[package]
+name = "arvolo-ipc"
+description = "Arvolo daemon IPC wire contract + client — shared by the CLI and the desktop GUI."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+arvolo-core.workspace = true
+anyhow.workspace = true
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+data-encoding = "2"
+# The client half speaks the async socket; unix-only for now (Windows named-pipe
+# is a later phase — see `socket_path`).
+[target.'cfg(unix)'.dependencies]
+tokio = { workspace = true }

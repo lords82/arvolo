@@ -28,6 +28,23 @@ pub(crate) async fn daemon(
     use std::os::unix::fs::PermissionsExt;
     use std::sync::{Arc, Mutex};
 
+    // Single-instance guard — FIRST, before any engine work. The kernel-enforced
+    // flock() is the real gate: it dies with the process (never stale) and can't
+    // be fooled by a daemon that is alive but too busy to answer a probe. Without
+    // it, a second daemon would "steal" the socket path from a live-but-slow one
+    // and both engines would run on the same identity/state — double deposits,
+    // forked history. Taking it before the engine spins up also means a losing
+    // twin never even subscribes to the relay inbox.
+    let sock = ipc::socket_path();
+    if let Some(parent) = sock.parent() {
+        std::fs::create_dir_all(parent).ok();
+        // Owner-only parent dir: closes the bind()→chmod(0o600) race on the socket
+        // itself — another local user can't traverse into the dir to connect during
+        // the window when the freshly-bound socket may still carry umask perms.
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).ok();
+    }
+    let _instance_lock = acquire_instance_lock(&book::config_dir().join("daemon.lock"))?;
+
     let relay = require_relay(relay, use_http)?;
     let me = my_identity()?;
     let my_id = encode_id(&me.public());
@@ -49,22 +66,8 @@ pub(crate) async fn daemon(
     let _auto_sync =
         (!no_sync && book::sync_enabled()).then(|| sync::spawn_auto_sync(relay.clone()));
 
-    // Single-instance guard: if the socket answers, a daemon is already up.
-    let sock = ipc::socket_path();
-    if let Some(parent) = sock.parent() {
-        std::fs::create_dir_all(parent).ok();
-        // Owner-only parent dir: closes the bind()→chmod(0o600) race on the socket
-        // itself — another local user can't traverse into the dir to connect during
-        // the window when the freshly-bound socket may still carry umask perms.
-        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).ok();
-    }
-    if tokio::net::UnixStream::connect(&sock).await.is_ok() {
-        anyhow::bail!(
-            "a daemon is already running (socket {} answers)",
-            sock.display()
-        );
-    }
-    // Stale socket from a previous crash — bind() would fail on an existing path.
+    // With the lock held, an existing socket file can only be a leftover from a
+    // crashed daemon — safe to clear before binding.
     if sock.exists() {
         std::fs::remove_file(&sock).ok();
     }
@@ -192,6 +195,7 @@ pub(crate) async fn daemon(
     let daemon = ipc::server::Daemon {
         manager,
         relay: Some(relay),
+        download_dir,
         pending,
     };
     let result = ipc::server::run(daemon, listener, shutdown).await;
@@ -200,6 +204,58 @@ pub(crate) async fn daemon(
     std::fs::remove_file(&sock).ok();
     std::fs::remove_file(&pidfile).ok();
     result
+}
+
+/// Take the daemon's exclusive instance lock: an `flock(2)` on `path`, held for
+/// the returned handle's lifetime. The kernel releases it when the process dies
+/// (any exit path — crash, SIGKILL), so it can never go stale, and a second
+/// daemon fails **immediately** instead of probing a socket that a busy-but-live
+/// daemon might be slow to answer. The lock file itself is never deleted; only
+/// the lock matters.
+#[cfg(unix)]
+pub(crate) fn acquire_instance_lock(path: &std::path::Path) -> Result<std::fs::File> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::PermissionsExt;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path)
+        .with_context(|| format!("open instance lock {}", path.display()))?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).ok();
+    // Non-blocking exclusive lock: EWOULDBLOCK == another daemon holds it.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        anyhow::bail!(
+            "a daemon is already running (instance lock {} is held)",
+            path.display()
+        );
+    }
+    Ok(file)
+}
+
+#[cfg(all(test, unix))]
+mod lock_tests {
+    use super::acquire_instance_lock;
+
+    #[test]
+    fn instance_lock_is_exclusive_and_released_on_drop() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("daemon.lock");
+
+        // flock is per open-file-description, so a second open in the same
+        // process contends exactly like a second process would.
+        let first = acquire_instance_lock(&path).expect("first lock");
+        let second = acquire_instance_lock(&path);
+        assert!(second.is_err(), "second acquisition must fail while held");
+        assert!(
+            second.unwrap_err().to_string().contains("already running"),
+            "failure names the running daemon"
+        );
+
+        // Dropping the holder releases the lock (as process death would).
+        drop(first);
+        acquire_instance_lock(&path).expect("re-acquire after release");
+    }
 }
 
 /// A cancellation token that fires on SIGINT (Ctrl-C) or SIGTERM (systemd stop).
