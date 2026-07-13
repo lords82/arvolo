@@ -39,7 +39,8 @@ allow = [
     "Unlicense",
     # Weak / file-level copyleft. Compatible with both AGPL distribution and a
     # proprietary larger work, as long as we don't modify the covered files.
-    # Only attohttpc (via iroh's UPnP/igd-next) is currently MPL.
+    # Currently: attohttpc (via iroh's UPnP) plus the cssparser/dtoa-short
+    # cohort pulled in by tauri's webview stack.
     "MPL-2.0",
     # Our own crates.
     "AGPL-3.0",
@@ -58,12 +59,18 @@ wildcards = "allow"
 [advisories]
 # Security advisories. In CI this runs as a separate, non-blocking step
 # (`cargo deny check advisories`) because the current findings are all
-# transitive through iroh and not directly actionable by us. Track them and
-# revisit when iroh bumps its dependencies:
+# transitive through iroh and tauri and not directly actionable by us. Track
+# them and revisit when those upstreams bump their dependencies:
+#   via iroh —
 #   RUSTSEC-2026-0118 / -0119  hickory DNS resolver DoS (NSEC3 loop, O(n²) names)
 #   RUSTSEC-2025-0134          rustls-pemfile unmaintained
 #   RUSTSEC-2024-0436          paste unmaintained
 #   RUSTSEC-2024-0370          proc-macro-error unmaintained
+#   via tauri (the GUI) —
+#   RUSTSEC-2024-0411…0420     gtk-rs GTK3 bindings unmaintained (Linux webview;
+#                              resolved upstream when wry moves off GTK3)
+#   RUSTSEC-2025-0098          unic-* unmaintained (urlpattern → tauri-utils)
+#   RUSTSEC-2025-0075/-0080/-0081/-0100/-0119  same GTK/i18n cohort
 # The license/bans/sources checks ARE a hard gate (see CI).
 yanked = "warn"
 
