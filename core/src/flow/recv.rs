@@ -9,7 +9,7 @@ use crate::crypto::{open, open_chunk, Identity, PublicId, Sealed};
 use crate::transfer::RelayChoice;
 
 use super::archive::unpack_archive_safely;
-use super::ctrl::spawn_control_supervisor;
+use super::ctrl::{spawn_control_supervisor, ControlHandle};
 use super::sidecar::{read_sidecar, remove_stage_files, sidecar_path, write_sidecar};
 use super::storage::{available_space, disk_full_reason, is_local_storage_error};
 use super::CHUNK_KEY_AAD;
@@ -847,9 +847,44 @@ pub async fn recv_chunked(
         receiver.close().await;
         return Ok(RecvOutcome::Cancelled(download));
     }
-    // Stop the control supervisor (drops the ack channel and closes the connection).
-    ctrl_cancel.cancel();
+    // Stop the control supervisor — but not before its acks are on the wire. The
+    // last chunk's ack was queued moments ago; dropping it would leave the sender
+    // believing the file never fully arrived (it would keep serving/re-offering
+    // something we already have). Close the ack channel, cancel, then wait for the
+    // supervisor to flush. Bounded: a sender that has vanished must not stall our
+    // completion, and a lost ack then costs only a redundant offer, not the file.
+    // Dropping the ack channel tells the supervisor the download is done; it then
+    // flushes its acks and exits by itself. Wait for that instead of cancelling it,
+    // because cancelling is what used to lose them: a small file can finish before
+    // the control connection has even finished opening, and a cancel at that moment
+    // strands every ack. The sender would then never learn the file arrived — it
+    // would keep serving and re-offering something already delivered.
+    //
+    // Bounded, and only cancel if it overruns: a sender that vanished mid-close must
+    // not hold up our completion, and a lost ack then costs a redundant offer, not
+    // the file. The bound clears the graceful-close wait inside `Control::finish`.
     drop(ack_tx);
+    match ctrl {
+        Some(h) => {
+            // Both senders must go for the channel to close: this one and the clone
+            // above. Leaving the handle's copy alive keeps `recv()` pending forever,
+            // so the supervisor never reaches its flush-and-exit and we would sit out
+            // the whole timeout on every completed download.
+            let ControlHandle {
+                ack_tx: owner_tx,
+                task,
+                sender_live: _,
+            } = h;
+            drop(owner_tx);
+            if tokio::time::timeout(std::time::Duration::from_secs(8), task)
+                .await
+                .is_err()
+            {
+                ctrl_cancel.cancel();
+            }
+        }
+        None => ctrl_cancel.cancel(),
+    }
     // Finalize the file so the seeder serves the last piece at its true length.
     file.set_len(t.total_size)?;
     drop(file);

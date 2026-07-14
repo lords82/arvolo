@@ -3,9 +3,82 @@
 
 use std::sync::{Arc, Mutex};
 
-use arvolo_core::flow::{self, RecvEvent, RecvOutcome};
+use arvolo_core::flow::{self, RecvEvent, RecvOutcome, SendEvent};
 use arvolo_core::transfer::RelayChoice;
 use tokio_util::sync::CancellationToken;
+
+/// The sender must conclude a send is **delivered** once the receiver has acked
+/// every chunk — that is the only fact that means "they have the whole file".
+///
+/// It used to conclude this *solely* from the receiver's control channel going
+/// away (`receiver_gone` with an empty tail). That made a completed delivery look
+/// unfinished whenever the disconnect wasn't observed, leaving the send Active
+/// forever and driving the manager's delivery loop to retract and re-post its
+/// offer. Here the receiver stays alive after finishing (we never cancel it and
+/// never drop the session), so the disconnect signal never comes: `Delivered`
+/// must still fire.
+#[tokio::test]
+async fn sender_reports_delivered_once_every_chunk_is_acked() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src.bin");
+    let out = dir.path().join("out.bin");
+    // Deliberately small (one chunk): the bug is in the control channel's teardown,
+    // not in the data path, and it reproduced on a 23-byte file. Keeping the payload
+    // tiny also keeps this test cheap next to the multi-chunk ones it runs beside.
+    let data: Vec<u8> = (0..64 * 1024).map(|i| (i * 11 + 5) as u8).collect();
+    std::fs::write(&src, &data).unwrap();
+
+    let session = flow::prepare_send(&src, "src.bin", false, None, None, RelayChoice::Disabled)
+        .await
+        .expect("prepare_send");
+    let ticket = session.ticket.clone();
+    assert_eq!(session.chunks, 1);
+
+    let delivered = Arc::new(Mutex::new(false));
+    let seen = delivered.clone();
+    let send_cancel = CancellationToken::new();
+    let serve = {
+        let c = send_cancel.clone();
+        tokio::spawn(async move {
+            session
+                .serve(c, move |ev| {
+                    if matches!(ev, SendEvent::Delivered) {
+                        *seen.lock().unwrap() = true;
+                    }
+                })
+                .await
+        })
+    };
+
+    // Fetch the whole file. `recv_chunked` returns once everything is saved.
+    let saved = flow::recv_chunked(
+        &ticket,
+        Some(out.clone()),
+        None,
+        RelayChoice::Disabled,
+        CancellationToken::new(),
+        |_| {},
+    )
+    .await
+    .expect("recv_chunked");
+    assert_eq!(std::fs::read(saved.path()).unwrap(), data, "integrity");
+
+    // The sender is still serving (we have not cancelled it). Within a few ticks
+    // of the last ack it must report Delivered — without needing the receiver to
+    // disconnect first.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while !*delivered.lock().unwrap() && std::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(
+        *delivered.lock().unwrap(),
+        "sender must report Delivered once every chunk is acked, not only when the \
+         receiver's control channel drops"
+    );
+
+    send_cancel.cancel();
+    let _ = serve.await;
+}
 
 /// Fase 4 enabling property: two devices that share one identity recover the same
 /// content key from a `--to` sealed delivery, so they re-seal byte-identical

@@ -246,6 +246,9 @@ impl SendSession {
         let chunk_size = self.sender.chunk_size() as u64;
         let mut last_delivered = 0usize;
         let mut last_peers = 0usize;
+        // Delivery is concluded from the acks, so report it exactly once even
+        // though both the ack count and a later disconnect can prove it.
+        let mut delivered_reported = false;
         let mut ticker = tokio::time::interval(std::time::Duration::from_millis(500));
         loop {
             tokio::select! {
@@ -257,6 +260,16 @@ impl SendSession {
                         let transferred = (d as u64).saturating_mul(chunk_size).min(self.total_size);
                         on(SendEvent::Progress { transferred, total: self.total_size });
                     }
+                    // Every chunk acked ⇒ they hold the whole file. This — not the
+                    // receiver disconnecting — is what "delivered" means. Waiting for
+                    // the disconnect instead left a finished send Active indefinitely
+                    // whenever the receiver stayed connected (it keepalives, so even
+                    // the idle timeout never fires), which in turn made the manager's
+                    // delivery loop keep re-offering a file that had already arrived.
+                    if !delivered_reported && self.chunks > 0 && d >= self.chunks {
+                        delivered_reported = true;
+                        on(SendEvent::Delivered);
+                    }
                     let p = self.sender.active_peers();
                     if p != last_peers {
                         last_peers = p;
@@ -267,9 +280,14 @@ impl SendSession {
                     on(SendEvent::ReceiverConnected);
                 }
                 undelivered = self.sender.receiver_gone() => {
-                    // Empty tail ⇒ that receiver fetched the whole file.
+                    // Empty tail ⇒ that receiver fetched the whole file. Still the
+                    // authoritative signal for an empty (zero-chunk) payload, which
+                    // the ack count above can never satisfy.
                     if undelivered.is_empty() {
-                        on(SendEvent::Delivered);
+                        if !delivered_reported {
+                            delivered_reported = true;
+                            on(SendEvent::Delivered);
+                        }
                         continue;
                     }
                     let Some(r) = &self.relay else { continue };

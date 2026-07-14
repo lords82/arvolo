@@ -37,6 +37,10 @@ pub(super) const OFFER_STATUS_POLL_SECS: u64 = 2;
 /// was fetched before leaving the transfer as merely "deposited".
 pub(super) const OFFLINE_CONFIRM_SECS: u64 = 90;
 pub(super) const OFFLINE_CONFIRM_POLL_SECS: u64 = 3;
+/// How long cancelling an awaiting-pickup deposit may spend withdrawing the blob
+/// from the relay before it gives up and ends the row anyway. The user is waiting
+/// on this: the row can't flip to Cancelled until the withdrawal returns.
+pub(super) const CANCEL_RELAY_SECS: u64 = 10;
 
 /// How long to hold before re-trying the relay after it was unavailable/errored.
 pub(super) const RELAY_RETRY_SECS: u64 = 15 * 60;
@@ -483,6 +487,13 @@ pub(super) async fn deposit_offline_and_offer(
 /// can't withdraw those, so the row is cancelled locally and the blob simply
 /// lapses at its TTL. Both relay calls are best-effort: a failed revoke must not
 /// leave the row stuck, and the relay expires the blob regardless.
+///
+/// They are also *bounded*. The engine's HTTP client carries no timeout, so an
+/// unreachable or stalled relay would keep both calls hanging — and since the row
+/// only flips (and the event only fires) once they return, the user would press
+/// "cancel" and watch nothing happen, with no way to tell a slow relay from a dead
+/// button. A withdrawal we can't complete in [`CANCEL_RELAY_SECS`] is one the TTL
+/// will have to finish for us; ending the row promptly is worth more than waiting.
 pub(super) fn cancel_deposited(inner: Arc<Inner>, id: u64) {
     let rec = inner
         .state_dir
@@ -490,21 +501,26 @@ pub(super) fn cancel_deposited(inner: Arc<Inner>, id: u64) {
         .and_then(|dir| load_depositeds(dir).into_iter().find(|r| r.id == id));
     tokio::spawn(async move {
         if let Some(rec) = &rec {
-            if !rec.revoke_token.is_empty() {
-                let _ = flow::revoke_offline(&rec.relay, &rec.claim, &rec.revoke_token).await;
-            }
-            if !rec.offer_id.is_empty() {
-                if let Ok(recipient) = PublicId::from_bytes(&rec.recipient) {
-                    let _ = presence::retract_offer(
-                        &inner.client,
-                        &rec.relay,
-                        &recipient,
-                        &rec.offer_id,
-                        &rec.poster_token,
-                    )
-                    .await;
+            let withdraw = async {
+                if !rec.revoke_token.is_empty() {
+                    let _ = flow::revoke_offline(&rec.relay, &rec.claim, &rec.revoke_token).await;
                 }
-            }
+                if !rec.offer_id.is_empty() {
+                    if let Ok(recipient) = PublicId::from_bytes(&rec.recipient) {
+                        let _ = presence::retract_offer(
+                            &inner.client,
+                            &rec.relay,
+                            &recipient,
+                            &rec.offer_id,
+                            &rec.poster_token,
+                        )
+                        .await;
+                    }
+                }
+            };
+            let _ =
+                tokio::time::timeout(std::time::Duration::from_secs(CANCEL_RELAY_SECS), withdraw)
+                    .await;
         }
         if let Some(dir) = &inner.state_dir {
             remove_deposited(dir, id);

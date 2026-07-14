@@ -19,6 +19,10 @@ pub(super) struct ControlHandle {
     pub(super) sender_live: Arc<std::sync::atomic::AtomicBool>,
     /// Best-effort ack of a committed chunk to the sender (dropped while offline).
     pub(super) ack_tx: tokio::sync::mpsc::UnboundedSender<u32>,
+    /// Resolves once the supervisor has flushed its queued acks and stopped. The
+    /// caller awaits this after cancelling, so the final acks reach the sender
+    /// before the endpoint goes away (see the flush in the cancel arm below).
+    pub(super) task: tokio::task::JoinHandle<()>,
 }
 
 pub(super) fn spawn_control_supervisor(
@@ -32,12 +36,13 @@ pub(super) fn spawn_control_supervisor(
     let sender_live = Arc::new(AtomicBool::new(false));
     let (ack_tx, mut ack_rx) = tokio::sync::mpsc::unbounded_channel::<u32>();
     let live = sender_live.clone();
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         let mut backoff = Duration::from_secs(1);
-        // Once the receiver finishes and drops `ack_tx`, stop selecting on it (a
-        // closed channel returns immediately) but keep the connection for
-        // `RelayHas` updates until cancelled.
-        let mut ack_open = true;
+        // The receiver dropping `ack_tx` is our "download finished" signal: we then
+        // flush the acks and exit on our own (see the `None` arm below). The caller
+        // awaits that rather than cancelling us outright — cancelling mid-connect
+        // would strand the acks of a small file that finished before we were even
+        // connected, which is exactly how a delivered send used to hang forever.
         loop {
             if cancel.is_cancelled() {
                 break;
@@ -73,14 +78,30 @@ pub(super) fn spawn_control_supervisor(
                         return;
                     }
                     _ = conn.closed() => break,
-                    maybe = ack_rx.recv(), if ack_open => {
+                    maybe = ack_rx.recv() => {
                         match maybe {
                             Some(idx) => {
                                 if control.ack(idx).await.is_err() {
                                     break;
                                 }
                             }
-                            None => ack_open = false,
+                            // The receiver dropped its side: it has committed every
+                            // chunk it is going to, and the queue is now drained (an
+                            // unbounded channel yields all pending items before it
+                            // reports closed). Flush and leave — we are done.
+                            //
+                            // The flush matters: `ack` only *buffers* into the QUIC
+                            // stream, and `Control`'s `Drop` closes the connection,
+                            // discarding anything not yet on the wire. `finish()`
+                            // ends the stream and waits for the sender to read it to
+                            // EOF. Without this the sender sees an undelivered tail
+                            // for chunks that did arrive, never concludes the send,
+                            // and keeps re-offering a file already received.
+                            None => {
+                                let _ = control.finish().await;
+                                live.store(false, Ordering::Relaxed);
+                                return;
+                            }
                         }
                     }
                 }
@@ -92,5 +113,6 @@ pub(super) fn spawn_control_supervisor(
     ControlHandle {
         sender_live,
         ack_tx,
+        task,
     }
 }

@@ -449,6 +449,11 @@ impl ProtocolHandler for CtrlHandler {
         }
         drop(delivered);
         let _ = self.gone_tx.send(undelivered);
+        // Acknowledge the clean shutdown. We have read the receiver's stream to EOF,
+        // so every `Have` it sent is already counted above; closing now lets its
+        // `Control::finish` return at once instead of sitting out its close timeout,
+        // which would otherwise stall the end of every completed download.
+        conn.close(0u32.into(), b"done");
         Ok(())
     }
 }
