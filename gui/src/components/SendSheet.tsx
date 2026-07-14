@@ -61,6 +61,17 @@ export function SendSheet() {
     return base;
   }, [paths]);
 
+  // Close on a click that *began* on the backdrop, not on any click that merely
+  // ends there. A file drop opens this sheet from under the pointer, and the click
+  // closing the drag then lands on a backdrop that did not exist when the gesture
+  // started — closing the sheet in the same frame it appeared. (It also stops a
+  // text selection dragged out of the panel from dismissing it on release.)
+  //
+  // Must be declared *above* the early return: hooks have to run in the same order
+  // on every render, and this component renders both closed (no paths) and open.
+  // Below it, dropping a file added a hook mid-life and React tore the tree down.
+  const pressedBackdrop = useRef(false);
+
   if (!paths) return null;
 
   const run = async (fn: () => Promise<void>) => {
@@ -76,13 +87,6 @@ export function SendSheet() {
   };
 
   const sizeLabel = paths.length > 1 ? `${paths.length} file` : "";
-
-  // Close on a click that *began* on the backdrop, not on any click that merely
-  // ends there. A file drop opens this sheet from under the pointer, and the click
-  // closing the drag then lands on a backdrop that did not exist when the gesture
-  // started — closing the sheet in the same frame it appeared. (It also stops a
-  // text selection dragged out of the panel from dismissing it on release.)
-  const pressedBackdrop = useRef(false);
 
   return (
     <div

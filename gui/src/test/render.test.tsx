@@ -4,7 +4,7 @@
 // panel, so that is where it has to be proven.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, render, screen } from "@testing-library/react";
 import { dto, harness, makeIpcMock, resetHarness } from "./mocks";
 
 vi.mock("../ipc", () => makeIpcMock());
@@ -57,6 +57,29 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("the window survives what the user does to it", () => {
+  it("48. the panel survives going from closed to open — the drop itself", async () => {
+    // The one that actually bit: rendering the sheet with paths already set is not
+    // the gesture. The gesture is a *transition* — it renders closed (returns null
+    // early), then a drop gives it paths and it renders open. A hook declared below
+    // that early return only runs on the second pass, so React sees the hook count
+    // grow mid-life and tears the whole tree down (#310) — a blank window.
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    render(
+      <ErrorBoundary>
+        <SendSheet />
+      </ErrorBoundary>
+    );
+    expect(screen.queryByText("Invia")).toBeNull(); // closed
+
+    await act(async () => {
+      useStore.getState().openSheet(["/Users/ls/Scrivania/relazione.pdf"]);
+    });
+
+    expect(screen.queryByText(/si è rotto/i), "the tree must not crash").toBeNull();
+    expect(screen.getByText("relazione.pdf")).toBeDefined();
+    spy.mockRestore();
+  });
+
   it("39. dropping a file opens the send panel without blanking the window", () => {
     // The exact gesture: a real OS drop hands the store a path, which mounts the
     // send sheet. If that render throws, the tree unmounts and the window goes white.
