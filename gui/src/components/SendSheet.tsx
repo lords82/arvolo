@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import QRCode from "qrcode";
 import { useStore } from "../store";
 import { extOf, shortId } from "../format";
@@ -77,9 +77,22 @@ export function SendSheet() {
 
   const sizeLabel = paths.length > 1 ? `${paths.length} file` : "";
 
+  // Close on a click that *began* on the backdrop, not on any click that merely
+  // ends there. A file drop opens this sheet from under the pointer, and the click
+  // closing the drag then lands on a backdrop that did not exist when the gesture
+  // started — closing the sheet in the same frame it appeared. (It also stops a
+  // text selection dragged out of the panel from dismissing it on release.)
+  const pressedBackdrop = useRef(false);
+
   return (
     <div
-      onClick={closeSheet}
+      onMouseDown={(e) => {
+        pressedBackdrop.current = e.target === e.currentTarget;
+      }}
+      onClick={(e) => {
+        if (e.target === e.currentTarget && pressedBackdrop.current) closeSheet();
+        pressedBackdrop.current = false;
+      }}
       style={{
         position: "fixed",
         inset: 0,

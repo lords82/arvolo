@@ -23,15 +23,23 @@ export function Board() {
   const outSections = sectionsFor(rows, "out", search);
   const inSections = sectionsFor(rows, "in", search);
 
+  // "In corso" = still open, which is the same set the row menu still offers to
+  // cancel — a deposit awaiting pickup included: it is an outstanding send until
+  // the recipient fetches it. Counting it as closed while still offering "Annulla"
+  // was the inconsistency that made cancelling a deposit move no number at all.
+  // A cancel in flight drops out immediately, matching the row's own optimistic
+  // "Annullamento…"; if the daemon refuses, both come back together.
+  // "In totale" stays every row in the column, concluded ones included.
   const count = (dir: "out" | "in") => {
     const f = rows.filter((t) => t.dir === dir);
-    const active = f.filter(
+    const open = f.filter(
       (t) =>
         t.status === "in corso" ||
         t.status === "in attesa" ||
-        t.status === "in stallo"
+        t.status === "in stallo" ||
+        t.status === "deposited"
     ).length;
-    return `${active} in corso · ${f.length} in totale`;
+    return `${open} in corso · ${f.length} in totale`;
   };
 
   return (
@@ -492,6 +500,9 @@ function RowMenu({ t }: { t: UITransfer }) {
       t.status === "in attesa" ||
       t.status === "in stallo" ||
       t.status === "deposited";
+    // A cancel already in flight: neither "Annulla" (it's happening) nor "Elimina"
+    // (the daemon refuses to drop an unfinished transfer) applies until it lands.
+    const cancelling = t.status === "in annullamento";
     if (t.status === "in corso" || t.status === "in stallo")
       actions.push({
         label: "Metti in pausa",
@@ -537,21 +548,22 @@ function RowMenu({ t }: { t: UITransfer }) {
       color: "#171514",
       onClick: () => store.moveItem(t.key, 1),
     });
-    actions.push(
-      live
-        ? {
-            label: t.dir === "out" ? "Annulla invio" : "Annulla",
-            glyph: "✕",
-            color: "#dc2626",
-            onClick: () => store.cancel(t.id),
-          }
-        : {
-            label: "Elimina",
-            glyph: "✕",
-            color: "#dc2626",
-            onClick: () => store.removeRow(t.key),
-          }
-    );
+    if (!cancelling)
+      actions.push(
+        live
+          ? {
+              label: t.dir === "out" ? "Annulla invio" : "Annulla",
+              glyph: "✕",
+              color: "#dc2626",
+              onClick: () => store.cancel(t.id),
+            }
+          : {
+              label: "Elimina",
+              glyph: "✕",
+              color: "#dc2626",
+              onClick: () => store.removeRow(t.key),
+            }
+      );
   }
 
   return (

@@ -46,6 +46,8 @@ export function statusMeta(s: UIStatus): StatusMeta {
       return { color: "#6b7280", text: "In attesa di ripresa" };
     case "fallito":
       return { color: "#dc2626", text: "Fallito" };
+    case "in annullamento":
+      return { color: "#8a827a", text: "Annullamento…" };
     case "annullato":
       return { color: "#8a827a", text: "Annullato" };
   }

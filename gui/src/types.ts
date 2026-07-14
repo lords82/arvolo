@@ -12,6 +12,7 @@ export type UIStatus =
   | "deposited" // handed to the relay mailbox
   | "completato"
   | "fallito"
+  | "in annullamento" // cancel sent, waiting for the daemon to confirm it
   | "annullato";
 
 // ---- daemon DTOs (mirror the Rust wire types) ----------------------------

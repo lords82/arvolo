@@ -19,6 +19,14 @@ function now(): number {
   return Date.now();
 }
 
+/** Strictly increasing list position. `Date.now()` is not usable here: two rows
+ *  created in the same millisecond would tie, leaving their order ambiguous and
+ *  making "Sposta su/giù" swap two equal ranks — a move that changes nothing. */
+let rankSeq = 0;
+function nextRank(): number {
+  return ++rankSeq;
+}
+
 /** Last progress sample per transfer id, for throughput estimation. Kept outside
  *  the store: it changes on every event and must not trigger renders itself. */
 const progSamples = new Map<number, { t: number; bytes: number }>();
@@ -130,7 +138,7 @@ export const useStore = create<State>((set, get) => {
       files: prev?.files ?? 1,
       path: prev?.path,
       firstSeen: prev?.firstSeen ?? now(),
-      rank: prev?.rank ?? prev?.firstSeen ?? now(),
+      rank: prev?.rank ?? nextRank(),
       rate: prev?.rate,
     };
   };
@@ -155,7 +163,7 @@ export const useStore = create<State>((set, get) => {
     downloadPeers: 0,
     files: 1,
     firstSeen: prev?.firstSeen ?? now(),
-    rank: prev?.rank ?? prev?.firstSeen ?? now(),
+    rank: prev?.rank ?? nextRank(),
   });
 
   /** Merge a partial change into an existing transfer row (creating a stub if the
@@ -180,7 +188,7 @@ export const useStore = create<State>((set, get) => {
           downloadPeers: 0,
           files: 1,
           firstSeen: now(),
-          rank: now(),
+          rank: nextRank(),
         } as UITransfer);
       return { transfers: { ...s.transfers, [key]: fn(existing) } };
     });
@@ -393,8 +401,28 @@ export const useStore = create<State>((set, get) => {
       set({ openMenuKey: null });
     },
     cancel: async (id) => {
-      await api.cancel(id);
+      // Show the click landed. The daemon only flips the row once it has actually
+      // torn the transfer down — for a deposit that means withdrawing the blob from
+      // the relay first — so without this the button looks dead for as long as that
+      // takes. The engine's `cancelled` event overwrites this with the real status.
+      const key = `t${id}`;
+      const before = get().transfers[key]?.status;
+      const setStatus = (status: UIStatus) =>
+        set((s) =>
+          s.transfers[key]
+            ? { transfers: { ...s.transfers, [key]: { ...s.transfers[key], status } } }
+            : {}
+        );
+      setStatus("in annullamento");
       set({ openMenuKey: null });
+      try {
+        await api.cancel(id);
+      } catch (e) {
+        // The daemon refused: put the row back as it was rather than leave it
+        // stuck pretending to cancel.
+        if (before) setStatus(before);
+        throw e;
+      }
     },
     removeRow: async (key) => {
       const t = get().transfers[key];
@@ -457,12 +485,15 @@ export const useStore = create<State>((set, get) => {
       set((s) => {
         const kept: Record<string, UITransfer> = {};
         for (const [k, t] of Object.entries(s.transfers)) {
-          const terminal =
+          // A deposit awaiting pickup is NOT finished: the recipient has not taken
+          // it, and the row is still cancellable (cancelling withdraws the file from
+          // the relay). The daemon keeps it for the same reason, so dropping it here
+          // would only make it reappear on the next snapshot.
+          const finished =
             t.status === "completato" ||
             t.status === "fallito" ||
-            t.status === "annullato" ||
-            t.status === "deposited";
-          if (!terminal) kept[k] = t;
+            t.status === "annullato";
+          if (!finished) kept[k] = t;
         }
         return { transfers: kept, openMenuKey: null };
       }),
