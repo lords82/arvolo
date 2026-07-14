@@ -29,11 +29,20 @@ export function App() {
   const versionMismatch =
     connected && status !== null && guiVersion !== "" && status.version !== guiVersion;
 
-  // Boot the store (snapshot + event subscription) once.
+  // Boot the store (snapshot + event subscription) once. `init` is async, so an
+  // unmount can land before it resolves — track that and dispose the listeners
+  // it hands back, or they'd leak (and double up under StrictMode's re-mount).
   useEffect(() => {
+    let disposed = false;
     let cleanup: (() => void) | undefined;
-    init().then((c) => (cleanup = c));
-    return () => cleanup?.();
+    init().then((c) => {
+      if (disposed) c();
+      else cleanup = c;
+    });
+    return () => {
+      disposed = true;
+      cleanup?.();
+    };
   }, [init]);
 
   // Native feel: no webview context menu (right-click → Reload/Inspect), and in

@@ -207,7 +207,8 @@ export const useStore = create<State>((set, get) => {
     isVerified: (id) => (id ? !!get().contactsById[id]?.verified : false),
 
     init: async () => {
-      api.guiVersion()
+      api
+        .guiVersion()
         .then((v) => set({ guiVersion: v }))
         .catch(() => {});
       const unlistenEv = await onEngineEvent((ev) => get().applyEvent(ev));
@@ -215,8 +216,25 @@ export const useStore = create<State>((set, get) => {
         set({ connected: c });
         if (c) get().reload();
       });
-      await get().reload();
+
+      // Seed the snapshot, retrying until it lands. The backend pump emits
+      // `engine://connected` only on a state *change*, so a webview that loads
+      // (or reloads) while the pump is already subscribed never receives one:
+      // if its first snapshot failed — the daemon was still starting, say — the
+      // board would sit empty forever with no event to wake it. Retrying here is
+      // the only self-heal, and it costs nothing once connected (the loop exits).
+      let stopped = false;
+      const seed = async () => {
+        while (!stopped) {
+          await get().reload();
+          if (get().connected) return;
+          await new Promise((r) => setTimeout(r, 2000));
+        }
+      };
+      void seed();
+
       return () => {
+        stopped = true;
         unlistenEv();
         unlistenConn();
       };
