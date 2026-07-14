@@ -240,6 +240,9 @@ pub enum EventDto {
     Cancelled {
         id: u64,
     },
+    /// The address book changed under the daemon. Carries nothing: re-issue
+    /// [`Request::ListContacts`] to pick the new book up.
+    ContactsChanged,
 }
 
 fn direction_str(d: Direction) -> &'static str {
@@ -334,6 +337,7 @@ impl From<&ManagerEvent> for EventDto {
                 error: error.clone(),
             },
             ManagerEvent::Cancelled { id } => EventDto::Cancelled { id: *id },
+            ManagerEvent::ContactsChanged => EventDto::ContactsChanged,
         }
     }
 }

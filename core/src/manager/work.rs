@@ -217,8 +217,7 @@ pub(super) async fn deliver_to(
                         &inner,
                         id,
                         relay.clone(),
-                        out.size,
-                        out.claim,
+                        out,
                         unix_now().saturating_add(OFFLINE_TTL_SECS),
                     );
                     return;
@@ -419,6 +418,11 @@ pub(super) async fn serve_live_once(
 pub(super) struct DepositOutcome {
     pub(super) size: u64,
     pub(super) claim: String,
+    /// Sender-only secret authorizing removal of the blob from the relay.
+    pub(super) revoke_token: String,
+    /// The offer left in the recipient's inbox + its retract token.
+    pub(super) offer_id: String,
+    pub(super) poster_token: String,
 }
 
 /// Deposit `payload` to the relay mailbox (sealed to `recipient`) and post a
@@ -452,7 +456,7 @@ pub(super) async fn deposit_offline_and_offer(
         note: note.to_string(),
         sender_name: inner.display_name.lock().unwrap().clone(),
     };
-    presence::post_offer(
+    let posted = presence::post_offer(
         &inner.client,
         relay,
         recipient,
@@ -462,7 +466,52 @@ pub(super) async fn deposit_offline_and_offer(
     )
     .await
     .map_err(|e| flow::DepositError::Unavailable(format!("deliver offer: {e:#}")))?;
-    Ok(DepositOutcome { size, claim })
+    Ok(DepositOutcome {
+        size,
+        claim,
+        revoke_token: deposited.revoke_token,
+        offer_id: posted.id,
+        poster_token: posted.poster_token,
+    })
+}
+
+/// Cancel an **awaiting-pickup deposit**: withdraw the blob from the relay and
+/// retract the offer from the recipient's inbox, so they can no longer fetch it,
+/// then mark the transfer Cancelled. Runs detached (the caller's `cancel` is sync).
+///
+/// A record written before cancellation was supported carries no revoke token; we
+/// can't withdraw those, so the row is cancelled locally and the blob simply
+/// lapses at its TTL. Both relay calls are best-effort: a failed revoke must not
+/// leave the row stuck, and the relay expires the blob regardless.
+pub(super) fn cancel_deposited(inner: Arc<Inner>, id: u64) {
+    let rec = inner
+        .state_dir
+        .as_ref()
+        .and_then(|dir| load_depositeds(dir).into_iter().find(|r| r.id == id));
+    tokio::spawn(async move {
+        if let Some(rec) = &rec {
+            if !rec.revoke_token.is_empty() {
+                let _ = flow::revoke_offline(&rec.relay, &rec.claim, &rec.revoke_token).await;
+            }
+            if !rec.offer_id.is_empty() {
+                if let Ok(recipient) = PublicId::from_bytes(&rec.recipient) {
+                    let _ = presence::retract_offer(
+                        &inner.client,
+                        &rec.relay,
+                        &recipient,
+                        &rec.offer_id,
+                        &rec.poster_token,
+                    )
+                    .await;
+                }
+            }
+        }
+        if let Some(dir) = &inner.state_dir {
+            remove_deposited(dir, id);
+        }
+        inner.set_status(id, TransferStatus::Cancelled);
+        inner.emit(ManagerEvent::Cancelled { id });
+    });
 }
 
 /// Poll the relay until the deposited blob `claim` is fetched (delivered) or the
@@ -504,10 +553,16 @@ pub(super) fn spawn_offline_confirm(
     inner: &Arc<Inner>,
     id: u64,
     relay: String,
-    size: u64,
-    claim: String,
+    out: DepositOutcome,
     expires: u64,
 ) {
+    let DepositOutcome {
+        size,
+        claim,
+        revoke_token,
+        offer_id,
+        poster_token,
+    } = out;
     inner.set_progress(id, size);
     inner.set_status(id, TransferStatus::Deposited);
     inner.emit(ManagerEvent::Deposited { id });
@@ -531,6 +586,9 @@ pub(super) fn spawn_offline_confirm(
                 relay: relay.clone(),
                 claim: claim.clone(),
                 expires,
+                revoke_token,
+                offer_id,
+                poster_token,
             },
         );
     }

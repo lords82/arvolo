@@ -141,7 +141,22 @@ pub(super) struct DepositedRecord {
     pub(super) claim: String,
     /// Unix seconds when the relay auto-expires the blob (deposit time + TTL).
     pub(super) expires: u64,
+    /// Sender-only secret that authorizes deleting the blob from the relay, so a
+    /// cancel can actually withdraw the file instead of only hiding the row.
+    pub(super) revoke_token: String,
+    /// The posted offer sitting in the recipient's inbox, and the token that
+    /// authorizes retracting it (so a cancel also removes their pickup notice).
+    pub(super) offer_id: String,
+    pub(super) poster_token: String,
 }
+
+// NOTE on evolving these records: postcard is a compact, **non-self-describing**
+// format — fields are read positionally and `#[serde(default)]` does nothing for
+// a missing one. Adding or reordering a field therefore makes every previously
+// written record of that type unparsable; `load_records` skips those silently, so
+// the state they tracked is quietly forgotten. If one of these structs ever needs
+// a new field after a release, bump the filename prefix (e.g. `dep2-`) and migrate
+// the old files, rather than editing the struct in place.
 
 pub(super) fn deposited_record_path(dir: &Path, id: u64) -> PathBuf {
     dir.join(format!("dep-{id}.pc"))

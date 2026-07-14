@@ -151,12 +151,30 @@ export function App() {
               borderRadius: 8,
               width: 30,
               height: 30,
-              fontSize: 13,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
               cursor: pendingOffers.length ? "pointer" : "default",
               color: pendingOffers.length ? "#171514" : "#a8a29a",
             }}
           >
-            🔔
+            {/* Line-art bell, drawn to sit with the other glyph icons (✉ ✓ ⏸)
+                rather than the colour emoji it replaces. */}
+            <svg
+              width="15"
+              height="15"
+              viewBox="0 0 16 16"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M8 2.4a3.6 3.6 0 0 1 3.6 3.6c0 2.5.6 3.5 1.1 4.1a.3.3 0 0 1-.2.5H3.5a.3.3 0 0 1-.2-.5c.5-.6 1.1-1.6 1.1-4.1A3.6 3.6 0 0 1 8 2.4Z" />
+              <path d="M8 1.2v1.2" />
+              <path d="M6.6 12.6a1.4 1.4 0 0 0 2.8 0" />
+            </svg>
             {pendingOffers.length > 0 && (
               <span
                 style={{

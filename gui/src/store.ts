@@ -71,6 +71,7 @@ interface State {
   // lifecycle
   init: () => Promise<() => void>;
   reload: () => Promise<void>;
+  refreshContacts: () => Promise<void>;
 
   // helpers
   peerLabel: (id: string | null, fallbackName?: string) => string;
@@ -269,6 +270,16 @@ export const useStore = create<State>((set, get) => {
       }
     },
 
+    // Contacts only — the rows are event-driven and must not be rebuilt from a
+    // snapshot just because the address book moved.
+    refreshContacts: async () => {
+      const contacts = await api.listContacts().catch(() => null);
+      if (!contacts) return;
+      const contactsById: Record<string, ContactDto> = {};
+      for (const c of contacts) contactsById[c.id] = c;
+      set({ contacts, contactsById });
+    },
+
     applyEvent: (ev) => {
       switch (ev.type) {
         case "offer_received":
@@ -330,6 +341,11 @@ export const useStore = create<State>((set, get) => {
         case "cancelled":
           patch(ev.id, (t) => ({ ...t, status: "annullato" }));
           break;
+        case "contacts_changed":
+          // Fired by the daemon whoever wrote the book — typically an
+          // `arvolo contacts …` run in another process.
+          void get().refreshContacts();
+          break;
       }
     },
 
@@ -383,7 +399,9 @@ export const useStore = create<State>((set, get) => {
     removeRow: async (key) => {
       const t = get().transfers[key];
       if (!t) return;
-      if (t.id > 0) await api.remove(t.id).catch(() => {});
+      // Only drop the row locally once the daemon confirms it dropped it too —
+      // swallowing a refusal would show an empty list while the transfer lives on.
+      if (t.id > 0) await api.remove(t.id);
       set((s) => {
         const { [key]: _drop, ...rest } = s.transfers;
         return { transfers: rest, openMenuKey: null };

@@ -178,6 +178,26 @@ pub(crate) async fn daemon(
         });
     }
 
+    // Address-book watcher: `arvolo contacts add/remove/verify/trust/name` runs in
+    // its own process and edits the book files directly — the daemon never sees the
+    // call. Poll the book so an attached front-end is nudged to refetch, instead of
+    // showing a stale "Persone" grid until it happens to reconnect. This also covers
+    // the daemon's own writes (a `MarkVerified`, an approved advertised name).
+    {
+        let manager = manager.clone();
+        tokio::spawn(async move {
+            let mut last = book::book_stamp();
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                let now = book::book_stamp();
+                if now != last {
+                    last = now;
+                    manager.notify_contacts_changed();
+                }
+            }
+        });
+    }
+
     eprintln!("arvolo daemon up.");
     eprintln!("  identity: {my_id}");
     eprintln!("  relay:    {relay}");

@@ -139,6 +139,12 @@ pub enum ManagerEvent {
     Failed { id: u64, error: String },
     /// A transfer was cancelled.
     Cancelled { id: u64 },
+    /// The local address book changed (a contact added/removed/renamed, a verified
+    /// or trusted mark set or cleared). Payload-free on purpose: the book lives on
+    /// disk, outside the engine, so this is a "refetch your contacts" nudge for
+    /// attached front-ends — not a description of the change. The daemon raises it
+    /// when it notices the book files move under it, whoever wrote them.
+    ContactsChanged,
 }
 
 /// A persistent, multi-transfer engine bound to one local identity.
@@ -200,6 +206,13 @@ impl TransferManager {
     /// Subscribe to the manager's event stream.
     pub fn subscribe(&self) -> broadcast::Receiver<ManagerEvent> {
         self.inner.events.subscribe()
+    }
+
+    /// Raise [`ContactsChanged`](ManagerEvent::ContactsChanged) on the event stream.
+    /// The address book is the client's, not the engine's, so the client tells us
+    /// when it moved; we only carry the notice to every subscriber.
+    pub fn notify_contacts_changed(&self) {
+        self.inner.emit(ManagerEvent::ContactsChanged);
     }
 
     /// This client's public id.
@@ -312,18 +325,27 @@ impl TransferManager {
 
     /// Cancel a transfer by id (no-op if it already finished).
     pub fn cancel(&self, id: u64) {
-        // A paused send has no running loop to cancel — end it directly.
-        let paused = self
+        let status = self
             .inner
             .transfers
             .lock()
             .unwrap()
             .get(&id)
-            .map(|t| matches!(t.status, TransferStatus::Paused(_)))
-            .unwrap_or(false);
-        if paused {
-            finish(&self.inner, id, true, Ok(None));
-            return;
+            .map(|t| t.status.clone());
+        match status {
+            // A paused send has no running loop to cancel — end it directly.
+            Some(TransferStatus::Paused(_)) => {
+                finish(&self.inner, id, true, Ok(None));
+                return;
+            }
+            // An awaiting-pickup deposit has no running loop either, and the file
+            // is sitting on the relay: withdraw it there before ending the row,
+            // or "cancel" would only hide it while the recipient could still fetch.
+            Some(TransferStatus::Deposited) => {
+                cancel_deposited(self.inner.clone(), id);
+                return;
+            }
+            _ => {}
         }
         if let Some(c) = self.inner.cancels.lock().unwrap().get(&id) {
             c.cancel();
@@ -473,8 +495,22 @@ impl TransferManager {
         // No running task to cancel for a deposited send.
         self.inner.cancels.lock().unwrap().remove(&id);
         // spawn_offline_confirm re-sets status/progress, re-persists under the
-        // fresh id, and resumes the pickup-confirmation poll.
-        spawn_offline_confirm(&self.inner, id, rec.relay, rec.size, rec.claim, rec.expires);
+        // fresh id, and resumes the pickup-confirmation poll. The revoke/retract
+        // tokens ride along so a restored deposit stays cancellable.
+        let relay = rec.relay.clone();
+        spawn_offline_confirm(
+            &self.inner,
+            id,
+            relay,
+            DepositOutcome {
+                size: rec.size,
+                claim: rec.claim,
+                revoke_token: rec.revoke_token,
+                offer_id: rec.offer_id,
+                poster_token: rec.poster_token,
+            },
+            rec.expires,
+        );
     }
 
     fn restore_sendto(&self, rec: SendToRecord) {

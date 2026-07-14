@@ -97,3 +97,28 @@ pub(crate) fn trusted_path() -> PathBuf {
 pub(crate) fn names_path() -> PathBuf {
     config_dir().join("names.toml")
 }
+
+/// A content fingerprint of the address book — the four ledgers that shape what a
+/// front-end shows in "Persone". Any `arvolo contacts …` run is a *separate process*
+/// writing these files behind the daemon's back, so the daemon polls this stamp to
+/// notice; a change in the value means "the book moved, refetch it".
+///
+/// It hashes the bytes rather than (len, mtime) on purpose: the files are tiny, and
+/// two edits landing inside one mtime tick with an unchanged length would otherwise
+/// read as "no change". `seen.toml` is deliberately left out — it records every
+/// receipt and would fire on traffic, not on a book edit.
+pub(crate) fn book_stamp() -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for p in [
+        contacts_path(),
+        names_path(),
+        verified_path(),
+        trusted_path(),
+    ] {
+        // A missing file is a state like any other (hashes as the empty vec), so
+        // creating or deleting one moves the stamp.
+        std::fs::read(&p).unwrap_or_default().hash(&mut h);
+    }
+    h.finish()
+}

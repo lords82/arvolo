@@ -484,10 +484,14 @@ function RowMenu({ t }: { t: UITransfer }) {
       onClick: () => store.reject(t.offerId!),
     });
   } else {
+    // "Live" = still cancellable rather than merely removable. A Deposited send
+    // counts: the file is sitting on the relay awaiting pickup, and cancelling it
+    // withdraws it there (see TransferManager::cancel).
     const live =
       t.status === "in corso" ||
       t.status === "in attesa" ||
-      t.status === "in stallo";
+      t.status === "in stallo" ||
+      t.status === "deposited";
     if (t.status === "in corso" || t.status === "in stallo")
       actions.push({
         label: "Metti in pausa",

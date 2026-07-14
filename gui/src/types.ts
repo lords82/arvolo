@@ -79,7 +79,10 @@ export type EngineEvent =
   | { type: "waiting"; id: number; reason: string }
   | { type: "paused"; id: number; reason: string }
   | { type: "failed"; id: number; error: string }
-  | { type: "cancelled"; id: number };
+  | { type: "cancelled"; id: number }
+  /** The address book moved (from this GUI, the CLI, or a sync). Carries nothing:
+   *  refetch the contacts. */
+  | { type: "contacts_changed" };
 
 // ---- UI model -------------------------------------------------------------
 

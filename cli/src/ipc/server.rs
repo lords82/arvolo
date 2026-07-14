@@ -104,9 +104,17 @@ async fn dispatch(d: &Daemon, cmd: Request) -> Response {
             d.manager.cancel(id);
             Response::Ok
         }
+        // Refuse (rather than silently no-op) when the transfer isn't finished:
+        // a UI that dropped the row on a bare Ok would show a list that no longer
+        // matches the engine.
         Request::Remove { id } => {
-            d.manager.remove(id);
-            Response::Ok
+            if d.manager.remove(id) {
+                Response::Ok
+            } else {
+                Response::Error(
+                    "this transfer is still in flight — cancel it before removing it".into(),
+                )
+            }
         }
         Request::MarkVerified { name } => match crate::book::mark_verified(&name) {
             Ok(_) => Response::Ok,
