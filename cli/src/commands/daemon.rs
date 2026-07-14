@@ -206,6 +206,26 @@ pub(crate) async fn daemon(
     result
 }
 
+/// Is semver `a` strictly older than `b`? Compares the numeric major/minor/patch
+/// only (both sides are our own `CARGO_PKG_VERSION`s). An unparsable or empty `b`
+/// — an ancient daemon that predates versioning — reads as older, not newer.
+fn version_lt(a: &str, b: &str) -> bool {
+    fn parts(v: &str) -> (u64, u64, u64) {
+        let mut it = v
+            .split('-')
+            .next()
+            .unwrap_or("")
+            .split('.')
+            .map(|p| p.parse::<u64>().unwrap_or(0));
+        (
+            it.next().unwrap_or(0),
+            it.next().unwrap_or(0),
+            it.next().unwrap_or(0),
+        )
+    }
+    parts(a) < parts(b)
+}
+
 /// Take the daemon's exclusive instance lock: an `flock(2)` on `path`, held for
 /// the returned handle's lifetime. The kernel releases it when the process dies
 /// (any exit path — crash, SIGKILL), so it can never go stale, and a second
@@ -235,7 +255,21 @@ pub(crate) fn acquire_instance_lock(path: &std::path::Path) -> Result<std::fs::F
 
 #[cfg(all(test, unix))]
 mod lock_tests {
-    use super::acquire_instance_lock;
+    use super::{acquire_instance_lock, version_lt};
+
+    #[test]
+    fn version_lt_orders_semver_and_tolerates_junk() {
+        assert!(version_lt("0.9.0", "0.9.2"), "patch");
+        assert!(
+            version_lt("0.9.9", "0.10.0"),
+            "minor is numeric, not textual"
+        );
+        assert!(!version_lt("0.9.2", "0.9.2"), "equal is not older");
+        assert!(!version_lt("1.0.0", "0.9.2"), "newer is not older");
+        // A pre-versioning daemon reports "" — must read as older, so we never
+        // tell the user to update a CLI that is in fact the newer one.
+        assert!(!version_lt("0.9.2", ""), "empty peer is not newer");
+    }
 
     #[test]
     fn instance_lock_is_exclusive_and_released_on_drop() {
@@ -302,12 +336,26 @@ pub(crate) async fn daemon_client() -> Option<ipc::client::DaemonClient> {
             } else {
                 st.version.clone()
             };
+            // Which side is stale decides the advice. Restarting the daemon only
+            // helps when *it* is the old one; if this CLI is older (a leftover on
+            // PATH while a newer daemon runs — e.g. a GUI started one from a fresh
+            // build), restarting the daemon with it would only downgrade things.
+            let cli_is_older = version_lt(ours, &st.version);
             eprintln!(
-                "✗ version mismatch: this CLI is {ours}, but the running daemon is {theirs}.\n  \
-                 The daemon kept running the old binary after the upgrade. Restart it:\n    \
-                 kill $(cat ~/.config/arvolo/daemon.pid)   # stop the stale daemon\n    \
-                 arvolo daemon                             # start it on {ours}"
+                "✗ version mismatch: this CLI is {ours}, but the running daemon is {theirs}."
             );
+            if cli_is_older {
+                eprintln!(
+                    "  This CLI binary is the stale one. Update it:\n    \
+                     cargo install --path cli    # or reinstall the {theirs} release"
+                );
+            } else {
+                eprintln!(
+                    "  The daemon kept running the old binary after the upgrade. Restart it:\n    \
+                     kill $(cat ~/.config/arvolo/daemon.pid)   # stop the stale daemon\n    \
+                     arvolo daemon                             # start it on {ours}"
+                );
+            }
             std::process::exit(1);
         }
     }
