@@ -461,6 +461,22 @@ impl TransferManager {
 
     /// Re-register a `send --to` restored from disk after a daemon restart: paused
     /// ones come back `Paused` (awaiting the user); active ones resume delivering.
+    /// Restore an awaiting-pickup mailbox deposit after a restart: the row comes
+    /// back as Deposited and the pickup-confirmation poll resumes. A record whose
+    /// relay-side TTL has already lapsed is dropped silently (the blob is gone).
+    fn restore_deposited(&self, rec: DepositedRecord) {
+        if unix_now() >= rec.expires {
+            return;
+        }
+        let peer = PublicId::from_bytes(&rec.recipient).ok();
+        let (id, _cancel) = self.register(Direction::Send, peer, rec.name.clone(), rec.size);
+        // No running task to cancel for a deposited send.
+        self.inner.cancels.lock().unwrap().remove(&id);
+        // spawn_offline_confirm re-sets status/progress, re-persists under the
+        // fresh id, and resumes the pickup-confirmation poll.
+        spawn_offline_confirm(&self.inner, id, rec.relay, rec.size, rec.claim, rec.expires);
+    }
+
     fn restore_sendto(&self, rec: SendToRecord) {
         let Ok(recipient) = PublicId::from_bytes(&rec.recipient) else {
             return;
@@ -909,7 +925,14 @@ impl TransferManager {
         let downloads = load_downloads(&dir);
         let sends = load_sends(&dir);
         let sendtos = load_sendtos(&dir);
-        let n = downloads.len() + sends.len() + sendtos.len();
+        let depositeds = load_depositeds(&dir);
+        let n = downloads.len() + sends.len() + sendtos.len() + depositeds.len();
+        for rec in depositeds {
+            // Re-registers under a fresh id; drop the stale record either way
+            // (restore_deposited persists a fresh one when still in-window).
+            remove_deposited(&dir, rec.id);
+            self.restore_deposited(rec);
+        }
         for rec in sendtos {
             // Re-registers under a fresh id; drop the stale record either way.
             remove_sendto(&dir, rec.id);

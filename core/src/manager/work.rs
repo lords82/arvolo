@@ -213,7 +213,14 @@ pub(super) async fn deliver_to(
             {
                 Ok(out) => {
                     drop_held(&inner, id);
-                    spawn_offline_confirm(&inner, id, relay.clone(), out.size, out.claim);
+                    spawn_offline_confirm(
+                        &inner,
+                        id,
+                        relay.clone(),
+                        out.size,
+                        out.claim,
+                        unix_now().saturating_add(OFFLINE_TTL_SECS),
+                    );
                     return;
                 }
                 Err(flow::DepositError::TooLarge) => {
@@ -475,6 +482,10 @@ pub(super) async fn confirm_offline_delivery(
         ) {
             inner.set_status(id, TransferStatus::Completed);
             inner.emit(ManagerEvent::Completed { id, path: None });
+            // Pickup confirmed — the durable deposited record has served its purpose.
+            if let Some(dir) = &inner.state_dir {
+                remove_deposited(dir, id);
+            }
             return;
         }
         if std::time::Instant::now() >= deadline {
@@ -485,17 +496,53 @@ pub(super) async fn confirm_offline_delivery(
 }
 
 /// Mark a transfer as deposited-to-mailbox and start confirming its delivery.
+/// Persists a durable record so a daemon restart restores the row (and resumes
+/// confirming) instead of silently dropping an awaiting-pickup deposit.
+/// `expires` is the blob's relay-side expiry (unix secs): a fresh deposit passes
+/// now + TTL; a restore passes the original value so restarts never extend it.
 pub(super) fn spawn_offline_confirm(
     inner: &Arc<Inner>,
     id: u64,
     relay: String,
     size: u64,
     claim: String,
+    expires: u64,
 ) {
     inner.set_progress(id, size);
     inner.set_status(id, TransferStatus::Deposited);
     inner.emit(ManagerEvent::Deposited { id });
+    if let Some(dir) = &inner.state_dir {
+        let (recipient, name) = {
+            let transfers = inner.transfers.lock().unwrap();
+            let t = transfers.get(&id);
+            (
+                t.and_then(|t| t.peer.as_ref().map(|p| p.to_bytes().to_vec()))
+                    .unwrap_or_default(),
+                t.map(|t| t.name.clone()).unwrap_or_default(),
+            )
+        };
+        persist_deposited(
+            dir,
+            &DepositedRecord {
+                id,
+                recipient,
+                name,
+                size,
+                relay: relay.clone(),
+                claim: claim.clone(),
+                expires,
+            },
+        );
+    }
     tokio::spawn(confirm_offline_delivery(inner.clone(), id, relay, claim));
+}
+
+/// Unix seconds now (0 on a pre-epoch clock — never panics).
+pub(super) fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// Drop the oldest finished transfers (lowest ids) so at most `keep` remain.

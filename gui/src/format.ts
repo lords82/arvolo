@@ -128,7 +128,7 @@ export function metaLine(t: UITransfer): string {
     case "in arrivo":
       return "tocca per i dettagli";
     case "deposited":
-      return "consegnato al relay";
+      return "in attesa che il destinatario lo ritiri";
     case "fallito":
       return t.reason || "trasferimento fallito";
     default:

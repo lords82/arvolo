@@ -127,6 +127,41 @@ pub(super) fn load_sendtos(dir: &Path) -> Vec<SendToRecord> {
     load_records(dir, "sendto-")
 }
 
+/// On-disk record of a mailbox **deposit awaiting pickup**, so a daemon restart
+/// keeps showing the transfer as Deposited (and keeps confirming its delivery)
+/// instead of silently dropping it from the list. Removed once the pickup is
+/// confirmed, or skipped on load after the relay-side TTL has lapsed.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(super) struct DepositedRecord {
+    pub(super) id: u64,
+    pub(super) recipient: Vec<u8>,
+    pub(super) name: String,
+    pub(super) size: u64,
+    pub(super) relay: String,
+    pub(super) claim: String,
+    /// Unix seconds when the relay auto-expires the blob (deposit time + TTL).
+    pub(super) expires: u64,
+}
+
+pub(super) fn deposited_record_path(dir: &Path, id: u64) -> PathBuf {
+    dir.join(format!("dep-{id}.pc"))
+}
+
+pub(super) fn persist_deposited(dir: &Path, rec: &DepositedRecord) {
+    if let Ok(bytes) = postcard::to_allocvec(rec) {
+        let _ = std::fs::create_dir_all(dir);
+        let _ = write_record_private(&deposited_record_path(dir, rec.id), &bytes);
+    }
+}
+
+pub(super) fn remove_deposited(dir: &Path, id: u64) {
+    let _ = std::fs::remove_file(deposited_record_path(dir, id));
+}
+
+pub(super) fn load_depositeds(dir: &Path) -> Vec<DepositedRecord> {
+    load_records(dir, "dep-")
+}
+
 /// Read every postcard record whose filename starts with `prefix` from `dir`.
 pub(super) fn load_records<T: serde::de::DeserializeOwned>(dir: &Path, prefix: &str) -> Vec<T> {
     let mut out = Vec::new();
