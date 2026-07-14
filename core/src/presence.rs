@@ -579,10 +579,19 @@ impl InboxSubscription {
         // a polled-yet-unacked offer would be returned again on the next round —
         // dedupe by id so each offer is surfaced to the caller exactly once.
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // Floor on how often a round may complete. The relay's long-poll returns
+        // *immediately* whenever the slot is non-empty — and a slot holding a
+        // durable non-offer blob (the contact-sync cell) is non-empty forever, so
+        // without this floor the loop degenerates into a zero-delay GET storm
+        // (observed: >700 req/s per client, pegging the relay and its access
+        // logs). A quiet inbox still long-polls the full hold time and never
+        // waits here.
+        const MIN_ROUND: std::time::Duration = std::time::Duration::from_secs(2);
         loop {
             if cancel.is_cancelled() {
                 return;
             }
+            let round_started = std::time::Instant::now();
             tokio::select! {
                 _ = cancel.cancelled() => return,
                 res = self.poll() => match res {
@@ -607,6 +616,13 @@ impl InboxSubscription {
                         }
                     }
                 },
+            }
+            let elapsed = round_started.elapsed();
+            if elapsed < MIN_ROUND {
+                tokio::select! {
+                    _ = cancel.cancelled() => return,
+                    _ = tokio::time::sleep(MIN_ROUND - elapsed) => {}
+                }
             }
         }
     }
