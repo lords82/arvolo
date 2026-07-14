@@ -68,6 +68,17 @@ export function App() {
     };
   }, []);
 
+  // Refuse the browser's drag machinery everywhere. A file released on a spot the
+  // app does not handle would otherwise hit the webview's default — navigate to the
+  // file — replacing the app with a blank page and no way back. Tauri reports real
+  // OS drops through its own event below, so nothing here needs the DOM's version.
+  useEffect(() => {
+    const swallow = (e: Event) => e.preventDefault();
+    const events = ["dragenter", "dragover", "dragleave", "drop"] as const;
+    events.forEach((ev) => window.addEventListener(ev, swallow));
+    return () => events.forEach((ev) => window.removeEventListener(ev, swallow));
+  }, []);
+
   // Real OS file drops (from Finder/Explorer/Nautilus), not just HTML drag.
   useEffect(() => {
     const p = getCurrentWebview().onDragDropEvent((event) => {
@@ -102,6 +113,53 @@ export function App() {
         minWidth: 0,
       }}
     >
+      {/* The whole window takes a drop, not just the dashed strip. Tauri reports OS
+          drops for the entire webview, so a file released anywhere already reaches
+          us; saying so plainly is the difference between "it did nothing" and an
+          obvious target. (Releasing it outside a handled area used to make the
+          webview navigate to the file and blank the window — see main.tsx.) */}
+      {dragging && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 200,
+            background: "rgba(249,115,22,.10)",
+            border: "3px dashed #f97316",
+            borderRadius: 12,
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: 10,
+            pointerEvents: "none",
+            backdropFilter: "blur(1px)",
+          }}
+        >
+          <div
+            style={{
+              width: 56,
+              height: 56,
+              borderRadius: 16,
+              background: "#f97316",
+              color: "#fff",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              fontSize: 26,
+            }}
+          >
+            ↑
+          </div>
+          <div style={{ fontSize: 15, fontWeight: 700 }}>
+            Rilascia per scegliere il destinatario
+          </div>
+          <div style={{ fontSize: 12.5, color: "#8a6d3b" }}>
+            Puoi rilasciare ovunque nella finestra
+          </div>
+        </div>
+      )}
+
       {/* App header (native OS title bar sits above this). */}
       <div
         style={{
