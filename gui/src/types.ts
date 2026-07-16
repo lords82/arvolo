@@ -56,7 +56,8 @@ export interface StatusDto {
   download_dir: string;
 }
 
-/** Mirrors `EventDto` (serde snake_case, internally tagged by `type`). */
+/** The app-model event: `EventDto` flattened by `normalizeEvent`. This is NOT the
+ *  wire shape — see `events.ts` for what the daemon actually sends. */
 export type EngineEvent =
   | {
       type: "offer_received";

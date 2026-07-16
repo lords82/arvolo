@@ -401,6 +401,65 @@ mod tests {
         assert_eq!(serde_json::from_str::<Response>(&s).unwrap(), r);
     }
 
+    /// The GUI's TypeScript mirrors these bytes by hand (`gui/src/events.ts`), so a
+    /// change in serde's representation must fail loudly here rather than silently
+    /// stop every live update in the app. This exact shape — externally tagged, a
+    /// unit variant as a bare string — is what the frontend's `normalizeEvent`
+    /// flattens. It was already once assumed to be `{"type":"started",...}`; it is
+    /// not, and the board quietly stopped refreshing.
+    #[test]
+    fn event_wire_format_is_stable() {
+        let cases: Vec<(EventDto, &str)> = vec![
+            (
+                EventDto::Started {
+                    id: 3,
+                    direction: "send".into(),
+                    name: "evtest.txt".into(),
+                    total_size: 6,
+                },
+                r#"{"started":{"id":3,"direction":"send","name":"evtest.txt","total_size":6}}"#,
+            ),
+            (
+                EventDto::Progress {
+                    id: 1,
+                    transferred: 5,
+                    total_size: 10,
+                },
+                r#"{"progress":{"id":1,"transferred":5,"total_size":10}}"#,
+            ),
+            (
+                EventDto::Completed { id: 1, path: None },
+                r#"{"completed":{"id":1,"path":null}}"#,
+            ),
+            (EventDto::Deposited { id: 2 }, r#"{"deposited":{"id":2}}"#),
+            (
+                EventDto::Waiting {
+                    id: 3,
+                    reason: "relay unavailable".into(),
+                },
+                r#"{"waiting":{"id":3,"reason":"relay unavailable"}}"#,
+            ),
+            (
+                EventDto::Failed {
+                    id: 5,
+                    error: "boom".into(),
+                },
+                r#"{"failed":{"id":5,"error":"boom"}}"#,
+            ),
+            (EventDto::Cancelled { id: 6 }, r#"{"cancelled":{"id":6}}"#),
+            // A unit variant is a bare string, NOT an object — the frontend has to
+            // handle both forms.
+            (EventDto::ContactsChanged, r#""contacts_changed""#),
+        ];
+        for (ev, want) in cases {
+            assert_eq!(
+                serde_json::to_string(&ev).unwrap(),
+                want,
+                "wire shape changed — update gui/src/events.ts to match"
+            );
+        }
+    }
+
     #[test]
     fn contacts_response_roundtrips() {
         let r = Response::Contacts(vec![ContactDto {

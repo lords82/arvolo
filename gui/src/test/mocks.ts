@@ -6,6 +6,7 @@
 // stayed empty, rows that claimed a transfer was gone when the daemon still had it).
 
 import { vi } from "vitest";
+import { normalizeEvent, type WireEvent } from "../events";
 import type {
   ContactDto,
   EngineEvent,
@@ -28,8 +29,10 @@ export interface Recorder {
 
 export interface Harness {
   recorder: Recorder;
-  /** Push an engine event, exactly as the Rust event pump would. */
-  emit: (ev: EngineEvent) => void;
+  /** Push an engine event **in its wire shape**, exactly as the Rust pump sends it.
+   *  Tests speak the real contract: a mock that invented `{ type, ... }` is how the
+   *  externally tagged wire format went unnoticed while every event was dropped. */
+  emit: (wire: WireEvent) => void;
   /** Flip the connected heartbeat. */
   setConnected: (c: boolean) => void;
   /** What `reload()` will find on the daemon. */
@@ -153,7 +156,11 @@ export function makeIpcMock() {
       },
     },
     onEngineEvent: (cb: (ev: EngineEvent) => void) => {
-      harness.emit = cb;
+      // Mirror the real subscriber exactly: wire in, normalizer, app model out.
+      harness.emit = (wire: WireEvent) => {
+        const ev = normalizeEvent(wire);
+        if (ev) cb(ev);
+      };
       return Promise.resolve(() => {});
     },
     onConnected: (cb: (c: boolean) => void) => {

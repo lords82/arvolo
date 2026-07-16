@@ -12,6 +12,8 @@ export function App() {
   const connected = useStore((s) => s.connected);
   const status = useStore((s) => s.status);
   const guiVersion = useStore((s) => s.guiVersion);
+  const loadError = useStore((s) => s.loadError);
+  const reload = useStore((s) => s.reload);
   const openSheet = useStore((s) => s.openSheet);
   const openIncoming = useStore((s) => s.openIncoming);
   // Select the stable map, derive the array with useMemo — a selector returning
@@ -301,6 +303,43 @@ export function App() {
           )}
         </div>
       </div>
+
+      {loadError && (
+        <div
+          role="alert"
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            padding: "7px 18px",
+            background: "#fdecec",
+            borderBottom: "1px solid #f5c2c2",
+            fontSize: 11.5,
+            color: "#b91c1c",
+            flex: "none",
+          }}
+        >
+          <span>⚠</span>
+          <span className="selectable" style={{ flex: 1, minWidth: 0 }}>
+            {loadError}
+          </span>
+          <button
+            onClick={() => void reload()}
+            style={{
+              border: "1px solid rgba(185,28,28,.3)",
+              background: "#fff",
+              color: "#b91c1c",
+              borderRadius: 7,
+              padding: "3px 10px",
+              fontSize: 11,
+              fontWeight: 600,
+              cursor: "pointer",
+            }}
+          >
+            Riprova
+          </button>
+        </div>
+      )}
 
       {versionMismatch && (
         <div

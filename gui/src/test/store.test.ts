@@ -22,6 +22,7 @@ async function boot(expectConnected = true) {
     connected: false,
     status: null,
     guiVersion: "",
+    loadError: null,
     contacts: [],
     contactsById: {},
     transfers: {},
@@ -93,16 +94,99 @@ describe("snapshot seeding", () => {
   });
 });
 
+describe("the board never lies about what the daemon holds", () => {
+  it("49. a daemon holding sends is never shown as an empty board", async () => {
+    // The failure this pins down: the board read "Connesso · 0 in totale" while the
+    // daemon held two live sends. A snapshot that cannot be read must never be
+    // rendered as "there is nothing" — that is indistinguishable from the truth.
+    harness.snapshot.transfers = [
+      dto.transfer({ id: 1, name: "Constatazione.pdf", status: "deposited" }),
+      dto.transfer({ id: 2, name: "Constatazione.pdf", status: "active" }),
+    ];
+    await boot();
+    expect(rows()).toHaveLength(2);
+    expect(useStore.getState().loadError).toBeNull();
+  });
+
+  it("50. a snapshot that fails says so — it does not report an empty daemon", async () => {
+    harness.fail = new Set(["listTransfers"]);
+    await boot(false);
+    expect(useStore.getState().loadError).toMatch(/non riesco a leggere/i);
+    expect(useStore.getState().connected).toBe(false);
+  });
+
+  it("51. a failed refresh keeps the rows it already had, it does not blank them", async () => {
+    harness.snapshot.transfers = [dto.transfer({ id: 1, name: "keep.me" })];
+    await boot();
+    expect(rows()).toHaveLength(1);
+
+    harness.fail = new Set(["listTransfers"]);
+    await useStore.getState().reload();
+
+    expect(row("t1"), "the row must survive a failed refresh").toBeTruthy();
+    expect(useStore.getState().loadError).toBeTruthy();
+  });
+
+  it("52. a recovered snapshot clears the error", async () => {
+    harness.fail = new Set(["status"]);
+    await boot(false);
+    expect(useStore.getState().loadError).toBeTruthy();
+
+    harness.fail = new Set();
+    harness.snapshot.transfers = [dto.transfer({ id: 1 })];
+    await useStore.getState().reload();
+
+    expect(useStore.getState().loadError).toBeNull();
+    expect(useStore.getState().connected).toBe(true);
+    expect(rows()).toHaveLength(1);
+  });
+
+  it("53. every command the UI can issue is wired to a real bridge call", async () => {
+    // A command the bridge does not expose fails at runtime only — and the store
+    // used to swallow exactly that. Assert the surface the UI depends on exists.
+    const { api } = (await import("../ipc")) as any;
+    for (const cmd of [
+      "status",
+      "listTransfers",
+      "listPending",
+      "listContacts",
+      "sendTo",
+      "serveTicket",
+      "createLink",
+      "acceptOffer",
+      "rejectOffer",
+      "pause",
+      "resume",
+      "cancel",
+      "remove",
+      "markVerified",
+      "guiVersion",
+    ]) {
+      expect(typeof api[cmd], `api.${cmd} must exist`).toBe("function");
+    }
+  });
+
+  it("54. a send lands on the board even if no snapshot ever arrives", async () => {
+    // Belt and braces: the row must come from the pushed `started` event alone, so a
+    // send is visible even when the snapshot path is broken.
+    harness.fail = new Set(["listTransfers", "status"]);
+    await boot(false);
+    await useStore.getState().send("proj", ["/a.pdf"], "");
+    harness.emit({ started: { id: 1,
+      direction: "send",
+      name: "a.pdf",
+      total_size: 10 } });
+    expect(row("t1").name).toBe("a.pdf");
+  });
+});
+
 describe("engine events → rows", () => {
   it("4. `started` creates the row", async () => {
     await boot();
-    harness.emit({
-      type: "started",
-      id: 1,
+    harness.emit({ started: { id: 1,
       direction: "send",
       name: "x.bin",
-      total_size: 200,
-    });
+      total_size: 200 } });
     expect(row("t1")).toMatchObject({
       dir: "out",
       name: "x.bin",
@@ -113,15 +197,15 @@ describe("engine events → rows", () => {
 
   it("5. `progress` advances bytes without losing the name", async () => {
     await boot();
-    harness.emit({ type: "started", id: 1, direction: "send", name: "x.bin", total_size: 200 });
-    harness.emit({ type: "progress", id: 1, transferred: 50, total_size: 200 });
+    harness.emit({ started: { id: 1, direction: "send", name: "x.bin", total_size: 200 } });
+    harness.emit({ progress: { id: 1, transferred: 50, total_size: 200 } });
     expect(row("t1")).toMatchObject({ name: "x.bin", transferred: 50 });
   });
 
   it("6. `completed` marks it done and keeps the saved path", async () => {
     await boot();
-    harness.emit({ type: "started", id: 1, direction: "recv", name: "in.bin", total_size: 80 });
-    harness.emit({ type: "completed", id: 1, path: "/Users/ls/Arvolo/in.bin" });
+    harness.emit({ started: { id: 1, direction: "recv", name: "in.bin", total_size: 80 } });
+    harness.emit({ completed: { id: 1, path: "/Users/ls/Arvolo/in.bin" } });
     expect(row("t1")).toMatchObject({
       status: "completato",
       transferred: 80,
@@ -131,26 +215,26 @@ describe("engine events → rows", () => {
 
   it("7. `deposited` — awaiting pickup, not delivered", async () => {
     await boot();
-    harness.emit({ type: "started", id: 1, direction: "send", name: "m.bin", total_size: 10 });
-    harness.emit({ type: "deposited", id: 1 });
+    harness.emit({ started: { id: 1, direction: "send", name: "m.bin", total_size: 10 } });
+    harness.emit({ deposited: { id: 1 } });
     expect(row("t1").status).toBe("deposited");
   });
 
   it("8. `waiting` carries the reason the daemon gave", async () => {
     await boot();
-    harness.emit({ type: "started", id: 1, direction: "send", name: "m.bin", total_size: 10 });
-    harness.emit({ type: "waiting", id: 1, reason: "relay unavailable" });
+    harness.emit({ started: { id: 1, direction: "send", name: "m.bin", total_size: 10 } });
+    harness.emit({ waiting: { id: 1, reason: "relay unavailable" } });
     expect(row("t1")).toMatchObject({ status: "in stallo", reason: "relay unavailable" });
   });
 
   it("9. `paused` and `failed` and `cancelled` land on their statuses", async () => {
     await boot();
     for (const id of [1, 2, 3]) {
-      harness.emit({ type: "started", id, direction: "send", name: `f${id}`, total_size: 10 });
+      harness.emit({ started: { id, direction: "send", name: `f${id}`, total_size: 10 } });
     }
-    harness.emit({ type: "paused", id: 1, reason: "by user" });
-    harness.emit({ type: "failed", id: 2, error: "boom" });
-    harness.emit({ type: "cancelled", id: 3 });
+    harness.emit({ paused: { id: 1, reason: "by user" } });
+    harness.emit({ failed: { id: 2, error: "boom" } });
+    harness.emit({ cancelled: { id: 3 } });
     expect(row("t1")).toMatchObject({ status: "in attesa", reason: "by user" });
     expect(row("t2")).toMatchObject({ status: "fallito", reason: "boom" });
     expect(row("t3").status).toBe("annullato");
@@ -158,15 +242,12 @@ describe("engine events → rows", () => {
 
   it("10. `offer_received` shows the sender's note and name", async () => {
     await boot();
-    harness.emit({
-      type: "offer_received",
-      id: "o1",
+    harness.emit({ offer_received: { id: "o1",
       from: "peer9",
       name: "foto.zip",
       size: 900,
       note: "le foto di ieri",
-      sender_name: "Marta",
-    });
+      sender_name: "Marta" } });
     expect(row("oo1")).toMatchObject({
       status: "in arrivo",
       dir: "in",
@@ -179,7 +260,7 @@ describe("engine events → rows", () => {
   it("11. an event for an unknown id still produces a row (no lost sends)", async () => {
     // A drop→send can land before any snapshot; the row must appear anyway.
     await boot();
-    harness.emit({ type: "progress", id: 42, transferred: 5, total_size: 10 });
+    harness.emit({ progress: { id: 42, transferred: 5, total_size: 10 } });
     expect(row("t42")).toBeTruthy();
   });
 });
@@ -187,7 +268,7 @@ describe("engine events → rows", () => {
 describe("actions reach the daemon", () => {
   it("12. pause/resume forward the id", async () => {
     await boot();
-    harness.emit({ type: "started", id: 4, direction: "send", name: "p", total_size: 1 });
+    harness.emit({ started: { id: 4, direction: "send", name: "p", total_size: 1 } });
     await useStore.getState().pause(4);
     await useStore.getState().resume(4);
     expect(harness.recorder.pause).toEqual([4]);
@@ -196,15 +277,12 @@ describe("actions reach the daemon", () => {
 
   it("13. accept sends the chosen folder and drops the offer row", async () => {
     await boot();
-    harness.emit({
-      type: "offer_received",
-      id: "o1",
+    harness.emit({ offer_received: { id: "o1",
       from: "p",
       name: "f",
       size: 1,
       note: "",
-      sender_name: "",
-    });
+      sender_name: "" } });
     await useStore.getState().accept("o1", "/tmp/dest");
     expect(harness.recorder.accept).toEqual([["o1", "/tmp/dest"]]);
     expect(row("oo1")).toBeUndefined();
@@ -212,15 +290,12 @@ describe("actions reach the daemon", () => {
 
   it("14. reject drops the offer row", async () => {
     await boot();
-    harness.emit({
-      type: "offer_received",
-      id: "o2",
+    harness.emit({ offer_received: { id: "o2",
       from: "p",
       name: "f",
       size: 1,
       note: "",
-      sender_name: "",
-    });
+      sender_name: "" } });
     await useStore.getState().reject("o2");
     expect(harness.recorder.reject).toEqual(["o2"]);
     expect(row("oo2")).toBeUndefined();
@@ -234,22 +309,22 @@ describe("actions reach the daemon", () => {
 
   it("16. cancel shows it landed, then the engine's verdict wins", async () => {
     await boot();
-    harness.emit({ type: "started", id: 1, direction: "send", name: "d", total_size: 1 });
-    harness.emit({ type: "deposited", id: 1 });
+    harness.emit({ started: { id: 1, direction: "send", name: "d", total_size: 1 } });
+    harness.emit({ deposited: { id: 1 } });
 
     const done = useStore.getState().cancel(1);
     expect(row("t1").status).toBe("in annullamento"); // optimistic, immediately
     await done;
     expect(harness.recorder.cancel).toEqual([1]);
 
-    harness.emit({ type: "cancelled", id: 1 });
+    harness.emit({ cancelled: { id: 1 } });
     expect(row("t1").status).toBe("annullato");
   });
 
   it("17. a refused cancel puts the row back — it must not pretend", async () => {
     await boot();
-    harness.emit({ type: "started", id: 1, direction: "send", name: "d", total_size: 1 });
-    harness.emit({ type: "deposited", id: 1 });
+    harness.emit({ started: { id: 1, direction: "send", name: "d", total_size: 1 } });
+    harness.emit({ deposited: { id: 1 } });
     harness.fail = new Set(["cancel"]);
 
     await expect(useStore.getState().cancel(1)).rejects.toThrow();
@@ -260,7 +335,7 @@ describe("actions reach the daemon", () => {
     // The daemon refuses to drop a transfer that is still in flight. Swallowing that
     // and dropping the row anyway is what made the GUI lie about a cancelled send.
     await boot();
-    harness.emit({ type: "started", id: 1, direction: "send", name: "d", total_size: 1 });
+    harness.emit({ started: { id: 1, direction: "send", name: "d", total_size: 1 } });
     harness.fail = new Set(["remove"]);
 
     await expect(useStore.getState().removeRow("t1")).rejects.toThrow();
@@ -269,8 +344,8 @@ describe("actions reach the daemon", () => {
 
   it("19. an accepted remove drops the row on both sides", async () => {
     await boot();
-    harness.emit({ type: "started", id: 1, direction: "send", name: "d", total_size: 1 });
-    harness.emit({ type: "completed", id: 1, path: null });
+    harness.emit({ started: { id: 1, direction: "send", name: "d", total_size: 1 } });
+    harness.emit({ completed: { id: 1, path: null } });
     await useStore.getState().removeRow("t1");
     expect(harness.recorder.remove).toEqual([1]);
     expect(row("t1")).toBeUndefined();
@@ -291,14 +366,14 @@ describe("actions reach the daemon", () => {
 
   it("21. pause-all pauses only what is running, and resumes what it paused", async () => {
     await boot();
-    harness.emit({ type: "started", id: 1, direction: "send", name: "a", total_size: 1 });
-    harness.emit({ type: "started", id: 2, direction: "send", name: "b", total_size: 1 });
-    harness.emit({ type: "completed", id: 2, path: null }); // finished: leave alone
+    harness.emit({ started: { id: 1, direction: "send", name: "a", total_size: 1 } });
+    harness.emit({ started: { id: 2, direction: "send", name: "b", total_size: 1 } });
+    harness.emit({ completed: { id: 2, path: null } }); // finished: leave alone
 
     await useStore.getState().togglePauseAll();
     expect(harness.recorder.pause).toEqual([1]);
 
-    harness.emit({ type: "paused", id: 1, reason: "x" });
+    harness.emit({ paused: { id: 1, reason: "x" } });
     await useStore.getState().togglePauseAll();
     expect(harness.recorder.resume).toEqual([1]);
   });
@@ -307,11 +382,11 @@ describe("actions reach the daemon", () => {
 describe("list housekeeping", () => {
   it("22. clearFinished keeps everything still in flight", async () => {
     await boot();
-    harness.emit({ type: "started", id: 1, direction: "send", name: "live", total_size: 1 });
-    harness.emit({ type: "started", id: 2, direction: "send", name: "done", total_size: 1 });
-    harness.emit({ type: "completed", id: 2, path: null });
-    harness.emit({ type: "started", id: 3, direction: "send", name: "held", total_size: 1 });
-    harness.emit({ type: "deposited", id: 3 });
+    harness.emit({ started: { id: 1, direction: "send", name: "live", total_size: 1 } });
+    harness.emit({ started: { id: 2, direction: "send", name: "done", total_size: 1 } });
+    harness.emit({ completed: { id: 2, path: null } });
+    harness.emit({ started: { id: 3, direction: "send", name: "held", total_size: 1 } });
+    harness.emit({ deposited: { id: 3 } });
 
     useStore.getState().clearFinished();
     expect(row("t1")).toBeTruthy();
@@ -321,8 +396,8 @@ describe("list housekeeping", () => {
 
   it("23. moveItem swaps a row with its neighbour, and stops at the edges", async () => {
     await boot();
-    harness.emit({ type: "started", id: 1, direction: "send", name: "first", total_size: 1 });
-    harness.emit({ type: "started", id: 2, direction: "send", name: "second", total_size: 1 });
+    harness.emit({ started: { id: 1, direction: "send", name: "first", total_size: 1 } });
+    harness.emit({ started: { id: 2, direction: "send", name: "second", total_size: 1 } });
 
     const order = () =>
       Object.values(useStore.getState().transfers)

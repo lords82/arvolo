@@ -68,6 +68,10 @@ interface State {
   contacts: ContactDto[];
   contactsById: Record<string, ContactDto>;
   transfers: Record<string, UITransfer>;
+  /** Why the last snapshot could not be read, if it could not. Silence here is how
+   *  the board came to show "Connesso · 0 invii" while the daemon held two live
+   *  sends: a swallowed error is indistinguishable from an empty list. */
+  loadError: string | null;
 
   // UI state
   search: string;
@@ -197,6 +201,7 @@ export const useStore = create<State>((set, get) => {
     connected: false,
     status: null,
     guiVersion: "",
+    loadError: null,
     contacts: [],
     contactsById: {},
     transfers: {},
@@ -250,31 +255,38 @@ export const useStore = create<State>((set, get) => {
     },
 
     reload: async () => {
+      // Nothing here may fail quietly. A swallowed error looks exactly like an empty
+      // daemon — and an empty board next to a green "Connesso" is a lie the user
+      // cannot see through. If we cannot read the list, say so and keep what we had.
+      let st: StatusDto | null = null;
       try {
-        const [st, contacts, transfers, pending] = await Promise.all([
-          api.status().catch(() => null),
-          api.listContacts().catch(() => [] as ContactDto[]),
-          api.listTransfers().catch(() => [] as TransferDto[]),
-          api.listPending().catch(() => [] as OfferDto[]),
+        const [status, contacts, transfers, pending] = await Promise.all([
+          api.status(),
+          api.listContacts(),
+          api.listTransfers(),
+          api.listPending(),
         ]);
+        st = status;
+
         const contactsById: Record<string, ContactDto> = {};
         for (const c of contacts) contactsById[c.id] = c;
-        set({ status: st, contacts, contactsById, connected: st !== null });
+        // Land the address book *before* deriving rows: each row resolves its peer
+        // name and verified badge through it, so building them first would stamp
+        // them from the previous book (a freshly verified contact stayed unverified).
+        set({ contacts, contactsById });
 
-        // Rebuild the rows, preserving firstSeen for rows we already track.
+        // Rebuild the rows, preserving firstSeen/rank for rows we already track.
         const prev = get().transfers;
         const map: Record<string, UITransfer> = {};
-        for (const d of transfers) {
-          const p = prev[`t${d.id}`];
-          map[`t${d.id}`] = dtoToUI(d, p);
-        }
-        for (const o of pending) {
-          const p = prev[`o${o.id}`];
-          map[`o${o.id}`] = offerToUI(o, p);
-        }
-        set({ transfers: map });
-      } catch {
-        /* leave prior state; the connected banner reflects the failure */
+        for (const d of transfers) map[`t${d.id}`] = dtoToUI(d, prev[`t${d.id}`]);
+        for (const o of pending) map[`o${o.id}`] = offerToUI(o, prev[`o${o.id}`]);
+
+        set({ status: st, transfers: map, connected: true, loadError: null });
+      } catch (e) {
+        set({
+          connected: false,
+          loadError: `Non riesco a leggere i trasferimenti dal daemon: ${String(e)}`,
+        });
       }
     },
 

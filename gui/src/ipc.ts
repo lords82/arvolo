@@ -2,6 +2,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { normalizeEvent, type WireEvent } from "./events";
 import type {
   ContactDto,
   EngineEvent,
@@ -36,9 +37,14 @@ export const api = {
   guiVersion: () => invoke<string>("gui_version"),
 };
 
-/** Subscribe to the pushed engine event stream. */
+/** Subscribe to the pushed engine event stream, flattening each event out of its
+ *  wire form (see `events.ts` — the daemon sends serde's externally tagged shape,
+ *  not `{ type, ... }`). Unknown events are dropped, not forwarded. */
 export function onEngineEvent(cb: (ev: EngineEvent) => void): Promise<UnlistenFn> {
-  return listen<EngineEvent>("engine://event", (e) => cb(e.payload));
+  return listen<WireEvent>("engine://event", (e) => {
+    const ev = normalizeEvent(e.payload);
+    if (ev) cb(ev);
+  });
 }
 
 /** Subscribe to the connected/disconnected heartbeat. */
