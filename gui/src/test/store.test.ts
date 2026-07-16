@@ -257,6 +257,50 @@ describe("engine events → rows", () => {
     });
   });
 
+  it("11b. a re-offer of the same file replaces the old row, id and all", async () => {
+    // A sender still retrying re-posts its offer and retracts the previous one, so
+    // the id changes. Keeping both left a row whose Accetta pointed at an id the
+    // daemon had already dropped — the button then did nothing, silently.
+    await boot();
+    const offer = (id: string) => ({
+      offer_received: {
+        id,
+        from: "peer1",
+        name: "relazione.pdf",
+        size: 10,
+        note: "",
+        sender_name: "",
+      },
+    });
+    harness.emit(offer("old1"));
+    harness.emit(offer("new2"));
+
+    expect(rows().filter((t) => t.status === "in arrivo")).toHaveLength(1);
+    expect(row("oold1"), "the dead id must not linger").toBeUndefined();
+    expect(row("onew2").offerId).toBe("new2");
+  });
+
+  it("11c. a different file from the same sender is not superseded", async () => {
+    await boot();
+    const offer = (id: string, name: string) => ({
+      offer_received: { id, from: "peer1", name, size: 10, note: "", sender_name: "" },
+    });
+    harness.emit(offer("a", "uno.txt"));
+    harness.emit(offer("b", "due.txt"));
+    expect(rows().filter((t) => t.status === "in arrivo")).toHaveLength(2);
+  });
+
+  it("11d. the same file from a different sender is its own offer", async () => {
+    await boot();
+    harness.emit({
+      offer_received: { id: "a", from: "peer1", name: "x.txt", size: 1, note: "", sender_name: "" },
+    });
+    harness.emit({
+      offer_received: { id: "b", from: "peer2", name: "x.txt", size: 1, note: "", sender_name: "" },
+    });
+    expect(rows().filter((t) => t.status === "in arrivo")).toHaveLength(2);
+  });
+
   it("11. an event for an unknown id still produces a row (no lost sends)", async () => {
     // A drop→send can land before any snapshot; the row must appear anyway.
     await boot();

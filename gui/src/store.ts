@@ -327,22 +327,39 @@ export const useStore = create<State>((set, get) => {
     applyEvent: (ev) => {
       switch (ev.type) {
         case "offer_received":
-          set((s) => ({
-            transfers: {
-              ...s.transfers,
-              [`o${ev.id}`]: offerToUI(
-                {
-                  id: ev.id,
-                  from: ev.from,
-                  name: ev.name,
-                  size: ev.size,
-                  note: ev.note,
-                  sender_name: ev.sender_name,
-                },
-                s.transfers[`o${ev.id}`]
-              ),
-            },
-          }));
+          set((s) => {
+            // Supersede any older offer from the same sender for the same file —
+            // exactly as the daemon does. A sender that is still retrying re-posts
+            // its offer and retracts the previous one, so the id churns: keeping the
+            // old row leaves a button wired to an id the daemon has already dropped
+            // ("no such pending offer"), which is precisely how Accetta came to do
+            // nothing at all.
+            const kept: Record<string, UITransfer> = {};
+            for (const [k, t] of Object.entries(s.transfers)) {
+              const stale =
+                t.status === "in arrivo" &&
+                t.peerId === ev.from &&
+                t.name === ev.name &&
+                t.offerId !== ev.id;
+              if (!stale) kept[k] = t;
+            }
+            return {
+              transfers: {
+                ...kept,
+                [`o${ev.id}`]: offerToUI(
+                  {
+                    id: ev.id,
+                    from: ev.from,
+                    name: ev.name,
+                    size: ev.size,
+                    note: ev.note,
+                    sender_name: ev.sender_name,
+                  },
+                  s.transfers[`o${ev.id}`]
+                ),
+              },
+            };
+          });
           break;
         case "started":
           patch(ev.id, (t) => ({
