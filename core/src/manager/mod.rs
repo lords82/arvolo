@@ -89,6 +89,10 @@ pub struct Transfer {
     /// For a send: distinct peers currently downloading from us right now (0 for
     /// a receive, or a send nobody is pulling).
     pub download_peers: usize,
+    /// Unix seconds when this transfer began. A UI groups history by day, and only
+    /// the engine knows the real time: a client that stamps rows when it first sees
+    /// them files every transfer under "today" the moment it restarts.
+    pub created: u64,
 }
 
 /// Events emitted as transfers and offers progress. Cloneable for [`broadcast`].
@@ -294,6 +298,7 @@ impl TransferManager {
                 id,
                 Transfer {
                     id,
+                    created: unix_now(),
                     direction,
                     peer,
                     name: name.clone(),

@@ -72,6 +72,11 @@ interface State {
    *  the board came to show "Connesso · 0 invii" while the daemon held two live
    *  sends: a swallowed error is indistinguishable from an empty list. */
   loadError: string | null;
+  /** Why the user's last action failed, if it did. Every action is fired from an
+   *  `onClick` that cannot await it, so a rejected promise had nowhere to go: the
+   *  button simply did nothing, silently, and the user was left guessing. */
+  actionError: string | null;
+  dismissActionError: () => void;
 
   // UI state
   search: string;
@@ -120,6 +125,21 @@ interface State {
 }
 
 export const useStore = create<State>((set, get) => {
+  /** Run a daemon action, surfacing any refusal. The UI fires these from click
+   *  handlers that cannot await, so without this a rejection is swallowed by the
+   *  event loop and the button looks broken rather than blocked. Re-throws so
+   *  callers that *do* await (and want to react) still can. */
+  const act = async <T,>(what: string, fn: () => Promise<T>): Promise<T> => {
+    try {
+      const r = await fn();
+      set({ actionError: null });
+      return r;
+    } catch (e) {
+      set({ actionError: `${what}: ${String(e)}` });
+      throw e;
+    }
+  };
+
   const dtoToUI = (d: TransferDto, prev?: UITransfer): UITransfer => {
     const { status, reason } = toUIStatus(d.status);
     const dir = d.direction === "send" ? "out" : "in";
@@ -141,7 +161,10 @@ export const useStore = create<State>((set, get) => {
       downloadPeers: d.download_peers,
       files: prev?.files ?? 1,
       path: prev?.path,
-      firstSeen: prev?.firstSeen ?? now(),
+      // The engine's own clock, not ours: a row we first see today may well be
+      // yesterday's. `created` is 0 only from a daemon that predates the field —
+      // then, and only then, fall back to when we noticed it.
+      firstSeen: d.created > 0 ? d.created * 1000 : (prev?.firstSeen ?? now()),
       rank: prev?.rank ?? nextRank(),
       rate: prev?.rate,
     };
@@ -202,6 +225,7 @@ export const useStore = create<State>((set, get) => {
     status: null,
     guiVersion: "",
     loadError: null,
+    actionError: null,
     contacts: [],
     contactsById: {},
     transfers: {},
@@ -380,36 +404,37 @@ export const useStore = create<State>((set, get) => {
     closeIncoming: () => set({ incomingOfferId: null }),
 
     send: async (to, paths, note) => {
-      const id = await api.sendTo(to, paths, note);
+      const id = await act(`Invio a ${to} non riuscito`, () =>
+        api.sendTo(to, paths, note)
+      );
       set({ sheetPaths: null });
       return id;
     },
-    ticket: async (paths) => {
-      const r = await api.serveTicket(paths, null);
-      return r;
-    },
-    link: async (path) => api.createLink(path, null, null),
+    ticket: async (paths) =>
+      act("Creazione del ticket non riuscita", () => api.serveTicket(paths, null)),
+    link: async (path) =>
+      act("Creazione del link non riuscita", () => api.createLink(path, null, null)),
 
     accept: async (offerId, out) => {
-      await api.acceptOffer(offerId, out);
+      await act("Impossibile accettare il file", () => api.acceptOffer(offerId, out));
       set((s) => {
         const { [`o${offerId}`]: _drop, ...rest } = s.transfers;
         return { transfers: rest, incomingOfferId: null };
       });
     },
     reject: async (offerId) => {
-      await api.rejectOffer(offerId);
+      await act("Impossibile rifiutare il file", () => api.rejectOffer(offerId));
       set((s) => {
         const { [`o${offerId}`]: _drop, ...rest } = s.transfers;
         return { transfers: rest, incomingOfferId: null };
       });
     },
     pause: async (id) => {
-      await api.pause(id);
+      await act("Impossibile mettere in pausa", () => api.pause(id));
       set({ openMenuKey: null });
     },
     resume: async (id) => {
-      await api.resume(id);
+      await act("Impossibile riprendere", () => api.resume(id));
       set({ openMenuKey: null });
     },
     cancel: async (id) => {
@@ -428,7 +453,7 @@ export const useStore = create<State>((set, get) => {
       setStatus("in annullamento");
       set({ openMenuKey: null });
       try {
-        await api.cancel(id);
+        await act("Impossibile annullare", () => api.cancel(id));
       } catch (e) {
         // The daemon refused: put the row back as it was rather than leave it
         // stuck pretending to cancel.
@@ -441,14 +466,14 @@ export const useStore = create<State>((set, get) => {
       if (!t) return;
       // Only drop the row locally once the daemon confirms it dropped it too —
       // swallowing a refusal would show an empty list while the transfer lives on.
-      if (t.id > 0) await api.remove(t.id);
+      if (t.id > 0) await act("Impossibile eliminare", () => api.remove(t.id));
       set((s) => {
         const { [key]: _drop, ...rest } = s.transfers;
         return { transfers: rest, openMenuKey: null };
       });
     },
     markVerified: async (name) => {
-      await api.markVerified(name);
+      await act(`Impossibile verificare ${name}`, () => api.markVerified(name));
       set({ openMenuKey: null });
       // Refresh contacts and re-stamp the verified badge on every row.
       await get().reload();
@@ -493,6 +518,7 @@ export const useStore = create<State>((set, get) => {
         set({ pauseAll: false, openMenuKey: null });
       }
     },
+    dismissActionError: () => set({ actionError: null }),
     clearFinished: () =>
       set((s) => {
         const kept: Record<string, UITransfer> = {};

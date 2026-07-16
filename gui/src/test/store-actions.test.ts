@@ -355,6 +355,84 @@ describe("pause-all", () => {
   });
 });
 
+describe("a failed action is never silent", () => {
+  // The bug this closes: every action is fired from an `onClick` that cannot await
+  // it, so a rejection vanished into the event loop. The button did nothing, said
+  // nothing, and the user could only conclude the app was broken.
+  it("96. a refused accept leaves a message the user can read", async () => {
+    await boot();
+    harness.emit({
+      offer_received: { id: "o1", from: "p", name: "f", size: 1, note: "", sender_name: "" },
+    });
+    harness.fail = new Set(["acceptOffer"]);
+    await expect(s().accept("o1", null)).rejects.toThrow();
+    expect(s().actionError).toMatch(/accettare/i);
+  });
+
+  it.each([
+    ["cancel", () => s().cancel(1), /annullare/i],
+    ["pause", () => s().pause(1), /pausa/i],
+    ["resume", () => s().resume(1), /riprendere/i],
+    ["reject", () => s().reject("o1"), /rifiutare/i],
+    ["markVerified", () => s().markVerified("proj"), /verificare/i],
+    ["link", () => s().link("/a"), /link/i],
+    ["ticket", () => s().ticket(["/a"]), /ticket/i],
+  ])("97. a refused %s reports itself", async (cmd, run, want) => {
+    await boot();
+    harness.emit({ started: { id: 1, direction: "send", name: "f", total_size: 1 } });
+    const apiName: Record<string, string> = {
+      cancel: "cancel",
+      pause: "pause",
+      resume: "resume",
+      reject: "rejectOffer",
+      markVerified: "markVerified",
+      link: "createLink",
+      ticket: "serveTicket",
+    };
+    harness.fail = new Set([apiName[cmd]]);
+    await expect(run()).rejects.toThrow();
+    expect(s().actionError, `${cmd} must say why`).toMatch(want);
+  });
+
+  it("98. a later success clears the message", async () => {
+    await boot();
+    harness.emit({ started: { id: 1, direction: "send", name: "f", total_size: 1 } });
+    harness.fail = new Set(["pause"]);
+    await expect(s().pause(1)).rejects.toThrow();
+    expect(s().actionError).toBeTruthy();
+
+    harness.fail = new Set();
+    await s().pause(1);
+    expect(s().actionError).toBeNull();
+  });
+
+  it("99. the user can dismiss it", async () => {
+    await boot();
+    harness.fail = new Set(["createLink"]);
+    await expect(s().link("/a")).rejects.toThrow();
+    s().dismissActionError();
+    expect(s().actionError).toBeNull();
+  });
+});
+
+describe("history is grouped by when it happened, not when we noticed", () => {
+  it("100. a transfer from days ago is dated by the engine, not by this session", async () => {
+    // `firstSeen` used to be stamped when the GUI first saw a row, so every restart
+    // refiled the whole history under "Oggi".
+    const threeDaysAgo = Math.floor(Date.now() / 1000) - 3 * 86400;
+    harness.snapshot.transfers = [dto.transfer({ id: 1, created: threeDaysAgo })];
+    await boot();
+    expect(row("t1").firstSeen).toBe(threeDaysAgo * 1000);
+  });
+
+  it("101. a daemon too old to date its transfers falls back to now", async () => {
+    harness.snapshot.transfers = [dto.transfer({ id: 1, created: 0 })];
+    const before = Date.now();
+    await boot();
+    expect(row("t1").firstSeen).toBeGreaterThanOrEqual(before);
+  });
+});
+
 describe("clearFinished", () => {
   it("94. on an empty board it does nothing", async () => {
     await boot();

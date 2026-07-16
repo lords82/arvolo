@@ -13,6 +13,8 @@ export function App() {
   const status = useStore((s) => s.status);
   const guiVersion = useStore((s) => s.guiVersion);
   const loadError = useStore((s) => s.loadError);
+  const actionError = useStore((s) => s.actionError);
+  const dismissActionError = useStore((s) => s.dismissActionError);
   const reload = useStore((s) => s.reload);
   const openSheet = useStore((s) => s.openSheet);
   const openIncoming = useStore((s) => s.openIncoming);
@@ -303,6 +305,42 @@ export function App() {
           )}
         </div>
       </div>
+
+      {actionError && (
+        <div
+          role="alert"
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            padding: "7px 18px",
+            background: "#fdecec",
+            borderBottom: "1px solid #f5c2c2",
+            fontSize: 11.5,
+            color: "#b91c1c",
+            flex: "none",
+          }}
+        >
+          <span>⚠</span>
+          <span className="selectable" style={{ flex: 1, minWidth: 0 }}>
+            {actionError}
+          </span>
+          <button
+            onClick={dismissActionError}
+            aria-label="Chiudi"
+            style={{
+              border: "none",
+              background: "transparent",
+              color: "#b91c1c",
+              fontSize: 13,
+              cursor: "pointer",
+              padding: "0 4px",
+            }}
+          >
+            ✕
+          </button>
+        </div>
+      )}
 
       {loadError && (
         <div

@@ -28,6 +28,9 @@ export interface TransferDto {
   swarm_peers: number;
   pieces_from_peers: number;
   download_peers: number;
+  /** Unix seconds when the transfer began, per the engine. 0 from a daemon that
+   *  predates the field. */
+  created: number;
 }
 
 export interface OfferDto {
@@ -116,8 +119,10 @@ export interface UITransfer {
   reason?: string;
   /** Completed-receive path (for "open folder"). */
   path?: string;
-  /** Client-side arrival time (ms) — daemon carries no timestamp; used for the
-   *  Oggi / Precedenti grouping only. */
+  /** When the transfer began (ms). Comes from the engine's `created`; only a row
+   *  the daemon cannot date (an offer, or a pre-`created` daemon) falls back to
+   *  the moment we first saw it. Stamping "now" for everything filed yesterday's
+   *  transfers under "Oggi" on every restart. */
   firstSeen: number;
   /** Manual list position (defaults to firstSeen; "Sposta su/giù" swaps it). */
   rank: number;

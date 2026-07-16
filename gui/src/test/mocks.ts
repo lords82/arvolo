@@ -183,6 +183,7 @@ export const dto = {
       swarm_peers: 0,
       pieces_from_peers: 0,
       download_peers: 0,
+      created: Math.floor(Date.now() / 1000),
       ...over,
     };
   },

@@ -164,6 +164,10 @@ pub struct TransferDto {
     /// For a send: distinct peers currently downloading from us.
     #[serde(default)]
     pub download_peers: usize,
+    /// Unix seconds when the transfer began, so a UI can group history by real
+    /// days. Optional on the wire: an older daemon predates it and reports 0.
+    #[serde(default)]
+    pub created: u64,
 }
 
 /// A parked incoming offer awaiting the user's accept/reject.
@@ -277,6 +281,7 @@ impl From<&Transfer> for TransferDto {
             swarm_peers: t.swarm_peers,
             pieces_from_peers: t.pieces_from_peers,
             download_peers: t.download_peers,
+            created: t.created,
         }
     }
 }
