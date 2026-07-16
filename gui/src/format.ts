@@ -17,7 +17,10 @@ export function fmtBytes(bytes: number): string {
 
 export function extOf(name: string): string {
   const p = (name || "").split(".");
-  return (p.length > 1 ? p.pop()! : "FILE").toUpperCase().slice(0, 4);
+  const ext = (p.length > 1 ? p.pop()! : "").toUpperCase().slice(0, 4);
+  // A name like "." or "x." splits to an empty suffix — an empty chip reads as a
+  // rendering fault. Fall back to the same label as a name with no extension.
+  return ext || "FILE";
 }
 
 /** Shorten a base32 id to `if2xmne…c7daha`, matching the CLI/mock. */
@@ -66,7 +69,10 @@ const METHODS: Record<Method, MethodMeta> = {
   ticket: { glyph: "⛓", label: "Ticket", color: "#c2410c", bg: "#fff3e9" },
 };
 export function methodMeta(m: Method): MethodMeta {
-  return METHODS[m] ?? METHODS.cloud;
+  // `METHODS[m]` alone walks the prototype chain: "toString"/"valueOf" would hit
+  // Object.prototype's, which is truthy, so `??` would not fall back and the row
+  // would render `undefined`. Only an own key counts.
+  return Object.prototype.hasOwnProperty.call(METHODS, m) ? METHODS[m] : METHODS.cloud;
 }
 
 const EXT_TINT: Record<string, [string, string]> = {
@@ -81,8 +87,12 @@ const EXT_TINT: Record<string, [string, string]> = {
   PNG: ["#fff7ed", "#c2410c"],
   TAR: ["#f4f1ee", "#8a827a"],
 };
+const EXT_TINT_DEFAULT: [string, string] = ["#f4f1ee", "#8a827a"];
 export function extTint(ext: string): [string, string] {
-  return EXT_TINT[ext] ?? ["#f4f1ee", "#8a827a"];
+  // Own keys only — see `methodMeta` for why an inherited hit is not a match.
+  return Object.prototype.hasOwnProperty.call(EXT_TINT, ext)
+    ? EXT_TINT[ext]
+    : EXT_TINT_DEFAULT;
 }
 
 /** Colour of the progress bar for a transfer (attenuated when stalled). */
@@ -102,10 +112,17 @@ export function fmtRate(bytesPerSec: number): string {
   return fmtBytes(bytesPerSec) + "/s";
 }
 
-/** Human remaining time from size/rate, e.g. "3 min". */
+/** An estimate further out than this is not information, it is noise: a transfer
+ *  that would take a month is better described by its speed alone. It also keeps a
+ *  vanishing rate from rendering as "5e+304 h" — arithmetic, not an ETA. */
+const ETA_MAX_SECS = 30 * 24 * 3600;
+
+/** Human remaining time from size/rate, e.g. "3 min". Empty when there is nothing
+ *  honest to say. */
 export function fmtEta(t: UITransfer): string {
-  if (!t.rate || t.rate <= 0 || !t.size) return "";
+  if (!t.rate || t.rate <= 0 || !Number.isFinite(t.rate) || !t.size) return "";
   const secs = Math.max(0, (t.size - t.transferred) / t.rate);
+  if (!Number.isFinite(secs) || secs > ETA_MAX_SECS) return "";
   if (secs < 90) return `${Math.max(1, Math.round(secs))} s`;
   if (secs < 90 * 60) return `${Math.round(secs / 60)} min`;
   return `${Math.round(secs / 3600)} h`;
@@ -169,8 +186,15 @@ export function sectionsFor(
     (t.peer || "").toLowerCase().includes(q);
   const f = rows.filter((t) => t.dir === dir && match(t));
 
+  // "in annullamento" belongs here: the cancel is in flight, the transfer is still
+  // the daemon's, and the row must stay on screen. Leaving it out of every section
+  // made it vanish the instant the user clicked Annulla — the board quietly
+  // disagreeing with the engine, which is the bug this whole file guards against.
   const isActive = (s: UIStatus) =>
-    s === "in corso" || s === "in attesa" || s === "in stallo";
+    s === "in corso" ||
+    s === "in attesa" ||
+    s === "in stallo" ||
+    s === "in annullamento";
   const isTerminal = (s: UIStatus) =>
     s === "completato" ||
     s === "fallito" ||

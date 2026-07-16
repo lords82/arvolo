@@ -293,13 +293,16 @@ async fn archive_roundtrip_packs_and_extracts() {
     .await
     .expect("recv_chunked");
     assert_eq!(saved.into_path(), outdir);
+    // `outdir` is the folder the receiver names after the transfer, so a lone
+    // folder's contents land straight in it — not at `outdir/folder/folder/…`.
+    assert_eq!(std::fs::read(outdir.join("a.txt")).unwrap(), b"hello alpha");
     assert_eq!(
-        std::fs::read(outdir.join("folder/a.txt")).unwrap(),
-        b"hello alpha"
-    );
-    assert_eq!(
-        std::fs::read(outdir.join("folder/sub/b.bin")).unwrap(),
+        std::fs::read(outdir.join("sub/b.bin")).unwrap(),
         vec![7u8; 1000]
+    );
+    assert!(
+        !outdir.join("folder").exists(),
+        "the folder must not be nested inside a folder of its own name"
     );
 
     send_cancel.cancel();

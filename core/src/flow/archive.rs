@@ -57,9 +57,17 @@ pub(super) fn unpack_archive_safely(archive: &Path, dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Pack files and/or directories into a tar archive at `dest` (each top-level
-/// input keeps its base name inside the archive). Used to send folders/multiple
+/// Pack files and/or directories into a tar archive at `dest`. Each top-level
+/// input keeps its base name inside the archive — *except* a lone directory,
+/// whose **contents** are packed at the archive root. Used to send folders/multiple
 /// files as one transfer; the receiver unpacks it (see [`crate::flow::recv_chunked`]).
+///
+/// The exception exists because the receiver always unpacks into a directory named
+/// after the transfer, and for a single folder that name *is* the folder: keeping
+/// the prefix too landed the payload at `~/Arvolo/photos/photos/…`. Packing the
+/// contents puts it where the sender meant, at `~/Arvolo/photos/…`. Several inputs
+/// (or a file among them) still keep their names — there the wrapper is called
+/// "bundle" and the names are the only thing telling them apart.
 /// Pack `paths` into a tar at `dest` *deterministically*: entries are emitted in
 /// a stable sorted order with normalized metadata (mtime/uid/gid zeroed, fixed
 /// mode), so the same inputs always yield byte-identical output. That is what
@@ -71,7 +79,12 @@ pub fn pack_tar(paths: &[PathBuf], dest: &Path) -> Result<()> {
     // entries (so empty dirs survive), then sort for a stable layout.
     let mut files: Vec<(String, PathBuf)> = Vec::new();
     let mut dirs: Vec<String> = Vec::new();
+    let lone_dir = paths.len() == 1 && paths[0].is_dir();
     for p in paths {
+        if lone_dir {
+            collect_dir_contents(p, &mut files, &mut dirs)?;
+            continue;
+        }
         let base = p
             .file_name()
             .map(|s| s.to_string_lossy().to_string())
@@ -124,6 +137,34 @@ pub fn pack_tar(paths: &[PathBuf], dest: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Collect a directory's children *as if each were a top-level input*, so the
+/// directory itself contributes no prefix. An empty directory yields an empty
+/// archive — the receiver still creates the (empty) folder from the transfer name.
+fn collect_dir_contents(
+    dir: &Path,
+    files: &mut Vec<(String, PathBuf)>,
+    dirs: &mut Vec<String>,
+) -> Result<()> {
+    let mut entries: Vec<_> = std::fs::read_dir(dir)
+        .with_context(|| format!("read dir {}", dir.display()))?
+        .filter_map(|e| e.ok())
+        .collect();
+    entries.sort_by_key(|e| e.file_name());
+    for e in entries {
+        let path = e.path();
+        let name = e.file_name().to_string_lossy().to_string();
+        let Ok(md) = std::fs::metadata(&path) else {
+            continue;
+        };
+        if md.is_dir() {
+            collect_dir(&path, &name, files, dirs)?;
+        } else if md.is_file() {
+            files.push((name, path));
+        }
+    }
+    Ok(())
+}
+
 /// Recursively collect a directory's regular files and subdirectories in sorted
 /// order (following symlinks to their targets), for deterministic packing.
 fn collect_dir(
@@ -161,20 +202,83 @@ mod archive_tests {
     use crate::flow::safe_download_name;
 
     // A benign archive (dir + regular file, exactly what `pack_tar` emits) unpacks.
+    // `out` stands in for the folder the receiver names after the transfer, so a
+    // lone directory's contents land directly in it — not one level deeper.
     #[test]
     fn benign_archive_unpacks() {
         let src = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(src.path().join("folder")).unwrap();
+        std::fs::create_dir_all(src.path().join("folder/sub")).unwrap();
         std::fs::write(src.path().join("folder/hello.txt"), b"hi").unwrap();
+        std::fs::write(src.path().join("folder/sub/deep.txt"), b"deep").unwrap();
         let tar_path = src.path().join("a.tar");
         pack_tar(&[src.path().join("folder")], &tar_path).unwrap();
 
         let out = tempfile::tempdir().unwrap();
         unpack_archive_safely(&tar_path, out.path()).unwrap();
+        assert_eq!(std::fs::read(out.path().join("hello.txt")).unwrap(), b"hi");
         assert_eq!(
-            std::fs::read(out.path().join("folder/hello.txt")).unwrap(),
-            b"hi"
+            std::fs::read(out.path().join("sub/deep.txt")).unwrap(),
+            b"deep",
+            "the tree below the folder is preserved"
         );
+        assert!(
+            !out.path().join("folder").exists(),
+            "a lone folder must not be nested inside a folder of its own name"
+        );
+    }
+
+    // Several inputs have nothing but their names to tell them apart, so those are
+    // kept — the receiver's wrapper is called "bundle", not after any one of them.
+    #[test]
+    fn several_inputs_keep_their_names() {
+        let src = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(src.path().join("d")).unwrap();
+        std::fs::write(src.path().join("d/inner.txt"), b"in").unwrap();
+        std::fs::write(src.path().join("loose.txt"), b"loose").unwrap();
+        let tar_path = src.path().join("b.tar");
+        pack_tar(
+            &[src.path().join("loose.txt"), src.path().join("d")],
+            &tar_path,
+        )
+        .unwrap();
+
+        let out = tempfile::tempdir().unwrap();
+        unpack_archive_safely(&tar_path, out.path()).unwrap();
+        assert_eq!(
+            std::fs::read(out.path().join("loose.txt")).unwrap(),
+            b"loose"
+        );
+        assert_eq!(
+            std::fs::read(out.path().join("d/inner.txt")).unwrap(),
+            b"in"
+        );
+    }
+
+    // A lone *file* is never archived by the sender, but packing one must still not
+    // lose its name (the resume repack path goes through here).
+    #[test]
+    fn a_lone_file_keeps_its_name() {
+        let src = tempfile::tempdir().unwrap();
+        std::fs::write(src.path().join("solo.txt"), b"solo").unwrap();
+        let tar_path = src.path().join("c.tar");
+        pack_tar(&[src.path().join("solo.txt")], &tar_path).unwrap();
+
+        let out = tempfile::tempdir().unwrap();
+        unpack_archive_safely(&tar_path, out.path()).unwrap();
+        assert_eq!(std::fs::read(out.path().join("solo.txt")).unwrap(), b"solo");
+    }
+
+    // An empty folder must still arrive — as an empty folder, not an error.
+    #[test]
+    fn an_empty_lone_folder_packs_to_an_empty_archive() {
+        let src = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(src.path().join("empty")).unwrap();
+        let tar_path = src.path().join("d.tar");
+        pack_tar(&[src.path().join("empty")], &tar_path).unwrap();
+
+        let out = tempfile::tempdir().unwrap();
+        unpack_archive_safely(&tar_path, out.path()).unwrap();
+        assert_eq!(std::fs::read_dir(out.path()).unwrap().count(), 0);
     }
 
     // An entry whose path traverses out of the target dir is refused, and nothing

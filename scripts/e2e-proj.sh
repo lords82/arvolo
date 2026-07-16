@@ -218,8 +218,10 @@ case_folder() {
   [ -n "$id" ] && ok "l'offerta della cartella arriva" || { bad "nessuna offerta per la cartella"; return; }
 
   peer "$ARVOLO accept $id" >/dev/null
-  if wait_for "peer \"cat ~/Arvolo/$d/$d/sub/b.txt\" | grep -q due" 90; then
-    ok "la cartella è ricostruita con la sua struttura"
+  # A lone folder lands as its own name, contents directly inside — not one level
+  # deeper. `~/Arvolo/photos/a.txt`, never `~/Arvolo/photos/photos/a.txt`.
+  if wait_for "peer \"cat ~/Arvolo/$d/sub/b.txt\" | grep -q due" 90; then
+    ok "la cartella è ricostruita con la sua struttura, senza doppio annidamento"
   else
     bad "la cartella non è arrivata integra"
   fi
