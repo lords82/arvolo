@@ -9,6 +9,7 @@ import { vi } from "vitest";
 import { normalizeEvent, type WireEvent } from "../events";
 import type {
   ContactDto,
+  DepositDto,
   EngineEvent,
   OfferDto,
   StatusDto,
@@ -25,6 +26,10 @@ export interface Recorder {
   reject: string[];
   markVerified: string[];
   sendTo: [string, string[], string][];
+  revokeDeposit: string[];
+  /** Counts fetches, so a test can prove the panel refreshes rather than trusting
+   *  a list it fetched once and never again. */
+  listDeposits: number;
 }
 
 export interface Harness {
@@ -41,13 +46,18 @@ export interface Harness {
     transfers: TransferDto[];
     pending: OfferDto[];
     contacts: ContactDto[];
+    deposits: DepositDto[];
   };
   /** Make the next call to these commands reject. */
   fail: Set<string>;
 }
 
-export const harness: Harness = {
-  recorder: {
+// Built fresh each time rather than written out twice: the initial value and the
+// per-test reset must not be able to drift apart. A field present in one and
+// missing from the other leaks state between tests, which is the kind of bug that
+// shows up as an unrelated test failing later.
+function freshRecorder(): Recorder {
+  return {
     cancel: [],
     remove: [],
     pause: [],
@@ -56,10 +66,13 @@ export const harness: Harness = {
     reject: [],
     markVerified: [],
     sendTo: [],
-  },
-  emit: () => {},
-  setConnected: () => {},
-  snapshot: {
+    revokeDeposit: [],
+    listDeposits: 0,
+  };
+}
+
+function freshSnapshot(): Harness["snapshot"] {
+  return {
     status: {
       version: "0.9.2",
       public_id: "if2xmnescalwohxlex5qylevzs2cypwdnjxe7sxb76wcphc7daha",
@@ -72,35 +85,21 @@ export const harness: Harness = {
     transfers: [],
     pending: [],
     contacts: [],
-  },
+    deposits: [],
+  };
+}
+
+export const harness: Harness = {
+  recorder: freshRecorder(),
+  emit: () => {},
+  setConnected: () => {},
+  snapshot: freshSnapshot(),
   fail: new Set(),
 };
 
 export function resetHarness() {
-  harness.recorder = {
-    cancel: [],
-    remove: [],
-    pause: [],
-    resume: [],
-    accept: [],
-    reject: [],
-    markVerified: [],
-    sendTo: [],
-  };
-  harness.snapshot = {
-    status: {
-      version: "0.9.2",
-      public_id: "if2xmnescalwohxlex5qylevzs2cypwdnjxe7sxb76wcphc7daha",
-      fingerprint: "able-otter-nine",
-      relay: "https://relay.test",
-      transfers: 0,
-      pending: 0,
-      download_dir: "/Users/ls/Arvolo",
-    },
-    transfers: [],
-    pending: [],
-    contacts: [],
-  };
+  harness.recorder = freshRecorder();
+  harness.snapshot = freshSnapshot();
   harness.fail = new Set();
 }
 
@@ -154,6 +153,14 @@ export function makeIpcMock() {
         harness.recorder.markVerified.push(name);
         return guard("markVerified", undefined);
       },
+      listDeposits: () => {
+        harness.recorder.listDeposits++;
+        return guard("listDeposits", harness.snapshot.deposits);
+      },
+      revokeDeposit: (id: string) => {
+        harness.recorder.revokeDeposit.push(id);
+        return guard("revokeDeposit", undefined);
+      },
     },
     onEngineEvent: (cb: (ev: EngineEvent) => void) => {
       // Mirror the real subscriber exactly: wire in, normalizer, app model out.
@@ -204,6 +211,25 @@ export const dto = {
       id: "peer1",
       fingerprint: "able-otter-nine",
       verified: false,
+      ...over,
+    };
+  },
+  /** A live public link, as a reachable relay reports it. */
+  deposit(over: Partial<DepositDto> = {}): DepositDto {
+    return {
+      id: "a1b2c3d4",
+      kind: "link",
+      name: "photo.jpg",
+      size: 4242,
+      link: "https://relay.test/dl/claim1#key",
+      recipient: "",
+      created: Math.floor(Date.now() / 1000),
+      expires: Math.floor(Date.now() / 1000) + 7 * 86400,
+      expired: false,
+      max_label: "unlimited",
+      present: true,
+      downloads: 0,
+      max_downloads: null,
       ...over,
     };
   },

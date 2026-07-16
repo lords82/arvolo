@@ -45,6 +45,8 @@ fn main() {
             bridge::cancel,
             bridge::remove,
             bridge::mark_verified,
+            bridge::list_deposits,
+            bridge::revoke_deposit,
             bridge::gui_version,
         ])
         .setup(|app| {

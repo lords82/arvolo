@@ -15,8 +15,8 @@ use tokio::sync::broadcast::error::RecvError;
 use tokio_util::sync::CancellationToken;
 
 use super::protocol::{
-    ContactDto, EventDto, OfferDto, Request, RequestEnvelope, Response, ServerMessage, StatusDto,
-    TransferDto,
+    ContactDto, DepositDto, EventDto, OfferDto, Request, RequestEnvelope, Response, ServerMessage,
+    StatusDto, TransferDto,
 };
 
 /// Shared daemon state handed to every connection handler. Cheap to clone.
@@ -100,6 +100,8 @@ async fn dispatch(d: &Daemon, cmd: Request) -> Response {
             Response::Pending(v)
         }
         Request::ListContacts => Response::Contacts(list_contacts()),
+        Request::ListDeposits => Response::Deposits(list_deposits().await),
+        Request::RevokeDeposit { id } => revoke_deposit(&id).await,
         Request::Cancel { id } => {
             d.manager.cancel(id);
             Response::Ok
@@ -221,6 +223,94 @@ async fn serve_ticket(d: &Daemon, paths: Vec<String>, seed_relay: Option<String>
             }
             Response::Error(format!("{e:#}"))
         }
+    }
+}
+
+/// How long the relay gets to answer one status query while the deposit list is
+/// being built. The list must open promptly even when the relay is down, so a slow
+/// answer degrades to "unknown" instead of hanging whoever asked.
+const CLAIM_STATUS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(4);
+
+/// Everything this client has left on a relay and could still take back, newest
+/// first (the order [`crate::deposits::list`] already guarantees). The revoke token
+/// stays here: a UI needs the id, never the secret.
+///
+/// The local record is a *receipt*, not a status: it is written once, at deposit
+/// time, and nothing ever updates it. A one-shot link that has been downloaded and
+/// a sealed deposit the recipient collected both leave it untouched — the relay
+/// never reports back. Listing records alone would therefore present dead entries
+/// as alive, which is worse than saying nothing. So ask the relay, concurrently and
+/// best-effort: unreachable leaves the live fields `None`, and the UI says it does
+/// not know rather than inventing an answer.
+async fn list_deposits() -> Vec<DepositDto> {
+    let recs = crate::deposits::list();
+
+    let mut set = tokio::task::JoinSet::new();
+    for (i, d) in recs.iter().enumerate() {
+        // An expired record has nothing left on the relay by definition — `expired`
+        // already says so, and a request could only confirm it. Don't spend one.
+        if d.expired() {
+            continue;
+        }
+        let (relay, claim) = (d.relay.clone(), d.claim.clone());
+        set.spawn(async move {
+            let info = tokio::time::timeout(
+                CLAIM_STATUS_TIMEOUT,
+                arvolo_core::flow::claim_info(&relay, &claim),
+            )
+            .await
+            .ok()
+            .and_then(|r| r.ok());
+            (i, info)
+        });
+    }
+    let mut live: HashMap<usize, arvolo_core::flow::ClaimInfo> = HashMap::new();
+    while let Some(joined) = set.join_next().await {
+        if let Ok((i, Some(info))) = joined {
+            live.insert(i, info);
+        }
+    }
+
+    recs.into_iter()
+        .enumerate()
+        .map(|(i, d)| {
+            let info = live.get(&i);
+            DepositDto {
+                expired: d.expired(),
+                max_label: d.max_label(),
+                present: info.map(|l| l.present),
+                downloads: info.and_then(|l| l.downloads),
+                max_downloads: info.and_then(|l| l.max_downloads),
+                id: d.id,
+                kind: d.kind,
+                name: d.name,
+                size: d.size,
+                link: d.link.unwrap_or_default(),
+                recipient: d.recipient.unwrap_or_default(),
+                created: d.created,
+                expires: d.expires,
+            }
+        })
+        .collect()
+}
+
+/// Withdraw a deposit from the relay, then forget the local record. An already
+/// expired one has nothing left on the relay — tidy the record and report success
+/// rather than an error the user can do nothing about.
+async fn revoke_deposit(id: &str) -> Response {
+    let Some(rec) = crate::deposits::load(id) else {
+        return Response::Error("no such deposit".into());
+    };
+    if !rec.expired() {
+        if let Err(e) =
+            arvolo_core::flow::revoke_offline(&rec.relay, &rec.claim, &rec.revoke_token).await
+        {
+            return Response::Error(format!("{e:#}"));
+        }
+    }
+    match crate::deposits::remove(id) {
+        Ok(()) => Response::Ok,
+        Err(e) => Response::Error(format!("{e:#}")),
     }
 }
 

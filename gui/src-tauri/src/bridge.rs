@@ -8,7 +8,7 @@
 use std::path::PathBuf;
 
 use arvolo_ipc::client::DaemonClient;
-use arvolo_ipc::protocol::{ContactDto, OfferDto, StatusDto, TransferDto};
+use arvolo_ipc::protocol::{ContactDto, DepositDto, OfferDto, StatusDto, TransferDto};
 use serde::Serialize;
 
 /// A ticket-serve result handed back to the UI.
@@ -115,6 +115,18 @@ pub async fn cancel(id: u64) -> Result<(), String> {
 pub async fn remove(id: u64) -> Result<(), String> {
     let mut c = client().await?;
     c.remove(id).await.or_else(err)
+}
+
+#[tauri::command]
+pub async fn list_deposits() -> Result<Vec<DepositDto>, String> {
+    let mut c = client().await?;
+    c.list_deposits().await.or_else(err)
+}
+
+#[tauri::command]
+pub async fn revoke_deposit(id: String) -> Result<(), String> {
+    let mut c = client().await?;
+    c.revoke_deposit(id).await.or_else(err)
 }
 
 #[tauri::command]

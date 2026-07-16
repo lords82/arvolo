@@ -6,6 +6,7 @@ import { shortId } from "./format";
 import { Board } from "./components/Board";
 import { SendSheet } from "./components/SendSheet";
 import { IncomingModal } from "./components/IncomingModal";
+import { DepositsPanel } from "./components/DepositsPanel";
 
 export function App() {
   const init = useStore((s) => s.init);
@@ -18,6 +19,7 @@ export function App() {
   const reload = useStore((s) => s.reload);
   const openSheet = useStore((s) => s.openSheet);
   const openIncoming = useStore((s) => s.openIncoming);
+  const openDeposits = useStore((s) => s.openDeposits);
   // Select the stable map, derive the array with useMemo — a selector returning
   // a fresh array every call makes useSyncExternalStore loop forever.
   const transfers = useStore((s) => s.transfers);
@@ -196,6 +198,41 @@ export function App() {
 
         <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 10 }}>
           <ConnPill connected={connected} />
+          {/* Links and sealed deposits: what is still on a relay, and revocable.
+              No count badge — this list is fetched on open, never pushed, so a
+              number here would be stale the moment someone downloaded a link. */}
+          <button
+            onClick={() => void openDeposits()}
+            title="Link e depositi attivi"
+            aria-label="Link e depositi"
+            style={{
+              border: "1px solid var(--line-strong)",
+              background: "#fff",
+              borderRadius: 8,
+              width: 30,
+              height: 30,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              cursor: "pointer",
+              color: "#171514",
+            }}
+          >
+            <svg
+              width="15"
+              height="15"
+              viewBox="0 0 16 16"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M6.6 8.7a2.4 2.4 0 0 0 3.6.3l2-2a2.4 2.4 0 0 0-3.4-3.4l-1.1 1.1" />
+              <path d="M9.4 7.3a2.4 2.4 0 0 0-3.6-.3l-2 2a2.4 2.4 0 0 0 3.4 3.4l1.1-1.1" />
+            </svg>
+          </button>
           {/* Arrivals bell: red badge = offers awaiting a decision. */}
           <button
             onClick={() =>
@@ -511,6 +548,7 @@ export function App() {
 
       <SendSheet />
       <IncomingModal />
+      <DepositsPanel />
     </div>
   );
 }

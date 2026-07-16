@@ -6,6 +6,7 @@ import { api, onConnected, onEngineEvent } from "./ipc";
 import { shortId } from "./format";
 import type {
   ContactDto,
+  DepositDto,
   EngineEvent,
   Method,
   OfferDto,
@@ -78,6 +79,19 @@ interface State {
   actionError: string | null;
   dismissActionError: () => void;
 
+  /** What is still on a relay and can be taken back. Unlike the board's rows these
+   *  are **not** event-driven: no engine event exists for a deposit, and the relay
+   *  never reports a download back, so this list is only ever as fresh as the last
+   *  fetch. It is fetched when the panel opens, and the panel is the only place it
+   *  is shown — precisely so it cannot sit on screen going quietly stale. */
+  deposits: DepositDto[];
+  depositsOpen: boolean;
+  depositsLoading: boolean;
+  depositsError: string | null;
+  /** Ids currently being withdrawn, so a row can show the click landed and cannot
+   *  be double-submitted (the relay round-trip is not instant). */
+  revoking: string[];
+
   // UI state
   search: string;
   pauseAll: boolean;
@@ -104,6 +118,14 @@ interface State {
   closeSheet: () => void;
   openIncoming: (offerId: string) => void;
   closeIncoming: () => void;
+  /** Open the deposits panel and fetch it. Opening *is* the refresh: there is no
+   *  event to keep it live, so a stale list must never be what greets the user. */
+  openDeposits: () => Promise<void>;
+  closeDeposits: () => void;
+  loadDeposits: () => Promise<void>;
+  /** Withdraw a deposit from the relay and forget it. Irreversible: the link stops
+   *  working for everyone who has it. */
+  revokeDeposit: (id: string) => Promise<void>;
 
   // actions (forward to the daemon, then let events reconcile)
   send: (to: string, paths: string[], note: string) => Promise<number>;
@@ -234,6 +256,11 @@ export const useStore = create<State>((set, get) => {
     openMenuKey: null,
     sheetPaths: null,
     incomingOfferId: null,
+    deposits: [],
+    depositsOpen: false,
+    depositsLoading: false,
+    depositsError: null,
+    revoking: [],
 
     peerLabel: (id, fallbackName) => {
       if (!id) return fallbackName || "sconosciuto";
@@ -419,6 +446,44 @@ export const useStore = create<State>((set, get) => {
     openIncoming: (offerId) =>
       set({ incomingOfferId: offerId, openMenuKey: null }),
     closeIncoming: () => set({ incomingOfferId: null }),
+
+    openDeposits: async () => {
+      set({ depositsOpen: true, openMenuKey: null });
+      await get().loadDeposits();
+    },
+    closeDeposits: () => set({ depositsOpen: false, depositsError: null }),
+
+    loadDeposits: async () => {
+      set({ depositsLoading: true });
+      try {
+        // The daemon asks each relay for the real state while building this, so it
+        // is slower than the other snapshots — hence the explicit loading flag.
+        const deposits = await api.listDeposits();
+        set({ deposits, depositsError: null, depositsLoading: false });
+      } catch (e) {
+        // Keep whatever we last had, and say why it may be wrong. An empty panel
+        // under a green "Connesso" would read as "you have no links" — the same lie
+        // the board's `loadError` exists to prevent.
+        set({
+          depositsLoading: false,
+          depositsError: `Non riesco a leggere i link dal daemon: ${String(e)}`,
+        });
+      }
+    },
+
+    revokeDeposit: async (id) => {
+      if (get().revoking.includes(id)) return;
+      set((s) => ({ revoking: [...s.revoking, id] }));
+      try {
+        // Drop the row only once the daemon confirms the relay let go. Removing it
+        // optimistically would show a link as gone while it still serves the file —
+        // the worst possible direction to be wrong in for a revoke.
+        await act("Impossibile revocare il link", () => api.revokeDeposit(id));
+        set((s) => ({ deposits: s.deposits.filter((d) => d.id !== id) }));
+      } finally {
+        set((s) => ({ revoking: s.revoking.filter((r) => r !== id) }));
+      }
+    },
 
     send: async (to, paths, note) => {
       const id = await act(`Invio a ${to} non riuscito`, () =>

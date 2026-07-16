@@ -10,8 +10,8 @@ use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::UnixStream;
 
 use crate::protocol::{
-    ContactDto, EventDto, OfferDto, Request, RequestEnvelope, Response, ServerMessage, StatusDto,
-    TransferDto,
+    ContactDto, DepositDto, EventDto, OfferDto, Request, RequestEnvelope, Response, ServerMessage,
+    StatusDto, TransferDto,
 };
 use crate::socket_path;
 
@@ -146,6 +146,19 @@ impl DaemonClient {
     /// Mark a saved contact verified after an out-of-band fingerprint check.
     pub async fn mark_verified(&mut self, name: String) -> Result<()> {
         expect_ok(self.request(Request::MarkVerified { name }).await?)
+    }
+
+    /// Everything still withdrawable from a relay: links and sealed deposits.
+    pub async fn list_deposits(&mut self) -> Result<Vec<DepositDto>> {
+        match self.request(Request::ListDeposits).await? {
+            Response::Deposits(v) => Ok(v),
+            other => unexpected(other),
+        }
+    }
+
+    /// Withdraw a deposit from the relay and forget it.
+    pub async fn revoke_deposit(&mut self, id: String) -> Result<()> {
+        expect_ok(self.request(Request::RevokeDeposit { id }).await?)
     }
 
     pub async fn pause(&mut self, id: u64) -> Result<()> {

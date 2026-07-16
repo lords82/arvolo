@@ -49,6 +49,35 @@ export interface ContactDto {
   verified: boolean;
 }
 
+/** Something left on a relay that can still be taken back: a public download link,
+ *  or a sealed deposit waiting for its recipient. No revoke token — that secret
+ *  stays in the daemon; the id is all a UI needs to ask for a withdrawal. */
+export interface DepositDto {
+  id: string;
+  /** "link" | "offline" */
+  kind: string;
+  name: string;
+  size: number;
+  /** The browser URL, for a link. Empty for a sealed deposit. */
+  link: string;
+  /** The recipient's base32 id, for a sealed deposit. Empty for a link. */
+  recipient: string;
+  created: number;
+  expires: number;
+  expired: boolean;
+  max_label: string;
+  /** Does the relay still hold it? The local record is only a receipt of the
+   *  deposit and never learns that a link was downloaded or a sealed deposit
+   *  collected, so the daemon asks the relay. `null` = it could not ask; show
+   *  "unknown", never "alive". */
+  present: boolean | null;
+  /** Times the relay has served it. `null` when unknown (see `present`). */
+  downloads: number | null;
+  /** The relay's own cap, possibly lower than the one requested. `null` when
+   *  unknown (see `present`). */
+  max_downloads: number | null;
+}
+
 export interface StatusDto {
   version: string;
   public_id: string;

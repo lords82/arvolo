@@ -70,6 +70,12 @@ pub enum Request {
     /// Mark a saved contact (by name) verified after an out-of-band fingerprint
     /// check → [`Response::Ok`] (error if the name isn't a saved contact).
     MarkVerified { name: String },
+    /// Everything this client has left on a relay and can still take back: public
+    /// download links and sealed mailbox deposits → [`Response::Deposits`].
+    ListDeposits,
+    /// Withdraw a deposit from the relay by its id and forget the record. The blob
+    /// stops being fetchable → [`Response::Ok`].
+    RevokeDeposit { id: String },
     /// Pause an in-progress `send --to` by id → [`Response::Ok`].
     Pause { id: u64 },
     /// Resume a paused `send --to` by id → [`Response::Ok`].
@@ -102,6 +108,7 @@ pub enum Response {
     Transfers(Vec<TransferDto>),
     Pending(Vec<OfferDto>),
     Contacts(Vec<ContactDto>),
+    Deposits(Vec<DepositDto>),
     Ok,
     Error(String),
 }
@@ -195,6 +202,49 @@ pub struct ContactDto {
     /// Whether the contact's key has been verified out-of-band.
     #[serde(default)]
     pub verified: bool,
+}
+
+/// Something this client left on a relay and can still withdraw: a public download
+/// link, or a sealed mailbox deposit awaiting its recipient. The revoke token is
+/// deliberately **not** here — it is the sender's secret, it never needs to leave
+/// the daemon, and a UI only ever needs the id to ask for a withdrawal.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DepositDto {
+    pub id: String,
+    /// "link" (public browser URL) or "offline" (sealed, for one recipient).
+    pub kind: String,
+    pub name: String,
+    pub size: u64,
+    /// The full browser URL, for a link. Empty for a sealed deposit.
+    #[serde(default)]
+    pub link: String,
+    /// The recipient's base32 id, for a sealed deposit. Empty for a link.
+    #[serde(default)]
+    pub recipient: String,
+    pub created: u64,
+    /// Unix seconds when the relay drops it on its own.
+    pub expires: u64,
+    /// Already past `expires`: the relay has let it go, so there is nothing left to
+    /// withdraw — only the local record to tidy away.
+    pub expired: bool,
+    /// Human download cap ("1 download", "nessun limite").
+    #[serde(default)]
+    pub max_label: String,
+    /// Whether the relay still holds the blob. The local record is only a receipt
+    /// of the deposit: it cannot know that someone downloaded a one-shot link or
+    /// that a recipient collected a sealed deposit, because nothing reports that
+    /// back. So this is asked of the relay when the list is built. `None` means the
+    /// relay could not be reached — a UI must then say "unknown", never "alive".
+    #[serde(default)]
+    pub present: Option<bool>,
+    /// How many times the relay has served the blob. `None` against a relay that
+    /// could not be reached, or an older one that only reports presence.
+    #[serde(default)]
+    pub downloads: Option<u32>,
+    /// The relay's own download cap, which may be lower than the one requested
+    /// (the relay clamps to its maximum). `None` as for `downloads`.
+    #[serde(default)]
+    pub max_downloads: Option<u32>,
 }
 
 /// Serializable mirror of [`ManagerEvent`].

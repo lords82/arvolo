@@ -1,7 +1,7 @@
 // Presentation helpers: byte/size formatting, id shortening, and the colour/label
 // metadata maps ported from the mock's `renderVals`.
 
-import type { Method, UIStatus, UITransfer } from "./types";
+import type { DepositDto, Method, UIStatus, UITransfer } from "./types";
 
 export function fmtBytes(bytes: number): string {
   if (!bytes && bytes !== 0) return "";
@@ -164,6 +164,91 @@ export function isToday(ms: number): boolean {
     d.getMonth() === now.getMonth() &&
     d.getDate() === now.getDate()
   );
+}
+
+// ---- deposits (links + sealed) --------------------------------------------
+
+/** `u32::MAX`, the sentinel a link is deposited with to mean "no limit". The relay
+ *  may echo it back as its own cap, so both ends of the wire can carry it. */
+const UNLIMITED = 4294967295;
+
+/** Human time until a unix-seconds deadline, e.g. "6 giorni", "3 ore". Empty once
+ *  the deadline has passed — the caller says "scaduto" instead of counting down
+ *  into the negatives. */
+export function fmtUntil(unixSecs: number, nowMs: number = Date.now()): string {
+  const secs = unixSecs - Math.floor(nowMs / 1000);
+  if (secs <= 0) return "";
+  if (secs < 90) return `${secs} secondi`;
+  if (secs < 90 * 60) return `${Math.round(secs / 60)} minuti`;
+  if (secs < 48 * 3600) return `${Math.round(secs / 3600)} ore`;
+  return `${Math.round(secs / 86400)} giorni`;
+}
+
+export interface DepositMeta {
+  color: string;
+  /** The one-word state shown next to the name. */
+  text: string;
+  /** The line under it: why, or how many downloads. */
+  detail: string;
+  /** Whether asking the relay to withdraw it could still achieve anything. False
+   *  only when we *know* the blob is gone — never merely because we could not ask. */
+  revocable: boolean;
+}
+
+/** How a deposit stands, told honestly.
+ *
+ *  Three different facts are in play and they must not be conflated: the local
+ *  clock (has the TTL passed?), the relay's answer (is the blob still there, and
+ *  how often was it served?), and *silence* — the relay could not be asked. The
+ *  last one is the one that matters: an unreachable relay must read as "non lo so",
+ *  because showing a downloaded one-shot link as "Attivo" is exactly the lie this
+ *  panel exists to stop. */
+export function depositMeta(d: DepositDto, nowMs: number = Date.now()): DepositMeta {
+  if (d.expired) {
+    return {
+      color: "#8a827a",
+      text: "Scaduto",
+      detail: "il relay l'ha già lasciato andare",
+      revocable: false,
+    };
+  }
+  if (d.present === false) {
+    return {
+      color: "#8a827a",
+      text: "Non più disponibile",
+      detail:
+        d.kind === "link"
+          ? "scaricato fino al limite, oppure già revocato"
+          : "ritirato dal destinatario, oppure già revocato",
+      revocable: false,
+    };
+  }
+  const until = fmtUntil(d.expires, nowMs);
+  const scade = until ? `scade tra ${until}` : "in scadenza";
+  if (d.present === null) {
+    // Reachability is not the same as absence. We keep it revocable: the daemon
+    // will find out for real when the user asks.
+    return {
+      color: "#a8834a",
+      text: "Stato sconosciuto",
+      detail: `relay non raggiungibile · ${scade}`,
+      revocable: true,
+    };
+  }
+  const parts: string[] = [];
+  if (d.downloads !== null) {
+    const cap =
+      d.max_downloads !== null && d.max_downloads < UNLIMITED
+        ? `/${d.max_downloads}`
+        : "";
+    parts.push(`${d.downloads}${cap} download`);
+  } else {
+    // An older relay reports presence but not counts. Say the cap we asked for
+    // rather than a number we do not have.
+    parts.push(d.max_label === "unlimited" ? "nessun limite" : `max ${d.max_label}`);
+  }
+  parts.push(scade);
+  return { color: "#16a34a", text: "Attivo", detail: parts.join(" · "), revocable: true };
 }
 
 export interface Section {

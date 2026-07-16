@@ -33,6 +33,7 @@ export function SendSheet() {
   const doSend = useStore((s) => s.send);
   const doTicket = useStore((s) => s.ticket);
   const doLink = useStore((s) => s.link);
+  const openDeposits = useStore((s) => s.openDeposits);
 
   const [tab, setTab] = useState<Tab>("contatti");
   const [note, setNote] = useState("");
@@ -282,6 +283,10 @@ export function SendSheet() {
                   setLink(url);
                 })
               }
+              onManage={() => {
+                closeSheet();
+                void openDeposits();
+              }}
             />
           )}
 
@@ -484,11 +489,16 @@ function IdTab({
 function LinkTab({
   link,
   onCreate,
+  onManage,
   busy,
   multi,
 }: {
   link: string;
   onCreate: () => void;
+  /** Open the deposits panel — where the link can be watched and revoked. This
+   *  used to be a line telling the user to go and run a CLI command (one that was
+   *  never implemented, at that). */
+  onManage: () => void;
   busy: boolean;
   multi: boolean;
 }) {
@@ -539,8 +549,24 @@ function LinkTab({
             </button>
           </div>
           <div style={{ fontSize: 11.5, color: "#a8a29a" }}>
-            Chiunque abbia questo link può scaricarlo. Revocalo dalla CLI con
-            <span className="mono"> arvolo deposits</span>.
+            Chiunque abbia questo link può scaricarlo. Puoi revocarlo quando vuoi
+            da{" "}
+            <button
+              onClick={onManage}
+              style={{
+                border: "none",
+                background: "transparent",
+                padding: 0,
+                font: "inherit",
+                color: "#7c3aed",
+                fontWeight: 600,
+                cursor: "pointer",
+                textDecoration: "underline",
+              }}
+            >
+              Link e depositi
+            </button>
+            .
           </div>
         </div>
       ) : (

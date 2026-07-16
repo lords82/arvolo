@@ -5,6 +5,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { normalizeEvent, type WireEvent } from "./events";
 import type {
   ContactDto,
+  DepositDto,
   EngineEvent,
   OfferDto,
   StatusDto,
@@ -34,6 +35,8 @@ export const api = {
   cancel: (id: number) => invoke<void>("cancel", { id }),
   remove: (id: number) => invoke<void>("remove", { id }),
   markVerified: (name: string) => invoke<void>("mark_verified", { name }),
+  listDeposits: () => invoke<DepositDto[]>("list_deposits"),
+  revokeDeposit: (id: string) => invoke<void>("revoke_deposit", { id }),
   guiVersion: () => invoke<string>("gui_version"),
 };
 
