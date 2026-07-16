@@ -39,14 +39,14 @@ mod ui;
 mod util;
 
 use args::{Cli, Command, DeviceAction, SyncAction};
+use commands::cancel::cancel_cmd;
 use commands::contacts::contacts_cmd;
 #[cfg(unix)]
-use commands::daemon::{accept_cmd, cancel_cmd, daemon, pause_cmd, reject_cmd, resume_cmd};
+use commands::daemon::{accept_cmd, daemon, pause_cmd, reject_cmd, resume_cmd};
 use commands::identity::{id, name_cmd, version_cmd};
 use commands::offline::revoke;
 use commands::receive::{listen, recv};
 use commands::send::send;
-use commands::sessions::sessions_cmd;
 use commands::transfers::transfers_cmd;
 use output::{init_tracing, VERBOSITY};
 use ui::*;
@@ -108,7 +108,6 @@ async fn main() -> Result<()> {
             SyncAction::Now => sync::sync_now(None, false).await,
             SyncAction::Status => sync::sync_status().await,
         },
-        Command::Sessions { action } => sessions_cmd(action).await,
         Command::Transfers { watch, action } => transfers_cmd(watch, action).await,
         Command::Revoke { target, token } => revoke(target, token).await,
         Command::Listen {
@@ -142,7 +141,6 @@ async fn main() -> Result<()> {
         Command::Accept { offer_id, out } => accept_cmd(offer_id, out).await,
         #[cfg(unix)]
         Command::Reject { offer_id } => reject_cmd(offer_id).await,
-        #[cfg(unix)]
         Command::Cancel { id } => cancel_cmd(id).await,
         #[cfg(unix)]
         Command::Pause { id } => pause_cmd(id).await,

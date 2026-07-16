@@ -143,6 +143,15 @@ impl DaemonClient {
         expect_ok(self.request(Request::Remove { id }).await?)
     }
 
+    /// Drop every finished transfer from the daemon's list; returns how many went.
+    /// In-flight ones stay, and the history log is untouched.
+    pub async fn clear_finished(&mut self) -> Result<usize> {
+        match self.request(Request::ClearFinished).await? {
+            Response::Cleared(n) => Ok(n),
+            other => unexpected(other),
+        }
+    }
+
     /// Mark a saved contact verified after an out-of-band fingerprint check.
     pub async fn mark_verified(&mut self, name: String) -> Result<()> {
         expect_ok(self.request(Request::MarkVerified { name }).await?)

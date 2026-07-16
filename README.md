@@ -129,10 +129,10 @@ only link against a relay you host/trust. See [PROTOCOL.md §7.6](docs/PROTOCOL.
 arvolo send ./report.pdf --link
 #   ->  https://relay.example.com/dl/<claim>#<key>
 
-# The link is tracked as a local session; cancel it (and delete the file from the
-# relay) anytime:
-arvolo sessions list
-arvolo sessions rm <id>
+# The link is listed among everything you've left on a relay; cancel it (and
+# delete the file from the relay) anytime:
+arvolo transfers
+arvolo cancel <id>
 ```
 
 ## Commands
@@ -154,11 +154,12 @@ arvolo sessions rm <id>
 | `arvolo version` | CLI version + whether the daemon is running (and its version). |
 | `arvolo contacts add\|list\|verify\|remove\|trust\|untrust\|accept-name` | Address book of recipients (used by `--to`); TOFU + out-of-band fingerprint verification. `trust` lets the daemon auto-download that contact's files (default: ask). `accept-name` approves a sender's advertised display name — first use pins it, a later change is quarantined (old name kept) until you approve. |
 | `arvolo listen [--download-dir --auto-accept-contacts --auto-accept-verified]` | Stay online and receive files contacts send to you (offers, live watchdog, transparent download). |
-| `arvolo sessions list\|rm <id>` | List relay deposits (link / sealed) with live relay status + resumable sends; `rm` **revokes on the relay**, deleting the file/link. |
-| `arvolo revoke <arvm…\|link> --token <t>` | Delete a deposited mailbox ticket **or** a browser download link from the relay (auto-detects which). |
-| `arvolo transfers [--watch]` / `transfers clear` | One view of everything: with a daemon, live in/out transfers + pending offers, then history below (`--watch` redraws); without one, just history. `clear` wipes history. |
+| `arvolo revoke <arvm…\|link> --token <t>` | Delete a deposited mailbox ticket **or** a browser download link from the relay (auto-detects which). For one you sent from **another machine** — locally, `arvolo cancel <id>` needs no token. |
+| `arvolo transfers [--watch]` | One view of everything: with a daemon, live in/out transfers + pending offers; then, daemon or not, what you've **left on a relay** (links / sealed deposits, with live relay status), the **resumable** sends, and the history (`--watch` redraws). |
+| &nbsp;&nbsp;`clear` / `clear-history` | `clear` closes out what's over — drops completed/cancelled/failed rows from the list, keeping anything still going (a mailbox send awaiting pickup looks done but isn't). `clear-history` wipes the history log. Neither touches the relay: withdraw with `arvolo cancel <id>`. |
+| `arvolo cancel <id>` | Take back anything `transfers` lists: a running transfer (a number), a file left on a relay (**deleted from the relay**, not just locally), or a resumable send. |
 | `arvolo daemon [--download-dir --relay]` | Run the always-on background engine + local control socket (systemd/launchd). See [`docs/DAEMON.md`](docs/DAEMON.md). |
-| `arvolo accept <id>` / `reject <id>` / `cancel <id>` | Drive the running daemon: approve/decline a parked offer, cancel a transfer (ids from `arvolo transfers`). |
+| `arvolo accept <id>` / `reject <id>` | Approve or decline a parked offer (ids from `arvolo transfers`; needs a running daemon). |
 
 Run `arvolo <cmd> --help` for the full flag list.
 

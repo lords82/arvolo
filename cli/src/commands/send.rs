@@ -110,9 +110,19 @@ pub(crate) async fn push(
                         record_history(&manager, id, "completed");
                         break;
                     }
-                    Ok(ManagerEvent::Deposited { id: eid }) if eid == id => {
+                    Ok(ManagerEvent::Deposited { id: eid, info }) if eid == id => {
                         eprintln!("✓ deposited to the mailbox (delivered when they return).");
                         record_history(&manager, id, "deposited");
+                        // This manager has no state_dir, so the engine keeps no record
+                        // of its own: without this the revoke token would die with the
+                        // process and the file would sit on the relay until its TTL,
+                        // unlistable and unwithdrawable. No engine row to cancel through
+                        // either — this send ends with the command.
+                        crate::deposits::record_from_event(None, &info);
+                        eprintln!(
+                            "   Take it back any time with `arvolo cancel {}`.",
+                            crate::deposits::id_for(&info.claim)
+                        );
                         break;
                     }
                     Ok(ManagerEvent::Waiting { id: eid, reason }) if eid == id => {
@@ -325,7 +335,7 @@ pub(crate) async fn send(
     .await?;
     // Persist a resumable session (best-effort: a save failure must not abort the
     // send). The content key is stored so an interrupted send can be recovered —
-    // see `arvolo sessions` and `send --resume`.
+    // listed by `arvolo transfers` and recovered with `send --resume`.
     if let Err(e) = sessions::save(
         session.content_key(),
         session.node_seed(),
@@ -419,7 +429,7 @@ pub(crate) async fn resume_by_ticket(ticket: &str, path: &Path, qr: bool) -> Res
             .map_err(|_| anyhow!("ticket content key has the wrong size"))?,
         KeyDelivery::Sealed { .. } => anyhow::bail!(
             "this ticket is sealed to a recipient (--to), so its key isn't in the ticket — \
-             resume it with `arvolo send --resume <id>` (see `arvolo sessions list`)"
+             resume it with `arvolo send --resume <id>` (see `arvolo transfers`)"
         ),
     };
     // A plain ticket carries no transport secret, so we can't rebind the original

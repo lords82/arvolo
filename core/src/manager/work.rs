@@ -33,10 +33,30 @@ pub(super) const LIVE_CONFIRM_SECS: u64 = 12;
 pub(super) const LIVE_CONNECT_SECS: u64 = 90;
 /// How often the watchdog polls the offer's seen-status during phase 1.
 pub(super) const OFFER_STATUS_POLL_SECS: u64 = 2;
-/// How long (and how often) a stay-open sender polls to confirm an offline blob
-/// was fetched before leaving the transfer as merely "deposited".
-pub(super) const OFFLINE_CONFIRM_SECS: u64 = 90;
+/// How often a sender re-checks whether a deposited blob was fetched. The check
+/// starts at `POLL_SECS` (a pickup moments after the deposit shows up fast) and
+/// backs off geometrically to `POLL_MAX_SECS`, running for the blob's whole life
+/// rather than a short window: a recipient who collects on day 5 is the normal
+/// case, not an edge one. At the cap that's ~700 requests over a 7-day TTL.
 pub(super) const OFFLINE_CONFIRM_POLL_SECS: u64 = 3;
+pub(super) const OFFLINE_CONFIRM_POLL_MAX_SECS: u64 = 15 * 60;
+/// How far before the relay-side expiry the pickup poll takes its last look, and
+/// why the verdict can be trusted at all.
+///
+/// The relay deletes a blob on **both** fetch and expiry, so "gone" alone doesn't
+/// say which happened — and once the row is deleted the relay has forgotten the
+/// download count too, so the answer is unrecoverable afterwards. Time is what
+/// disambiguates: gone *before* the TTL can only be a fetch. Stopping this much
+/// earlier keeps that inference off the boundary, where the two causes meet.
+///
+/// Note the margin is not covering a clock *offset* between us and the relay: a TTL
+/// is a duration, and both sides deadlined at `created + ttl` from the same moment
+/// by their own clock, so a standing offset cancels out. What it covers is the two
+/// clocks disagreeing about how long that duration lasted — drift across the week,
+/// or either one being stepped (NTP, a suspended VM) — plus the round-trip of the
+/// look itself. The cost is a pickup in the final minutes reading as an expiry — a
+/// far better error than the reverse (claiming delivery that never happened).
+pub(super) const OFFLINE_CONFIRM_MARGIN_SECS: u64 = 120;
 /// How long cancelling an awaiting-pickup deposit may spend withdrawing the blob
 /// from the relay before it gives up and ends the row anyway. The user is waiting
 /// on this: the row can't flip to Cancelled until the withdrawal returns.
@@ -429,6 +449,11 @@ pub(super) struct DepositOutcome {
     pub(super) poster_token: String,
 }
 
+/// A sealed mailbox deposit is burn-after-read: it is sealed to one recipient, so
+/// the relay only ever needs to serve it once. Named because the deposit call and
+/// the [`DepositInfo`] describing it must not drift apart.
+pub(super) const OFFLINE_MAX_DOWNLOADS: u32 = 1;
+
 /// Deposit `payload` to the relay mailbox (sealed to `recipient`) and post a
 /// long-lived `arvm` offer pointing at it. Shared by the up-front offline path and
 /// the live-send watchdog fallback.
@@ -447,7 +472,7 @@ pub(super) async fn deposit_offline_and_offer(
         &inner.me,
         relay,
         OFFLINE_TTL_SECS,
-        1,
+        OFFLINE_MAX_DOWNLOADS,
         None,
     )
     .await?;
@@ -530,34 +555,109 @@ pub(super) fn cancel_deposited(inner: Arc<Inner>, id: u64) {
     });
 }
 
-/// Poll the relay until the deposited blob `claim` is fetched (delivered) or the
-/// confirmation window elapses. On delivery, flip the transfer to Completed and
-/// emit it; otherwise leave it as Deposited. Runs as a detached task.
+/// Watch a deposited blob until its fate is known: Completed once the recipient
+/// fetches it, Failed once the relay-side TTL runs out with it still sitting
+/// there. Backs off from seconds to `POLL_MAX_SECS` and keeps watching for the
+/// blob's whole life, so a pickup on day 5 still lands. Runs as a detached task.
+///
+/// `expires` is the relay-side expiry (unix secs). The last look happens
+/// `MARGIN` before it — see [`OFFLINE_CONFIRM_MARGIN_SECS`] for why the verdict
+/// hinges on that gap.
+///
+/// A relay we can't reach yields no verdict at all: on error we keep retrying,
+/// and if the deadline passes without a single successful look the transfer is
+/// left Deposited. "I never saw it picked up" and "it wasn't picked up" are
+/// different claims, and only the second one earns a terminal state.
 pub(super) async fn confirm_offline_delivery(
     inner: Arc<Inner>,
     id: u64,
     relay: String,
     claim: String,
+    expires: u64,
 ) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(OFFLINE_CONFIRM_SECS);
+    let verdict_at = expires.saturating_sub(OFFLINE_CONFIRM_MARGIN_SECS);
+    let mut delay = OFFLINE_CONFIRM_POLL_SECS;
     loop {
-        if matches!(
-            flow::claim_status(&relay, &claim).await,
-            Ok(flow::ClaimStatus::Gone)
-        ) {
-            inner.set_status(id, TransferStatus::Completed);
-            inner.emit(ManagerEvent::Completed { id, path: None });
-            // Pickup confirmed — the durable deposited record has served its purpose.
-            if let Some(dir) = &inner.state_dir {
-                remove_deposited(dir, id);
+        let look = flow::claim_info(&relay, &claim).await.ok();
+        match read_deposit(look.as_ref(), unix_now(), verdict_at) {
+            Verdict::PickedUp => {
+                complete_deposit(&inner, id);
+                return;
             }
-            return;
+            Verdict::Expired => {
+                let msg = "expired on the relay — the recipient never collected it".to_string();
+                inner.set_status(id, TransferStatus::Failed(msg.clone()));
+                inner.emit(ManagerEvent::Failed { id, error: msg });
+                retire_record(&inner, id);
+                return;
+            }
+            Verdict::Unknown => {
+                retire_record(&inner, id);
+                return;
+            }
+            Verdict::KeepWatching => {}
         }
-        if std::time::Instant::now() >= deadline {
-            return; // stays Deposited; the blob still lives on the relay
-        }
-        tokio::time::sleep(std::time::Duration::from_secs(OFFLINE_CONFIRM_POLL_SECS)).await;
+        // Never sleep past the verdict: waking after the relay has already dropped
+        // the row would turn a real pickup into an indistinguishable "gone".
+        let wait = delay.min(verdict_at.saturating_sub(unix_now())).max(1);
+        tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+        delay = delay.saturating_mul(2).min(OFFLINE_CONFIRM_POLL_MAX_SECS);
     }
+}
+
+/// What one look at a deposited blob's status means for the transfer.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Verdict {
+    /// The recipient fetched it.
+    PickedUp,
+    /// The TTL ran out with it still sitting on the relay.
+    Expired,
+    /// The deadline arrived with the relay unreachable, so we never learned
+    /// anything. Distinct from `Expired`: "I never saw it picked up" is not the
+    /// same claim as "it wasn't picked up", and only the latter may be shown.
+    Unknown,
+    /// No conclusion yet — look again later.
+    KeepWatching,
+}
+
+/// Decide a deposit's fate from one status look. Pure: the network and the clock
+/// are the caller's problem, which is what makes the interesting cases (a pickup
+/// on day 5, a relay that was down at the deadline) testable without either.
+///
+/// `look` is `None` when the relay couldn't be reached. Note that only *this*
+/// look counts, never an earlier one: a blob seen on day 3 says nothing about
+/// day 7 if the relay went dark in between — it could have been collected the
+/// whole time. An expiry verdict needs the relay to still be saying "it's here"
+/// as the TTL runs out.
+pub(super) fn read_deposit(look: Option<&flow::ClaimInfo>, now: u64, verdict_at: u64) -> Verdict {
+    match look {
+        // A download count is the direct answer, when the relay is new enough to
+        // report it. It only ever reaches 1 here (deposits are max=1, so the fetch
+        // deletes the row), but reading it keeps this correct if a multi-download
+        // deposit ever grows a tracked row.
+        Some(i) if i.downloads.is_some_and(|d| d >= 1) => Verdict::PickedUp,
+        // Gone, and the TTL hasn't run out: only a fetch removes it this early.
+        Some(i) if !i.present => Verdict::PickedUp,
+        _ if now < verdict_at => Verdict::KeepWatching,
+        // Still there as the TTL runs out: nobody ever came for it.
+        Some(_) => Verdict::Expired,
+        None => Verdict::Unknown,
+    }
+}
+
+/// Retire a watched deposit's durable record: the blob is past saving either way,
+/// so dropping it also stops a restart from re-watching a dead deposit.
+fn retire_record(inner: &Arc<Inner>, id: u64) {
+    if let Some(dir) = &inner.state_dir {
+        remove_deposited(dir, id);
+    }
+}
+
+/// Mark a watched deposit as picked up and retire its durable record.
+fn complete_deposit(inner: &Arc<Inner>, id: u64) {
+    inner.set_status(id, TransferStatus::Completed);
+    inner.emit(ManagerEvent::Completed { id, path: None });
+    retire_record(inner, id);
 }
 
 /// Mark a transfer as deposited-to-mailbox and start confirming its delivery.
@@ -581,22 +681,41 @@ pub(super) fn spawn_offline_confirm(
     } = out;
     inner.set_progress(id, size);
     inner.set_status(id, TransferStatus::Deposited);
-    inner.emit(ManagerEvent::Deposited { id });
+
+    // Read the row once, for the event and the record both.
+    let (recipient, name) = {
+        let transfers = inner.transfers.lock().unwrap();
+        let t = transfers.get(&id);
+        (
+            t.and_then(|t| t.peer.clone()),
+            t.map(|t| t.name.clone()).unwrap_or_default(),
+        )
+    };
+
+    // Emitted *before* the record is written, so it carries what a front-end needs
+    // to file its own receipt rather than making it read ours back — see [`DepositInfo`].
+    inner.emit(ManagerEvent::Deposited {
+        id,
+        info: DepositInfo {
+            relay: relay.clone(),
+            claim: claim.clone(),
+            revoke_token: revoke_token.clone(),
+            name: name.clone(),
+            size,
+            expires,
+            max: OFFLINE_MAX_DOWNLOADS,
+            recipient: recipient.clone(),
+            offer_id: offer_id.clone(),
+            poster_token: poster_token.clone(),
+        },
+    });
+
     if let Some(dir) = &inner.state_dir {
-        let (recipient, name) = {
-            let transfers = inner.transfers.lock().unwrap();
-            let t = transfers.get(&id);
-            (
-                t.and_then(|t| t.peer.as_ref().map(|p| p.to_bytes().to_vec()))
-                    .unwrap_or_default(),
-                t.map(|t| t.name.clone()).unwrap_or_default(),
-            )
-        };
         persist_deposited(
             dir,
             &DepositedRecord {
                 id,
-                recipient,
+                recipient: recipient.map(|p| p.to_bytes().to_vec()).unwrap_or_default(),
                 name,
                 size,
                 relay: relay.clone(),
@@ -608,7 +727,13 @@ pub(super) fn spawn_offline_confirm(
             },
         );
     }
-    tokio::spawn(confirm_offline_delivery(inner.clone(), id, relay, claim));
+    tokio::spawn(confirm_offline_delivery(
+        inner.clone(),
+        id,
+        relay,
+        claim,
+        expires,
+    ));
 }
 
 /// Unix seconds now (0 on a pre-epoch clock — never panics).
@@ -746,3 +871,92 @@ pub(super) fn finish(inner: &Inner, id: u64, cancelled: bool, result: Result<Opt
 }
 
 // ---- resumable-download persistence ---------------------------------------
+
+#[cfg(test)]
+mod deposit_verdict_tests {
+    use super::{read_deposit, Verdict};
+    use crate::flow::ClaimInfo;
+
+    const DEADLINE: u64 = 1_000;
+
+    fn present() -> ClaimInfo {
+        ClaimInfo {
+            present: true,
+            downloads: Some(0),
+            max_downloads: Some(1),
+        }
+    }
+    fn gone() -> ClaimInfo {
+        ClaimInfo {
+            present: false,
+            downloads: None,
+            max_downloads: None,
+        }
+    }
+
+    /// The regression this whole change exists for: the old watcher gave up after
+    /// 90 seconds, so a recipient who collected on day 5 left the row lying about
+    /// itself forever. Long after the old window, "gone" still means delivered.
+    #[test]
+    fn gone_long_after_the_old_window_is_still_a_pickup() {
+        assert_eq!(
+            read_deposit(Some(&gone()), 900, DEADLINE),
+            Verdict::PickedUp
+        );
+    }
+
+    /// An older relay reports presence only (`downloads: None`), so the pickup has
+    /// to be read from the blob's disappearance alone.
+    #[test]
+    fn a_presence_only_relay_still_resolves_a_pickup() {
+        let old = ClaimInfo {
+            present: false,
+            downloads: None,
+            max_downloads: None,
+        };
+        assert_eq!(read_deposit(Some(&old), 10, DEADLINE), Verdict::PickedUp);
+    }
+
+    /// When the relay does count, the count decides — no inference needed.
+    #[test]
+    fn a_download_count_settles_it_directly() {
+        let fetched = ClaimInfo {
+            present: true,
+            downloads: Some(1),
+            max_downloads: Some(2),
+        };
+        assert_eq!(
+            read_deposit(Some(&fetched), 10, DEADLINE),
+            Verdict::PickedUp
+        );
+    }
+
+    #[test]
+    fn still_sitting_there_means_look_again() {
+        assert_eq!(
+            read_deposit(Some(&present()), 999, DEADLINE),
+            Verdict::KeepWatching
+        );
+    }
+
+    #[test]
+    fn still_there_as_the_ttl_runs_out_is_an_expiry() {
+        assert_eq!(
+            read_deposit(Some(&present()), DEADLINE, DEADLINE),
+            Verdict::Expired
+        );
+    }
+
+    /// The verdict rides on *this* look, not on history: a relay that goes dark
+    /// before the deadline could have served the file the whole time it was gone.
+    /// Reporting "never collected" there would be a guess dressed as a fact.
+    #[test]
+    fn a_relay_dark_at_the_deadline_yields_no_verdict() {
+        assert_eq!(read_deposit(None, DEADLINE, DEADLINE), Verdict::Unknown);
+    }
+
+    #[test]
+    fn an_unreachable_relay_before_the_deadline_just_retries() {
+        assert_eq!(read_deposit(None, 500, DEADLINE), Verdict::KeepWatching);
+    }
+}

@@ -8,7 +8,9 @@ use std::time::{Duration, Instant};
 
 use arvolo_core::backfill::BlobNode;
 use arvolo_core::crypto::Identity;
+use arvolo_core::flow::fetch_offline;
 use arvolo_core::manager::{TransferManager, TransferStatus};
+use arvolo_core::presence::InboxSubscription;
 use arvolo_core::transfer::RelayChoice;
 use arvolo_relay::{router, AppState, Mailbox};
 
@@ -215,5 +217,64 @@ async fn paused_send_survives_restart() {
             .into_iter()
             .any(|t| matches!(t.status, TransferStatus::Paused(_))),
         "the send must come back paused after a restart"
+    );
+}
+
+/// The pickup a sender actually cares about: the recipient was offline, the file
+/// went to the mailbox, and later they collected it. The row must stop saying
+/// "deposited" and say delivered.
+///
+/// This drives the whole wiring against a real relay — the deposit's expiry
+/// reaching the watcher, the status look, and the flip — which the pure verdict
+/// tests in `core` deliberately don't touch. A pickup *after* the old
+/// 90-second window is the case that used to be lost forever; it can't be timed
+/// out here without a three-minute test, so `core`'s unit tests pin that and this
+/// one pins that the machine around them is connected.
+#[tokio::test]
+async fn a_collected_deposit_completes() {
+    let (relay, _dir) = spawn_relay().await;
+
+    let sender = Identity::generate();
+    let recipient = Identity::generate(); // offline: never posts a presence beacon
+    let dl = tempfile::tempdir().unwrap();
+    let m = TransferManager::new(sender, Some(relay.clone()), dl.path().to_path_buf());
+
+    let payload = b"the quarterly report".to_vec();
+    let src = tmpfile(&payload);
+    let id = m
+        .send_to(
+            &recipient.public(),
+            src.path().to_path_buf(),
+            "report.pdf".into(),
+            false,
+            String::new(),
+        )
+        .await
+        .unwrap();
+
+    // Nobody home, so the send falls back to the relay mailbox and waits there.
+    wait_status(&m, id, |s| matches!(s, TransferStatus::Deposited)).await;
+
+    // The recipient comes back and collects it: the offer waiting in their inbox
+    // carries the ticket, exactly as the accept path would use it.
+    let sub = InboxSubscription::new(relay, &recipient);
+    let offers = sub.poll_wait(5).await.expect("read the inbox");
+    let offer = offers.first().expect("the deposit posted an offer");
+    let out = dl.path().join("collected.pdf");
+    let (path, _) = fetch_offline(&offer.offer.ticket, Some(out), &recipient, None)
+        .await
+        .expect("collect the deposit");
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        payload,
+        "the collected file must be the one that was sent"
+    );
+
+    // The watcher notices the blob is gone and settles the row.
+    let status = wait_status(&m, id, |s| !matches!(s, TransferStatus::Deposited)).await;
+    assert_eq!(
+        status,
+        TransferStatus::Completed,
+        "a collected deposit is delivered, not still awaiting pickup"
     );
 }

@@ -39,11 +39,20 @@ async fn spawn_relay() -> String {
     format!("http://{addr}")
 }
 
-/// A `Command` for the built `arvolo` binary with an isolated config dir + relay.
+/// A `Command` for the built `arvolo` binary with an isolated config dir, identity
+/// and relay.
+///
+/// `ARVOLO_IDENTITY` is what makes the two devices actually distinct: the identity
+/// path does *not* follow `ARVOLO_CONFIG_DIR`, it falls back to
+/// `$HOME/.config/arvolo/identity.key`. Without it both sides would open the same
+/// key file — the real one belonging to whoever ran the test — so `join` would
+/// "import" an identity A had only ever read from B's own file, and this test would
+/// pass without pairing anything.
 fn arvolo(cfg: &Path, relay: &str, args: &[&str]) -> Command {
     let mut c = Command::new(env!("CARGO_BIN_EXE_arvolo"));
     c.args(args)
         .env("ARVOLO_CONFIG_DIR", cfg)
+        .env("ARVOLO_IDENTITY", cfg.join("identity.key"))
         .env("ARVOLO_RELAY", relay)
         .env("ARVOLO_NO_WIZARD", "1")
         .kill_on_drop(true);

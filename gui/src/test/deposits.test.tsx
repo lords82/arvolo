@@ -21,6 +21,7 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({ open: () => Promise.resolve(null) 
 vi.mock("@tauri-apps/plugin-opener", () => ({ revealItemInDir: () => Promise.resolve() }));
 
 import { useStore } from "../store";
+import { App } from "../App";
 import { DepositsPanel } from "../components/DepositsPanel";
 import type { DepositDto } from "../types";
 
@@ -224,6 +225,12 @@ describe("the panel", () => {
     await s().openDeposits();
     render(<DepositsPanel />);
     expect(await screen.findByText("relazione.pdf")).toBeDefined();
+    // The claim in this test's name, actually asserted: the relay has let it go, so
+    // there is nothing to withdraw — only the local record to tidy away. Offering
+    // "Revoca" would promise an action that cannot happen.
+    expect(screen.getByText("Non più disponibile")).toBeDefined();
+    expect(screen.getByText("Elimina")).toBeDefined();
+    expect(screen.queryByText("Revoca")).toBeNull();
   });
 
   it("153. with nothing out there it says so plainly", async () => {
@@ -248,5 +255,76 @@ describe("the panel", () => {
     render(<DepositsPanel />);
     fireEvent.click(screen.getByLabelText("Chiudi"));
     expect(s().depositsOpen).toBe(false);
+  });
+
+  it("157. a live link says how many times it was actually fetched", async () => {
+    // Not the cap that was asked for at deposit time — the count the relay reports.
+    // The local record cannot know this: it is written once and never updated.
+    harness.snapshot.deposits = [deposit({ present: true, downloads: 3, max_downloads: 5 })];
+    await s().openDeposits();
+    render(<DepositsPanel />);
+    expect(await screen.findByText("Attivo")).toBeDefined();
+    expect(screen.getByText(/3\/5 download/)).toBeDefined();
+  });
+
+  it("158. with nothing out there, it still does not send the user to a terminal", async () => {
+    harness.snapshot.deposits = [];
+    await s().openDeposits();
+    render(<DepositsPanel />);
+    expect(await screen.findByText(/nessun link o deposito/i)).toBeDefined();
+    expect(screen.queryByText(/CLI|terminale|arvolo /i)).toBeNull();
+  });
+
+  it("159. a sealed deposit calls its recipient by name", async () => {
+    // Sealed deposits only started reaching this panel once the daemon began
+    // filing a record for the mailbox sends it makes — before that, this whole
+    // branch rendered for nobody. The board names people; a raw key here would
+    // be the one place that doesn't.
+    useStore.setState({
+      contactsById: {
+        k7x2: { id: "k7x2", name: "alice", verified: true, fingerprint: "aa bb" },
+      },
+    });
+    harness.snapshot.deposits = [
+      deposit({ kind: "offline", link: "", recipient: "k7x2", max_label: "1" }),
+    ];
+    await s().openDeposits();
+    render(<DepositsPanel />);
+    expect(await screen.findByText(/sigillato per alice/)).toBeDefined();
+  });
+
+  it("160. a sealed deposit for someone not in the book still says who", async () => {
+    // No name to show, but the id is not nothing — it must not render "sigillato
+    // per " and trail off.
+    useStore.setState({ contactsById: {} });
+    harness.snapshot.deposits = [
+      deposit({ kind: "offline", link: "", recipient: "zz99aabbccdd", max_label: "1" }),
+    ];
+    await s().openDeposits();
+    render(<DepositsPanel />);
+    const line = await screen.findByText(/sigillato per \S+/);
+    expect(line.textContent).not.toMatch(/sigillato per\s*$/);
+  });
+});
+
+describe("reaching the panel from the app", () => {
+  it("159. the header button opens it and fetches what is out there", async () => {
+    harness.snapshot.deposits = [deposit({ name: "vacanze.zip" })];
+    render(<App />);
+    fireEvent.click(screen.getByLabelText("Link e depositi"));
+    expect(await screen.findByText("vacanze.zip")).toBeDefined();
+    expect(harness.recorder.listDeposits).toBeGreaterThan(0);
+  });
+
+  it("160. opening always refetches — nothing pushes this list", async () => {
+    // No engine event exists for a deposit, and a relay never reports a download
+    // back, so what is in the store is only ever as fresh as the last fetch. If
+    // opening trusted the cache, the panel would quietly show yesterday's truth.
+    useStore.setState({ deposits: [deposit({ name: "vecchio.zip" })] });
+    harness.snapshot.deposits = [deposit({ name: "nuovo.zip" })];
+    render(<App />);
+    fireEvent.click(screen.getByLabelText("Link e depositi"));
+    expect(await screen.findByText("nuovo.zip")).toBeDefined();
+    expect(screen.queryByText("vecchio.zip")).toBeNull();
   });
 });

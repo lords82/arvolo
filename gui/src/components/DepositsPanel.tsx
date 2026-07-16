@@ -9,7 +9,7 @@
 
 import { useState } from "react";
 import { useStore } from "../store";
-import { depositMeta, extOf, fmtBytes, shortId } from "../format";
+import { depositMeta, extOf, fmtBytes } from "../format";
 import type { DepositDto } from "../types";
 
 export function DepositsPanel() {
@@ -173,6 +173,10 @@ function Empty({ loading }: { loading: boolean }) {
 function Row({ d }: { d: DepositDto }) {
   const revoke = useStore((s) => s.revokeDeposit);
   const revoking = useStore((s) => s.revoking);
+  // Sealed deposits name a contact, so say who: the board already calls people by
+  // name, and a raw key here would be the one place that doesn't. Falls back to a
+  // short id for someone who isn't in the book.
+  const peerLabel = useStore((s) => s.peerLabel);
   const [confirming, setConfirming] = useState(false);
   const [copied, setCopied] = useState(false);
 
@@ -232,7 +236,7 @@ function Row({ d }: { d: DepositDto }) {
           className="mono"
           style={{ fontSize: 10, color: "#a8a29a", marginTop: 2 }}
         >
-          {isLink ? d.link : `sigillato per ${shortId(d.recipient)}`}
+          {isLink ? d.link : `sigillato per ${peerLabel(d.recipient, "")}`}
         </div>
       </div>
 

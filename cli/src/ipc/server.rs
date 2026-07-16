@@ -15,8 +15,8 @@ use tokio::sync::broadcast::error::RecvError;
 use tokio_util::sync::CancellationToken;
 
 use super::protocol::{
-    ContactDto, DepositDto, EventDto, OfferDto, Request, RequestEnvelope, Response, ServerMessage,
-    StatusDto, TransferDto,
+    ContactDto, EventDto, OfferDto, Request, RequestEnvelope, Response, ServerMessage, StatusDto,
+    TransferDto,
 };
 
 /// Shared daemon state handed to every connection handler. Cheap to clone.
@@ -65,10 +65,21 @@ async fn handle_conn(daemon: Daemon, stream: tokio::net::UnixStream) -> Result<(
         if line.trim().is_empty() {
             continue;
         }
+        // The correlation id and the command parse independently — and the reply must
+        // use the real id even when the command is gibberish. The client is blocked
+        // reading for *its* id and skips anything else, so answering with a
+        // placeholder leaves it waiting on a reply that will never come: it hangs
+        // instead of learning what went wrong. The case is not hypothetical — a CLI
+        // newer than the daemon sends a variant this build has never heard of, which
+        // is precisely what every upgrade leaves behind until the daemon restarts.
         let env: RequestEnvelope = match serde_json::from_str(&line) {
             Ok(e) => e,
             Err(e) => {
-                write_reply(&mut write, 0, Response::Error(format!("bad request: {e}"))).await?;
+                let id = serde_json::from_str::<serde_json::Value>(&line)
+                    .ok()
+                    .and_then(|v| v.get("id").and_then(serde_json::Value::as_u64))
+                    .unwrap_or(0) as u32;
+                write_reply(&mut write, id, Response::Error(format!("bad request: {e}"))).await?;
                 continue;
             }
         };
@@ -100,8 +111,8 @@ async fn dispatch(d: &Daemon, cmd: Request) -> Response {
             Response::Pending(v)
         }
         Request::ListContacts => Response::Contacts(list_contacts()),
-        Request::ListDeposits => Response::Deposits(list_deposits().await),
-        Request::RevokeDeposit { id } => revoke_deposit(&id).await,
+        Request::ListDeposits => Response::Deposits(crate::deposits::list_dtos().await),
+        Request::RevokeDeposit { id } => revoke_deposit(d, &id).await,
         Request::Cancel { id } => {
             d.manager.cancel(id);
             Response::Ok
@@ -118,6 +129,7 @@ async fn dispatch(d: &Daemon, cmd: Request) -> Response {
                 )
             }
         }
+        Request::ClearFinished => Response::Cleared(d.manager.clear_finished()),
         Request::MarkVerified { name } => match crate::book::mark_verified(&name) {
             Ok(_) => Response::Ok,
             Err(e) => Response::Error(format!("{e:#}")),
@@ -226,89 +238,35 @@ async fn serve_ticket(d: &Daemon, paths: Vec<String>, seed_relay: Option<String>
     }
 }
 
-/// How long the relay gets to answer one status query while the deposit list is
-/// being built. The list must open promptly even when the relay is down, so a slow
-/// answer degrades to "unknown" instead of hanging whoever asked.
-const CLAIM_STATUS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(4);
-
-/// Everything this client has left on a relay and could still take back, newest
-/// first (the order [`crate::deposits::list`] already guarantees). The revoke token
-/// stays here: a UI needs the id, never the secret.
-///
-/// The local record is a *receipt*, not a status: it is written once, at deposit
-/// time, and nothing ever updates it. A one-shot link that has been downloaded and
-/// a sealed deposit the recipient collected both leave it untouched — the relay
-/// never reports back. Listing records alone would therefore present dead entries
-/// as alive, which is worse than saying nothing. So ask the relay, concurrently and
-/// best-effort: unreachable leaves the live fields `None`, and the UI says it does
-/// not know rather than inventing an answer.
-async fn list_deposits() -> Vec<DepositDto> {
-    let recs = crate::deposits::list();
-
-    let mut set = tokio::task::JoinSet::new();
-    for (i, d) in recs.iter().enumerate() {
-        // An expired record has nothing left on the relay by definition — `expired`
-        // already says so, and a request could only confirm it. Don't spend one.
-        if d.expired() {
-            continue;
-        }
-        let (relay, claim) = (d.relay.clone(), d.claim.clone());
-        set.spawn(async move {
-            let info = tokio::time::timeout(
-                CLAIM_STATUS_TIMEOUT,
-                arvolo_core::flow::claim_info(&relay, &claim),
-            )
-            .await
-            .ok()
-            .and_then(|r| r.ok());
-            (i, info)
-        });
-    }
-    let mut live: HashMap<usize, arvolo_core::flow::ClaimInfo> = HashMap::new();
-    while let Some(joined) = set.join_next().await {
-        if let Ok((i, Some(info))) = joined {
-            live.insert(i, info);
-        }
-    }
-
-    recs.into_iter()
-        .enumerate()
-        .map(|(i, d)| {
-            let info = live.get(&i);
-            DepositDto {
-                expired: d.expired(),
-                max_label: d.max_label(),
-                present: info.map(|l| l.present),
-                downloads: info.and_then(|l| l.downloads),
-                max_downloads: info.and_then(|l| l.max_downloads),
-                id: d.id,
-                kind: d.kind,
-                name: d.name,
-                size: d.size,
-                link: d.link.unwrap_or_default(),
-                recipient: d.recipient.unwrap_or_default(),
-                created: d.created,
-                expires: d.expires,
-            }
-        })
-        .collect()
-}
-
 /// Withdraw a deposit from the relay, then forget the local record. An already
 /// expired one has nothing left on the relay — tidy the record and report success
 /// rather than an error the user can do nothing about.
-async fn revoke_deposit(id: &str) -> Response {
+///
+/// A deposit this engine made is withdrawn *through* the engine. Revoking its blob
+/// directly would be half a withdrawal: the send also left an offer in the
+/// recipient's inbox, and only the engine's `cancel` retracts that (and ends the
+/// still-live `Deposited` row). Deleting the file while leaving the offer standing
+/// would point the recipient at something that is no longer there.
+async fn revoke_deposit(d: &Daemon, id: &str) -> Response {
     let Some(rec) = crate::deposits::load(id) else {
         return Response::Error("no such deposit".into());
     };
-    if !rec.expired() {
-        if let Err(e) =
-            arvolo_core::flow::revoke_offline(&rec.relay, &rec.claim, &rec.revoke_token).await
-        {
-            return Response::Error(format!("{e:#}"));
-        }
+
+    if let Some(tid) = rec.transfer_id.filter(|t| d.manager.get(*t).is_some()) {
+        // Detached and best-effort inside the engine (a dead relay must not hang the
+        // row), so the record goes now: the deposit is on its way out either way, and
+        // a receipt for a withdrawal already ordered would only be a lie in the list.
+        d.manager.cancel(tid);
+        return match crate::deposits::remove(id) {
+            Ok(()) => Response::Ok,
+            Err(e) => Response::Error(format!("{e:#}")),
+        };
     }
-    match crate::deposits::remove(id) {
+
+    // No engine row: a one-shot CLI deposit, or one whose daemon has since restarted
+    // without restoring it. The record carries what the withdrawal needs — including
+    // the inbox offer, which must come down with the blob.
+    match crate::deposits::withdraw(&rec).await {
         Ok(()) => Response::Ok,
         Err(e) => Response::Error(format!("{e:#}")),
     }
@@ -352,7 +310,7 @@ async fn create_link(d: &Daemon, path: String, ttl: Option<u64>, max: Option<u32
     match outcome {
         Ok(out) => {
             // Save a revocable record so a GUI-created link can still be cancelled
-            // from `arvolo deposits`, exactly like a link made from the CLI.
+            // with `arvolo cancel <id>`, exactly like a link made from the CLI.
             let _ = crate::deposits::save(
                 crate::deposits::KIND_LINK,
                 &relay,
@@ -363,7 +321,11 @@ async fn create_link(d: &Daemon, path: String, ttl: Option<u64>, max: Option<u32
                 max,
                 Some(out.link.clone()),
                 None,
-                ttl,
+                crate::util::now_unix().saturating_add(ttl),
+                // A link is deposited directly, not through the engine: no transfer
+                // row, and no recipient, so no inbox offer. The blob is the whole job.
+                None,
+                None,
             );
             Response::Link(out.link)
         }
@@ -385,7 +347,7 @@ fn spawn_temp_cleanup(
                         ManagerEvent::Completed { id: e, .. }
                         | ManagerEvent::Failed { id: e, .. }
                         | ManagerEvent::Cancelled { id: e }
-                        | ManagerEvent::Deposited { id: e } if *e == id);
+                        | ManagerEvent::Deposited { id: e, .. } if *e == id);
                     if done {
                         let _ = std::fs::remove_file(&temp);
                         return;

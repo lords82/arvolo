@@ -89,7 +89,11 @@ pub(crate) async fn send_offline(
             max,
             Some(out.link.clone()),
             None,
-            ttl,
+            now_unix().saturating_add(ttl),
+            // A link has no engine row and no recipient — it is nobody's arrival, so
+            // there is no inbox offer to retract either. The blob is the whole of it.
+            None,
+            None,
         )?;
         let cap = if max == deposits::UNLIMITED {
             "no download limit".to_string()
@@ -106,10 +110,10 @@ pub(crate) async fn send_offline(
         println!("Anyone with this link can download it in a browser — no arvolo needed:\n");
         println!("    {}\n", out.link);
         println!(
-            "Session '{}' saved — cancel the link (and delete it from the relay) with:\n",
+            "Listed as '{}' in `arvolo transfers` — cancel the link (and delete it\nfrom the relay) with:\n",
             rec.id
         );
-        println!("    arvolo sessions rm {}\n", rec.id);
+        println!("    arvolo cancel {}\n", rec.id);
         if qr {
             print_qr(&out.link);
         }
@@ -169,6 +173,13 @@ pub(crate) async fn send_offline(
     // Also drop an inbox offer so the recipient's daemon can auto-fetch it (the
     // offer carries this same arvm ticket; best-effort — the printed ticket still
     // works if this fails).
+    //
+    // Keep what comes back. The offer outlives this command, and withdrawing later
+    // has to retract it as well as revoke the blob — revoking alone would leave the
+    // recipient an arrival that can never be fetched. Only the poster token can
+    // retract it, so the token has to survive the process that minted it: it goes in
+    // the record, next to the revoke token, and `arvolo cancel <id>` uses both.
+    let mut posted = None;
     if offer {
         let off = arvolo_core::presence::Offer {
             name: name.clone(),
@@ -178,7 +189,7 @@ pub(crate) async fn send_offline(
             note: note.to_string(),
             sender_name: book::my_display_name(),
         };
-        if let Err(e) = arvolo_core::presence::post_offer(
+        match arvolo_core::presence::post_offer(
             &reqwest::Client::new(),
             &relay,
             &recipient,
@@ -188,9 +199,10 @@ pub(crate) async fn send_offline(
         )
         .await
         {
-            eprintln!(
+            Ok(p) => posted = Some(p),
+            Err(e) => eprintln!(
                 "(warning: couldn't post an inbox offer, so the recipient's daemon won't auto-fetch: {e:#})"
-            );
+            ),
         }
     }
 
@@ -203,8 +215,17 @@ pub(crate) async fn send_offline(
         size,
         max,
         None,
-        Some(to.clone()),
-        ttl,
+        // The resolved key, not `to` — which is whatever was typed on the command
+        // line, a contact name as often as an id. The record's reader has no way to
+        // tell one from the other, and needs the key: to retract the offer below, and
+        // to match the deposit to a contact in a UI. (The daemon path has always put
+        // the key here; this one used to disagree.)
+        Some(encode_id(&recipient)),
+        now_unix().saturating_add(ttl),
+        // No engine row behind a one-shot deposit: the withdrawal happens from the
+        // record itself, which is why the offer below rides along in it.
+        None,
+        posted.as_ref(),
     )?;
     println!(
         "\nEncrypted and deposited ({max} download(s), expires in {}).",
@@ -220,10 +241,10 @@ pub(crate) async fn send_offline(
     }
     println!("    arvolo recv {encoded}\n");
     println!(
-        "Session '{}' saved — cancel the delivery (and delete it from the relay) with:\n",
+        "Listed as '{}' in `arvolo transfers` — cancel the delivery (and delete it\nfrom the relay) with:\n",
         rec.id
     );
-    println!("    arvolo sessions rm {}\n", rec.id);
+    println!("    arvolo cancel {}\n", rec.id);
     if qr {
         print_qr(&encoded);
     }

@@ -7,11 +7,16 @@ use std::process::{Command, Output};
 use arvolo_core::crypto::Identity;
 use tempfile::TempDir;
 
-/// Run `arvolo <args>` with an isolated config dir and non-interactive stdin.
+/// Run `arvolo <args>` with an isolated config dir, identity and non-interactive stdin.
+///
+/// The identity needs its own variable: its path doesn't follow `ARVOLO_CONFIG_DIR`,
+/// it falls back to `$HOME/.config/arvolo/identity.key` — so without this a test run
+/// reads, and can create, the identity of whoever ran it.
 fn arvolo(cfg: &TempDir, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_arvolo"))
         .args(args)
         .env("ARVOLO_CONFIG_DIR", cfg.path())
+        .env("ARVOLO_IDENTITY", cfg.path().join("identity.key"))
         // No relay: keeps `contacts list` from reaching out; irrelevant here.
         .env_remove("ARVOLO_RELAY")
         .output()

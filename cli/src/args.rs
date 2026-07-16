@@ -31,7 +31,7 @@ pub(crate) enum Command {
         #[arg(num_args = 0..)]
         paths: Vec<PathBuf>,
         /// Resume an interrupted send so the ticket you already shared stays valid.
-        /// Pass a **session id** (see `arvolo sessions list`) — recovers `--to`
+        /// Pass a **session id** (see `arvolo transfers`) — recovers `--to`
         /// sends too, no file needed — OR a plain **`arvc…` ticket** together with
         /// its file (re-serves it; the receiver uses the reprinted ticket).
         #[arg(long, value_name = "ID|TICKET")]
@@ -116,14 +116,11 @@ pub(crate) enum Command {
         #[command(subcommand)]
         action: Option<SyncAction>,
     },
-    /// List or delete resumable send sessions (used by `send --resume`).
-    Sessions {
-        #[command(subcommand)]
-        action: SessionAction,
-    },
-    /// Show all transfers — live (in/out) and past — plus offers awaiting
-    /// approval. With a daemon running it includes its live state; otherwise it
-    /// shows the persisted history. `clear` wipes the history.
+    /// Show everything: live transfers (in/out) and offers awaiting approval,
+    /// files you left on a relay (links and sealed mailbox deposits), interrupted
+    /// sends you can resume, and the past. With a daemon running this includes its
+    /// live state; without one it shows everything that lives on disk. Take any of
+    /// it back with `arvolo cancel <id>`. `clear` wipes the history.
     Transfers {
         /// Keep the view open and redraw as transfers progress (needs a daemon).
         #[arg(long)]
@@ -215,11 +212,12 @@ pub(crate) enum Command {
         /// The offer id shown by `arvolo transfers`.
         offer_id: String,
     },
-    /// Cancel a running transfer by its id (see `arvolo transfers`).
-    #[cfg(unix)]
+    /// Take back anything `arvolo transfers` shows: a running transfer (a plain
+    /// number), a file left on a relay — link or sealed mailbox deposit, deleted
+    /// from the relay, not just locally — or a resumable send you no longer want.
     Cancel {
-        /// The transfer id shown by `arvolo transfers`.
-        id: u64,
+        /// The id shown by `arvolo transfers`.
+        id: String,
     },
     /// Pause an in-progress `send --to` (hold it; resume or cancel later).
     #[cfg(unix)]
@@ -317,14 +315,12 @@ pub(crate) enum SyncAction {
 
 #[derive(Subcommand)]
 pub(crate) enum TransferAction {
-    /// Delete all transfer history.
+    /// Close out the transfers that are over: drop every completed, cancelled and
+    /// failed row from the list. Anything still going stays — including a mailbox
+    /// send awaiting pickup, which looks done but isn't. The history below is a
+    /// separate record and is kept (`clear-history` wipes that).
     Clear,
-}
-
-#[derive(Subcommand)]
-pub(crate) enum SessionAction {
-    /// List resumable send sessions.
-    List,
-    /// Delete a saved session by id.
-    Rm { id: String },
+    /// Delete the persisted history log — the `history:` section. Does not touch
+    /// the live list, your relay deposits, or your resumable sends.
+    ClearHistory,
 }

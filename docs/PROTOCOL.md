@@ -473,14 +473,22 @@ unaffected. An older relay without `/v1/features` is treated as allowing links.
 
 ---
 
-## 8. Lifecycle, sessions, and expiry
+## 8. Lifecycle, deposits, and expiry
 
-Every relay deposit (a sealed `arvm` ticket **or** a public link) is recorded as a
-local **deposit session** ([`cli/src/deposits.rs`](../cli/src/deposits.rs), 0600 —
-it holds the revoke token) with its relay, claim, name, size, download cap, and
-expiry. `arvolo sessions list` shows each with a **live relay status** (polls
-`/v1/entry/{claim}/status`): `present`, `gone (downloaded / expired / revoked)`, or
-`unknown (relay unreachable)`, plus whether it has locally expired.
+Every relay deposit (a sealed `arvm` ticket **or** a public link) is recorded
+locally ([`cli/src/deposits.rs`](../cli/src/deposits.rs), 0600 — it holds the
+revoke token) with its relay, claim, name, size, download cap, and expiry. This
+happens whoever made it: the one-shot CLI writes the record directly, and the
+engine's front-ends write it from the `Deposited` event (the engine itself sits
+below this store), so a mailbox send is listed and withdrawable whether or not a
+daemon was running.
+
+`arvolo transfers` lists them under **left on relay**, each with a **live relay
+status** (polls `/v1/entry/{claim}/status`): `present`, `gone (downloaded /
+revoked)`, or `unknown (relay unreachable)`, plus whether it has locally expired.
+The local record is a *receipt*, not a status — nothing reports a download back —
+so the status is asked of the relay when the list is built, and an unreachable
+relay reads as `unknown` rather than inventing an answer.
 
 A blob is deleted when the **first** of these happens:
 
@@ -488,9 +496,26 @@ A blob is deleted when the **first** of these happens:
    unlimited for a link).
 2. **TTL lapses** — the relay's reaper deletes expired entries (default 7 days for
    a deposit; capped at 30 days).
-3. **Revoke** — `arvolo sessions rm <id>` (or `revoke <arvm…|link>`) sends the
-   revoke token to `DELETE /v1/entry/{claim}` **before** dropping the local record,
-   so removing the session deletes the file and kills the link.
+3. **Revoke** — `arvolo cancel <id>` (or `revoke <arvm…|link>`, for one sent from
+   another machine) sends the revoke token to `DELETE /v1/entry/{claim}` **before**
+   dropping the local record, so taking a deposit back deletes the file and kills
+   the link. A deposit the engine made is withdrawn *through* the engine, which
+   also retracts the offer it left in the recipient's inbox — otherwise they'd be
+   pointed at a blob that is no longer there.
+
+The **local record** is swept an hour after its TTL, when the list is next built.
+Expiry is the only trigger: the record exists to hold the revoke token, so it dies
+with the blob, and of the three ways a blob dies only the TTL can be known locally,
+for free, and for certain. A download proves nothing (a link is unlimited by
+default; even a sealed send takes `--max N`), and an unreachable relay's silence
+must never be read as absence. Keeping a dead record costs a stale row; binning a
+live one costs the token — so the sweep waits for the one signal that can't be
+wrong, with an hour's slack.
+
+No clock is exchanged with the relay, and none is needed: a TTL is a duration, so
+both sides deadline at `created + ttl` from the same moment by their own clock, and
+a standing offset cancels. The hour of slack covers the residue — our clock drifting
+or jumping (an NTP step, a suspended VM) *between* the deposit and the check.
 
 Rendezvous slots, inbox offers, and presence beacons each have their own short
 TTLs and row caps (abuse/disk-fill guards); see the constants in
@@ -584,7 +609,7 @@ asked for when you chose a "share by link" flow.
   share is a bearer token by definition. (A recipient-sealed `arvm` send, by
   contrast, can *only* be opened by one identity's key.)
 - *Mitigations (not a fix, a choice):* set **`--max N`** (burn after N downloads),
-  a short **`--ttl`**, and **`arvolo sessions rm <id>`** to revoke it the moment
+  a short **`--ttl`**, and **`arvolo cancel <id>`** to revoke it the moment
   you're done — controls most link services don't even offer.
 
 **5. The browser download link trusts the relay to serve honest code.**

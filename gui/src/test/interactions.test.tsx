@@ -30,7 +30,6 @@ import { App } from "../App";
 import { Board } from "../components/Board";
 import { SendSheet } from "../components/SendSheet";
 import { IncomingModal } from "../components/IncomingModal";
-import { DepositsPanel } from "../components/DepositsPanel";
 
 function fresh() {
   useStore.setState({
@@ -452,120 +451,8 @@ describe("the incoming modal", () => {
   });
 });
 
-describe("the deposits panel", () => {
-  it("140. the header button opens it and fetches what is on the relay", async () => {
-    harness.snapshot.deposits = [dto.deposit({ name: "vacanze.zip" })];
-    render(<App />);
-    fireEvent.click(screen.getByLabelText("Link e depositi"));
-    expect(await screen.findByText("vacanze.zip")).toBeDefined();
-    expect(harness.recorder.listDeposits).toBeGreaterThan(0);
-  });
-
-  it("141. opening always refetches — the list has no event to keep it live", async () => {
-    // Nothing pushes a deposit change: no engine event exists for one, and a relay
-    // never reports a download back. So the list a user is shown must be fetched at
-    // the moment they ask for it, not whatever was cached from last time.
-    useStore.setState({ deposits: [dto.deposit({ name: "vecchio.zip" })] });
-    harness.snapshot.deposits = [dto.deposit({ name: "nuovo.zip" })];
-    render(<App />);
-    fireEvent.click(screen.getByLabelText("Link e depositi"));
-    expect(await screen.findByText("nuovo.zip")).toBeDefined();
-    expect(screen.queryByText("vecchio.zip")).toBeNull();
-  });
-
-  it("142. a live link shows the URL and how often it was fetched", async () => {
-    useStore.setState({
-      depositsOpen: true,
-      deposits: [dto.deposit({ present: true, downloads: 3 })],
-    });
-    render(<DepositsPanel />);
-    expect(screen.getByText("Attivo")).toBeDefined();
-    expect(screen.getByText(/3 download/)).toBeDefined();
-    expect(screen.getByText("https://relay.test/dl/claim1#key")).toBeDefined();
-  });
-
-  it("143. Revoca asks before doing it — one click revokes nothing", () => {
-    useStore.setState({ depositsOpen: true, deposits: [dto.deposit()] });
-    render(<DepositsPanel />);
-    fireEvent.click(screen.getByText("Revoca"));
-    expect(harness.recorder.revokeDeposit).toEqual([]);
-    expect(screen.getByText("Sì, revoca")).toBeDefined();
-  });
-
-  it("144. confirming tells the daemon, and the row goes", async () => {
-    useStore.setState({ depositsOpen: true, deposits: [dto.deposit({ id: "dead01" })] });
-    render(<DepositsPanel />);
-    fireEvent.click(screen.getByText("Revoca"));
-    fireEvent.click(screen.getByText("Sì, revoca"));
-    await waitFor(() => expect(harness.recorder.revokeDeposit).toEqual(["dead01"]));
-    await waitFor(() => expect(screen.queryByText("photo.jpg")).toBeNull());
-  });
-
-  it("145. a refused revoke says so and KEEPS the row", async () => {
-    // The row must not vanish on a failure: showing a link as gone while the relay
-    // still serves it is the one direction a revoke must never be wrong in.
-    harness.fail = new Set(["revokeDeposit"]);
-    useStore.setState({ depositsOpen: true, deposits: [dto.deposit()] });
-    render(<App />);
-    fireEvent.click(screen.getByText("Revoca"));
-    fireEvent.click(screen.getByText("Sì, revoca"));
-    await waitFor(() => expect(useStore.getState().actionError).toMatch(/revocare/i));
-    expect(screen.getByText("photo.jpg")).toBeDefined();
-  });
-
-  it("146. an unreachable relay reads as unknown, never as alive", () => {
-    useStore.setState({
-      depositsOpen: true,
-      deposits: [dto.deposit({ present: null, downloads: null, max_downloads: null })],
-    });
-    render(<DepositsPanel />);
-    expect(screen.getByText("Stato sconosciuto")).toBeDefined();
-    expect(screen.queryByText("Attivo")).toBeNull();
-    // Still worth trying: not knowing is not the same as knowing it is gone.
-    expect(screen.getByText("Revoca")).toBeDefined();
-  });
-
-  it("147. a link the relay no longer holds offers a tidy-up, not a revoke", () => {
-    useStore.setState({
-      depositsOpen: true,
-      deposits: [dto.deposit({ present: false })],
-    });
-    render(<DepositsPanel />);
-    expect(screen.getByText("Non più disponibile")).toBeDefined();
-    expect(screen.getByText("Elimina")).toBeDefined();
-    expect(screen.queryByText("Revoca")).toBeNull();
-  });
-
-  it("148. Aggiorna refetches rather than trusting what is on screen", async () => {
-    useStore.setState({ depositsOpen: true, deposits: [dto.deposit()] });
-    render(<DepositsPanel />);
-    const before = harness.recorder.listDeposits;
-    fireEvent.click(screen.getByText("Aggiorna"));
-    await waitFor(() =>
-      expect(harness.recorder.listDeposits).toBe(before + 1)
-    );
-  });
-
-  it("149. a daemon that cannot be read says so instead of showing an empty list", async () => {
-    // An empty panel under a green "Connesso" reads as "you have no links" — the
-    // same lie the board's loadError exists to prevent.
-    harness.fail = new Set(["listDeposits"]);
-    useStore.setState({ depositsOpen: true });
-    render(<DepositsPanel />);
-    fireEvent.click(screen.getByText("Aggiorna"));
-    expect(await screen.findByRole("alert")).toBeDefined();
-  });
-
-  it("150. the empty state never sends the user to a terminal", () => {
-    useStore.setState({ depositsOpen: true, deposits: [] });
-    render(<DepositsPanel />);
-    expect(screen.getByText(/Nessun link o deposito attivo/)).toBeDefined();
-    expect(screen.queryByText(/CLI|terminale|arvolo /i)).toBeNull();
-  });
-});
-
 describe("no dead ends to the CLI", () => {
-  it("151. the Link tab points at the panel, not at a command to type", async () => {
+  it("156. the Link tab points at the panel, not at a command to type", async () => {
     // It used to say "Revocalo dalla CLI con `arvolo deposits`" — a command that
     // does not exist in the CLI at all. The advice was unfollowable twice over.
     useStore.setState({ sheetPaths: ["/a.txt"] });

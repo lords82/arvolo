@@ -95,6 +95,47 @@ pub struct Transfer {
     pub created: u64,
 }
 
+/// What an offline send actually left on the relay, carried by
+/// [`ManagerEvent::Deposited`].
+///
+/// It rides *with* the event on purpose. A subscriber told only "id N was
+/// deposited" would have to read the engine's own record back to learn how to
+/// withdraw it — which races the write that follows the emit, and finds nothing at
+/// all on a manager without a `state_dir`. Handing over the capability at the
+/// moment it comes into being avoids both.
+///
+/// This is in-process only. It holds `revoke_token`, a sender-only secret, which
+/// is why the IPC mirror (`arvolo_ipc`'s `EventDto`) keeps nothing from here but
+/// the id: subscribers to a daemon socket must not be handed the withdrawal
+/// capability for someone else's deposit.
+#[derive(Clone, Debug)]
+pub struct DepositInfo {
+    pub relay: String,
+    pub claim: String,
+    /// Sender-only secret authorizing removal of the blob from the relay.
+    pub revoke_token: String,
+    pub name: String,
+    pub size: u64,
+    /// Unix seconds when the relay drops the blob on its own. Absolute, not a TTL:
+    /// a restored deposit keeps its original deadline rather than winning a fresh one.
+    pub expires: u64,
+    /// The download cap it was deposited under.
+    pub max: u32,
+    /// The recipient it is sealed to.
+    pub recipient: Option<PublicId>,
+    /// The offer left in the recipient's inbox pointing at this blob, and the token
+    /// that retracts it — the other half of a withdrawal, alongside `revoke_token`.
+    ///
+    /// The engine keeps its own copy and retracts them itself when it cancels, so
+    /// handing them over is redundant *while a daemon is running*. It isn't when one
+    /// isn't: a deposit made by the daemon can be withdrawn later from a bare CLI,
+    /// with the engine gone, and without these that withdrawal could only kill the
+    /// blob — leaving the recipient an arrival that can never be fetched. A receipt
+    /// is only worth keeping if it is sufficient on its own.
+    pub offer_id: String,
+    pub poster_token: String,
+}
+
 /// Events emitted as transfers and offers progress. Cloneable for [`broadcast`].
 #[derive(Clone, Debug)]
 pub enum ManagerEvent {
@@ -129,8 +170,9 @@ pub enum ManagerEvent {
     Completed { id: u64, path: Option<PathBuf> },
     /// An offline send was deposited to the mailbox (awaiting the recipient). It
     /// may later transition to [`Completed`](ManagerEvent::Completed) once the
-    /// recipient fetches it (within the confirmation window).
-    Deposited { id: u64 },
+    /// recipient fetches it (within the confirmation window). `info` describes what
+    /// was left on the relay, so a front-end can record a withdrawable receipt.
+    Deposited { id: u64, info: DepositInfo },
     /// A send is being held for later delivery because the relay couldn't take it
     /// (refused / unreachable / errored). The daemon keeps trying: live P2P when
     /// the recipient appears, and the relay again on a slow interval. `reason` is
@@ -244,11 +286,21 @@ impl TransferManager {
         self.inner.transfers.lock().unwrap().get(&id).cloned()
     }
 
-    /// Drop all finished (completed/failed/cancelled) transfers from the list —
-    /// e.g. when the user clears their history in the UI. Keeps still-in-flight
-    /// transfers (Active, and Deposited ones still awaiting a pickup confirmation).
-    pub fn clear_finished(&self) {
-        self.inner.transfers.lock().unwrap().retain(|_, t| {
+    /// Drop every finished (completed/failed/cancelled) transfer from the list and
+    /// return how many went — the bulk twin of [`remove`](Self::remove).
+    ///
+    /// "Finished" is defined by what it *keeps*: anything that still has a future.
+    /// A **Deposited** send is the one that catches people out — it looks done, and
+    /// isn't: its blob is sitting on a relay waiting to be collected, and the pickup
+    /// poll can still turn it into Completed. Waiting and Paused likewise. Only rows
+    /// that will never change again are dropped.
+    ///
+    /// This forgets the row, not the deed: the history log is written separately and
+    /// is untouched here.
+    pub fn clear_finished(&self) -> usize {
+        let mut transfers = self.inner.transfers.lock().unwrap();
+        let before = transfers.len();
+        transfers.retain(|_, t| {
             matches!(
                 t.status,
                 TransferStatus::Active
@@ -257,6 +309,7 @@ impl TransferManager {
                     | TransferStatus::Paused(_)
             )
         });
+        before - transfers.len()
     }
 
     /// Drop one **finished** (completed/failed/cancelled) transfer from the list —
@@ -493,6 +546,11 @@ impl TransferManager {
     /// relay-side TTL has already lapsed is dropped silently (the blob is gone).
     fn restore_deposited(&self, rec: DepositedRecord) {
         if unix_now() >= rec.expires {
+            // Delete it too: skipping alone left the file to be re-read and
+            // re-skipped on every start from here to eternity.
+            if let Some(dir) = &self.inner.state_dir {
+                remove_deposited(dir, rec.id);
+            }
             return;
         }
         let peer = PublicId::from_bytes(&rec.recipient).ok();
@@ -1007,5 +1065,143 @@ impl TransferManager {
         if let Some(sub) = &self.inner.inbox {
             let _ = sub.ack(offer_id).await;
         }
+    }
+}
+
+#[cfg(test)]
+mod clear_finished_tests {
+    use super::*;
+
+    /// The whole risk of a bulk clear is what it *keeps*. A Deposited send is the
+    /// trap: it reads as finished — bytes all moved, nothing running — but its blob
+    /// is on a relay awaiting pickup and the poll can still turn it Completed.
+    /// Dropping it would lose the row *and* the pending delivery from the list.
+    #[tokio::test]
+    async fn clearing_keeps_everything_that_still_has_a_future() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = TransferManager::with_state_dir(
+            Identity::generate(),
+            None,
+            dir.path().to_path_buf(),
+            Some(dir.path().to_path_buf()),
+        );
+
+        // One row per status, so the predicate is pinned from both sides.
+        let mk = |status: TransferStatus| {
+            let (id, _c) = m.register(Direction::Send, None, "f.bin".into(), 1);
+            m.inner.cancels.lock().unwrap().remove(&id);
+            m.inner.set_status(id, status);
+            id
+        };
+        let completed = mk(TransferStatus::Completed);
+        let cancelled = mk(TransferStatus::Cancelled);
+        let failed = mk(TransferStatus::Failed("nope".into()));
+        let active = mk(TransferStatus::Active);
+        let deposited = mk(TransferStatus::Deposited);
+        let waiting = mk(TransferStatus::Waiting("relay down".into()));
+        let paused = mk(TransferStatus::Paused("by hand".into()));
+
+        assert_eq!(m.clear_finished(), 3, "completed + cancelled + failed");
+
+        for (id, what) in [
+            (active, "active"),
+            (deposited, "deposited — awaiting pickup, not done"),
+            (waiting, "waiting"),
+            (paused, "paused"),
+        ] {
+            assert!(m.get(id).is_some(), "{what} must survive a clear");
+        }
+        for (id, what) in [
+            (completed, "completed"),
+            (cancelled, "cancelled"),
+            (failed, "failed"),
+        ] {
+            assert!(m.get(id).is_none(), "{what} must be cleared");
+        }
+
+        // Idempotent: nothing left to take.
+        assert_eq!(m.clear_finished(), 0);
+    }
+}
+
+#[cfg(test)]
+mod deposit_event_tests {
+    use super::*;
+
+    /// The `Deposited` event must hand over the withdrawal capability, not just an
+    /// id. A front-end files its own receipt from this — it is how a mailbox send
+    /// stays listable and revocable — and it cannot read ours back: the write races
+    /// the emit, and a manager without a `state_dir` never writes one at all.
+    ///
+    /// Driven through `resume_incomplete` because that is also the backfill path: a
+    /// deposit made before any of this existed is re-announced on the next start,
+    /// which is what spares us a migration.
+    #[tokio::test]
+    async fn restoring_a_deposit_re_announces_how_to_withdraw_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = TransferManager::with_state_dir(
+            Identity::generate(),
+            None,
+            dir.path().to_path_buf(),
+            Some(dir.path().to_path_buf()),
+        );
+        let mut events = m.subscribe();
+
+        let recipient = Identity::generate().public();
+        let expires = unix_now() + 3600;
+        persist_deposited(
+            dir.path(),
+            &DepositedRecord {
+                id: 41,
+                recipient: recipient.to_bytes().to_vec(),
+                name: "budget.xlsx".into(),
+                size: 4242,
+                relay: "https://relay.example".into(),
+                claim: "claim-abc".into(),
+                expires,
+                revoke_token: "revoke-me".into(),
+                offer_id: "offer-1".into(),
+                poster_token: "poster-1".into(),
+            },
+        );
+
+        assert_eq!(m.resume_incomplete(), 1);
+
+        let ev = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
+            .await
+            .expect("an event")
+            .expect("not lagged");
+        // `register` announces the row first; the deposit news follows.
+        let ev = if matches!(ev, ManagerEvent::Started { .. }) {
+            tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
+                .await
+                .expect("an event")
+                .expect("not lagged")
+        } else {
+            ev
+        };
+
+        let ManagerEvent::Deposited { id, info } = ev else {
+            panic!("expected Deposited, got {ev:?}");
+        };
+        // A fresh id each restart — which is why the receipt is keyed on the claim,
+        // not on this.
+        assert!(m.get(id).is_some());
+        assert_eq!(info.claim, "claim-abc");
+        assert_eq!(info.revoke_token, "revoke-me");
+        // The other half of a withdrawal: without these a front-end could only kill
+        // the blob, leaving the recipient an arrival that can never be fetched.
+        assert_eq!(info.offer_id, "offer-1");
+        assert_eq!(info.poster_token, "poster-1");
+        assert_eq!(info.relay, "https://relay.example");
+        assert_eq!(info.name, "budget.xlsx");
+        assert_eq!(info.size, 4242);
+        assert_eq!(
+            info.recipient.as_ref().map(|p| p.to_bytes().to_vec()),
+            Some(recipient.to_bytes().to_vec())
+        );
+        // The relay's original deadline, not a fresh hour from now: a restart loop
+        // must not keep a blob alive past the TTL its recipient was promised.
+        assert_eq!(info.expires, expires);
     }
 }

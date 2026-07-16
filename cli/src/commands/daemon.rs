@@ -165,7 +165,10 @@ pub(crate) async fn daemon(
                         }
                         record_history(&manager, id, "completed");
                     }
-                    Ok(ManagerEvent::Deposited { id }) => record_history(&manager, id, "deposited"),
+                    Ok(ManagerEvent::Deposited { id, info }) => {
+                        record_history(&manager, id, "deposited");
+                        crate::deposits::record_from_event(Some(id), &info);
+                    }
                     Ok(ManagerEvent::Failed { id, error }) => {
                         record_history(&manager, id, &format!("failed: {error}"))
                     }
@@ -458,17 +461,6 @@ pub(crate) async fn reject_cmd(offer_id: String) -> Result<()> {
         .context("no daemon running (start `arvolo daemon`)")?;
     client.reject(offer_id).await?;
     eprintln!("✗ rejected.");
-    Ok(())
-}
-
-/// `arvolo cancel <id>` — stop a transfer running in the daemon.
-#[cfg(unix)]
-pub(crate) async fn cancel_cmd(id: u64) -> Result<()> {
-    let mut client = daemon_client()
-        .await
-        .context("no daemon running (start `arvolo daemon`)")?;
-    client.cancel(id).await?;
-    eprintln!("cancelled transfer {id}.");
     Ok(())
 }
 

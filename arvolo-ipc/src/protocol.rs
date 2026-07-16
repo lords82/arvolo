@@ -67,6 +67,11 @@ pub enum Request {
     /// Drop one **finished** transfer from the list (per-row "Elimina" in a UI).
     /// No-op for anything still in flight → [`Response::Ok`].
     Remove { id: u64 },
+    /// Drop **every** finished transfer (completed / cancelled / failed) from the
+    /// list → [`Response::Cleared`] with the count. Anything still in flight stays,
+    /// including a Deposited send awaiting its pickup. The history log is a separate
+    /// store and is not touched.
+    ClearFinished,
     /// Mark a saved contact (by name) verified after an out-of-band fingerprint
     /// check → [`Response::Ok`] (error if the name isn't a saved contact).
     MarkVerified { name: String },
@@ -109,6 +114,8 @@ pub enum Response {
     Pending(Vec<OfferDto>),
     Contacts(Vec<ContactDto>),
     Deposits(Vec<DepositDto>),
+    /// How many rows a bulk removal actually dropped.
+    Cleared(usize),
     Ok,
     Error(String),
 }
@@ -378,7 +385,11 @@ impl From<&ManagerEvent> for EventDto {
                 id: *id,
                 path: path.as_ref().map(|p| p.display().to_string()),
             },
-            ManagerEvent::Deposited { id } => EventDto::Deposited { id: *id },
+            // `info` is dropped on purpose, and this is the line that keeps the
+            // promise made on `DepositDto`: it carries the deposit's revoke token,
+            // a sender-only secret, and every subscriber on the socket would get a
+            // copy. A UI only ever needs the id — it asks the daemon to withdraw.
+            ManagerEvent::Deposited { id, .. } => EventDto::Deposited { id: *id },
             ManagerEvent::Waiting { id, reason } => EventDto::Waiting {
                 id: *id,
                 reason: reason.clone(),
@@ -456,6 +467,40 @@ mod tests {
         assert_eq!(serde_json::from_str::<Response>(&s).unwrap(), r);
     }
 
+    /// `ManagerEvent::Deposited` carries a [`DepositInfo`] holding the deposit's
+    /// **revoke token** — the sender-only capability to delete the blob from the
+    /// relay. Every client subscribed to the daemon socket receives every event, so
+    /// the conversion to the wire must drop it. It has no reason to travel: a UI
+    /// asks the daemon to withdraw by id (`Request::RevokeDeposit`), and the daemon
+    /// reads the token from its own store.
+    ///
+    /// Widening `EventDto::Deposited` to carry `info` would look like a convenience
+    /// and would be a capability leak. This test is the tripwire.
+    #[test]
+    fn deposited_event_never_carries_the_revoke_token_onto_the_wire() {
+        let ev = ManagerEvent::Deposited {
+            id: 9,
+            info: arvolo_core::manager::DepositInfo {
+                relay: "https://relay.example".into(),
+                claim: "claim-abc".into(),
+                revoke_token: "SUPER-SECRET-REVOKE-TOKEN".into(),
+                name: "budget.xlsx".into(),
+                size: 4242,
+                expires: 1_800_000_000,
+                max: 1,
+                recipient: None,
+                offer_id: "offer-1".into(),
+                poster_token: "SUPER-SECRET-POSTER-TOKEN".into(),
+            },
+        };
+        let line = serde_json::to_string(&EventDto::from(&ev)).unwrap();
+        assert_eq!(line, r#"{"deposited":{"id":9}}"#);
+        assert!(!line.contains("SUPER-SECRET-REVOKE-TOKEN"));
+        // The other capability in there: it retracts the recipient's inbox entry.
+        assert!(!line.contains("SUPER-SECRET-POSTER-TOKEN"));
+        assert!(!line.contains("claim-abc"));
+    }
+
     /// The GUI's TypeScript mirrors these bytes by hand (`gui/src/events.ts`), so a
     /// change in serde's representation must fail loudly here rather than silently
     /// stop every live update in the app. This exact shape — externally tagged, a
@@ -513,6 +558,42 @@ mod tests {
                 "wire shape changed — update gui/src/events.ts to match"
             );
         }
+    }
+
+    /// The live fields are `Option`s on purpose: "the relay could not be asked" is a
+    /// third state, distinct from present and from gone, and the GUI renders it as
+    /// "unknown". If they ever silently became plain values, an unreachable relay
+    /// would start reporting `false`/`0` — a downloaded link shown as untouched.
+    #[test]
+    fn deposits_response_roundtrips_and_keeps_unknown_unknown() {
+        let r = Response::Deposits(vec![DepositDto {
+            id: "a1b2c3d4".into(),
+            kind: "link".into(),
+            name: "photo.jpg".into(),
+            size: 4242,
+            link: "https://relay.example/dl/claim#key".into(),
+            recipient: String::new(),
+            created: 1_700_000_000,
+            expires: 1_700_604_800,
+            expired: false,
+            max_label: "unlimited".into(),
+            present: None,
+            downloads: None,
+            max_downloads: None,
+        }]);
+        let s = serde_json::to_string(&r).unwrap();
+        assert_eq!(serde_json::from_str::<Response>(&s).unwrap(), r);
+
+        // An older daemon predates the live fields entirely: they must decode as
+        // "unknown" rather than fail the whole list.
+        let old = r#"{"deposits":[{"id":"a1","kind":"link","name":"x","size":1,
+            "created":1,"expires":2,"expired":false}]}"#;
+        let back: Response = serde_json::from_str(old).unwrap();
+        let Response::Deposits(v) = back else {
+            panic!("expected deposits")
+        };
+        assert_eq!(v[0].present, None);
+        assert_eq!(v[0].downloads, None);
     }
 
     #[test]

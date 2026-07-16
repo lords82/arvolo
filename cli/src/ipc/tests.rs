@@ -111,6 +111,159 @@ async fn list_contacts_over_the_socket() {
     std::env::remove_var("ARVOLO_CONFIG_DIR");
 }
 
+/// A deposit the engine made is withdrawn *through* the engine, because only the
+/// engine also retracts the offer it left in the recipient's inbox (and ends the
+/// still-live row). Revoking the blob behind its back would be half a withdrawal.
+///
+/// The unreachable relay is the assertion. The direct path would dial it, fail, and
+/// answer `Error` with the record still on disk; going through the manager touches
+/// no relay here at all. So `Ok` + a gone record can only mean it dispatched right.
+#[tokio::test]
+async fn revoking_a_deposit_the_engine_made_goes_through_the_engine() {
+    let _guard = crate::testlock::ENV
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    std::env::set_var("ARVOLO_CONFIG_DIR", dir.path());
+
+    let manager = TransferManager::new(Identity::generate(), None, dir.path().join("downloads"));
+    // Any engine row will do: what's under test is the dispatch, not the transfer.
+    let tid = manager.start_download(
+        "arvm-not-a-real-ticket".into(),
+        dir.path().join("out.bin"),
+        None,
+        "budget.xlsx".into(),
+        10,
+    );
+    assert!(manager.get(tid).is_some());
+
+    let rec = crate::deposits::save(
+        crate::deposits::KIND_OFFLINE,
+        // Reserved for documentation; a dial would stall, never succeed.
+        "http://192.0.2.1:1",
+        "claim-xyz",
+        "revoke-me",
+        "budget.xlsx",
+        10,
+        1,
+        None,
+        None,
+        crate::util::now_unix() + 3600,
+        Some(tid),
+        None,
+    )
+    .unwrap();
+    assert!(!rec.expired(), "an expired record skips the relay anyway");
+
+    let listener = tokio::net::UnixListener::bind(socket_path()).unwrap();
+    let shutdown = CancellationToken::new();
+    let daemon = Daemon {
+        manager,
+        relay: Some("https://relay.test".into()),
+        download_dir: dir.path().join("downloads"),
+        pending: Arc::new(Mutex::new(HashMap::new())),
+    };
+    let stop = shutdown.clone();
+    tokio::spawn(async move {
+        let _ = server::run(daemon, listener, stop).await;
+    });
+
+    let mut client = DaemonClient::connect().await.expect("connect");
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        client.revoke_deposit(rec.id.clone()),
+    )
+    .await
+    .expect("must not hang on the relay")
+    .expect("must not error out through the direct path");
+
+    assert!(
+        crate::deposits::load(&rec.id).is_none(),
+        "the record must be gone"
+    );
+
+    shutdown.cancel();
+    std::env::remove_var("ARVOLO_CONFIG_DIR");
+}
+
+/// `arvolo transfers clear` drops finished rows and **keeps the history**: they are
+/// two different stores answering two different questions ("what's going on" vs
+/// "what happened"), and the history is the only permanent one. Wiping both from one
+/// verb would leave no record of a transfer the user only meant to tidy off a list.
+#[tokio::test]
+async fn clearing_finished_transfers_leaves_the_history_alone() {
+    let _guard = crate::testlock::ENV
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (shutdown, _dir) = spawn_test_daemon().await;
+
+    crate::history::record("send", None, "done.txt", 10, 10, "completed").unwrap();
+    assert_eq!(crate::history::list().len(), 1);
+
+    let mut client = DaemonClient::connect().await.expect("connect");
+    // Nothing running, so nothing to drop — the point is what survives.
+    assert_eq!(client.clear_finished().await.expect("clear"), 0);
+
+    assert_eq!(
+        crate::history::list().len(),
+        1,
+        "clear must not touch the history log"
+    );
+
+    shutdown.cancel();
+    std::env::remove_var("ARVOLO_CONFIG_DIR");
+}
+
+/// A command this daemon has never heard of must come back as an **error on the
+/// caller's own id**, not a placeholder.
+///
+/// This is the shape of every upgrade: `cargo install` replaces the binary, the
+/// daemon keeps running the old code, and the next new-CLI command reaches a build
+/// that can't parse it. The client blocks reading for its correlation id and skips
+/// everything else, so a reply stamped `0` isn't an error — it's a hang, with no
+/// hint that a restart is all it needed. (This is not theoretical: `clear_finished`
+/// hung exactly this way against a daemon from ten minutes earlier.)
+#[tokio::test]
+async fn an_unknown_command_answers_the_caller_instead_of_hanging_it() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let _guard = crate::testlock::ENV
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (shutdown, _dir) = spawn_test_daemon().await;
+
+    // Raw socket: the typed client can't send a variant that doesn't exist.
+    let stream = tokio::net::UnixStream::connect(socket_path())
+        .await
+        .unwrap();
+    let (read, mut write) = stream.into_split();
+    let mut lines = BufReader::new(read).lines();
+    write
+        .write_all(b"{\"id\":7,\"cmd\":\"from_a_future_cli\"}\n")
+        .await
+        .unwrap();
+
+    let line = tokio::time::timeout(std::time::Duration::from_secs(5), lines.next_line())
+        .await
+        .expect("must answer, not hang")
+        .unwrap()
+        .expect("a reply line");
+    let msg: super::protocol::ServerMessage = serde_json::from_str(&line).unwrap();
+    match msg {
+        super::protocol::ServerMessage::Reply { id, result } => {
+            assert_eq!(
+                id, 7,
+                "the reply must carry the caller's id, not a placeholder"
+            );
+            assert!(matches!(result, super::protocol::Response::Error(_)));
+        }
+        other => panic!("expected a Reply, got {other:?}"),
+    }
+
+    shutdown.cancel();
+    std::env::remove_var("ARVOLO_CONFIG_DIR");
+}
+
 #[tokio::test]
 async fn second_bind_on_the_same_socket_fails() {
     let _guard = crate::testlock::ENV
