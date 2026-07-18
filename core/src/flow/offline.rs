@@ -71,7 +71,9 @@ pub async fn deposit_offline(
     max: u32,
     password: Option<&str>,
 ) -> std::result::Result<Deposited, DepositError> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use std::sync::{Arc, Mutex};
+
+    use tokio::io::AsyncReadExt;
     use DepositError::Fatal;
     let io = |e: std::io::Error| Fatal(anyhow::Error::from(e));
 
@@ -105,13 +107,38 @@ pub async fn deposit_offline(
         .context("seal content key")
         .map_err(Fatal)?;
 
-    // Seal each 16 MiB chunk into a temp file (bounded memory), then stream that
-    // file to the relay.
+    // Seal each 16 MiB chunk as the upload pulls it, and hand the relay a lazy
+    // stream — no whole-file copy ever lands on local disk. The old path spooled the
+    // entire ciphertext to a temp file first, which needs as much free space as the
+    // file itself on whatever volume holds the system temp dir; a large send on a
+    // full disk died there with ENOSPC. Reading is driven by the socket, so a slow
+    // relay just pauses the reads (backpressure) rather than racing ahead of it. The
+    // relay enforces its own per-blob cap while it reads, so no Content-Length is
+    // needed for an over-limit blob to be refused.
     let revoke_token = random_token();
-    let tmp = std::env::temp_dir().join(format!("arvolo-mb-{revoke_token}.tmp"));
-    let seal_res = async {
-        let mut infile = tokio::fs::File::open(path).await.map_err(io)?;
-        let mut outfile = tokio::fs::File::create(&tmp).await.map_err(io)?;
+    // Sender-held revoke secret; the relay stores only its BLAKE3 hash.
+    let revoke_hash = blake3::hash(revoke_token.as_bytes());
+    let relay = relay.trim_end_matches('/').to_string();
+    let url = format!("{relay}/v1/deposit?ttl={ttl}&max={max}");
+
+    // A read or seal failure is local and fatal — the relay never saw it, retrying
+    // won't help — but it reaches the caller only as a stream error, which reqwest
+    // wraps as an ordinary send failure indistinguishable from the relay being down.
+    // Stash it out of band: after the request fails, a stashed error means Fatal, its
+    // absence means the network. Without this, a mid-file read error would demote to
+    // Unavailable and invite a pointless retry.
+    let src = path.to_path_buf();
+    let fatal: Arc<Mutex<Option<anyhow::Error>>> = Arc::new(Mutex::new(None));
+    let fatal_w = fatal.clone();
+    let body = reqwest::Body::wrap_stream(async_stream::stream! {
+        let mut infile = match tokio::fs::File::open(&src).await {
+            Ok(f) => f,
+            Err(e) => {
+                *fatal_w.lock().unwrap() = Some(anyhow::Error::from(e));
+                yield Err(std::io::Error::other("open source file"));
+                return;
+            }
+        };
         let mut buf = vec![0u8; CHUNK_SIZE as usize];
         for idx in 0..total_chunks {
             let want = if idx == total_chunks - 1 {
@@ -119,31 +146,22 @@ pub async fn deposit_offline(
             } else {
                 CHUNK_SIZE as usize
             };
-            infile.read_exact(&mut buf[..want]).await.map_err(io)?;
-            let ct = seal_chunk(&key, idx, total_chunks, &buf[..want]).map_err(Fatal)?;
-            outfile.write_all(&ct).await.map_err(io)?;
+            if let Err(e) = infile.read_exact(&mut buf[..want]).await {
+                *fatal_w.lock().unwrap() = Some(anyhow::Error::from(e));
+                yield Err(std::io::Error::other("read source file"));
+                return;
+            }
+            match seal_chunk(&key, idx, total_chunks, &buf[..want]) {
+                Ok(ct) => yield Ok::<Vec<u8>, std::io::Error>(ct),
+                Err(e) => {
+                    *fatal_w.lock().unwrap() = Some(e);
+                    yield Err(std::io::Error::other("seal chunk"));
+                    return;
+                }
+            }
         }
-        outfile.flush().await.map_err(io)?;
-        Ok::<(), DepositError>(())
-    }
-    .await;
-    if let Err(e) = seal_res {
-        let _ = tokio::fs::remove_file(&tmp).await;
-        return Err(e);
-    }
+    });
 
-    // Sender-held revoke secret; the relay stores only its BLAKE3 hash.
-    let revoke_hash = blake3::hash(revoke_token.as_bytes());
-    let relay = relay.trim_end_matches('/').to_string();
-    let url = format!("{relay}/v1/deposit?ttl={ttl}&max={max}");
-    let upload = match tokio::fs::File::open(&tmp).await {
-        Ok(f) => f,
-        Err(e) => {
-            let _ = tokio::fs::remove_file(&tmp).await;
-            return Err(io(e));
-        }
-    };
-    let body = reqwest::Body::wrap_stream(tokio_util::io::ReaderStream::new(upload));
     let result = reqwest::Client::new()
         .post(&url)
         .header(
@@ -157,9 +175,18 @@ pub async fn deposit_offline(
         .body(body)
         .send()
         .await;
-    let _ = tokio::fs::remove_file(&tmp).await;
 
-    let resp = result.map_err(|e| DepositError::Unavailable(e.to_string()))?;
+    let resp = match result {
+        Ok(r) => r,
+        Err(e) => {
+            // A stashed local error is the true cause; the network wrapper reqwest
+            // put on the truncated body is a symptom.
+            if let Some(f) = fatal.lock().unwrap().take() {
+                return Err(Fatal(f));
+            }
+            return Err(DepositError::Unavailable(e.to_string()));
+        }
+    };
     let status = resp.status();
     if status == reqwest::StatusCode::PAYLOAD_TOO_LARGE {
         return Err(DepositError::TooLarge);
