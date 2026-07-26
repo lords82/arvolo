@@ -37,13 +37,50 @@ pub(super) fn persist_download(dir: &Path, rec: &DownloadRecord) {
     }
 }
 
+/// Removes the resume record **and** its paused marker together, so a terminal
+/// download never leaves a stray "paused" flag behind that a restart would honor.
 pub(super) fn remove_download(dir: &Path, id: u64) {
     let _ = std::fs::remove_file(download_record_path(dir, id));
+    clear_paused(dir, id);
+}
+
+/// Load one download resume record by id (`None` if absent/undecodable) — what
+/// [`super::TransferManager::resume`] reads to restart a paused download.
+pub(super) fn load_download(dir: &Path, id: u64) -> Option<DownloadRecord> {
+    let bytes = std::fs::read(download_record_path(dir, id)).ok()?;
+    postcard::from_bytes(&bytes).ok()
 }
 
 pub(super) fn load_downloads(dir: &Path) -> Vec<DownloadRecord> {
     load_records(dir, "dl-")
 }
+
+/// A download's "the user paused this" flag, kept as a **sidecar marker file**
+/// (`dl-paused-<id>`) rather than a field on [`DownloadRecord`]. Two reasons: the
+/// record is postcard (not self-describing), so adding a field would silently drop
+/// every download already in flight at an upgrade; and a marker is atomic to set and
+/// clear. Present iff the paused download's record is present — [`remove_download`]
+/// clears both — so the two never desync. Empty file: it carries no secret, only its
+/// existence matters.
+pub(super) fn paused_marker_path(dir: &Path, id: u64) -> PathBuf {
+    dir.join(format!("dl-paused-{id}"))
+}
+
+pub(super) fn mark_paused(dir: &Path, id: u64) {
+    let _ = std::fs::create_dir_all(dir);
+    let _ = std::fs::write(paused_marker_path(dir, id), []);
+}
+
+pub(super) fn clear_paused(dir: &Path, id: u64) {
+    let _ = std::fs::remove_file(paused_marker_path(dir, id));
+}
+
+pub(super) fn is_paused_marked(dir: &Path, id: u64) -> bool {
+    paused_marker_path(dir, id).exists()
+}
+
+// `load-<prefix>` scan skips our marker files: they have no `.pc` extension, and
+// `load_records` only reads records it can decode — a marker decodes to nothing.
 
 /// On-disk record of an active send (serving an anonymous `arvc…` ticket), so the
 /// daemon can resume serving after a restart. Stores the file path, the ticket

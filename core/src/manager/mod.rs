@@ -472,35 +472,64 @@ impl TransferManager {
         Ok(id)
     }
 
-    /// Pause an in-progress `send --to` (Active or Waiting): stop actively trying
-    /// and hold it as `Paused` until `resume`d or `cancel`led. No-op for anything
-    /// that isn't a live send. Returns whether it was paused.
+    /// Pause an in-progress transfer (Active or Waiting): stop working on it and hold
+    /// it as `Paused` until `resume`d or `cancel`led. Returns whether it was paused.
+    ///
+    /// Works for a live **`send --to`** (held-state send) and for a resumable
+    /// **download** (a chunked receive with a resume record). Both keep their partial
+    /// state on disk. No-op for anything else — an anonymous ticket serve, a one-shot
+    /// mailbox fetch, an awaiting-pickup deposit.
     pub fn pause(&self, id: u64) -> bool {
-        let can = self
+        let (can, is_recv) = self
             .inner
             .transfers
             .lock()
             .unwrap()
             .get(&id)
             .map(|t| {
-                matches!(
-                    t.status,
-                    TransferStatus::Active | TransferStatus::Waiting(_)
+                (
+                    matches!(
+                        t.status,
+                        TransferStatus::Active | TransferStatus::Waiting(_)
+                    ),
+                    t.direction == Direction::Recv,
                 )
             })
-            .unwrap_or(false);
-        let held = self.inner.held.lock().unwrap().get(&id).cloned();
-        let (true, Some(h)) = (can, held) else {
+            .unwrap_or((false, false));
+        if !can {
             return false;
-        };
-        h.pause_flag.store(true, Ordering::Relaxed);
-        if let Some(c) = self.inner.cancels.lock().unwrap().get(&id) {
-            c.cancel(); // wakes the loop, which sees the flag and pauses
         }
-        true
+
+        // A held send: flag it and wake its delivery loop, which parks it as Paused.
+        if let Some(h) = self.inner.held.lock().unwrap().get(&id).cloned() {
+            h.pause_flag.store(true, Ordering::Relaxed);
+            if let Some(c) = self.inner.cancels.lock().unwrap().get(&id) {
+                c.cancel();
+            }
+            return true;
+        }
+
+        // A resumable download: mark it paused on disk *before* cancelling the fetch,
+        // so the task settling from the cancel sees the marker and parks it as Paused
+        // (keeping the partial + record) instead of ending it as Cancelled. The marker
+        // also survives a restart, so `resume_incomplete` leaves it paused.
+        if is_recv {
+            if let Some(dir) = &self.inner.state_dir {
+                if download_record_path(dir, id).exists() {
+                    mark_paused(dir, id);
+                    if let Some(c) = self.inner.cancels.lock().unwrap().get(&id) {
+                        c.cancel();
+                    }
+                    return true;
+                }
+            }
+        }
+        false
     }
 
-    /// Resume a `Paused` send: start delivering again. Returns whether it resumed.
+    /// Resume a `Paused` transfer: a held **send** starts delivering again; a paused
+    /// **download** restarts its fetch under the same id, continuing from the partial
+    /// file on disk. Returns whether it resumed.
     pub fn resume(&self, id: u64) -> bool {
         let paused = self
             .inner
@@ -510,33 +539,54 @@ impl TransferManager {
             .get(&id)
             .map(|t| matches!(t.status, TransferStatus::Paused(_)))
             .unwrap_or(false);
-        let held = self.inner.held.lock().unwrap().get(&id).cloned();
-        let relay = self.inner.relay.clone();
-        let (true, Some(h), Some(relay)) = (paused, held, relay) else {
+        if !paused {
             return false;
-        };
-        h.pause_flag.store(false, Ordering::Relaxed);
-        let cancel = CancellationToken::new();
-        self.inner
-            .cancels
-            .lock()
-            .unwrap()
-            .insert(id, cancel.clone());
-        self.inner.set_status_live(id, TransferStatus::Active);
-        persist_held_record(&self.inner, id, false, "");
-        tokio::spawn(deliver_to(
-            self.inner.clone(),
-            id,
-            cancel,
-            relay,
-            h.recipient,
-            h.payload,
-            h.name,
-            h.archive,
-            h.note,
-            h.pause_flag,
-        ));
-        true
+        }
+
+        // A held send: re-arm its cancel token and re-spawn the delivery loop.
+        let held = self.inner.held.lock().unwrap().get(&id).cloned();
+        if let (Some(h), Some(relay)) = (held, self.inner.relay.clone()) {
+            h.pause_flag.store(false, Ordering::Relaxed);
+            let cancel = CancellationToken::new();
+            self.inner
+                .cancels
+                .lock()
+                .unwrap()
+                .insert(id, cancel.clone());
+            self.inner.set_status_live(id, TransferStatus::Active);
+            persist_held_record(&self.inner, id, false, "");
+            tokio::spawn(deliver_to(
+                self.inner.clone(),
+                id,
+                cancel,
+                relay,
+                h.recipient,
+                h.payload,
+                h.name,
+                h.archive,
+                h.note,
+                h.pause_flag,
+            ));
+            return true;
+        }
+
+        // A paused download: clear the marker and re-spawn the fetch under the same id
+        // with a fresh cancel token — recv_chunked resumes from the partial file.
+        if let Some(dir) = self.inner.state_dir.clone() {
+            if let Some(rec) = load_download(&dir, id) {
+                clear_paused(&dir, id);
+                let cancel = CancellationToken::new();
+                self.inner
+                    .cancels
+                    .lock()
+                    .unwrap()
+                    .insert(id, cancel.clone());
+                self.inner.set_status_live(id, TransferStatus::Active);
+                self.spawn_receive(id, rec.ticket, PathBuf::from(rec.out_path), None, cancel);
+                return true;
+            }
+        }
+        false
     }
 
     /// Re-register a `send --to` restored from disk after a daemon restart: paused
@@ -628,6 +678,35 @@ impl TransferManager {
                 pause_flag,
             ));
         }
+    }
+
+    /// Re-register a download the user had paused, after a restart: it comes back as
+    /// `Paused` under a fresh id (with its record + marker rewritten to match), and
+    /// does **not** start fetching until [`resume`](Self::resume)d. Mirrors the
+    /// paused-`send --to` restore in [`restore_sendto`](Self::restore_sendto).
+    fn restore_paused_download(&self, rec: DownloadRecord) {
+        let (id, _cancel) = self.register(Direction::Recv, None, rec.name.clone(), rec.size);
+        // No running task to cancel for a paused download.
+        self.inner.cancels.lock().unwrap().remove(&id);
+        if let Some(dir) = &self.inner.state_dir {
+            persist_download(
+                dir,
+                &DownloadRecord {
+                    id,
+                    ticket: rec.ticket,
+                    out_path: rec.out_path,
+                    name: rec.name.clone(),
+                    size: rec.size,
+                },
+            );
+            mark_paused(dir, id);
+        }
+        self.inner
+            .set_status(id, TransferStatus::Paused("in pausa".to_string()));
+        self.inner.emit(ManagerEvent::Paused {
+            id,
+            reason: "in pausa".to_string(),
+        });
     }
 
     /// Serve an **anonymous** P2P ticket (no `--to`) in the background: returns the
@@ -894,6 +973,23 @@ impl TransferManager {
             }
         }
 
+        self.spawn_receive(id, ticket, out_path, peer, cancel);
+        id
+    }
+
+    /// Spawn the background fetch for receive `id`. Split out of [`start_download`] so
+    /// [`resume`](Self::resume) can restart a **paused** download under its existing id
+    /// with a fresh cancel token — without re-registering the row or rewriting its
+    /// record. `recv_chunked` picks up from the partial file on disk, so a resumed
+    /// fetch continues where the pause left off.
+    fn spawn_receive(
+        &self,
+        id: u64,
+        ticket: String,
+        out_path: PathBuf,
+        peer: Option<PublicId>,
+        cancel: CancellationToken,
+    ) {
         let inner = self.inner.clone();
         tokio::spawn(async move {
             let me = match inner.identity() {
@@ -906,7 +1002,7 @@ impl TransferManager {
             let cancelled = cancel.clone();
 
             // An offline (`arvm`) offer is a one-shot mailbox fetch — no live
-            // sender to stream from, so no per-chunk progress.
+            // sender to stream from, so no per-chunk progress, and nothing to pause.
             if !crate::chunked::ChunkTicket::looks_like(&ticket) {
                 if let Some(p) = &peer {
                     inner.set_peer(id, p.clone());
@@ -1003,17 +1099,36 @@ impl TransferManager {
                     }
                 }
             }
-            // Treat a stopped-but-incomplete outcome (user cancel OR disk-full pause)
-            // as not-completed, so it is never recorded/seeded as a finished download.
-            let stopped_incomplete = matches!(&result, Ok(o) if !o.is_complete());
-            finish(
-                &inner,
-                id,
-                cancelled.is_cancelled() || stopped_incomplete,
-                result.map(|o| Some(o.into_path())),
-            );
+            // A pause is not a terminal state: the partial + record stay on disk so it
+            // can resume, exactly like the disk-full case. Two ways in:
+            //  - a **user pause** arrives as a Cancelled outcome (pause() cancelled the
+            //    token) with the paused marker already set (pause() wrote it first);
+            //  - a **disk-full stop** is a Paused outcome — we set the marker now so a
+            //    restart keeps it paused rather than silently resuming into a full disk.
+            // Everything else (done / real cancel / failure) is terminal and drops the
+            // record via `finish`.
+            let paused_marked = inner
+                .state_dir
+                .as_ref()
+                .is_some_and(|dir| is_paused_marked(dir, id));
+            let paused_reason =
+                receive_pause_reason(&result, cancelled.is_cancelled(), paused_marked);
+            if let Some(reason) = paused_reason {
+                if let Some(dir) = &inner.state_dir {
+                    mark_paused(dir, id);
+                }
+                inner.set_status(id, TransferStatus::Paused(reason.clone()));
+                inner.emit(ManagerEvent::Paused { id, reason });
+            } else {
+                let stopped_incomplete = matches!(&result, Ok(o) if !o.is_complete());
+                finish(
+                    &inner,
+                    id,
+                    cancelled.is_cancelled() || stopped_incomplete,
+                    result.map(|o| Some(o.into_path())),
+                );
+            }
         });
-        id
     }
 
     /// Re-start every persisted, not-yet-finished chunked download (called once at
@@ -1040,15 +1155,22 @@ impl TransferManager {
             self.restore_sendto(rec);
         }
         for rec in downloads {
-            // Drop the stale record; start_download writes a fresh one (new id).
+            // A download the user paused comes back Paused (awaiting them); an active
+            // one resumes fetching. Read the marker before dropping the stale record —
+            // `remove_download` clears the marker too.
+            let was_paused = is_paused_marked(&dir, rec.id);
             remove_download(&dir, rec.id);
-            self.start_download(
-                rec.ticket,
-                PathBuf::from(rec.out_path),
-                None,
-                rec.name,
-                rec.size,
-            );
+            if was_paused {
+                self.restore_paused_download(rec);
+            } else {
+                self.start_download(
+                    rec.ticket,
+                    PathBuf::from(rec.out_path),
+                    None,
+                    rec.name,
+                    rec.size,
+                );
+            }
         }
         for rec in sends {
             remove_send(&dir, rec.id);
@@ -1067,6 +1189,27 @@ impl TransferManager {
         if let Some(sub) = &self.inner.inbox {
             let _ = sub.ack(offer_id).await;
         }
+    }
+}
+
+/// Decide whether a finished receive should **park as Paused** (keeping its partial
+/// output + resume record on disk) rather than reach a terminal state. Returns the
+/// pause reason, or `None` for a terminal outcome (completed / real cancel / failure).
+///
+/// Pure so the branch can be pinned without a live transfer. Two ways to pause:
+/// - a **disk-full** stop is a [`RecvOutcome::Paused`] — always resumable;
+/// - a **user pause** arrives as [`RecvOutcome::Cancelled`] (pause cancels the fetch
+///   token) *and* the paused marker is set (pause wrote it before cancelling). Without
+///   the marker a Cancelled outcome is a real user cancel, which is terminal.
+fn receive_pause_reason(
+    result: &Result<flow::RecvOutcome>,
+    cancel_fired: bool,
+    paused_marked: bool,
+) -> Option<String> {
+    match result {
+        Ok(flow::RecvOutcome::Paused { reason, .. }) => Some(reason.clone()),
+        Ok(o) if !o.is_complete() && cancel_fired && paused_marked => Some("in pausa".to_string()),
+        _ => None,
     }
 }
 
@@ -1123,6 +1266,161 @@ mod clear_finished_tests {
 
         // Idempotent: nothing left to take.
         assert_eq!(m.clear_finished(), 0);
+    }
+}
+
+#[cfg(test)]
+mod pause_download_tests {
+    use super::*;
+    use crate::flow::RecvOutcome;
+    use std::path::PathBuf;
+
+    /// The heart of the fix: a stopped download is parked as Paused (kept + resumable)
+    /// only when it should be — a disk-full stop always, a cancel only when the user
+    /// pause marker is set. A real user cancel (no marker) and every terminal outcome
+    /// stay terminal. Getting this wrong either loses a paused download or leaves a
+    /// cancelled one un-droppable.
+    #[test]
+    fn a_download_parks_as_paused_exactly_when_it_should() {
+        let p = PathBuf::from("/tmp/x");
+        // disk-full: Paused outcome → always resumable, marker irrelevant.
+        assert_eq!(
+            receive_pause_reason(
+                &Ok(RecvOutcome::Paused {
+                    output: p.clone(),
+                    reason: "disk full".into()
+                }),
+                false,
+                false
+            ),
+            Some("disk full".to_string())
+        );
+        // user pause: cancel fired AND marker set.
+        assert_eq!(
+            receive_pause_reason(&Ok(RecvOutcome::Cancelled(p.clone())), true, true),
+            Some("in pausa".to_string())
+        );
+        // real cancel: cancel fired, NO marker → terminal.
+        assert_eq!(
+            receive_pause_reason(&Ok(RecvOutcome::Cancelled(p.clone())), true, false),
+            None
+        );
+        // completed → terminal, even if a marker somehow lingers.
+        assert_eq!(
+            receive_pause_reason(&Ok(RecvOutcome::Completed(p.clone())), false, true),
+            None
+        );
+        // error → terminal.
+        assert_eq!(
+            receive_pause_reason(&Err(anyhow::anyhow!("boom")), true, true),
+            None
+        );
+    }
+
+    /// The paused marker and the resume record live and die together: `remove_download`
+    /// (every terminal path) clears the marker too, so a finished download can never
+    /// leave a stray "paused" flag a restart would honor.
+    #[test]
+    fn the_marker_never_outlives_its_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        persist_download(
+            d,
+            &DownloadRecord {
+                id: 7,
+                ticket: "arvc-x".into(),
+                out_path: "/tmp/out".into(),
+                name: "f".into(),
+                size: 1,
+            },
+        );
+        mark_paused(d, 7);
+        assert!(is_paused_marked(d, 7));
+        assert!(load_download(d, 7).is_some());
+
+        remove_download(d, 7); // terminal
+        assert!(!is_paused_marked(d, 7), "marker must go with the record");
+        assert!(load_download(d, 7).is_none());
+    }
+
+    /// Persistence across a restart — the behavior the user asked for. A download
+    /// paused before a restart comes back **Paused**, not silently re-downloading:
+    /// `resume_incomplete` sees the marker and restores it without fetching.
+    #[tokio::test]
+    async fn a_paused_download_stays_paused_across_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = TransferManager::with_state_dir(
+            Identity::generate(),
+            None,
+            dir.path().to_path_buf(),
+            Some(dir.path().to_path_buf()),
+        );
+        // A paused download's on-disk state: a record + its marker.
+        persist_download(
+            dir.path(),
+            &DownloadRecord {
+                id: 3,
+                ticket: "arvcSOMETHING".into(),
+                out_path: dir.path().join("movie.mp4").to_string_lossy().into_owned(),
+                name: "movie.mp4".into(),
+                size: 1_000_000,
+            },
+        );
+        mark_paused(dir.path(), 3);
+
+        assert_eq!(m.resume_incomplete(), 1);
+
+        let t = m
+            .list()
+            .into_iter()
+            .find(|t| t.name == "movie.mp4")
+            .expect("restored");
+        assert!(
+            matches!(t.status, TransferStatus::Paused(_)),
+            "a paused download must come back Paused, not downloading — got {:?}",
+            t.status
+        );
+        assert_eq!(t.direction, Direction::Recv);
+        // Re-registered under a fresh id, with its record + marker rewritten to match,
+        // so a later resume can find them.
+        assert!(is_paused_marked(dir.path(), t.id));
+        assert!(load_download(dir.path(), t.id).is_some());
+    }
+
+    /// An *active* (un-paused) download record still auto-resumes on restart — the
+    /// pause path must not swallow the normal case.
+    #[tokio::test]
+    async fn an_unpaused_download_still_auto_resumes() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = TransferManager::with_state_dir(
+            Identity::generate(),
+            None,
+            dir.path().to_path_buf(),
+            Some(dir.path().to_path_buf()),
+        );
+        persist_download(
+            dir.path(),
+            &DownloadRecord {
+                id: 4,
+                // Not a real ticket: the fetch task will fail fast, but the row is
+                // registered Active first, which is all this asserts.
+                ticket: "arvcBOGUS".into(),
+                out_path: dir.path().join("f.bin").to_string_lossy().into_owned(),
+                name: "f.bin".into(),
+                size: 10,
+            },
+        );
+        // No marker → not paused.
+        assert_eq!(m.resume_incomplete(), 1);
+        let t = m
+            .list()
+            .into_iter()
+            .find(|t| t.name == "f.bin")
+            .expect("restored");
+        assert!(
+            !matches!(t.status, TransferStatus::Paused(_)),
+            "an un-paused download must resume, not come back Paused"
+        );
     }
 }
 
