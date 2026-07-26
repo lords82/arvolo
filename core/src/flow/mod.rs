@@ -9,6 +9,7 @@ mod archive;
 mod ctrl;
 mod offline;
 mod recv;
+mod schedule;
 mod send;
 mod sidecar;
 mod storage;

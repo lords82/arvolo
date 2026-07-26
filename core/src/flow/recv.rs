@@ -309,11 +309,14 @@ pub async fn recv_chunked(
     // Where the payload lands on disk: the staged tar for archives (so a partial
     // resumes and — with ARVOLO_SEED — the tar can keep being seeded), else the
     // requested path or a default from the name.
+    //
+    // `user_out` is a *destination*, not always a filename — an existing directory
+    // (the GUI folder picker, `--out <dir>`) means "save inside here". See
+    // [`single_file_out`]. (For archives `user_out` is already the unpack directory,
+    // handled above.)
     let download: PathBuf = match &archive_dir {
         Some(_) => archive_stage_path(&t.chunks),
-        None => user_out
-            .clone()
-            .unwrap_or_else(|| default_from_name(&t.name, &t.chunks)),
+        None => single_file_out(user_out.as_deref(), &t.name, &t.chunks),
     };
     // Make sure the staging directory (parent of `download`) exists before we
     // start writing per-chunk `.arvpart` files into it.
@@ -446,6 +449,10 @@ pub async fn recv_chunked(
     // Peers (by endpoint id) that served corrupt bytes; filtered out of future
     // provider lists. Populated by `fetch_to_file` on an integrity failure.
     let banned: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+    // Per-provider throughput estimate (bytes/sec, EWMA), measured on each
+    // successful fetch. Drives provider choice: prefer faster, less-loaded sources
+    // and offload the origin. Empty until the first fetch completes.
+    let rates: Arc<Mutex<HashMap<String, f64>>> = Arc::new(Mutex::new(HashMap::new()));
     // Metric: pieces we pulled from a swarm peer (vs. the origin/relay).
     let from_peers = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let swarm_cancel = cancel.child_token();
@@ -507,39 +514,35 @@ pub async fn recv_chunked(
     let providers_having =
         |i: usize, cooldown: &HashMap<String, std::time::Instant>, now: std::time::Instant| {
             let banned_snap = banned.lock().unwrap();
-            let ok = |id: &str| {
-                !banned_snap.contains(id) && cooldown.get(id).map(|t| *t <= now).unwrap_or(true)
-            };
-            let mut out: Vec<(String, iroh::EndpointAddr)> = Vec::new();
+            let is_ok =
+                |id: &str| super::schedule::is_eligible(id, &banned_snap, cooldown, now);
+            // The origin sender holds every piece, but counts as a provider only
+            // while its control channel is live — this is the fallback source a
+            // piece resolves to when the peer that held it leaves.
             let sender_up = sender_live
                 .as_ref()
                 .map(|b| b.load(std::sync::atomic::Ordering::Relaxed))
                 .unwrap_or(false);
-            if sender_up {
-                if let Some(a) = &sender_addr {
-                    let id = a.id.to_string();
-                    if ok(&id) {
-                        out.push((id, a.clone()));
-                    }
-                }
-            }
-            if on_relay.lock().unwrap().contains(&(i as u32)) {
-                if let Some(a) = &relay_addr {
-                    let id = a.id.to_string();
-                    if ok(&id) {
-                        out.push((id, a.clone()));
-                    }
-                }
-            }
-            for (a, bf) in peers.lock().unwrap().iter() {
-                if crate::swarm::bitfield_has(bf, i) {
-                    let id = a.id.to_string();
-                    if ok(&id) {
-                        out.push((id, a.clone()));
-                    }
-                }
-            }
-            out
+            let sender_pair = if sender_up {
+                sender_addr.as_ref().map(|a| (a.id.to_string(), a.clone()))
+            } else {
+                None
+            };
+            let relay_pair = relay_addr.as_ref().map(|a| (a.id.to_string(), a.clone()));
+            let on_relay_snap = on_relay.lock().unwrap();
+            let peer_list: Vec<(String, iroh::EndpointAddr, Vec<u8>)> = peers
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(a, bf)| (a.id.to_string(), a.clone(), bf.clone()))
+                .collect();
+            super::schedule::providers_for_piece(
+                i,
+                sender_pair.as_ref(),
+                relay_pair.as_ref().map(|r| (r, &*on_relay_snap)),
+                &peer_list,
+                is_ok,
+            )
         };
 
     // Task result: (piece, provider id, its stage file, outcome). Outcome is
@@ -571,9 +574,10 @@ pub async fn recv_chunked(
     loop {
         let now = std::time::Instant::now();
         // Assignment: keep the window full. Each fresh chunk goes to the provider
-        // that has it with the *fewest requests in flight* (load balancing across
-        // peers); once only the last few pieces remain, also give an in-flight piece
-        // a second/third source (endgame) so a slow provider can't stall the finish.
+        // chosen by `schedule::choose_provider` — a peer/relay over the origin
+        // (offload), then the fastest, least-loaded source; once only the last few
+        // pieces remain, also give an in-flight piece a second/third source (endgame)
+        // so a slow provider can't stall the finish.
         while set.len() < concurrency && !cancel.is_cancelled() {
             // Phase 1: a fresh piece, rarest-first (fewest providers) with a RANDOM
             // tie-break among equally-rare pieces. Because the origin has every
@@ -583,7 +587,7 @@ pub async fn recv_chunked(
             // state from picking the same piece, spreading distinct pieces faster.
             let fresh = {
                 use rand::Rng;
-                let mut cands: Vec<(usize, Vec<(String, iroh::EndpointAddr)>)> = remaining
+                let cands: Vec<(usize, Vec<(String, iroh::EndpointAddr)>)> = remaining
                     .iter()
                     .copied()
                     .filter(|i| piece_backoff.get(i).map(|t| *t <= now).unwrap_or(true))
@@ -592,10 +596,11 @@ pub async fn recv_chunked(
                         (!p.is_empty()).then_some((i, p))
                     })
                     .collect();
-                cands.iter().map(|(_, p)| p.len()).min().map(|min| {
-                    cands.retain(|(_, p)| p.len() == min);
-                    cands.swap_remove(rand::rng().random_range(0..cands.len()))
-                })
+                // Rarest-first: among the pieces with the fewest providers, pick one
+                // at random so two peers in the same state don't grab the same piece.
+                let mut rare = super::schedule::rarest_set(cands);
+                (!rare.is_empty())
+                    .then(|| rare.swap_remove(rand::rng().random_range(0..rare.len())))
             };
             let (i, provs, is_fresh) = if let Some((i, p)) = fresh {
                 (i, p, true)
@@ -625,10 +630,25 @@ pub async fn recv_chunked(
                     None => break,
                 }
             };
-            let (prov_id, prov_addr) = provs
-                .into_iter()
-                .min_by_key(|(id, _)| *in_flight.get(id).unwrap_or(&0))
-                .unwrap();
+            // Choose the source: prefer a peer/relay over the origin (offload it) and,
+            // among those, the one with the lowest estimated time-to-serve (faster +
+            // less loaded first). So a piece a peer already holds is pulled from the
+            // peer, not the origin — unless the origin is dramatically cheaper.
+            let (prov_id, prov_addr) = {
+                let rates_snap = rates.lock().unwrap();
+                let cands: Vec<super::schedule::Candidate<iroh::EndpointAddr>> = provs
+                    .into_iter()
+                    .map(|(id, addr)| super::schedule::Candidate {
+                        is_origin: sender_id.as_deref() == Some(id.as_str()),
+                        in_flight: *in_flight.get(&id).unwrap_or(&0),
+                        rate_bps: rates_snap.get(&id).copied(),
+                        id,
+                        addr,
+                    })
+                    .collect();
+                let chosen = super::schedule::choose_provider(&cands).unwrap();
+                (chosen.id.clone(), chosen.addr.clone())
+            };
             if is_fresh {
                 remaining.remove(&i);
             }
@@ -652,7 +672,9 @@ pub async fn recv_chunked(
             let hash = t.chunks[i];
             let stage_task = stage.clone();
             let pid = prov_id.clone();
+            let rates_task = rates.clone();
             set.spawn(async move {
+                let started = std::time::Instant::now();
                 let r = tokio::select! {
                     _ = tok.cancelled() => None,
                     res = async {
@@ -666,6 +688,17 @@ pub async fn recv_chunked(
                         rx.fetch_one(&prov_addr, hash, &mut part, &bn).await
                     } => Some(res),
                 };
+                // On success, fold this fetch's throughput into the provider's EWMA so
+                // future picks prefer faster sources. Wall-time under parallelism only
+                // approximates a provider's capacity, but the estimate self-corrects.
+                if let Some(Ok(())) = &r {
+                    let elapsed = started.elapsed().as_secs_f64();
+                    if let Ok(meta) = std::fs::metadata(&stage_task) {
+                        if elapsed > 0.0 {
+                            super::schedule::update_rate(&rates_task, &pid, meta.len() as f64 / elapsed);
+                        }
+                    }
+                }
                 (i, pid, stage, r)
             });
         }
@@ -965,5 +998,67 @@ fn default_from_name(name: &str, chunks: &[crate::reexport::Hash]) -> PathBuf {
     match safe_download_name(name) {
         Some(n) => PathBuf::from(n),
         None => default_out(&chunks.first().map(|h| h.to_string()).unwrap_or_default()),
+    }
+}
+
+/// Resolve where a single-file receive lands from the caller's `--out`/accept
+/// destination. `user_out` is a *destination*, not necessarily a filename:
+/// - `None` → a name-derived file in the current dir (the caller sets the dir).
+/// - an existing **directory** → save the file *inside* it. This is what the GUI's
+///   folder picker and the CLI's `--out <dir>` hand over; taking it literally as the
+///   output file opens the folder itself and fails with EISDIR ("Is a directory").
+/// - any other path → the caller named the file; use it as-is.
+fn single_file_out(
+    user_out: Option<&std::path::Path>,
+    name: &str,
+    chunks: &[crate::reexport::Hash],
+) -> PathBuf {
+    match user_out {
+        Some(dir) if dir.is_dir() => dir.join(default_from_name(name, chunks)),
+        Some(file) => file.to_path_buf(),
+        None => default_from_name(name, chunks),
+    }
+}
+
+#[cfg(test)]
+mod out_resolution_tests {
+    use super::single_file_out;
+    use std::path::PathBuf;
+
+    /// The bug this fixes: a **directory** handed over as the destination — the GUI's
+    /// folder picker, or `--out ~/Downloads` — was used as the output *file*, so
+    /// opening it failed with EISDIR ("Is a directory") and the receive died at 0 B.
+    /// It must land the file *inside* the directory instead.
+    #[test]
+    fn a_directory_destination_receives_the_file_inside_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = single_file_out(Some(dir.path()), "iPhone_Restore.ipsw", &[]);
+        assert_eq!(out, dir.path().join("iPhone_Restore.ipsw"));
+    }
+
+    /// A path that is not a directory is the filename the caller chose — untouched.
+    #[test]
+    fn a_file_path_is_used_verbatim() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("chosen-name.bin");
+        assert_eq!(single_file_out(Some(&file), "sender.ipsw", &[]), file);
+    }
+
+    /// No destination falls back to the ticket's (already-sanitized) name.
+    #[test]
+    fn no_destination_uses_the_ticket_name() {
+        assert_eq!(
+            single_file_out(None, "report.pdf", &[]),
+            PathBuf::from("report.pdf")
+        );
+    }
+
+    /// Saving into a chosen directory still sanitizes the sender-supplied name: a
+    /// traversal name reduces to a single component and cannot escape the directory.
+    #[test]
+    fn a_hostile_name_cannot_escape_the_chosen_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = single_file_out(Some(dir.path()), "../../etc/passwd", &[]);
+        assert_eq!(out, dir.path().join("passwd"));
     }
 }

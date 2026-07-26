@@ -607,8 +607,9 @@ function TicketTab({
   return (
     <div>
       <div style={{ fontSize: 12.5, color: "#57534c", marginBottom: 14 }}>
-        Genera un <b>ticket</b> — come un magnet link. Chi ce l'ha scarica in P2P
-        direttamente da te (o dai peer), senza passare da un server.
+        Genera un <b>ticket</b>: chi ce l'ha scarica il file in P2P direttamente da
+        te (o dai peer), senza passare da un server. Vale come una chiave —
+        tienilo privato, chiunque l'abbia può aprire il file.
       </div>
       {ticket ? (
         <div>

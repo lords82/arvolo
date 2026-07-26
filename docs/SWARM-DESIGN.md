@@ -2,7 +2,8 @@
 
 > **Status:** phases 1–4 implemented and phase 5 partially, on top of 0.8.5.
 > Scope: **swarm applies only to shared `arvc…` tickets** (reusable content
-> capabilities, magnet-like). `--to <contact>` sends stay strictly 1-to-1 (sealed
+> capabilities — one ticket, many receivers seeding each other). `--to <contact>`
+> sends stay strictly 1-to-1 (sealed
 > per recipient) and are out of scope — they keep the sender+relay resilience
 > already shipped in 0.8.5.
 >

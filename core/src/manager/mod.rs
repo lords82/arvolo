@@ -831,7 +831,9 @@ impl TransferManager {
         // The offer name is sender-supplied and untrusted (even a "trusted"
         // contact is auto-downloaded via this path): reduce it to a single safe
         // path component so it can't traverse out of the download dir, and fall
-        // back to a ticket-derived name if nothing usable remains.
+        // back to a ticket-derived name if nothing usable remains. A `Some(out)`
+        // that is a directory is resolved to a file *inside* it by `recv_chunked`
+        // (the common chokepoint for both this daemon path and the CLI `recv`).
         let out_path = out.unwrap_or_else(|| {
             let base = crate::flow::safe_download_name(&offer.offer.name).unwrap_or_else(|| {
                 crate::flow::default_out(&offer.offer.ticket)
