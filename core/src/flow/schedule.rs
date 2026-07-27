@@ -121,7 +121,11 @@ pub(crate) struct Candidate<A> {
 /// better, so a faster provider absorbs more load before a slower one is preferred.
 /// The origin is inflated by [`ORIGIN_OFFLOAD_FACTOR`] to spare the source.
 fn cost<A>(c: &Candidate<A>, prior_rate: f64) -> f64 {
-    let rate = c.rate_bps.filter(|r| *r > 0.0).unwrap_or(prior_rate).max(1.0);
+    let rate = c
+        .rate_bps
+        .filter(|r| *r > 0.0)
+        .unwrap_or(prior_rate)
+        .max(1.0);
     let base = (c.in_flight as f64 + 1.0) / rate;
     if c.is_origin {
         base * ORIGIN_OFFLOAD_FACTOR
@@ -145,21 +149,24 @@ pub(crate) fn choose_provider<A>(candidates: &[Candidate<A>]) -> Option<&Candida
         .filter(|r| *r > 0.0)
         .fold(f64::NAN, f64::max);
     let prior = if best_known.is_nan() { 1.0 } else { best_known };
-    candidates
-        .iter()
-        .min_by(|a, b| cost(a, prior).total_cmp(&cost(b, prior)).then(a.id.cmp(&b.id)))
+    candidates.iter().min_by(|a, b| {
+        cost(a, prior)
+            .total_cmp(&cost(b, prior))
+            .then(a.id.cmp(&b.id))
+    })
 }
 
 /// Fold a fresh throughput sample (bytes/sec) into a provider's EWMA estimate, used
 /// by [`choose_provider`] to prefer faster sources. The first sample seeds the
 /// estimate; later ones smooth it.
 pub(crate) fn update_rate(rates: &Mutex<HashMap<String, f64>>, id: &str, sample_bps: f64) {
-    if !(sample_bps > 0.0) {
-        return;
+    // Ignore non-positive or NaN samples (a zero-time or empty read): only a real,
+    // positive throughput folds into the estimate.
+    if sample_bps > 0.0 {
+        let mut r = rates.lock().unwrap();
+        let e = r.entry(id.to_string()).or_insert(sample_bps);
+        *e = RATE_EWMA_ALPHA * sample_bps + (1.0 - RATE_EWMA_ALPHA) * *e;
     }
-    let mut r = rates.lock().unwrap();
-    let e = r.entry(id.to_string()).or_insert(sample_bps);
-    *e = RATE_EWMA_ALPHA * sample_bps + (1.0 - RATE_EWMA_ALPHA) * *e;
 }
 
 #[cfg(test)]
@@ -220,10 +227,18 @@ mod tests {
         let peers = [b];
 
         let for_2 = providers_for_piece(2, Some(&s), None, &peers, always_ok);
-        assert_eq!(ids(&for_2), vec!["origin", "B"], "both A and B can serve piece 2");
+        assert_eq!(
+            ids(&for_2),
+            vec!["origin", "B"],
+            "both A and B can serve piece 2"
+        );
 
         let for_0 = providers_for_piece(0, Some(&s), None, &peers, always_ok);
-        assert_eq!(ids(&for_0), vec!["origin"], "B lacks piece 0, only A serves it");
+        assert_eq!(
+            ids(&for_0),
+            vec!["origin"],
+            "B lacks piece 0, only A serves it"
+        );
     }
 
     /// B downloads a chunk then disconnects: the tracker drops it, so it is simply
@@ -238,7 +253,11 @@ mod tests {
 
         // B is gone from the peer list; the origin is still a provider for piece 2.
         let after = providers_for_piece(2, Some(&s), None, &[], always_ok);
-        assert_eq!(ids(&after), vec!["origin"], "piece 2 falls back to the origin");
+        assert_eq!(
+            ids(&after),
+            vec!["origin"],
+            "piece 2 falls back to the origin"
+        );
     }
 
     /// When the origin is offline, the piece falls back to the relay — but only for
@@ -252,7 +271,10 @@ mod tests {
         assert_eq!(ids(&has), vec!["relay"], "relay has piece 1");
 
         let lacks = providers_for_piece(2, None, Some((&r, &on_relay)), &[], always_ok);
-        assert!(lacks.is_empty(), "relay never backfilled piece 2 → no provider");
+        assert!(
+            lacks.is_empty(),
+            "relay never backfilled piece 2 → no provider"
+        );
     }
 
     /// With the origin gone and nothing on the relay, a peer that holds the piece is
@@ -273,7 +295,10 @@ mod tests {
         let on_relay: HashSet<u32> = HashSet::new();
         let peers = [peer("B", 4, &[0])]; // B has piece 0, not piece 2
         let got = providers_for_piece(2, None, Some((&r, &on_relay)), &peers, always_ok);
-        assert!(got.is_empty(), "no source for piece 2 → empty (caller waits)");
+        assert!(
+            got.is_empty(),
+            "no source for piece 2 → empty (caller waits)"
+        );
     }
 
     /// A peer that served corrupt bytes is banned and excluded even though it still
@@ -314,7 +339,11 @@ mod tests {
         let after = providers_for_piece(0, Some(&s), None, &[], |id| {
             is_eligible(id, &banned, &cooldown, now + Duration::from_secs(4))
         });
-        assert_eq!(ids(&after), vec!["origin"], "cooldown elapsed → eligible again");
+        assert_eq!(
+            ids(&after),
+            vec!["origin"],
+            "cooldown elapsed → eligible again"
+        );
     }
 
     /// Provider order is deterministic: origin first, then relay, then peers — the
@@ -476,7 +505,10 @@ mod tests {
         update_rate(&rates, "P", 2_000_000.0);
         let v = *rates.lock().unwrap().get("P").unwrap();
         // 0.3*2e6 + 0.7*1e6 = 1.3e6 — between the two, nearer the older value.
-        assert!((v - 1_300_000.0).abs() < 1.0, "EWMA blends samples, got {v}");
+        assert!(
+            (v - 1_300_000.0).abs() < 1.0,
+            "EWMA blends samples, got {v}"
+        );
     }
 
     /// Non-positive samples (a zero-time or empty read) are ignored, never poisoning

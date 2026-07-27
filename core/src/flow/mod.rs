@@ -20,7 +20,8 @@ pub use offline::{
     ClaimStatus, DepositError, Deposited,
 };
 pub use recv::{
-    default_out, recv_chunked, safe_download_name, ChunkSource, RecvEvent, RecvOutcome,
+    default_out, discard_incomplete, recv_chunked, safe_download_name, ChunkSource, RecvEvent,
+    RecvOutcome,
 };
 pub use send::{prepare_send, resume_send, SendEvent, SendSession};
 

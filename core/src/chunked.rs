@@ -630,15 +630,20 @@ impl ChunkSender {
     }
 
     pub async fn shutdown(self) {
-        // Shut the accept loop down *gracefully*, awaiting its task. iroh's Router
-        // holds the loop in an `AbortOnDropHandle`, so simply dropping the sender
-        // aborts it mid-flight — and the abort surfaces as a "task was cancelled"
-        // panic from the loop's internal `join_all`. `Router::shutdown` cancels the
-        // loop's token, waits for it to finish, and closes the endpoint for us.
-        // A JoinError here only means a protocol handler itself panicked during
-        // shutdown — nothing we can act on at teardown, so ignore it.
-        let _ = self.router.shutdown().await;
+        // Stop serving *now*, not after the current download drains. This runs on
+        // `cancel`, which must actually interrupt an in-flight transfer — so close
+        // the endpoint FIRST: that tears down active receiver connections, so their
+        // chunk-serving handler tasks error out and end. Only then shut the router's
+        // accept loop. The old order (`router.shutdown().await` first) waited for the
+        // handlers to finish, so a receiver mid-download of a large file kept pulling
+        // to completion after `cancel`, leaving the transfer "active" the whole time.
+        //
+        // Closing the endpoint (rather than dropping the sender) avoids the
+        // "task was cancelled" panic the `AbortOnDropHandle` drop would raise: the
+        // handlers observe a closed connection and return cleanly. A JoinError from
+        // `router.shutdown` only means a handler panicked at teardown — ignore it.
         self.endpoint.close().await;
+        let _ = self.router.shutdown().await;
     }
 }
 
@@ -707,8 +712,11 @@ impl ChunkSeeder {
     }
 
     pub async fn shutdown(self) {
-        let _ = self.router.shutdown().await;
+        // Close the endpoint first so active peer connections are torn down at once
+        // (their handlers end), then shut the router — same reasoning as
+        // `ChunkSender::shutdown`: stop seeding immediately on cancel, don't drain.
         self.endpoint.close().await;
+        let _ = self.router.shutdown().await;
     }
 }
 

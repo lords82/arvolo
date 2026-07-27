@@ -83,7 +83,7 @@ mod tests {
     use super::*;
 
     fn hashes(seeds: &[&[u8]]) -> Vec<Hash> {
-        seeds.iter().map(|s| Hash::new(s)).collect()
+        seeds.iter().map(Hash::new).collect()
     }
 
     /// Every ticket holder must derive the *same* swarm id from the piece list — it

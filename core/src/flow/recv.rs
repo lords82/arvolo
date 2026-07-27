@@ -278,6 +278,105 @@ const PROVIDER_COOLDOWN_SECS: u64 = 3;
 /// (so a piece no one can serve yet doesn't busy-loop).
 const PIECE_BACKOFF_SECS: u64 = 2;
 
+/// Whether to skip resume re-validation entirely and trust the sidecar verbatim
+/// (`ARVOLO_RESUME_TRUST=1`). Off by default — a deleted/truncated output must not
+/// finalize as complete.
+fn resume_trust() -> bool {
+    env_flag("ARVOLO_RESUME_TRUST")
+}
+
+/// Whether to run the **deep** (byte-exact) resume check: re-seal every claimed
+/// piece and match its hash. `ARVOLO_RESUME_VERIFY=full`. Off by default because
+/// re-encrypting a multi-GB partial pegs a core for a while on every restart; the
+/// cheap length check already catches the common "file removed/truncated" case.
+/// Turn it on when silent in-place corruption (bit-rot, a partial overwrite that
+/// keeps the file length) is a concern.
+fn resume_deep_verify() -> bool {
+    matches!(
+        std::env::var("ARVOLO_RESUME_VERIFY")
+            .ok()
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("full") | Some("deep") | Some("bytes")
+    )
+}
+
+fn env_flag(name: &str) -> bool {
+    matches!(
+        std::env::var(name).ok().as_deref().map(str::trim),
+        Some("1") | Some("true") | Some("yes") | Some("on")
+    )
+}
+
+/// Re-check, against the file on disk, every piece the resume sidecar claims we
+/// hold — so a deleted, moved, or truncated output can **never** be finalized as
+/// "complete" on a stale sidecar. Returns the corrected bitfield (a subset of
+/// `have`); cleared pieces are re-fetched by the caller.
+///
+/// Two levels (see [`resume_deep_verify`]):
+/// - **length** (default, cheap, no hashing): a piece is kept only if its bytes
+///   physically fit within the file's current length. A removed file (length 0) or
+///   a truncated one clears the affected pieces — the common "file gone" case —
+///   without re-reading a byte.
+/// - **deep** (`deep = true`): additionally re-read each in-range piece, re-seal it
+///   with the content key, and require its hash to match the ticket (catches
+///   in-place corruption that keeps the length). Costs a full re-encrypt of the
+///   partial.
+#[allow(clippy::too_many_arguments)]
+fn revalidate_have(
+    download: &Path,
+    have: &[u8],
+    chunks: &[crate::hash::Hash],
+    key: &[u8; crate::crypto::CHUNK_KEY_LEN],
+    chunk_size: u32,
+    total_size: u64,
+    total_chunks: u32,
+    deep: bool,
+) -> Vec<u8> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut checked = crate::swarm::bitfield_new(chunks.len());
+    let file_len = std::fs::metadata(download).map(|m| m.len()).unwrap_or(0);
+    // Only open the file when deep-verifying; the length alone drives the cheap path.
+    let mut f = if deep {
+        std::fs::File::open(download).ok()
+    } else {
+        None
+    };
+    let cs = chunk_size as u64;
+    for (i, want) in chunks.iter().enumerate() {
+        if !crate::swarm::bitfield_has(have, i) {
+            continue;
+        }
+        let start = i as u64 * cs;
+        // The plaintext stored on disk for piece `i` (the last piece is short).
+        let plain_len = if i + 1 == chunks.len() {
+            total_size.saturating_sub(start)
+        } else {
+            cs
+        };
+        // Cheap: the piece's bytes must fit within the file. A removed (len 0) or
+        // truncated output clears here, with no reads or hashing.
+        if start.saturating_add(plain_len) > file_len {
+            continue;
+        }
+        // Deep (opt-in): the bytes must also re-seal to the ticket's hash.
+        if let Some(f) = f.as_mut() {
+            let mut plain = vec![0u8; plain_len as usize];
+            if f.seek(SeekFrom::Start(start)).is_err() || f.read_exact(&mut plain).is_err() {
+                continue;
+            }
+            match crate::crypto::seal_chunk(key, i as u32, total_chunks, &plain) {
+                Ok(ct) if crate::hash::Hash::new(&ct) == *want => {}
+                _ => continue,
+            }
+        }
+        crate::swarm::bitfield_set(&mut checked, i);
+    }
+    checked
+}
+
 pub async fn recv_chunked(
     ticket: &str,
     out: Option<PathBuf>,
@@ -378,6 +477,56 @@ pub async fn recv_chunked(
     // cannot). An absent/mismatched sidecar starts fresh — any bytes already on disk
     // are overwritten as pieces commit.
     let have_bits = read_sidecar(&download, t.chunks.len());
+    let before = crate::swarm::bitfield_count(&have_bits);
+    // Trust the bytes, not just the bookkeeping: re-verify each claimed piece against
+    // the file on disk, so a deleted/moved/corrupted output can't be finalized as
+    // "complete" on a stale sidecar. Skipped when there's nothing to check, or when
+    // explicitly trusting the sidecar (`ARVOLO_RESUME_TRUST=1`) for speed on huge,
+    // trusted storage.
+    let have_bits = if before > 0 && !resume_trust() {
+        let checked = revalidate_have(
+            &download,
+            &have_bits,
+            &t.chunks,
+            &key,
+            t.chunk_size,
+            t.total_size,
+            total_chunks,
+            resume_deep_verify(),
+        );
+        let after = crate::swarm::bitfield_count(&checked);
+        if after < before {
+            // Persist the corrected sidecar so a restart re-fetches only the bad
+            // pieces, not the ones still intact on disk.
+            write_sidecar(&download, &checked);
+            tracing::warn!(
+                "resume re-verify of {}: {} of {} on-disk pieces missing or corrupt",
+                download.display(),
+                before - after,
+                before
+            );
+        }
+        if after == 0 {
+            // The whole partial vanished (the file was deleted or moved). Don't
+            // silently re-download the entire payload — pause with an explanation so
+            // the user decides: resume (re-fetch from scratch — the sidecar is now
+            // empty) or remove the transfer. Mirrors the disk-full pause below, and
+            // reuses the same Paused outcome the manager/GUI already surface.
+            let reason = "il file del download non è più su disco (rimosso o spostato): \
+                 riprendi per riscaricarlo da capo, oppure elimina il trasferimento"
+                .to_string();
+            on(RecvEvent::Paused {
+                reason: reason.clone(),
+            });
+            return Ok(RecvOutcome::Paused {
+                output: download,
+                reason,
+            });
+        }
+        checked
+    } else {
+        have_bits
+    };
     let resuming_from = crate::swarm::bitfield_count(&have_bits) as usize;
 
     // Pre-flight: if the filesystem plainly lacks room for what's left to fetch,
@@ -514,8 +663,7 @@ pub async fn recv_chunked(
     let providers_having =
         |i: usize, cooldown: &HashMap<String, std::time::Instant>, now: std::time::Instant| {
             let banned_snap = banned.lock().unwrap();
-            let is_ok =
-                |id: &str| super::schedule::is_eligible(id, &banned_snap, cooldown, now);
+            let is_ok = |id: &str| super::schedule::is_eligible(id, &banned_snap, cooldown, now);
             // The origin sender holds every piece, but counts as a provider only
             // while its control channel is live — this is the fallback source a
             // piece resolves to when the peer that held it leaves.
@@ -695,7 +843,11 @@ pub async fn recv_chunked(
                     let elapsed = started.elapsed().as_secs_f64();
                     if let Ok(meta) = std::fs::metadata(&stage_task) {
                         if elapsed > 0.0 {
-                            super::schedule::update_rate(&rates_task, &pid, meta.len() as f64 / elapsed);
+                            super::schedule::update_rate(
+                                &rates_task,
+                                &pid,
+                                meta.len() as f64 / elapsed,
+                            );
                         }
                     }
                 }
@@ -980,6 +1132,24 @@ pub fn default_out(seed: &str) -> PathBuf {
     PathBuf::from(format!("received-{}.bin", &seed[..seed.len().min(16)]))
 }
 
+/// Delete every on-disk artifact of a **discarded** (cancelled) chunked download:
+/// the partial output file, its `.arvhave` resume sidecar, and any `.arvpart.N` chunk
+/// staging files. For an archive the staged tar is the download; for a single file it
+/// is the output itself.
+///
+/// Only for a cancel, never a pause: a paused download keeps all of this to resume
+/// from. A cancel removes the resume record, so the partial could never resume anyway
+/// — leaving it behind is pure litter (a multi-GB `.ipsw` in the download folder).
+pub fn discard_incomplete(ticket: &str, out_path: &Path) {
+    let download = match crate::chunked::ChunkTicket::decode(ticket) {
+        Ok(t) if t.archive => archive_stage_path(&t.chunks),
+        _ => out_path.to_path_buf(),
+    };
+    remove_stage_files(&download);
+    let _ = std::fs::remove_file(sidecar_path(&download));
+    let _ = std::fs::remove_file(&download);
+}
+
 /// Reduce a sender-supplied (untrusted) name to a single, safe path component,
 /// stripping any directory parts so a malicious `name` like `../../.ssh/x` or an
 /// absolute path can't escape the intended download directory. Returns `None` when
@@ -1017,6 +1187,33 @@ fn single_file_out(
         Some(dir) if dir.is_dir() => dir.join(default_from_name(name, chunks)),
         Some(file) => file.to_path_buf(),
         None => default_from_name(name, chunks),
+    }
+}
+
+#[cfg(test)]
+mod discard_tests {
+    use super::discard_incomplete;
+
+    /// Cancelling a download must clear its litter: the partial file, the `.arvhave`
+    /// resume sidecar, and every `.arvpart.N` chunk stage. A bogus ticket decodes to
+    /// nothing, so it is treated as a single-file download at `out` (the archive path
+    /// needs a real ticket; the single-file path is what leaves a multi-GB `.ipsw`).
+    #[test]
+    fn discard_removes_partial_file_sidecar_and_chunk_stages() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("iPhone_Restore.ipsw");
+        let arvhave = dir.path().join("iPhone_Restore.ipsw.arvhave");
+        let part0 = dir.path().join("iPhone_Restore.ipsw.arvpart.0");
+        let part87 = dir.path().join("iPhone_Restore.ipsw.arvpart.87");
+        for f in [&out, &arvhave, &part0, &part87] {
+            std::fs::write(f, b"x").unwrap();
+        }
+
+        discard_incomplete("arvc-not-a-real-ticket", &out);
+
+        for f in [&out, &arvhave, &part0, &part87] {
+            assert!(!f.exists(), "must be deleted: {}", f.display());
+        }
     }
 }
 
@@ -1060,5 +1257,183 @@ mod out_resolution_tests {
         let dir = tempfile::tempdir().unwrap();
         let out = single_file_out(Some(dir.path()), "../../etc/passwd", &[]);
         assert_eq!(out, dir.path().join("passwd"));
+    }
+}
+
+/// Resume re-verification: the sidecar's "have" bits are only trusted for pieces
+/// whose bytes are actually present and match on disk. A deleted, moved, truncated,
+/// or corrupted output must not be finalized as complete on a stale sidecar.
+#[cfg(test)]
+mod revalidate_tests {
+    use super::revalidate_have;
+    use crate::crypto::{random_chunk_key, seal_chunk};
+    use crate::hash::Hash;
+    use crate::swarm::{bitfield_count, bitfield_has, bitfield_new, bitfield_set};
+    use std::io::{Seek, SeekFrom, Write};
+    use std::path::{Path, PathBuf};
+
+    const CS: u32 = 1024;
+    const LAST: usize = 500; // short final piece
+    const TOTAL_SIZE: u64 = CS as u64 * 2 + LAST as u64;
+
+    /// A 3-piece content (two full + one short). Returns the temp dir (kept alive),
+    /// the output path, the content key, the piece hashes, and the plaintexts.
+    fn fixture() -> (
+        tempfile::TempDir,
+        PathBuf,
+        [u8; 32],
+        Vec<Hash>,
+        Vec<Vec<u8>>,
+    ) {
+        let plains: Vec<Vec<u8>> = vec![
+            vec![1u8; CS as usize],
+            vec![2u8; CS as usize],
+            vec![3u8; LAST],
+        ];
+        let key = random_chunk_key();
+        let n = plains.len() as u32;
+        let chunks: Vec<Hash> = plains
+            .iter()
+            .enumerate()
+            .map(|(i, p)| Hash::new(seal_chunk(&key, i as u32, n, p).unwrap()))
+            .collect();
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("f.out");
+        (dir, out, key, chunks, plains)
+    }
+
+    /// Lay down a full-size sparse file, writing only `present` pieces at their true
+    /// offsets (the rest stay zero holes). `len` overrides the file length (for the
+    /// truncated-file case).
+    fn lay(out: &Path, plains: &[Vec<u8>], present: &[usize], len: u64) {
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(out)
+            .unwrap();
+        f.set_len(len).unwrap();
+        for &i in present {
+            f.seek(SeekFrom::Start(i as u64 * CS as u64)).unwrap();
+            f.write_all(&plains[i]).unwrap();
+        }
+    }
+
+    fn claim(present: &[usize]) -> Vec<u8> {
+        let mut bf = bitfield_new(3);
+        for &i in present {
+            bitfield_set(&mut bf, i);
+        }
+        bf
+    }
+
+    fn check(out: &Path, key: &[u8; 32], chunks: &[Hash], have: &[u8], deep: bool) -> Vec<u8> {
+        revalidate_have(
+            out,
+            have,
+            chunks,
+            key,
+            CS,
+            TOTAL_SIZE,
+            chunks.len() as u32,
+            deep,
+        )
+    }
+
+    /// Every claimed piece really on disk survives verification (either level).
+    #[test]
+    fn all_valid_pieces_survive() {
+        let (_d, out, key, chunks, plains) = fixture();
+        lay(&out, &plains, &[0, 1, 2], TOTAL_SIZE);
+        assert_eq!(
+            bitfield_count(&check(&out, &key, &chunks, &claim(&[0, 1, 2]), false)),
+            3
+        );
+        assert_eq!(
+            bitfield_count(&check(&out, &key, &chunks, &claim(&[0, 1, 2]), true)),
+            3
+        );
+    }
+
+    /// The whole output file gone → nothing is trusted, everything is re-fetched.
+    /// This is the deleted-file case that used to finalize an all-zeros "complete";
+    /// the cheap length check (default) catches it with no hashing.
+    #[test]
+    fn a_missing_file_clears_every_claimed_piece() {
+        let (_d, out, key, chunks, _plains) = fixture();
+        // never create `out`
+        let got = check(&out, &key, &chunks, &claim(&[0, 1, 2]), false);
+        assert_eq!(bitfield_count(&got), 0, "no file → nothing verified");
+    }
+
+    /// A truncated file (the tail piece's bytes are missing) clears the trailing
+    /// piece but keeps the intact ones — length check alone, no hashing.
+    #[test]
+    fn a_truncated_file_clears_the_missing_tail() {
+        let (_d, out, key, chunks, plains) = fixture();
+        // Only pieces 0 and 1 fit; file ends before piece 2's region.
+        lay(&out, &plains, &[0, 1], CS as u64 * 2);
+        let got = check(&out, &key, &chunks, &claim(&[0, 1, 2]), false);
+        assert!(bitfield_has(&got, 0) && bitfield_has(&got, 1));
+        assert!(
+            !bitfield_has(&got, 2),
+            "the missing tail piece must be cleared"
+        );
+    }
+
+    /// Only the pieces the sidecar *claims* are checked — verification never invents
+    /// pieces the sidecar didn't already assert, even if the bytes happen to be there.
+    #[test]
+    fn unclaimed_pieces_are_never_added() {
+        let (_d, out, key, chunks, plains) = fixture();
+        lay(&out, &plains, &[0, 1, 2], TOTAL_SIZE); // all bytes present…
+        let got = check(&out, &key, &chunks, &claim(&[0]), false); // …only piece 0 claimed
+        assert_eq!(bitfield_count(&got), 1);
+        assert!(bitfield_has(&got, 0));
+    }
+
+    /// The cheap length check trusts a same-length hole/corruption (it can't see it):
+    /// a zeroed in-range piece survives without deep verification. Documents the
+    /// deliberate default-mode limitation.
+    #[test]
+    fn length_check_alone_keeps_a_same_length_hole() {
+        let (_d, out, key, chunks, plains) = fixture();
+        lay(&out, &plains, &[0, 2], TOTAL_SIZE); // piece 1 is a zero hole, file full-length
+        let got = check(&out, &key, &chunks, &claim(&[0, 1, 2]), false);
+        assert!(
+            bitfield_has(&got, 1),
+            "length mode can't detect a same-length hole"
+        );
+    }
+
+    /// Deep verification re-seals every claimed piece, so a zeroed in-range region is
+    /// caught and cleared while the intact pieces survive.
+    #[test]
+    fn deep_verify_clears_a_zeroed_piece() {
+        let (_d, out, key, chunks, plains) = fixture();
+        lay(&out, &plains, &[0, 2], TOTAL_SIZE); // piece 1 left as a zero hole
+        let got = check(&out, &key, &chunks, &claim(&[0, 1, 2]), true);
+        assert!(bitfield_has(&got, 0) && bitfield_has(&got, 2));
+        assert!(
+            !bitfield_has(&got, 1),
+            "deep verify clears the zeroed piece"
+        );
+    }
+
+    /// Deep verification catches an in-place byte flip that keeps the file length.
+    #[test]
+    fn deep_verify_clears_a_corrupted_piece() {
+        let (_d, out, key, chunks, plains) = fixture();
+        lay(&out, &plains, &[0, 1, 2], TOTAL_SIZE);
+        let mut f = std::fs::OpenOptions::new().write(true).open(&out).unwrap();
+        f.seek(SeekFrom::Start(CS as u64 + 10)).unwrap();
+        f.write_all(&[0xFF]).unwrap();
+        drop(f);
+        let got = check(&out, &key, &chunks, &claim(&[0, 1, 2]), true);
+        assert!(bitfield_has(&got, 0) && bitfield_has(&got, 2));
+        assert!(
+            !bitfield_has(&got, 1),
+            "deep verify clears the corrupted piece"
+        );
     }
 }

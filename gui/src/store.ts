@@ -403,7 +403,15 @@ export const useStore = create<State>((set, get) => {
             transferred: ev.transferred,
             size: ev.total_size || t.size,
             rate: sampleRate(ev.id, ev.transferred, t.rate),
-            status: t.status === "in corso" ? "in corso" : t.status,
+            // Bytes are moving, so the row is active — flip it back from "in attesa"
+            // (paused) or "in stallo" (waiting) on resume. Only a *terminal* status
+            // is left alone: a late straggler event must not un-finish a done row.
+            status:
+              t.status === "completato" ||
+              t.status === "annullato" ||
+              t.status === "fallito"
+                ? t.status
+                : "in corso",
           }));
           break;
         case "completed":

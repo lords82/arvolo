@@ -554,6 +554,7 @@ impl TransferManager {
                 .unwrap()
                 .insert(id, cancel.clone());
             self.inner.set_status_live(id, TransferStatus::Active);
+            self.emit_progress_now(id);
             persist_held_record(&self.inner, id, false, "");
             tokio::spawn(deliver_to(
                 self.inner.clone(),
@@ -582,11 +583,33 @@ impl TransferManager {
                     .unwrap()
                     .insert(id, cancel.clone());
                 self.inner.set_status_live(id, TransferStatus::Active);
+                self.emit_progress_now(id);
                 self.spawn_receive(id, rec.ticket, PathBuf::from(rec.out_path), None, cancel);
                 return true;
             }
         }
         false
+    }
+
+    /// Emit a `Progress` event with the row's current bytes. `set_status_live` changes
+    /// status silently (no event), so on **resume** a UI would keep showing the row as
+    /// paused until the first fetched chunk. This nudges it back to active at once —
+    /// a progress event means the transfer is moving.
+    fn emit_progress_now(&self, id: u64) {
+        let snapshot = self
+            .inner
+            .transfers
+            .lock()
+            .unwrap()
+            .get(&id)
+            .map(|t| (t.transferred, t.total_size));
+        if let Some((transferred, total_size)) = snapshot {
+            self.inner.emit(ManagerEvent::Progress {
+                id,
+                transferred,
+                total_size,
+            });
+        }
     }
 
     /// Re-register a `send --to` restored from disk after a daemon restart: paused
@@ -1121,12 +1144,21 @@ impl TransferManager {
                 inner.emit(ManagerEvent::Paused { id, reason });
             } else {
                 let stopped_incomplete = matches!(&result, Ok(o) if !o.is_complete());
+                // A real cancel (user discarded it, no pause marker) is terminal:
+                // `finish` drops the resume record, so the partial can never resume.
+                // Delete the litter it would otherwise leave — the partial file, its
+                // `.arvhave` sidecar, and the `.arvpart.N` chunk stages. Not on a
+                // *failure* (Err): that partial can still resume if the user re-accepts.
+                let discard = cancelled.is_cancelled() && stopped_incomplete;
                 finish(
                     &inner,
                     id,
                     cancelled.is_cancelled() || stopped_incomplete,
                     result.map(|o| Some(o.into_path())),
                 );
+                if discard {
+                    flow::discard_incomplete(&ticket, &out_path);
+                }
             }
         });
     }
