@@ -6,8 +6,12 @@ background **daemon** the CLI drives, over the local IPC socket. Closing the
 window leaves transfers running; the CLI and GUI share one engine and identity.
 
 Implements the **board `3a`** design from `../Arvolo.dc.html`: two columns
-(Inviati / Ricevuti) with sections, live search, pause-all, a 4-tab send panel
-(Persone / ID·QR / Link / Ticket) and an incoming-offer modal.
+(Inviati / Ricevuti) with sections, live search, pause-all + clear-finished, a
+5-tab send panel (Persone / ID·QR / Codice / Link / Ticket), a paste-anything
+**Ricevi** modal (`arvolo recv`), a full **Rubrica** (add/rename/remove,
+verify-with-fingerprint, trust, block, advertised-name approval, own display
+name), a **Storico** panel (`arvolo history`) and an incoming-offer modal with
+fingerprint verification and block-sender.
 
 ## Architecture
 
@@ -84,26 +88,37 @@ app can spawn the daemon on a clean machine.
   "Esci" in the tray menu); the daemon keeps running either way.
 * **Campanella arrivi** in the header: red badge = offers awaiting a decision;
   click opens the oldest one.
-* **Verifica identità** (menu ⋮ and the incoming modal) marks a *saved contact*
-  verified after an out-of-band fingerprint comparison (`MarkVerified` IPC).
+* **Verifica identità** (Rubrica and the incoming modal) marks a *saved contact*
+  verified **with the fingerprint on screen** — the click confirms an
+  out-of-band comparison, it never marks blind (`MarkVerified` IPC).
 * Per-row **Elimina** removes a finished transfer from the daemon's list
-  (`Remove` IPC); **Sposta su/giù** is local ordering only.
+  (`Remove` IPC); **Pulisci** sweeps every finished row (`ClearFinished`);
+  **Sposta su/giù** is local ordering only.
+* A live **pairing code** shows as a copyable chip on its board row
+  (`code_ready` / `code_closed` events).
 * A **version banner** appears when the running daemon's version differs from the
-  GUI's (e.g. a stale daemon kept running after an upgrade).
+  GUI's, with a one-click **Riavvia il daemon** (SIGTERM via pid file; the event
+  pump respawns it).
 * No right-click context menu; in release builds the reload/devtools shortcuts
   are swallowed too.
 
-## Known gaps vs. the mock (deferred)
+## Known gaps vs. the CLI (deferred)
 
-* **Pairing SAS** — "Verifica identità" records the user's out-of-band check; a
-  guided SAS/pairing flow is a separate epic.
-* **Scansione QR** con fotocamera — the app *shows* QR codes (own code, ticket);
-  scanning is deferred.
-* Chip **metodo** (P2P vs Cloud) and the **Oggi/Precedenti** split are best-effort:
-  `TransferDto` carries no method flag or timestamp, so method is inferred and the
-  day grouping uses a client-side arrival time.
+* **`arvolo contacts pair`** (SPAKE2 trade of public ids) and **`arvolo device
+  pair/join/sync`** (multi-device identity) — interactive rendezvous flows, a
+  separate epic.
+* **`arvolo contacts export/import`** — file-based book backup stays CLI-only.
+* **Resume of an interrupted send** by session id / re-supplied `arvc…` ticket —
+  the board resumes *paused* transfers; disk-session recovery stays CLI-only.
+* **Scansione QR** con fotocamera — the app *shows* QR codes (own code, pairing
+  code, ticket); scanning is deferred.
+* Chip **metodo** (P2P vs Cloud) is best-effort: `TransferDto` carries no method
+  flag, so it is inferred.
 * **Riprova** on a failed transfer and **Forza ripresa** on a stalled one are not
   offered: the engine has no retry for terminal failures (stalled sends already
   auto-retry), so the menu only shows actions that actually work.
 * **Link** invio: supports a single file (a folder is archived); multiple selected
-  files fall back to the first — use Ticket/Persone to send a group.
+  files fall back to the first — use Ticket/Persone to send a group. `--password`
+  is not offered because the CLI doesn't support it on links either (the browser
+  page can't unwrap it); password-protected **deposits** are received fine (the
+  Ricevi modal asks when the ticket carries one).

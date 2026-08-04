@@ -111,6 +111,127 @@ async fn list_contacts_over_the_socket() {
     std::env::remove_var("ARVOLO_CONFIG_DIR");
 }
 
+/// The whole address-book surface a GUI needs, driven over the socket: add,
+/// verify (and see the fingerprint travel), trust — refused unverified, then
+/// forced —, block, rename keeping the marks, remove. One flowing test rather
+/// than seven, because the point is that the *same* contact survives each step
+/// with the right marks, which per-step tests with fresh daemons cannot see.
+#[tokio::test]
+async fn contact_lifecycle_over_the_socket() {
+    let _guard = crate::testlock::ENV
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (shutdown, _dir) = spawn_test_daemon().await;
+
+    let id = Identity::generate().public();
+    let id_b32 = data_encoding::BASE32_NOPAD
+        .encode(&id.to_bytes())
+        .to_lowercase();
+
+    let mut client = DaemonClient::connect().await.expect("connect");
+
+    client
+        .add_contact("bob".into(), id_b32.clone())
+        .await
+        .expect("add");
+    // Garbage id: refused, not saved.
+    assert!(client
+        .add_contact("mallory".into(), "not-a-key".into())
+        .await
+        .is_err());
+
+    // Trust before verify is refused (MITM risk) — the CLI rule, on the wire.
+    assert!(client.mark_trusted("bob".into(), false).await.is_err());
+    // …but can be forced, exactly like `contacts trust --force`.
+    client
+        .mark_trusted("bob".into(), true)
+        .await
+        .expect("force trust");
+    client.mark_untrusted("bob".into()).await.expect("untrust");
+
+    client.mark_verified("bob".into()).await.expect("verify");
+    client
+        .mark_trusted("bob".into(), false)
+        .await
+        .expect("trust verified");
+
+    client.block("bob".into()).await.expect("block");
+    let c = &client.list_contacts().await.expect("list")[0];
+    assert!(c.verified && c.trusted && c.blocked);
+    assert!(!c.fingerprint.is_empty());
+    client.unblock("bob".into()).await.expect("unblock");
+
+    // Rename keeps the id-keyed marks — the reason rename exists at all.
+    client
+        .rename_contact("bob".into(), "roberto".into())
+        .await
+        .expect("rename");
+    let contacts = client.list_contacts().await.expect("list");
+    assert_eq!(contacts[0].name, "roberto");
+    assert!(contacts[0].verified && contacts[0].trusted);
+
+    client
+        .remove_contact("roberto".into())
+        .await
+        .expect("remove");
+    assert!(client.remove_contact("roberto".into()).await.is_err());
+    assert!(client.list_contacts().await.expect("list").is_empty());
+
+    shutdown.cancel();
+    std::env::remove_var("ARVOLO_CONFIG_DIR");
+}
+
+/// History and the advertised display name, over the socket. The daemon's own
+/// status must carry the name a moment after it is set — the GUI shows it in the
+/// header, and a stale answer there means the user "renamed themselves" into thin
+/// air.
+#[tokio::test]
+async fn history_and_display_name_over_the_socket() {
+    let _guard = crate::testlock::ENV
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (shutdown, _dir) = spawn_test_daemon().await;
+
+    let mut client = DaemonClient::connect().await.expect("connect");
+
+    assert!(client.list_history().await.expect("history").is_empty());
+    crate::history::record("send", None, "done.bin", 10, 10, "completed").unwrap();
+    let hist = client.list_history().await.expect("history");
+    assert_eq!(hist.len(), 1);
+    assert_eq!(hist[0].name, "done.bin");
+    assert_eq!(hist[0].status, "completed");
+    assert_eq!(client.clear_history().await.expect("clear"), 1);
+    assert!(client.list_history().await.expect("history").is_empty());
+
+    client.set_my_name("Lorenzo".into()).await.expect("name");
+    assert_eq!(client.status().await.expect("status").display_name, "Lorenzo");
+    client.set_my_name("".into()).await.expect("clear name");
+    assert_eq!(client.status().await.expect("status").display_name, "");
+
+    shutdown.cancel();
+    std::env::remove_var("ARVOLO_CONFIG_DIR");
+}
+
+/// `Recv` with something that is neither ticket, code nor offline ticket answers
+/// with a helpful error instead of registering a doomed transfer row.
+#[tokio::test]
+async fn recv_rejects_gibberish_over_the_socket() {
+    let _guard = crate::testlock::ENV
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (shutdown, _dir) = spawn_test_daemon().await;
+
+    let mut client = DaemonClient::connect().await.expect("connect");
+    let err = client
+        .recv("definitely-not-a-ticket".into(), None, None)
+        .await
+        .expect_err("gibberish must be refused");
+    assert!(err.to_string().contains("arvc"), "explains what it accepts");
+
+    shutdown.cancel();
+    std::env::remove_var("ARVOLO_CONFIG_DIR");
+}
+
 /// A deposit the engine made is withdrawn *through* the engine, because only the
 /// engine also retracts the offer it left in the recipient's inbox (and ends the
 /// still-live row). Revoking the blob behind its back would be half a withdrawal.

@@ -600,7 +600,16 @@ impl TransferManager {
                     .insert(id, cancel.clone());
                 self.inner.set_status_live(id, TransferStatus::Active);
                 self.emit_progress_now(id);
-                self.spawn_receive(id, rec.ticket, PathBuf::from(rec.out_path), None, cancel);
+                // A paused fetch is always chunked (offline one-shots can't pause), so
+                // no password to re-supply.
+                self.spawn_receive(
+                    id,
+                    rec.ticket,
+                    PathBuf::from(rec.out_path),
+                    None,
+                    cancel,
+                    None,
+                );
                 return true;
             }
         }
@@ -1145,6 +1154,21 @@ impl TransferManager {
         name: String,
         size: u64,
     ) -> u64 {
+        self.start_download_with_password(ticket, out_path, peer, name, size, None)
+    }
+
+    /// [`start_download`](Self::start_download) for a password-protected offline
+    /// (`arvm…`) ticket: the password unwraps the content key on fetch. Ignored for
+    /// a chunked ticket, whose key travels in the ticket itself.
+    pub fn start_download_with_password(
+        &self,
+        ticket: String,
+        out_path: PathBuf,
+        peer: Option<PublicId>,
+        name: String,
+        size: u64,
+        password: Option<String>,
+    ) -> u64 {
         let (id, cancel) = self.register(Direction::Recv, peer.clone(), name.clone(), size);
 
         // Persist a resume record for chunked downloads (offline one-shots aren't
@@ -1164,7 +1188,7 @@ impl TransferManager {
             }
         }
 
-        self.spawn_receive(id, ticket, out_path, peer, cancel);
+        self.spawn_receive(id, ticket, out_path, peer, cancel, password);
         id
     }
 
@@ -1180,6 +1204,7 @@ impl TransferManager {
         out_path: PathBuf,
         peer: Option<PublicId>,
         cancel: CancellationToken,
+        password: Option<String>,
     ) {
         let inner = self.inner.clone();
         tokio::spawn(async move {
@@ -1198,7 +1223,9 @@ impl TransferManager {
                 if let Some(p) = &peer {
                     inner.set_peer(id, p.clone());
                 }
-                let result = flow::fetch_offline(&ticket, Some(out_path.clone()), &me, None).await;
+                let result =
+                    flow::fetch_offline(&ticket, Some(out_path.clone()), &me, password.as_deref())
+                        .await;
                 match result {
                     Ok((path, n)) => {
                         // No per-chunk progress for a one-shot mailbox fetch — record

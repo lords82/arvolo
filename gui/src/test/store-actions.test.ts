@@ -207,7 +207,7 @@ describe("ticket", () => {
 describe("link", () => {
   it("78. returns the public URL, fragment key included", async () => {
     await boot();
-    const url = await s().link("/a.txt");
+    const url = await s().link("/a.txt", null, null);
     expect(url).toContain("#");
     expect(url).toContain("/dl/");
   });
@@ -215,7 +215,7 @@ describe("link", () => {
   it("79. a refusal surfaces rather than yielding an unusable link", async () => {
     await boot();
     harness.fail = new Set(["createLink"]);
-    await expect(s().link("/a.txt")).rejects.toThrow();
+    await expect(s().link("/a.txt", null, null)).rejects.toThrow();
   });
 });
 
@@ -375,7 +375,7 @@ describe("a failed action is never silent", () => {
     ["resume", () => s().resume(1), /riprendere/i],
     ["reject", () => s().reject("o1"), /rifiutare/i],
     ["markVerified", () => s().markVerified("proj"), /verificare/i],
-    ["link", () => s().link("/a"), /link/i],
+    ["link", () => s().link("/a", null, null), /link/i],
     ["ticket", () => s().ticket(["/a"]), /ticket/i],
   ])("97. a refused %s reports itself", async (cmd, run, want) => {
     await boot();
@@ -409,7 +409,7 @@ describe("a failed action is never silent", () => {
   it("99. the user can dismiss it", async () => {
     await boot();
     harness.fail = new Set(["createLink"]);
-    await expect(s().link("/a")).rejects.toThrow();
+    await expect(s().link("/a", null, null)).rejects.toThrow();
     s().dismissActionError();
     expect(s().actionError).toBeNull();
   });
@@ -436,7 +436,7 @@ describe("history is grouped by when it happened, not when we noticed", () => {
 describe("clearFinished", () => {
   it("94. on an empty board it does nothing", async () => {
     await boot();
-    expect(() => s().clearFinished()).not.toThrow();
+    await expect(s().clearFinished()).resolves.toBeUndefined();
     expect(Object.keys(s().transfers)).toHaveLength(0);
   });
 
@@ -449,7 +449,7 @@ describe("clearFinished", () => {
     });
     s().toggleMenu("t1");
 
-    s().clearFinished();
+    await s().clearFinished();
 
     expect(row("t1")).toBeUndefined();
     expect(row("oo1"), "an undecided arrival is not history").toBeTruthy();

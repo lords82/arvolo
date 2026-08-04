@@ -105,6 +105,51 @@ pub enum Request {
     },
     /// Reject a parked offer → [`Response::Ok`].
     RejectOffer { offer_id: String },
+    /// Receive from a pasted artefact — the daemon-side mirror of `arvolo recv`.
+    /// An `arvc…` ticket or a pairing code fetches live (the code is resolved to
+    /// its ticket first); an offline `arvm…` ticket is fetched from the relay
+    /// mailbox, unwrapping with `password` when it carries one. `out` is a file
+    /// path or a directory on the *daemon's* filesystem (default: its download
+    /// dir) → [`Response::TransferId`].
+    Recv {
+        ticket: String,
+        out: Option<String>,
+        password: Option<String>,
+    },
+    /// Save (or re-key) a contact → [`Response::Ok`]. Re-keying an existing name
+    /// clears its verified/trusted marks, exactly as `arvolo contacts add` does —
+    /// a UI should warn before sending that.
+    AddContact { name: String, id: String },
+    /// Remove a saved contact by name → [`Response::Ok`] (error if unknown).
+    RemoveContact { name: String },
+    /// Rename a contact, keeping its key and verified/trusted marks → [`Response::Ok`].
+    RenameContact { old: String, new: String },
+    /// Clear a contact's verified mark → [`Response::Ok`].
+    MarkUnverified { name: String },
+    /// Trust a contact/id to auto-download without a prompt → [`Response::Ok`].
+    /// Refused for an unverified contact unless `force` — auto-downloading from
+    /// an unconfirmed key is a MITM risk, same rule as `arvolo contacts trust`.
+    MarkTrusted {
+        who: String,
+        #[serde(default)]
+        force: bool,
+    },
+    /// Stop auto-downloading from a contact/id → [`Response::Ok`].
+    MarkUntrusted { who: String },
+    /// Silence an identity: its offers are dropped on arrival → [`Response::Ok`].
+    Block { who: String },
+    /// Let a blocked identity's offers through again → [`Response::Ok`].
+    Unblock { who: String },
+    /// Approve a contact's pending advertised display name → [`Response::Ok`].
+    AcceptName { who: String },
+    /// The log of finished transfers, newest first → [`Response::History`].
+    ListHistory,
+    /// Forget the whole history log → [`Response::Cleared`] with the count.
+    ClearHistory,
+    /// Set (or clear, with an empty string) the display name advertised inside
+    /// offers this daemon sends → [`Response::Ok`]. Applies immediately to the
+    /// running engine, and persists to config like `arvolo me name`.
+    SetMyName { name: String },
     /// Turn this connection into an event stream (no further requests on it).
     Subscribe,
 }
@@ -132,6 +177,7 @@ pub enum Response {
     Pending(Vec<OfferDto>),
     Contacts(Vec<ContactDto>),
     Deposits(Vec<DepositDto>),
+    History(Vec<HistoryDto>),
     /// How many rows a bulk removal actually dropped.
     Cleared(usize),
     Ok,
@@ -174,6 +220,10 @@ pub struct StatusDto {
     /// client can still read an older daemon's status.
     #[serde(default)]
     pub download_dir: String,
+    /// The display name advertised inside offers (empty when none is set).
+    /// Optional on the wire for older daemons.
+    #[serde(default)]
+    pub display_name: String,
 }
 
 /// Serializable mirror of [`Transfer`] with a base32 peer id.
@@ -231,6 +281,37 @@ pub struct ContactDto {
     /// Whether the contact's key has been verified out-of-band.
     #[serde(default)]
     pub verified: bool,
+    /// Whether their files auto-download without a prompt (`contacts trust`).
+    #[serde(default)]
+    pub trusted: bool,
+    /// Whether their offers are dropped on arrival (`contacts block`).
+    #[serde(default)]
+    pub blocked: bool,
+    /// The advertised display name the user already approved (empty when none).
+    #[serde(default)]
+    pub display_name: String,
+    /// An advertised name awaiting the user's approval (empty when none) —
+    /// surfaced so a UI can offer [`Request::AcceptName`].
+    #[serde(default)]
+    pub pending_name: String,
+}
+
+/// One finished transfer from the history log — read-only by construction (the
+/// live, still-actionable rows are [`TransferDto`]s).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HistoryDto {
+    pub id: String,
+    /// "send" or "recv".
+    pub direction: String,
+    /// The peer's base32 id (recipient of a send, sender of a receive), if known.
+    pub peer: Option<String>,
+    pub name: String,
+    pub total_size: u64,
+    pub transferred: u64,
+    /// "completed" / "cancelled" / "failed: <msg>" / "deposited".
+    pub status: String,
+    /// Unix seconds when the record was written.
+    pub created: u64,
 }
 
 /// Something this client left on a relay and can still withdraw: a public download
@@ -654,6 +735,34 @@ mod tests {
             id: "if2xmne".into(),
             fingerprint: "able-otter-nine".into(),
             verified: true,
+            trusted: true,
+            blocked: false,
+            display_name: "Alice A.".into(),
+            pending_name: String::new(),
+        }]);
+        let s = serde_json::to_string(&r).unwrap();
+        assert_eq!(serde_json::from_str::<Response>(&s).unwrap(), r);
+
+        // An older daemon predates the trust/name fields: they must default, not
+        // fail the whole list.
+        let old = r#"{"contacts":[{"name":"bob","id":"abc"}]}"#;
+        let Response::Contacts(v) = serde_json::from_str::<Response>(old).unwrap() else {
+            panic!("expected contacts")
+        };
+        assert!(!v[0].trusted && !v[0].blocked && v[0].pending_name.is_empty());
+    }
+
+    #[test]
+    fn history_response_roundtrips() {
+        let r = Response::History(vec![HistoryDto {
+            id: "a1b2c3".into(),
+            direction: "recv".into(),
+            peer: Some("if2xmne".into()),
+            name: "photo.jpg".into(),
+            total_size: 4242,
+            transferred: 4242,
+            status: "completed".into(),
+            created: 1_700_000_000,
         }]);
         let s = serde_json::to_string(&r).unwrap();
         assert_eq!(serde_json::from_str::<Response>(&s).unwrap(), r);

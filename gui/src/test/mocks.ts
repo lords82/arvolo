@@ -30,6 +30,21 @@ export interface Recorder {
   /** Counts fetches, so a test can prove the panel refreshes rather than trusting
    *  a list it fetched once and never again. */
   listDeposits: number;
+  recv: [string, string | null, string | null][];
+  serveCode: [string[], boolean][];
+  createLink: [number | null, number | null][];
+  addContact: [string, string][];
+  removeContact: string[];
+  renameContact: [string, string][];
+  markTrusted: [string, boolean][];
+  markUntrusted: string[];
+  block: string[];
+  unblock: string[];
+  acceptName: string[];
+  setMyName: string[];
+  clearFinished: number;
+  clearHistory: number;
+  listHistory: number;
 }
 
 export interface Harness {
@@ -68,6 +83,21 @@ function freshRecorder(): Recorder {
     sendTo: [],
     revokeDeposit: [],
     listDeposits: 0,
+    recv: [],
+    serveCode: [],
+    createLink: [],
+    addContact: [],
+    removeContact: [],
+    renameContact: [],
+    markTrusted: [],
+    markUntrusted: [],
+    block: [],
+    unblock: [],
+    acceptName: [],
+    setMyName: [],
+    clearFinished: 0,
+    clearHistory: 0,
+    listHistory: 0,
   };
 }
 
@@ -81,6 +111,7 @@ function freshSnapshot(): Harness["snapshot"] {
       transfers: 0,
       pending: 0,
       download_dir: "/Users/ls/Arvolo",
+      display_name: "",
     },
     transfers: [],
     pending: [],
@@ -124,7 +155,18 @@ export function makeIpcMock() {
         return guard("sendTo", 1);
       },
       serveTicket: () => guard("serveTicket", { id: 1, ticket: "arvc-test" }),
-      createLink: () => guard("createLink", "https://relay.test/dl/abc#key"),
+      serveCode: (paths: string[], _relay: string | null, keep: boolean) => {
+        harness.recorder.serveCode.push([paths, keep]);
+        return guard("serveCode", { id: 1, code: "4821-crater-mango" });
+      },
+      createLink: (_path: string, ttl: number | null, max: number | null) => {
+        harness.recorder.createLink.push([ttl, max]);
+        return guard("createLink", "https://relay.test/dl/abc#key");
+      },
+      recv: (ticket: string, out: string | null, password: string | null) => {
+        harness.recorder.recv.push([ticket, out, password]);
+        return guard("recv", 9);
+      },
       acceptOffer: (offerId: string, out: string | null) => {
         harness.recorder.accept.push([offerId, out]);
         return guard("acceptOffer", 7);
@@ -153,6 +195,56 @@ export function makeIpcMock() {
         harness.recorder.markVerified.push(name);
         return guard("markVerified", undefined);
       },
+      markUnverified: (name: string) => guard("markUnverified", void name),
+      markTrusted: (who: string, force: boolean) => {
+        harness.recorder.markTrusted.push([who, force]);
+        return guard("markTrusted", undefined);
+      },
+      markUntrusted: (who: string) => {
+        harness.recorder.markUntrusted.push(who);
+        return guard("markUntrusted", undefined);
+      },
+      blockContact: (who: string) => {
+        harness.recorder.block.push(who);
+        return guard("blockContact", undefined);
+      },
+      unblockContact: (who: string) => {
+        harness.recorder.unblock.push(who);
+        return guard("unblockContact", undefined);
+      },
+      acceptName: (who: string) => {
+        harness.recorder.acceptName.push(who);
+        return guard("acceptName", undefined);
+      },
+      addContact: (name: string, id: string) => {
+        harness.recorder.addContact.push([name, id]);
+        return guard("addContact", undefined);
+      },
+      removeContact: (name: string) => {
+        harness.recorder.removeContact.push(name);
+        return guard("removeContact", undefined);
+      },
+      renameContact: (old: string, newName: string) => {
+        harness.recorder.renameContact.push([old, newName]);
+        return guard("renameContact", undefined);
+      },
+      listHistory: () => {
+        harness.recorder.listHistory++;
+        return guard("listHistory", []);
+      },
+      clearHistory: () => {
+        harness.recorder.clearHistory++;
+        return guard("clearHistory", 0);
+      },
+      clearFinished: () => {
+        harness.recorder.clearFinished++;
+        return guard("clearFinished", 0);
+      },
+      setMyName: (name: string) => {
+        harness.recorder.setMyName.push(name);
+        return guard("setMyName", undefined);
+      },
+      restartDaemon: () => guard("restartDaemon", undefined),
       listDeposits: () => {
         harness.recorder.listDeposits++;
         return guard("listDeposits", harness.snapshot.deposits);
@@ -211,6 +303,10 @@ export const dto = {
       id: "peer1",
       fingerprint: "able-otter-nine",
       verified: false,
+      trusted: false,
+      blocked: false,
+      display_name: "",
+      pending_name: "",
       ...over,
     };
   },

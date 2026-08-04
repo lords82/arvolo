@@ -37,6 +37,7 @@ function reset() {
       transfers: 0,
       pending: 0,
       download_dir: "/Users/ls/Arvolo",
+      display_name: "",
     },
     guiVersion: "0.9.2",
     contacts: [],

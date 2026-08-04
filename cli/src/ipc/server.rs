@@ -15,8 +15,8 @@ use tokio::sync::broadcast::error::RecvError;
 use tokio_util::sync::CancellationToken;
 
 use super::protocol::{
-    ContactDto, EventDto, OfferDto, Request, RequestEnvelope, Response, ServerMessage, StatusDto,
-    TransferDto,
+    ContactDto, EventDto, HistoryDto, OfferDto, Request, RequestEnvelope, Response, ServerMessage,
+    StatusDto, TransferDto,
 };
 
 /// Shared daemon state handed to every connection handler. Cheap to clone.
@@ -162,6 +162,76 @@ async fn dispatch(d: &Daemon, cmd: Request) -> Response {
         Request::ServeTicket { paths, seed_relay } => serve_ticket(d, paths, seed_relay).await,
         Request::ServeCode { paths, relay, keep } => serve_code(d, paths, relay, keep).await,
         Request::CreateLink { path, ttl, max } => create_link(d, path, ttl, max).await,
+        Request::Recv {
+            ticket,
+            out,
+            password,
+        } => recv_ticket(d, ticket, out, password).await,
+        // Contact edits reply on their own result; the pushed `ContactsChanged`
+        // event (from the daemon's book watcher) is what nudges every *other*
+        // attached frontend to refetch.
+        Request::AddContact { name, id } => match crate::book::contact_add(&name, &id) {
+            Ok(_key_change) => Response::Ok,
+            Err(e) => Response::Error(format!("{e:#}")),
+        },
+        Request::RemoveContact { name } => match crate::book::contact_remove(&name) {
+            Ok(true) => Response::Ok,
+            Ok(false) => Response::Error(format!("no such contact '{name}'")),
+            Err(e) => Response::Error(format!("{e:#}")),
+        },
+        Request::RenameContact { old, new } => match crate::book::contact_rename(&old, &new) {
+            Ok(()) => Response::Ok,
+            Err(e) => Response::Error(format!("{e:#}")),
+        },
+        Request::MarkUnverified { name } => match crate::book::unmark_verified(&name) {
+            Ok(_) => Response::Ok,
+            Err(e) => Response::Error(format!("{e:#}")),
+        },
+        Request::MarkTrusted { who, force } => mark_trusted(who, force),
+        Request::MarkUntrusted { who } => match crate::book::unmark_trusted(&who) {
+            Ok(_) => Response::Ok,
+            Err(e) => Response::Error(format!("{e:#}")),
+        },
+        Request::Block { who } => match crate::book::mark_blocked(&who) {
+            Ok(_) => Response::Ok,
+            Err(e) => Response::Error(format!("{e:#}")),
+        },
+        Request::Unblock { who } => match crate::book::unmark_blocked(&who) {
+            Ok(_) => Response::Ok,
+            Err(e) => Response::Error(format!("{e:#}")),
+        },
+        Request::AcceptName { who } => match crate::book::accept_name(&who) {
+            Ok(_) => Response::Ok,
+            Err(e) => Response::Error(format!("{e:#}")),
+        },
+        Request::ListHistory => Response::History(
+            crate::history::list()
+                .into_iter()
+                .map(|r| HistoryDto {
+                    id: r.id,
+                    direction: r.direction,
+                    peer: r.peer_id,
+                    name: r.name,
+                    total_size: r.total_size,
+                    transferred: r.transferred,
+                    status: r.status,
+                    created: r.created,
+                })
+                .collect(),
+        ),
+        Request::ClearHistory => match crate::history::clear() {
+            Ok(n) => Response::Cleared(n),
+            Err(e) => Response::Error(format!("{e:#}")),
+        },
+        Request::SetMyName { name } => match crate::book::set_my_display_name(&name) {
+            Ok(()) => {
+                // The engine advertises the name inside each sealed offer — flip it
+                // live too, or the change would only apply after a daemon restart.
+                d.manager.set_display_name(name.trim().to_string());
+                Response::Ok
+            }
+            Err(e) => Response::Error(format!("{e:#}")),
+        },
         // Handled in `handle_conn` before dispatch; reachable only if a client
         // pipelines Subscribe with other commands, which we don't support.
         Request::Subscribe => {
@@ -325,10 +395,119 @@ fn list_contacts() -> Vec<ContactDto> {
         .map(|(name, id)| ContactDto {
             fingerprint: crate::book::fingerprint_of(&id).unwrap_or_default(),
             verified: crate::book::is_verified(&id),
+            trusted: crate::book::is_trusted(&id),
+            blocked: crate::book::is_blocked(&id),
+            display_name: crate::book::display_name_of(&id).unwrap_or_default(),
+            pending_name: crate::book::pending_name_of(&id).unwrap_or_default(),
             name,
             id,
         })
         .collect()
+}
+
+/// Trust an identity to auto-download — same refusal as `arvolo contacts trust`:
+/// an unverified key needs `force`, because auto-downloading from a key never
+/// confirmed out-of-band is a MITM risk.
+fn mark_trusted(who: String, force: bool) -> Response {
+    let id = match crate::book::resolve_recipient(&who) {
+        Ok(r) => crate::encode_id(&r),
+        Err(e) => return Response::Error(format!("{e:#}")),
+    };
+    if !crate::book::is_verified(&id) && !force {
+        let fp = crate::book::fingerprint_of(&id).unwrap_or_default();
+        return Response::Error(format!(
+            "'{who}' isn't verified — trusting it would auto-download from a key you \
+             haven't confirmed out-of-band (MITM risk). Fingerprint: {fp}. \
+             Verify first, or force."
+        ));
+    }
+    match crate::book::mark_trusted(&who) {
+        Ok(_) => Response::Ok,
+        Err(e) => Response::Error(format!("{e:#}")),
+    }
+}
+
+/// Receive from a pasted artefact, exactly as `arvolo recv` sorts them: a short
+/// pairing code is resolved to its ticket over the rendezvous first, an `arvm…`
+/// offline ticket is fetched from the relay mailbox, and anything else must be an
+/// `arvc…` chunked ticket fetched live. The download runs in the engine, so it
+/// shows up as a normal transfer row with progress, pause and cancel.
+async fn recv_ticket(
+    d: &Daemon,
+    ticket: String,
+    out: Option<String>,
+    password: Option<String>,
+) -> Response {
+    use arvolo_core::{chunked::ChunkTicket, code, offline::OfflineTicket};
+
+    let ticket = ticket.trim().to_string();
+
+    // Resolve a code to its ticket, bounded: resolution waits for the sender, and
+    // an RPC that can hang forever on a typo would freeze the UI that sent it.
+    let ticket = if code::looks_like_code(&ticket) {
+        let default_relay = crate::book::default_relay_or_builtin();
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            code::resolve_code(&ticket, default_relay.as_deref()),
+        )
+        .await
+        {
+            Ok(Ok(t)) => t,
+            Ok(Err(e)) => return Response::Error(format!("pairing: {e:#}")),
+            Err(_) => {
+                return Response::Error(
+                    "pairing timed out — the sender isn't answering on that code (check it, \
+                     or try again while they're online)"
+                        .into(),
+                )
+            }
+        }
+    } else {
+        ticket
+    };
+
+    // What lands where: honour an explicit file path; treat an explicit directory
+    // as "in there, under the payload's own name"; default to the download dir.
+    // `recv_chunked` resolves dir→file itself, but the offline fetch does not, so
+    // the file name is settled here for both.
+    let (name, size, peer) = if let Ok(t) = ChunkTicket::decode(&ticket) {
+        (t.name, t.total_size, None)
+    } else if let Ok(t) = OfflineTicket::decode(&ticket) {
+        if t.has_password() && password.as_deref().map(str::is_empty).unwrap_or(true) {
+            return Response::Error(
+                "this ticket is password-protected — supply the password".into(),
+            );
+        }
+        // The payload name travels sealed, so the row starts under a claim-derived
+        // one; the sender id is right in the ticket though, so the row knows who.
+        let name = arvolo_core::flow::default_out(&ticket)
+            .display()
+            .to_string();
+        let peer = arvolo_core::crypto::PublicId::from_bytes(&t.sender).ok();
+        (name, t.total_size, peer)
+    } else {
+        return Response::Error(
+            "not a ticket this daemon understands — paste an arvc… ticket, a pairing \
+             code (like 4821-crater-mango), or an arvm… offline ticket"
+                .into(),
+        );
+    };
+    let safe_name = arvolo_core::flow::safe_download_name(&name).unwrap_or_else(|| name.clone());
+    let out_path = match out.map(PathBuf::from) {
+        Some(p) if p.is_dir() => p.join(&safe_name),
+        Some(p) => p,
+        None => d.download_dir.join(&safe_name),
+    };
+    if let Some(parent) = out_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).ok();
+        }
+    }
+
+    let id = d
+        .manager
+        .start_download_with_password(ticket, out_path, peer, name, size, password);
+    Response::TransferId(id)
 }
 
 /// Encrypt `path` (a single file, or a folder packed into an archive) locally and
@@ -434,6 +613,7 @@ fn status(d: &Daemon) -> StatusDto {
         transfers: d.manager.list().len(),
         pending: d.pending.lock().unwrap().len(),
         download_dir: d.download_dir.display().to_string(),
+        display_name: crate::book::my_display_name(),
     }
 }
 

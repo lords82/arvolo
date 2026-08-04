@@ -55,3 +55,9 @@ fn home_dir() -> PathBuf {
 pub fn socket_path() -> PathBuf {
     config_dir().join("daemon.sock")
 }
+
+/// Path to the daemon's pid file (honors `ARVOLO_CONFIG_DIR`) — what a frontend
+/// reads to stop a stale daemon so its supervisor can start a fresh one.
+pub fn pid_path() -> PathBuf {
+    config_dir().join("daemon.pid")
+}

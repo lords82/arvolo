@@ -8,7 +8,7 @@
 use std::path::PathBuf;
 
 use arvolo_ipc::client::DaemonClient;
-use arvolo_ipc::protocol::{ContactDto, DepositDto, OfferDto, StatusDto, TransferDto};
+use arvolo_ipc::protocol::{ContactDto, DepositDto, HistoryDto, OfferDto, StatusDto, TransferDto};
 use serde::Serialize;
 
 /// A ticket-serve result handed back to the UI.
@@ -16,6 +16,13 @@ use serde::Serialize;
 pub struct ServedDto {
     pub id: u64,
     pub ticket: String,
+}
+
+/// A code-serve result handed back to the UI.
+#[derive(Debug, Clone, Serialize)]
+pub struct CodeDto {
+    pub id: u64,
+    pub code: String,
 }
 
 /// Connect to the daemon, mapping the "no daemon" error to a UI-friendly string.
@@ -115,6 +122,138 @@ pub async fn cancel(id: u64) -> Result<(), String> {
 pub async fn remove(id: u64) -> Result<(), String> {
     let mut c = client().await?;
     c.remove(id).await.or_else(err)
+}
+
+#[tauri::command]
+pub async fn serve_code(
+    paths: Vec<String>,
+    relay: Option<String>,
+    keep: bool,
+) -> Result<CodeDto, String> {
+    let mut c = client().await?;
+    match c.serve_code(paths, relay, keep).await {
+        Ok((id, code)) => Ok(CodeDto { id, code }),
+        Err(e) => err(e),
+    }
+}
+
+#[tauri::command]
+pub async fn recv(
+    ticket: String,
+    out: Option<String>,
+    password: Option<String>,
+) -> Result<u64, String> {
+    let mut c = client().await?;
+    c.recv(ticket, out.map(PathBuf::from), password)
+        .await
+        .or_else(err)
+}
+
+#[tauri::command]
+pub async fn add_contact(name: String, id: String) -> Result<(), String> {
+    let mut c = client().await?;
+    c.add_contact(name, id).await.or_else(err)
+}
+
+#[tauri::command]
+pub async fn remove_contact(name: String) -> Result<(), String> {
+    let mut c = client().await?;
+    c.remove_contact(name).await.or_else(err)
+}
+
+#[tauri::command]
+pub async fn rename_contact(old: String, new: String) -> Result<(), String> {
+    let mut c = client().await?;
+    c.rename_contact(old, new).await.or_else(err)
+}
+
+#[tauri::command]
+pub async fn mark_unverified(name: String) -> Result<(), String> {
+    let mut c = client().await?;
+    c.mark_unverified(name).await.or_else(err)
+}
+
+#[tauri::command]
+pub async fn mark_trusted(who: String, force: bool) -> Result<(), String> {
+    let mut c = client().await?;
+    c.mark_trusted(who, force).await.or_else(err)
+}
+
+#[tauri::command]
+pub async fn mark_untrusted(who: String) -> Result<(), String> {
+    let mut c = client().await?;
+    c.mark_untrusted(who).await.or_else(err)
+}
+
+#[tauri::command]
+pub async fn block_contact(who: String) -> Result<(), String> {
+    let mut c = client().await?;
+    c.block(who).await.or_else(err)
+}
+
+#[tauri::command]
+pub async fn unblock_contact(who: String) -> Result<(), String> {
+    let mut c = client().await?;
+    c.unblock(who).await.or_else(err)
+}
+
+#[tauri::command]
+pub async fn accept_name(who: String) -> Result<(), String> {
+    let mut c = client().await?;
+    c.accept_name(who).await.or_else(err)
+}
+
+#[tauri::command]
+pub async fn list_history() -> Result<Vec<HistoryDto>, String> {
+    let mut c = client().await?;
+    c.list_history().await.or_else(err)
+}
+
+#[tauri::command]
+pub async fn clear_history() -> Result<usize, String> {
+    let mut c = client().await?;
+    c.clear_history().await.or_else(err)
+}
+
+#[tauri::command]
+pub async fn clear_finished() -> Result<usize, String> {
+    let mut c = client().await?;
+    c.clear_finished().await.or_else(err)
+}
+
+#[tauri::command]
+pub async fn set_my_name(name: String) -> Result<(), String> {
+    let mut c = client().await?;
+    c.set_my_name(name).await.or_else(err)
+}
+
+/// Stop a (stale) daemon by its pid file. The event pump's `ensure_running` then
+/// brings a fresh one up — which is the whole point: the pair is a restart the
+/// user doesn't have to open a terminal for.
+#[tauri::command]
+pub async fn restart_daemon() -> Result<(), String> {
+    let pid = std::fs::read_to_string(arvolo_ipc::pid_path())
+        .map_err(|e| format!("pid file: {e}"))?
+        .trim()
+        .parse::<i32>()
+        .map_err(|e| format!("pid file: {e}"))?;
+    #[cfg(unix)]
+    {
+        // SIGTERM — the daemon shuts down cleanly (it persists resumable state).
+        let rc = unsafe { libc::kill(pid, libc::SIGTERM) };
+        if rc != 0 {
+            return Err(format!(
+                "could not stop daemon (pid {pid}): {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        Err("restart is unix-only for now".into())
+    }
 }
 
 #[tauri::command]

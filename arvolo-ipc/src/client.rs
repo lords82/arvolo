@@ -10,8 +10,8 @@ use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::UnixStream;
 
 use crate::protocol::{
-    ContactDto, DepositDto, EventDto, OfferDto, Request, RequestEnvelope, Response, ServerMessage,
-    StatusDto, TransferDto,
+    ContactDto, DepositDto, EventDto, HistoryDto, OfferDto, Request, RequestEnvelope, Response,
+    ServerMessage, StatusDto, TransferDto,
 };
 use crate::socket_path;
 
@@ -204,6 +204,92 @@ impl DaemonClient {
 
     pub async fn reject(&mut self, offer_id: String) -> Result<()> {
         expect_ok(self.request(Request::RejectOffer { offer_id }).await?)
+    }
+
+    /// Receive from a pasted `arvc…` ticket, pairing code or `arvm…` offline
+    /// ticket — the daemon fetches it as a normal transfer; returns its id.
+    pub async fn recv(
+        &mut self,
+        ticket: String,
+        out: Option<PathBuf>,
+        password: Option<String>,
+    ) -> Result<u64> {
+        let out = out.map(|p| p.to_string_lossy().into_owned());
+        match self
+            .request(Request::Recv {
+                ticket,
+                out,
+                password,
+            })
+            .await?
+        {
+            Response::TransferId(id) => Ok(id),
+            other => unexpected(other),
+        }
+    }
+
+    /// Save (or re-key) a contact. Re-keying clears verified/trusted marks —
+    /// warn the user first.
+    pub async fn add_contact(&mut self, name: String, id: String) -> Result<()> {
+        expect_ok(self.request(Request::AddContact { name, id }).await?)
+    }
+
+    pub async fn remove_contact(&mut self, name: String) -> Result<()> {
+        expect_ok(self.request(Request::RemoveContact { name }).await?)
+    }
+
+    pub async fn rename_contact(&mut self, old: String, new: String) -> Result<()> {
+        expect_ok(self.request(Request::RenameContact { old, new }).await?)
+    }
+
+    /// Clear a contact's verified mark.
+    pub async fn mark_unverified(&mut self, name: String) -> Result<()> {
+        expect_ok(self.request(Request::MarkUnverified { name }).await?)
+    }
+
+    /// Trust a contact/id to auto-download. Refused for an unverified contact
+    /// unless `force`.
+    pub async fn mark_trusted(&mut self, who: String, force: bool) -> Result<()> {
+        expect_ok(self.request(Request::MarkTrusted { who, force }).await?)
+    }
+
+    pub async fn mark_untrusted(&mut self, who: String) -> Result<()> {
+        expect_ok(self.request(Request::MarkUntrusted { who }).await?)
+    }
+
+    /// Silence an identity: offers from it are dropped on arrival.
+    pub async fn block(&mut self, who: String) -> Result<()> {
+        expect_ok(self.request(Request::Block { who }).await?)
+    }
+
+    pub async fn unblock(&mut self, who: String) -> Result<()> {
+        expect_ok(self.request(Request::Unblock { who }).await?)
+    }
+
+    /// Approve a contact's pending advertised display name.
+    pub async fn accept_name(&mut self, who: String) -> Result<()> {
+        expect_ok(self.request(Request::AcceptName { who }).await?)
+    }
+
+    /// The log of finished transfers, newest first.
+    pub async fn list_history(&mut self) -> Result<Vec<HistoryDto>> {
+        match self.request(Request::ListHistory).await? {
+            Response::History(v) => Ok(v),
+            other => unexpected(other),
+        }
+    }
+
+    /// Forget the whole history log; returns how many records went.
+    pub async fn clear_history(&mut self) -> Result<usize> {
+        match self.request(Request::ClearHistory).await? {
+            Response::Cleared(n) => Ok(n),
+            other => unexpected(other),
+        }
+    }
+
+    /// Set (or clear, with an empty string) the advertised display name.
+    pub async fn set_my_name(&mut self, name: String) -> Result<()> {
+        expect_ok(self.request(Request::SetMyName { name }).await?)
     }
 
     /// Turn this connection into an event stream. Sends `Subscribe`, consumes the

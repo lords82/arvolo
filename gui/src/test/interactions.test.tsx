@@ -42,6 +42,7 @@ function fresh() {
       transfers: 0,
       pending: 0,
       download_dir: "/Users/ls/Arvolo",
+      display_name: "",
     },
     guiVersion: "0.9.2",
     loadError: null,
@@ -246,7 +247,10 @@ describe("the row menu", () => {
     await waitFor(() => expect(revealItemInDir).toHaveBeenCalledWith("/Users/ls/Arvolo/x"));
   });
 
-  it("117. Verifica identità is offered for a saved contact and marks it", async () => {
+  it("117. Verifica identità routes to the Rubrica, where the fingerprint is shown", async () => {
+    // Marking a key verified means "I compared the fingerprint out-of-band", so
+    // the menu no longer marks on the spot: it opens the address book, whose
+    // verify flow puts the fingerprint on screen before asking for the click.
     useStore.setState({
       contacts: [dto.contact({ name: "proj", id: "peer1" })],
       contactsById: { peer1: dto.contact({ name: "proj", id: "peer1" }) },
@@ -254,8 +258,9 @@ describe("the row menu", () => {
     });
     render(<Board />);
     fireEvent.click(screen.getByLabelText("Azioni trasferimento"));
-    fireEvent.click(screen.getByText("Verifica identità"));
-    await waitFor(() => expect(harness.recorder.markVerified).toEqual(["proj"]));
+    fireEvent.click(screen.getByText("Verifica identità…"));
+    expect(useStore.getState().contactsOpen).toBe(true);
+    expect(harness.recorder.markVerified).toEqual([]);
   });
 
   it("118. Sposta giù reorders without touching the daemon", async () => {

@@ -40,6 +40,9 @@ export type WireEvent =
   | { paused: { id: number; reason: string } }
   | { failed: { id: number; error: string } }
   | { cancelled: { id: number } }
+  | { code_ready: { id: number; code: string } }
+  | { code_paired: { id: number; done: number } }
+  | { code_closed: { id: number; reason: string } }
   | "contacts_changed";
 
 /** Every variant the app knows how to act on. A daemon of a different build may
@@ -54,6 +57,9 @@ const KNOWN = new Set<EngineEvent["type"]>([
   "paused",
   "failed",
   "cancelled",
+  "code_ready",
+  "code_paired",
+  "code_closed",
   "contacts_changed",
 ]);
 

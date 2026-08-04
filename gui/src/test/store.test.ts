@@ -432,10 +432,13 @@ describe("list housekeeping", () => {
     harness.emit({ started: { id: 3, direction: "send", name: "held", total_size: 1 } });
     harness.emit({ deposited: { id: 3 } });
 
-    useStore.getState().clearFinished();
+    await useStore.getState().clearFinished();
     expect(row("t1")).toBeTruthy();
     expect(row("t3")).toBeTruthy(); // awaiting pickup is NOT finished
     expect(row("t2")).toBeUndefined();
+    // Daemon-side too — a local-only sweep would see every row come back with
+    // the next snapshot.
+    expect(harness.recorder.clearFinished).toBe(1);
   });
 
   it("23. moveItem swaps a row with its neighbour, and stops at the edges", async () => {

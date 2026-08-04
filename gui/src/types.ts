@@ -31,6 +31,8 @@ export interface TransferDto {
   /** Unix seconds when the transfer began, per the engine. 0 from a daemon that
    *  predates the field. */
   created: number;
+  /** The live pairing code this send answers to, while one is hosted. */
+  code?: string | null;
 }
 
 export interface OfferDto {
@@ -47,6 +49,28 @@ export interface ContactDto {
   id: string;
   fingerprint: string;
   verified: boolean;
+  /** Auto-download without a prompt (contacts trust). */
+  trusted: boolean;
+  /** Offers dropped on arrival (contacts block). */
+  blocked: boolean;
+  /** The advertised display name already approved ("" when none). */
+  display_name: string;
+  /** An advertised name awaiting approval ("" when none). */
+  pending_name: string;
+}
+
+/** One finished transfer from the daemon's history log (read-only). */
+export interface HistoryDto {
+  id: string;
+  direction: "send" | "recv";
+  peer: string | null;
+  name: string;
+  total_size: number;
+  transferred: number;
+  /** "completed" | "cancelled" | "failed: …" | "deposited". */
+  status: string;
+  /** Unix seconds. */
+  created: number;
 }
 
 /** Something left on a relay that can still be taken back: a public download link,
@@ -86,6 +110,8 @@ export interface StatusDto {
   transfers: number;
   pending: number;
   download_dir: string;
+  /** The display name advertised in offers ("" when none is set). */
+  display_name: string;
 }
 
 /** The app-model event: `EventDto` flattened by `normalizeEvent`. This is NOT the
@@ -114,6 +140,12 @@ export type EngineEvent =
   | { type: "paused"; id: number; reason: string }
   | { type: "failed"; id: number; error: string }
   | { type: "cancelled"; id: number }
+  /** A short pairing code is live for this send (fresh, or restored on restart). */
+  | { type: "code_ready"; id: number; code: string }
+  /** A receiver used the code and now holds the ticket. */
+  | { type: "code_paired"; id: number; done: number }
+  /** The code stopped working; the send behind it carries on. */
+  | { type: "code_closed"; id: number; reason: string }
   /** The address book moved (from this GUI, the CLI, or a sync). Carries nothing:
    *  refetch the contacts. */
   | { type: "contacts_changed" };
@@ -157,4 +189,6 @@ export interface UITransfer {
   rank: number;
   /** Smoothed throughput in bytes/sec, derived from progress events. */
   rate?: number;
+  /** The live pairing code this send answers to, while one is hosted. */
+  code?: string;
 }

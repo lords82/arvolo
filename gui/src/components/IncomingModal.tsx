@@ -23,14 +23,20 @@ export function IncomingModal() {
     return o?.peerId ? s.contactsById[o.peerId] : undefined;
   });
 
+  const blockContact = useStore((s) => s.blockContact);
+
   const [dest, setDest] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [verifying, setVerifying] = useState(false);
+  const [blocking, setBlocking] = useState(false);
 
   const offer = offerId ? transfers[`o${offerId}`] : undefined;
 
   useEffect(() => {
     setDest(null);
     setBusy(false);
+    setVerifying(false);
+    setBlocking(false);
   }, [offerId]);
 
   if (!offerId || !offer) return null;
@@ -47,6 +53,25 @@ export function IncomingModal() {
     setBusy(true);
     try {
       await accept(offerId, dest);
+    } catch {
+      // Surfaced by the store's error banner; swallowed here so a daemon refusal
+      // doesn't become an unhandled rejection.
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Block = silence THIS sender for good, and make the current offer go away with
+  // it — leaving the offer parked after a block would be a question the user
+  // already answered.
+  const doBlock = async () => {
+    if (!offer?.peerId) return;
+    setBusy(true);
+    try {
+      await blockContact(offer.peerId);
+      await reject(offerId);
+    } catch {
+      // Error banner already raised by the store.
     } finally {
       setBusy(false);
     }
@@ -195,6 +220,7 @@ export function IncomingModal() {
               fontSize: 11,
               color: "#8a827a",
               marginBottom: 12,
+              flexWrap: "wrap",
             }}
           >
             {offer.verified ? (
@@ -206,10 +232,9 @@ export function IncomingModal() {
                 ⚠ Identità non verificata
               </span>
             )}
-            {!offer.verified && contact && (
+            {!offer.verified && contact && !verifying && (
               <button
-                onClick={() => markVerified(contact.name)}
-                title="Segna come verificata dopo aver confrontato il fingerprint di persona/su un altro canale"
+                onClick={() => setVerifying(true)}
                 style={{
                   border: "1px solid rgba(15,118,110,.35)",
                   background: "#e6f4ef",
@@ -221,10 +246,146 @@ export function IncomingModal() {
                   cursor: "pointer",
                 }}
               >
-                Verifica identità
+                Verifica identità…
+              </button>
+            )}
+            {offer.peerId && !blocking && (
+              <button
+                onClick={() => setBlocking(true)}
+                title="Le sue offerte non ti raggiungeranno più"
+                style={{
+                  border: "1px solid rgba(185,28,28,.3)",
+                  background: "#fff",
+                  color: "#b91c1c",
+                  borderRadius: 7,
+                  padding: "3px 8px",
+                  fontSize: 10.5,
+                  fontWeight: 600,
+                  cursor: "pointer",
+                  marginLeft: "auto",
+                }}
+              >
+                Blocca mittente
               </button>
             )}
           </div>
+
+          {/* Verify = "I compared this fingerprint out-of-band" — so it is on
+              screen, and the click confirms the comparison, not a wish. */}
+          {verifying && contact && (
+            <div
+              style={{
+                background: "#faf8f6",
+                border: "1px solid var(--line)",
+                borderRadius: 10,
+                padding: "10px 12px",
+                marginBottom: 12,
+              }}
+            >
+              <div style={{ fontSize: 11.5, color: "#3a352f", lineHeight: 1.5 }}>
+                Confronta il fingerprint di <b>{contact.name}</b> su un altro
+                canale (a voce, in videochiamata):
+              </div>
+              <div
+                className="mono selectable"
+                style={{
+                  background: "#16181d",
+                  color: "#34d399",
+                  borderRadius: 8,
+                  padding: "8px 10px",
+                  fontSize: 12,
+                  margin: "8px 0",
+                  textAlign: "center",
+                }}
+              >
+                {contact.fingerprint || "(fingerprint non disponibile)"}
+              </div>
+              <div style={{ display: "flex", gap: 6 }}>
+                <button
+                  disabled={busy || !contact.fingerprint}
+                  onClick={() => {
+                    void markVerified(contact.name).catch(() => {});
+                    setVerifying(false);
+                  }}
+                  style={{
+                    border: "none",
+                    background: "#0f766e",
+                    color: "#fff",
+                    borderRadius: 7,
+                    padding: "6px 11px",
+                    fontSize: 11,
+                    fontWeight: 600,
+                    cursor: "pointer",
+                  }}
+                >
+                  Coincide — segna verificato
+                </button>
+                <button
+                  onClick={() => setVerifying(false)}
+                  style={{
+                    border: "1px solid rgba(0,0,0,.14)",
+                    background: "#fff",
+                    borderRadius: 7,
+                    padding: "6px 11px",
+                    fontSize: 11,
+                    fontWeight: 600,
+                    cursor: "pointer",
+                  }}
+                >
+                  Annulla
+                </button>
+              </div>
+            </div>
+          )}
+
+          {blocking && (
+            <div
+              style={{
+                background: "#fdecec",
+                border: "1px solid #f5c2c2",
+                borderRadius: 10,
+                padding: "10px 12px",
+                marginBottom: 12,
+              }}
+            >
+              <div style={{ fontSize: 11.5, color: "#b91c1c", lineHeight: 1.5 }}>
+                Bloccare <b>{label}</b>? Questa offerta viene rifiutata e le
+                prossime verranno scartate in silenzio (si annulla dalla Rubrica).
+              </div>
+              <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+                <button
+                  disabled={busy}
+                  onClick={() => void doBlock()}
+                  style={{
+                    border: "none",
+                    background: "#b91c1c",
+                    color: "#fff",
+                    borderRadius: 7,
+                    padding: "6px 11px",
+                    fontSize: 11,
+                    fontWeight: 600,
+                    cursor: "pointer",
+                  }}
+                >
+                  Blocca e rifiuta
+                </button>
+                <button
+                  onClick={() => setBlocking(false)}
+                  style={{
+                    border: "1px solid rgba(0,0,0,.14)",
+                    background: "#fff",
+                    borderRadius: 7,
+                    padding: "6px 11px",
+                    fontSize: 11,
+                    fontWeight: 600,
+                    cursor: "pointer",
+                  }}
+                >
+                  Annulla
+                </button>
+              </div>
+            </div>
+          )}
 
           {/* dest folder */}
           <button
@@ -255,7 +416,7 @@ export function IncomingModal() {
           <div style={{ display: "flex", gap: 10 }}>
             <button
               disabled={busy}
-              onClick={() => reject(offerId)}
+              onClick={() => void reject(offerId).catch(() => {})}
               style={{
                 flex: 1,
                 border: "1px solid rgba(0,0,0,.14)",

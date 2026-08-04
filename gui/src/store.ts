@@ -8,6 +8,7 @@ import type {
   ContactDto,
   DepositDto,
   EngineEvent,
+  HistoryDto,
   Method,
   OfferDto,
   StatusDto,
@@ -92,12 +93,21 @@ interface State {
    *  be double-submitted (the relay round-trip is not instant). */
   revoking: string[];
 
+  /** The history log, fetched when its panel opens (like the deposits: there is
+   *  no push event for it, so open-is-the-refresh keeps it honest). */
+  history: HistoryDto[];
+  historyOpen: boolean;
+  historyLoading: boolean;
+  historyError: string | null;
+
   // UI state
   search: string;
   pauseAll: boolean;
   openMenuKey: string | null;
   sheetPaths: string[] | null; // send sheet open when non-null
   incomingOfferId: string | null; // incoming modal
+  receiveOpen: boolean; // paste-a-ticket modal
+  contactsOpen: boolean; // address book panel
 
   // lifecycle
   init: () => Promise<() => void>;
@@ -127,10 +137,24 @@ interface State {
    *  working for everyone who has it. */
   revokeDeposit: (id: string) => Promise<void>;
 
+  openReceive: () => void;
+  closeReceive: () => void;
+  openContacts: () => void;
+  closeContacts: () => void;
+  openHistory: () => Promise<void>;
+  closeHistory: () => void;
+  loadHistory: () => Promise<void>;
+  /** Forget the whole daemon-side history log. */
+  clearHistory: () => Promise<void>;
+
   // actions (forward to the daemon, then let events reconcile)
   send: (to: string, paths: string[], note: string) => Promise<number>;
   ticket: (paths: string[]) => Promise<{ id: number; ticket: string }>;
-  link: (path: string) => Promise<string>;
+  /** Host a short pairing code in the daemon (keep = serve every receiver). */
+  code: (paths: string[], keep: boolean) => Promise<{ id: number; code: string }>;
+  link: (path: string, ttl: number | null, max: number | null) => Promise<string>;
+  /** Receive from a pasted arvc… ticket, pairing code or arvm… offline ticket. */
+  receive: (ticket: string, out: string | null, password: string | null) => Promise<number>;
   accept: (offerId: string, out: string | null) => Promise<void>;
   reject: (offerId: string) => Promise<void>;
   pause: (id: number) => Promise<void>;
@@ -140,10 +164,26 @@ interface State {
   removeRow: (key: string) => Promise<void>;
   /** Mark a saved contact verified, then refresh contacts + row badges. */
   markVerified: (name: string) => Promise<void>;
+  markUnverified: (name: string) => Promise<void>;
+  /** Trust auto-download. The daemon refuses an unverified contact unless forced. */
+  markTrusted: (who: string, force: boolean) => Promise<void>;
+  markUntrusted: (who: string) => Promise<void>;
+  blockContact: (who: string) => Promise<void>;
+  unblockContact: (who: string) => Promise<void>;
+  acceptName: (who: string) => Promise<void>;
+  addContact: (name: string, id: string) => Promise<void>;
+  removeContact: (name: string) => Promise<void>;
+  renameContact: (old: string, newName: string) => Promise<void>;
+  /** Set (or clear) the display name advertised inside offers. */
+  setMyName: (name: string) => Promise<void>;
+  /** Stop the stale daemon; the event pump respawns a fresh one. */
+  restartDaemon: () => Promise<void>;
   /** "Sposta su/giù": swap the row's rank with its neighbour (same direction). */
   moveItem: (key: string, delta: 1 | -1) => void;
   togglePauseAll: () => Promise<void>;
-  clearFinished: () => void;
+  /** Drop every finished row, daemon-side first — a local-only clear would just
+   *  see them all come back with the next snapshot. */
+  clearFinished: () => Promise<void>;
 }
 
 export const useStore = create<State>((set, get) => {
@@ -189,6 +229,7 @@ export const useStore = create<State>((set, get) => {
       firstSeen: d.created > 0 ? d.created * 1000 : (prev?.firstSeen ?? now()),
       rank: prev?.rank ?? nextRank(),
       rate: prev?.rate,
+      code: d.code ?? prev?.code,
     };
   };
 
@@ -256,11 +297,17 @@ export const useStore = create<State>((set, get) => {
     openMenuKey: null,
     sheetPaths: null,
     incomingOfferId: null,
+    receiveOpen: false,
+    contactsOpen: false,
     deposits: [],
     depositsOpen: false,
     depositsLoading: false,
     depositsError: null,
     revoking: [],
+    history: [],
+    historyOpen: false,
+    historyLoading: false,
+    historyError: null,
 
     peerLabel: (id, fallbackName) => {
       if (!id) return fallbackName || "sconosciuto";
@@ -437,6 +484,16 @@ export const useStore = create<State>((set, get) => {
         case "cancelled":
           patch(ev.id, (t) => ({ ...t, status: "annullato" }));
           break;
+        case "code_ready":
+          patch(ev.id, (t) => ({ ...t, code: ev.code }));
+          break;
+        case "code_paired":
+          // Someone holds the ticket now; the code may retire (one-shot) or stay
+          // (keep) — the daemon says which with `code_closed`, so nothing to do.
+          break;
+        case "code_closed":
+          patch(ev.id, (t) => ({ ...t, code: undefined }));
+          break;
         case "contacts_changed":
           // Fired by the daemon whoever wrote the book — typically an
           // `arvolo contacts …` run in another process.
@@ -454,6 +511,34 @@ export const useStore = create<State>((set, get) => {
     openIncoming: (offerId) =>
       set({ incomingOfferId: offerId, openMenuKey: null }),
     closeIncoming: () => set({ incomingOfferId: null }),
+    openReceive: () => set({ receiveOpen: true, openMenuKey: null }),
+    closeReceive: () => set({ receiveOpen: false }),
+    openContacts: () => set({ contactsOpen: true, openMenuKey: null }),
+    closeContacts: () => set({ contactsOpen: false }),
+
+    openHistory: async () => {
+      set({ historyOpen: true, openMenuKey: null });
+      await get().loadHistory();
+    },
+    closeHistory: () => set({ historyOpen: false, historyError: null }),
+    loadHistory: async () => {
+      set({ historyLoading: true });
+      try {
+        const history = await api.listHistory();
+        set({ history, historyError: null, historyLoading: false });
+      } catch (e) {
+        // Keep what we last had and say why it may be stale — an empty panel
+        // under a green "Connesso" would read as "nothing ever happened".
+        set({
+          historyLoading: false,
+          historyError: `Non riesco a leggere lo storico dal daemon: ${String(e)}`,
+        });
+      }
+    },
+    clearHistory: async () => {
+      await act("Impossibile svuotare lo storico", () => api.clearHistory());
+      set({ history: [] });
+    },
 
     openDeposits: async () => {
       set({ depositsOpen: true, openMenuKey: null });
@@ -502,8 +587,17 @@ export const useStore = create<State>((set, get) => {
     },
     ticket: async (paths) =>
       act("Creazione del ticket non riuscita", () => api.serveTicket(paths, null)),
-    link: async (path) =>
-      act("Creazione del link non riuscita", () => api.createLink(path, null, null)),
+    code: async (paths, keep) =>
+      act("Creazione del codice non riuscita", () => api.serveCode(paths, null, keep)),
+    link: async (path, ttl, max) =>
+      act("Creazione del link non riuscita", () => api.createLink(path, ttl, max)),
+    receive: async (ticket, out, password) => {
+      const id = await act("Ricezione non riuscita", () =>
+        api.recv(ticket, out, password)
+      );
+      set({ receiveOpen: false });
+      return id;
+    },
 
     accept: async (offerId, out) => {
       await act("Impossibile accettare il file", () => api.acceptOffer(offerId, out));
@@ -568,6 +662,61 @@ export const useStore = create<State>((set, get) => {
       // Refresh contacts and re-stamp the verified badge on every row.
       await get().reload();
     },
+    markUnverified: async (name) => {
+      await act(`Impossibile togliere la verifica a ${name}`, () =>
+        api.markUnverified(name)
+      );
+      await get().reload();
+    },
+    markTrusted: async (who, force) => {
+      await act(`Impossibile fidarsi di ${who}`, () => api.markTrusted(who, force));
+      await get().refreshContacts();
+    },
+    markUntrusted: async (who) => {
+      await act(`Impossibile togliere la fiducia a ${who}`, () =>
+        api.markUntrusted(who)
+      );
+      await get().refreshContacts();
+    },
+    blockContact: async (who) => {
+      await act(`Impossibile bloccare ${who}`, () => api.blockContact(who));
+      await get().refreshContacts();
+    },
+    unblockContact: async (who) => {
+      await act(`Impossibile sbloccare ${who}`, () => api.unblockContact(who));
+      await get().refreshContacts();
+    },
+    acceptName: async (who) => {
+      await act(`Impossibile approvare il nome di ${who}`, () =>
+        api.acceptName(who)
+      );
+      await get().refreshContacts();
+    },
+    addContact: async (name, id) => {
+      await act(`Impossibile salvare ${name}`, () => api.addContact(name, id));
+      await get().refreshContacts();
+    },
+    removeContact: async (name) => {
+      await act(`Impossibile rimuovere ${name}`, () => api.removeContact(name));
+      await get().refreshContacts();
+    },
+    renameContact: async (old, newName) => {
+      await act(`Impossibile rinominare ${old}`, () =>
+        api.renameContact(old, newName)
+      );
+      await get().refreshContacts();
+    },
+    setMyName: async (name) => {
+      await act("Impossibile impostare il nome", () => api.setMyName(name));
+      // The name lives in StatusDto — refetch so the header shows the new one.
+      const status = await api.status().catch(() => null);
+      if (status) set({ status });
+    },
+    restartDaemon: async () => {
+      await act("Impossibile riavviare il daemon", () => api.restartDaemon());
+      // The event pump notices the drop and respawns; the connected heartbeat
+      // and the seed-retry loop take it from there.
+    },
     moveItem: (key, delta) =>
       set((s) => {
         const me = s.transfers[key];
@@ -609,14 +758,14 @@ export const useStore = create<State>((set, get) => {
       }
     },
     dismissActionError: () => set({ actionError: null }),
-    clearFinished: () =>
+    clearFinished: async () => {
+      // Daemon first: a local-only clear would just see every row come back with
+      // the next snapshot. Its ClearFinished applies the same definition of
+      // "finished" (a deposit awaiting pickup is NOT finished — still cancellable).
+      await act("Impossibile pulire i completati", () => api.clearFinished());
       set((s) => {
         const kept: Record<string, UITransfer> = {};
         for (const [k, t] of Object.entries(s.transfers)) {
-          // A deposit awaiting pickup is NOT finished: the recipient has not taken
-          // it, and the row is still cancellable (cancelling withdraws the file from
-          // the relay). The daemon keeps it for the same reason, so dropping it here
-          // would only make it reappear on the next snapshot.
           const finished =
             t.status === "completato" ||
             t.status === "fallito" ||
@@ -624,6 +773,7 @@ export const useStore = create<State>((set, get) => {
           if (!finished) kept[k] = t;
         }
         return { transfers: kept, openMenuKey: null };
-      }),
+      });
+    },
   };
 });

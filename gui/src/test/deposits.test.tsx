@@ -73,7 +73,7 @@ describe("the deposits list", () => {
 
   it("141. a link created in the app turns up in the list", async () => {
     // The user's actual ask: create a link, then find it somewhere.
-    await s().link("/a.pdf");
+    await s().link("/a.pdf", null, null);
     harness.snapshot.deposits = [deposit({ name: "a.pdf" })];
     await s().loadDeposits();
     expect(s().deposits.map((d) => d.name)).toContain("a.pdf");
@@ -282,7 +282,7 @@ describe("the panel", () => {
     // be the one place that doesn't.
     useStore.setState({
       contactsById: {
-        k7x2: { id: "k7x2", name: "alice", verified: true, fingerprint: "aa bb" },
+        k7x2: { id: "k7x2", name: "alice", verified: true, fingerprint: "aa bb", trusted: false, blocked: false, display_name: "", pending_name: "" },
       },
     });
     harness.snapshot.deposits = [

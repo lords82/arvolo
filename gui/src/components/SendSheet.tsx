@@ -3,7 +3,7 @@ import QRCode from "qrcode";
 import { useStore } from "../store";
 import { extOf, shortId } from "../format";
 
-type Tab = "contatti" | "id" | "link" | "ticket";
+type Tab = "contatti" | "id" | "code" | "link" | "ticket";
 
 const AVATAR_COLORS = [
   "#c2410c",
@@ -32,12 +32,14 @@ export function SendSheet() {
   const status = useStore((s) => s.status);
   const doSend = useStore((s) => s.send);
   const doTicket = useStore((s) => s.ticket);
+  const doCode = useStore((s) => s.code);
   const doLink = useStore((s) => s.link);
   const openDeposits = useStore((s) => s.openDeposits);
 
   const [tab, setTab] = useState<Tab>("contatti");
   const [note, setNote] = useState("");
   const [code, setCode] = useState("");
+  const [pairCode, setPairCode] = useState("");
   const [link, setLink] = useState("");
   const [ticket, setTicket] = useState("");
   const [busy, setBusy] = useState(false);
@@ -49,6 +51,7 @@ export function SendSheet() {
       setTab("contatti");
       setNote("");
       setCode("");
+      setPairCode("");
       setLink("");
       setTicket("");
       setErr("");
@@ -192,6 +195,7 @@ export function SendSheet() {
             [
               ["contatti", "Persone"],
               ["id", "ID / QR"],
+              ["code", "Codice"],
               ["link", "Link"],
               ["ticket", "Ticket"],
             ] as [Tab, string][]
@@ -272,14 +276,27 @@ export function SendSheet() {
             />
           )}
 
+          {tab === "code" && (
+            <CodeTab
+              code={pairCode}
+              busy={busy}
+              onCreate={(keep) =>
+                run(async () => {
+                  const r = await doCode(paths, keep);
+                  setPairCode(r.code);
+                })
+              }
+            />
+          )}
+
           {tab === "link" && (
             <LinkTab
               link={link}
               busy={busy}
               multi={paths.length > 1}
-              onCreate={() =>
+              onCreate={(ttl, max) =>
                 run(async () => {
-                  const url = await doLink(paths[0]);
+                  const url = await doLink(paths[0], ttl, max);
                   setLink(url);
                 })
               }
@@ -486,6 +503,130 @@ function IdTab({
   );
 }
 
+/** How long a deposited link lives on the relay, offered as choices rather than
+ *  a raw seconds field (the CLI takes `--ttl`; these are its common values). */
+const TTL_CHOICES: [string, number][] = [
+  ["1 ora", 3600],
+  ["1 giorno", 24 * 3600],
+  ["7 giorni", 7 * 24 * 3600],
+  ["30 giorni", 30 * 24 * 3600],
+];
+
+function CodeTab({
+  code,
+  onCreate,
+  busy,
+}: {
+  code: string;
+  onCreate: (keep: boolean) => void;
+  busy: boolean;
+}) {
+  const [keep, setKeep] = useState(false);
+  const [qr, setQr] = useState("");
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    if (code)
+      QRCode.toDataURL(code, { margin: 1, width: 200 })
+        .then(setQr)
+        .catch(() => setQr(""));
+    else setQr("");
+  }, [code]);
+
+  return (
+    <div>
+      <div style={{ fontSize: 12.5, color: "#57534c", marginBottom: 14 }}>
+        Genera un <b>codice breve</b> tipo{" "}
+        <span className="mono">4821-crater-mango</span>: si detta a voce o si
+        scrive a mano, e chi lo riceve fa <span className="mono">arvolo recv
+        &lt;codice&gt;</span> (o lo incolla in “Ricevi”). Il file viaggia comunque
+        P2P — il relay fa solo da punto d'incontro. Il daemon lo tiene attivo
+        anche se chiudi questa finestra.
+      </div>
+      {code ? (
+        <div>
+          <div
+            style={{
+              background: "#16181d",
+              borderRadius: 12,
+              padding: "18px 14px",
+              marginBottom: 12,
+              textAlign: "center",
+            }}
+          >
+            <span
+              className="mono selectable"
+              style={{ fontSize: 22, fontWeight: 700, color: "#34d399", letterSpacing: ".04em" }}
+            >
+              {code}
+            </span>
+          </div>
+          <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+            <button
+              onClick={() => {
+                navigator.clipboard.writeText(code);
+                setCopied(true);
+                setTimeout(() => setCopied(false), 1200);
+              }}
+              style={{
+                flex: 1,
+                border: "none",
+                background: "#171514",
+                color: "#fff",
+                borderRadius: 10,
+                padding: 11,
+                fontSize: 12,
+                fontWeight: 600,
+                cursor: "pointer",
+              }}
+            >
+              {copied ? "Copiato ✓" : "Copia codice"}
+            </button>
+          </div>
+          {qr && (
+            <div style={{ display: "flex", justifyContent: "center", marginBottom: 10 }}>
+              <img src={qr} width={160} height={160} style={{ borderRadius: 12 }} alt="QR del codice" />
+            </div>
+          )}
+          <div style={{ fontSize: 11.5, color: "#a8a29a" }}>
+            Lo trovi anche sulla riga dell'invio nella board; interrompilo con
+            “Annulla invio”.
+          </div>
+        </div>
+      ) : (
+        <div>
+          <label
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              fontSize: 12,
+              color: "#57534c",
+              marginBottom: 14,
+              cursor: "pointer",
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={keep}
+              onChange={(e) => setKeep(e.target.checked)}
+            />
+            Valido per più persone (finché non lo annulli)
+          </label>
+          {keep && (
+            <div style={{ fontSize: 11, color: "#b45309", marginBottom: 12 }}>
+              ⚠ Un codice riutilizzabile resta valido per chiunque lo intercetti,
+              finché non lo annulli.
+            </div>
+          )}
+          <button disabled={busy} onClick={() => onCreate(keep)} style={primaryBtn(busy)}>
+            {busy ? "Generazione…" : "Genera codice"}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function LinkTab({
   link,
   onCreate,
@@ -494,7 +635,7 @@ function LinkTab({
   multi,
 }: {
   link: string;
-  onCreate: () => void;
+  onCreate: (ttl: number | null, max: number | null) => void;
   /** Open the deposits panel — where the link can be watched and revoked. This
    *  used to be a line telling the user to go and run a CLI command (one that was
    *  never implemented, at that). */
@@ -502,6 +643,8 @@ function LinkTab({
   busy: boolean;
   multi: boolean;
 }) {
+  const [ttl, setTtl] = useState<number>(7 * 24 * 3600);
+  const [max, setMax] = useState<string>("");
   return (
     <div>
       <div style={{ fontSize: 12.5, color: "#57534c", marginBottom: 14 }}>
@@ -513,6 +656,52 @@ function LinkTab({
         <div style={{ fontSize: 11.5, color: "#b45309", marginBottom: 10 }}>
           ⚠ Hai selezionato più file: il link userà il primo. Per inviarli tutti
           insieme usa Ticket o Persone.
+        </div>
+      )}
+      {!link && (
+        <div style={{ display: "flex", gap: 10, marginBottom: 14 }}>
+          <label style={{ flex: 1, fontSize: 11, color: "#57534c" }}>
+            Scade dopo
+            <select
+              value={ttl}
+              onChange={(e) => setTtl(Number(e.target.value))}
+              style={{
+                display: "block",
+                width: "100%",
+                marginTop: 4,
+                border: "1px solid var(--line-strong)",
+                borderRadius: 8,
+                padding: "8px 10px",
+                fontSize: 12,
+                background: "#fff",
+              }}
+            >
+              {TTL_CHOICES.map(([label, secs]) => (
+                <option key={secs} value={secs}>
+                  {label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label style={{ flex: 1, fontSize: 11, color: "#57534c" }}>
+            Max download (vuoto = senza limite)
+            <input
+              type="number"
+              min={1}
+              value={max}
+              onChange={(e) => setMax(e.target.value)}
+              placeholder="∞"
+              style={{
+                display: "block",
+                width: "100%",
+                marginTop: 4,
+                border: "1px solid var(--line-strong)",
+                borderRadius: 8,
+                padding: "8px 10px",
+                fontSize: 12,
+              }}
+            />
+          </label>
         </div>
       )}
       {link ? (
@@ -572,7 +761,7 @@ function LinkTab({
       ) : (
         <button
           disabled={busy}
-          onClick={onCreate}
+          onClick={() => onCreate(ttl, max.trim() ? Number(max) : null)}
           style={primaryBtn(busy)}
         >
           {busy ? "Creazione…" : "Crea link di download"}

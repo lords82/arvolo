@@ -371,6 +371,33 @@ function TransferRow({ t }: { t: UITransfer }) {
               messaggio
             </Chip>
           )}
+          {t.code && (
+            /* The live pairing code this send answers to — click to copy, since
+               the whole point of a code is handing it to someone. */
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                navigator.clipboard.writeText(t.code!);
+              }}
+              title="Codice attivo — clicca per copiarlo"
+              className="mono"
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 3,
+                fontSize: 9.5,
+                fontWeight: 700,
+                background: "#16181d",
+                color: "#34d399",
+                padding: "2px 7px",
+                borderRadius: 20,
+                border: "none",
+                cursor: "pointer",
+              }}
+            >
+              {t.code} ⧉
+            </button>
+          )}
           {t.downloadPeers > 0 && (
             <Chip bg="#eaf3ec" color="#2f7d4f" glyph="↥">
               servo {t.downloadPeers} peer
@@ -432,10 +459,12 @@ function TransferRow({ t }: { t: UITransfer }) {
 
       {isPending && t.offerId && (
         <div style={{ display: "flex", gap: 6, flex: "none", marginTop: 2 }}>
+          {/* The store surfaces failures in the error banner; the catch is only to
+              keep a daemon refusal from becoming an unhandled rejection. */}
           <button
             onClick={(e) => {
               e.stopPropagation();
-              store.reject(t.offerId!);
+              void store.reject(t.offerId!).catch(() => {});
             }}
             style={btnGhost}
           >
@@ -444,7 +473,7 @@ function TransferRow({ t }: { t: UITransfer }) {
           <button
             onClick={(e) => {
               e.stopPropagation();
-              store.accept(t.offerId!, null);
+              void store.accept(t.offerId!, null).catch(() => {});
             }}
             style={btnAccept}
           >
@@ -483,13 +512,13 @@ function RowMenu({ t }: { t: UITransfer }) {
       label: "Accetta",
       glyph: "✓",
       color: "#16a34a",
-      onClick: () => store.accept(t.offerId!, null),
+      onClick: () => void store.accept(t.offerId!, null).catch(() => {}),
     });
     actions.push({
       label: "Rifiuta",
       glyph: "✕",
       color: "#dc2626",
-      onClick: () => store.reject(t.offerId!),
+      onClick: () => void store.reject(t.offerId!).catch(() => {}),
     });
   } else {
     // "Live" = still cancellable rather than merely removable. A Deposited send
@@ -508,14 +537,14 @@ function RowMenu({ t }: { t: UITransfer }) {
         label: "Metti in pausa",
         glyph: "⏸",
         color: "#171514",
-        onClick: () => store.pause(t.id),
+        onClick: () => void store.pause(t.id).catch(() => {}),
       });
     if (t.status === "in attesa")
       actions.push({
         label: "Riprendi",
         glyph: "▶",
         color: "#171514",
-        onClick: () => store.resume(t.id),
+        onClick: () => void store.resume(t.id).catch(() => {}),
       });
     if (t.status === "completato" && t.path)
       actions.push({
@@ -528,13 +557,18 @@ function RowMenu({ t }: { t: UITransfer }) {
         },
       });
     // Only offered for a saved contact: the verified mark is keyed to the
-    // address book, and the user should compare the fingerprint out-of-band.
+    // address book. Routes to the Rubrica, where the fingerprint is shown and
+    // confirmed — a one-click verify with no fingerprint on screen would make
+    // the badge meaningless.
     if (!t.verified && contact)
       actions.push({
-        label: "Verifica identità",
+        label: "Verifica identità…",
         glyph: "✓",
         color: "#0f766e",
-        onClick: () => store.markVerified(contact.name),
+        onClick: () => {
+          store.toggleMenu(null);
+          store.openContacts();
+        },
       });
     actions.push({
       label: "Sposta su",
@@ -555,13 +589,13 @@ function RowMenu({ t }: { t: UITransfer }) {
               label: t.dir === "out" ? "Annulla invio" : "Annulla",
               glyph: "✕",
               color: "#dc2626",
-              onClick: () => store.cancel(t.id),
+              onClick: () => void store.cancel(t.id).catch(() => {}),
             }
           : {
               label: "Elimina",
               glyph: "✕",
               color: "#dc2626",
-              onClick: () => store.removeRow(t.key),
+              onClick: () => void store.removeRow(t.key).catch(() => {}),
             }
       );
   }

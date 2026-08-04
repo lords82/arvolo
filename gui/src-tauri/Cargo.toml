@@ -23,6 +23,10 @@ tokio.workspace = true
 tracing.workspace = true
 # The daemon client + wire contract, shared with the CLI.
 arvolo-ipc.workspace = true
+
+# Signalling the daemon for the in-app restart (unix only).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 # Pin `time` to the last release whose `Parsable::parse` API `cookie 0.18` (pulled
 # transitively by tauri/wry) compiles against — 0.3.52 shipped a breaking change in
 # a patch release. Constrains the shared workspace lock; harmless for the others.

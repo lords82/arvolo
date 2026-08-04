@@ -7,6 +7,9 @@ import { Board } from "./components/Board";
 import { SendSheet } from "./components/SendSheet";
 import { IncomingModal } from "./components/IncomingModal";
 import { DepositsPanel } from "./components/DepositsPanel";
+import { ReceiveModal } from "./components/ReceiveModal";
+import { ContactsPanel } from "./components/ContactsPanel";
+import { HistoryPanel } from "./components/HistoryPanel";
 
 export function App() {
   const init = useStore((s) => s.init);
@@ -20,6 +23,10 @@ export function App() {
   const openSheet = useStore((s) => s.openSheet);
   const openIncoming = useStore((s) => s.openIncoming);
   const openDeposits = useStore((s) => s.openDeposits);
+  const openReceive = useStore((s) => s.openReceive);
+  const openContacts = useStore((s) => s.openContacts);
+  const openHistory = useStore((s) => s.openHistory);
+  const restartDaemon = useStore((s) => s.restartDaemon);
   // Select the stable map, derive the array with useMemo — a selector returning
   // a fresh array every call makes useSyncExternalStore loop forever.
   const transfers = useStore((s) => s.transfers);
@@ -198,6 +205,75 @@ export function App() {
 
         <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 10 }}>
           <ConnPill connected={connected} />
+          {/* Receive: paste a ticket/code someone sent you — the GUI's `arvolo recv`. */}
+          <button
+            onClick={openReceive}
+            title="Ricevi da un ticket o un codice"
+            aria-label="Ricevi"
+            style={headerBtn}
+          >
+            <svg
+              width="15"
+              height="15"
+              viewBox="0 0 16 16"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.3"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M8 2.5v8" />
+              <path d="M4.8 7.6 8 10.8l3.2-3.2" />
+              <path d="M3 13.2h10" />
+            </svg>
+          </button>
+          {/* Address book: people, trust and blocks. */}
+          <button
+            onClick={openContacts}
+            title="Rubrica"
+            aria-label="Rubrica"
+            style={headerBtn}
+          >
+            <svg
+              width="15"
+              height="15"
+              viewBox="0 0 16 16"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+            >
+              <circle cx="6" cy="5.4" r="2.4" />
+              <path d="M1.8 13.4c.5-2.4 2.2-3.6 4.2-3.6s3.7 1.2 4.2 3.6" />
+              <path d="M10.6 3.4a2.4 2.4 0 0 1 0 4" />
+              <path d="M11.9 9.9c1.2.4 2 1.4 2.3 3" />
+            </svg>
+          </button>
+          {/* History: the log of what already finished. */}
+          <button
+            onClick={() => void openHistory()}
+            title="Storico"
+            aria-label="Storico"
+            style={headerBtn}
+          >
+            <svg
+              width="15"
+              height="15"
+              viewBox="0 0 16 16"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+            >
+              <circle cx="8" cy="8" r="5.6" />
+              <path d="M8 5v3.2l2.2 1.3" />
+            </svg>
+          </button>
           {/* Links and sealed deposits: what is still on a relay, and revocable.
               No count badge — this list is fetched on open, never pushed, so a
               number here would be stale the moment someone downloaded a link. */}
@@ -205,18 +281,7 @@ export function App() {
             onClick={() => void openDeposits()}
             title="Link e depositi attivi"
             aria-label="Link e depositi"
-            style={{
-              border: "1px solid var(--line-strong)",
-              background: "#fff",
-              borderRadius: 8,
-              width: 30,
-              height: 30,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              cursor: "pointer",
-              color: "#171514",
-            }}
+            style={headerBtn}
           >
             <svg
               width="15"
@@ -430,12 +495,25 @@ export function App() {
             flex: "none",
           }}
         >
-          ⚠ Il daemon in esecuzione è la versione{" "}
-          <b>{status?.version || "precedente"}</b>, questa app è la {guiVersion}
-          . Riavvialo:{" "}
-          <span className="mono" style={{ fontSize: 11 }}>
-            kill $(cat ~/.config/arvolo/daemon.pid) && arvolo daemon
+          <span style={{ flex: 1 }}>
+            ⚠ Il daemon in esecuzione è la versione{" "}
+            <b>{status?.version || "precedente"}</b>, questa app è la {guiVersion}.
           </span>
+          <button
+            onClick={() => void restartDaemon().catch(() => {})}
+            style={{
+              border: "1px solid rgba(138,90,30,.35)",
+              background: "#fff",
+              color: "#8a5a1e",
+              borderRadius: 7,
+              padding: "3px 10px",
+              fontSize: 11,
+              fontWeight: 600,
+              cursor: "pointer",
+            }}
+          >
+            Riavvia il daemon
+          </button>
         </div>
       )}
 
@@ -549,9 +627,26 @@ export function App() {
       <SendSheet />
       <IncomingModal />
       <DepositsPanel />
+      <ReceiveModal />
+      <ContactsPanel />
+      <HistoryPanel />
     </div>
   );
 }
+
+/** The shared look of the small square header buttons. */
+const headerBtn: React.CSSProperties = {
+  border: "1px solid var(--line-strong)",
+  background: "#fff",
+  borderRadius: 8,
+  width: 30,
+  height: 30,
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  cursor: "pointer",
+  color: "#171514",
+};
 
 function ConnPill({ connected }: { connected: boolean }) {
   const color = connected ? "#16a34a" : "#dc2626";
@@ -583,6 +678,15 @@ function ControlRow() {
   const setSearch = useStore((s) => s.setSearch);
   const pauseAll = useStore((s) => s.pauseAll);
   const togglePauseAll = useStore((s) => s.togglePauseAll);
+  const clearFinished = useStore((s) => s.clearFinished);
+  // Offer the sweep only when there is something to sweep.
+  const transfers = useStore((s) => s.transfers);
+  const hasFinished = Object.values(transfers).some(
+    (t) =>
+      t.status === "completato" ||
+      t.status === "fallito" ||
+      t.status === "annullato"
+  );
   return (
     <div
       style={{
@@ -639,6 +743,25 @@ function ControlRow() {
         <span style={{ fontSize: 11 }}>{pauseAll ? "▶" : "⏸"}</span>
         {pauseAll ? "Riprendi tutto" : "Pausa tutto"}
       </button>
+      {hasFinished && (
+        <button
+          onClick={() => void clearFinished().catch(() => {})}
+          title="Togli dalla board completati, falliti e annullati (lo storico li ricorda)"
+          style={{
+            flex: "none",
+            border: "1px solid var(--line-strong)",
+            background: "#fff",
+            borderRadius: 10,
+            padding: "9px 14px",
+            fontSize: 12,
+            fontWeight: 600,
+            cursor: "pointer",
+            color: "#57534c",
+          }}
+        >
+          Pulisci
+        </button>
+      )}
     </div>
   );
 }
