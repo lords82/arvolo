@@ -2,7 +2,7 @@
 
 > **Status:** phases 1–4 implemented and phase 5 partially, on top of 0.8.5.
 > Scope: **swarm applies only to shared `arvc…` tickets** (reusable content
-> capabilities — one ticket, many receivers seeding each other). `--to <contact>`
+> capabilities — one ticket, many receivers seeding each other). `arvolo send <contact>`
 > sends stay strictly 1-to-1 (sealed
 > per recipient) and are out of scope — they keep the sender+relay resilience
 > already shipped in 0.8.5.
@@ -14,7 +14,7 @@
 >   peers as providers.
 > - ✅ **Phase 4** — rarest-first piece selection.
 > - ✅ **Phase 5** — relay-only privacy toggle (`ARVOLO_SWARM=off`), provider
->   banning on integrity failure, swarm metrics in `arvolo transfers` (peers +
+>   banning on integrity failure, swarm metrics in `arvolo status` (peers +
 >   pieces-from-peers), seed-after-complete (`ARVOLO_SEED_AFTER`), and **endgame**
 >   (race the last ≤4 pieces across up to 4 sources each; first BLAKE3-verified
 >   wins and cancels the losers via the per-piece token; only pieces with ≥2
@@ -23,7 +23,7 @@
 > **Swarm activation:** on by default. Every shared `arvc…` ticket embeds the
 > configured relay (best-effort — falls back to pure P2P if the relay is
 > unreachable at send time), so the seeder + tracker + peers engage without any
-> flag. The old `--seed-relay` flag is gone. `--code` and `--to` are unaffected
+> flag. The old `--seed-relay` flag is gone. `code` and `send` are unaffected
 > (`--to` stays 1-to-1; `--code` carries its own rendezvous relay).
 
 This document specifies turning a reusable-ticket transfer into a **BitTorrent-style
@@ -283,7 +283,7 @@ On daemon startup:
 2. **Rejoin the swarm** (announce with the current bitfield) and resume the scheduler
    — **no re-accept prompt**; the transfer was already accepted, its acceptance is
    the on-disk record.
-3. Emit a `Resumed` event so `arvolo transfers` shows it active again.
+3. Emit a `Resumed` event so `arvolo status` shows it active again.
 
 The **key is stored on disk** (in `meta.toml`, owner-only `0600`, same as the ticket
 would be). This is required for resume and reseeding; call it out as a security
@@ -394,7 +394,7 @@ Each phase is independently shippable and testable.
   each other and serve pieces. Availability from the tracker; still simple selection.
 - **Phase 4 — rarest-first + endgame scheduler** (§5.5): the real swarm scheduling.
 - **Phase 5 — polish**: privacy "relay-only" mode, warm-up randomization, provider
-  health/banning, tunables, metrics in `arvolo transfers`.
+  health/banning, tunables, metrics in `arvolo status`.
 
 Suggested first build target after this spec is approved: **Phase 1**.
 

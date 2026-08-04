@@ -9,27 +9,23 @@ use crate::{book, deposits, history, sessions};
 #[cfg(unix)]
 use crate::ipc;
 
-use crate::args::TransferAction;
+use crate::args::StatusAction;
 #[cfg(unix)]
 use crate::commands::daemon::{daemon_client, daemon_events, print_transfer_dto};
 #[cfg(unix)]
 use crate::ui::*;
 use crate::util::*;
 
-/// `arvolo transfers` — the one view. With a daemon running: its live transfers
-/// (in/out) and the offers awaiting approval. Then, daemon or not, everything
-/// that lives on disk: the files left on a relay, the interrupted sends that can
-/// still be resumed, and the history. Anything here is taken back with `arvolo
-/// cancel <id>`. `clear` wipes the history.
-pub(crate) async fn transfers_cmd(watch: bool, action: Option<TransferAction>) -> Result<()> {
-    match action {
-        Some(TransferAction::ClearHistory) => {
-            let n = history::clear()?;
-            println!("Cleared {n} history record(s) — the live list, your relay deposits and your resumable sends are untouched.");
-            return Ok(());
-        }
-        Some(TransferAction::Clear) => return clear_finished().await,
-        None => {}
+/// `arvolo status` — everything you can still act on. With a daemon running: its
+/// live transfers (in/out) and the offers awaiting approval. Then, daemon or not,
+/// what lives on disk: the files left on a relay and the interrupted sends that
+/// can still be resumed. Anything here is taken back with `arvolo cancel <id>`.
+///
+/// What already finished is [`crate::commands::history`], not this — the split is
+/// exactly "can I still do something about it?".
+pub(crate) async fn status_cmd(watch: bool, action: Option<StatusAction>) -> Result<()> {
+    if let Some(StatusAction::Clear) = action {
+        return clear_finished().await;
     }
 
     #[cfg(unix)]
@@ -46,23 +42,45 @@ pub(crate) async fn transfers_cmd(watch: bool, action: Option<TransferAction>) -
     #[cfg(not(unix))]
     let _ = watch;
 
+    // Say the daemon is down before showing anything else. "Is it running?" is a
+    // status question, and this view is the answer to it — leaving it out is what
+    // used to send people to a separate `arvolo version` just to find out. Note
+    // what's missing, too: the live rows and parked offers below aren't absent
+    // because nothing is happening, they're absent because nobody is watching.
+    println!(
+        "daemon: not running — `arvolo daemon` starts it (no live transfers or offers below)."
+    );
+
     // No daemon: no live rows and no parked offers (both are the daemon's), but
-    // deposits, resumable sends and history are all on disk and still ours to show.
+    // deposits and resumable sends are on disk and still ours to show.
     print_deposits(&deposits::list_dtos().await);
     print_resumable();
-    print_history();
+    print_history_pointer();
     Ok(())
 }
 
-/// `arvolo transfers clear` — close out what's over.
+/// One line saying the log exists and where it is.
+///
+/// The log used to be printed here in full, which on a well-used machine meant
+/// answering "what's going on?" with a hundred lines of what already happened —
+/// the few actionable rows buried under it. Moving it out only works if it stays
+/// findable, so this line is the trade: the count is the reason to go look.
+pub(crate) fn print_history_pointer() {
+    let n = history::list().len();
+    if n > 0 {
+        println!("\nhistory: {n} record(s) — `arvolo history`");
+    }
+}
+
+/// `arvolo status clear` — close out what's over.
 ///
 /// The list lives in the daemon (it is the engine's own state, not a file), so
 /// without one there is nothing here to clear. Say that rather than reporting a
 /// cheerful zero: the rows the user is looking at aren't gone, they were never
 /// visible from this process.
 ///
-/// Deliberately narrow. It leaves the history log alone — that is the permanent
-/// record, and `clear-history` is where you ask for it to be forgotten — and it
+/// Deliberately narrow. It leaves the log alone — that is the permanent record,
+/// and `arvolo history clear` is where you ask for it to be forgotten — and it
 /// leaves the relay alone: withdrawing a deposit is `arvolo cancel <id>`, an act
 /// with consequences on another machine, never a side effect of tidying a list.
 async fn clear_finished() -> Result<()> {
@@ -71,14 +89,14 @@ async fn clear_finished() -> Result<()> {
         let Some(mut client) = daemon_client().await else {
             eprintln!(
                 "(no daemon running — the transfer list is the daemon's own state, so there's\n \
-                 nothing to clear here. `arvolo transfers clear-history` wipes the history log.)"
+                 nothing to clear here. `arvolo history clear` forgets the log.)"
             );
             return Ok(());
         };
         let n = client.clear_finished().await?;
         println!(
-            "Cleared {n} finished transfer(s) — history kept (`clear-history` wipes it), \
-             deposits kept (`arvolo cancel <id>` withdraws one)."
+            "Cleared {n} finished transfer(s) — the log is kept (`arvolo history clear` \
+             forgets it), deposits kept (`arvolo cancel <id>` withdraws one)."
         );
         Ok(())
     }
@@ -151,7 +169,7 @@ fn print_resumable() {
     if list.is_empty() {
         return;
     }
-    println!("resumable sends — `arvolo send --resume <id>`:");
+    println!("resumable sends — `arvolo resume <id>`:");
     for rec in list {
         let kind = if rec.archive { "archive" } else { "file" };
         println!(
@@ -164,32 +182,26 @@ fn print_resumable() {
     }
 }
 
-/// Print the persisted transfer history (the bottom of every view).
-pub(crate) fn print_history() {
-    let list = history::list();
-    if list.is_empty() {
-        println!("history: (none)");
-        return;
-    }
-    println!("history:");
-    for rec in list {
-        let arrow = if rec.direction == "send" {
-            "→"
-        } else {
-            "←"
-        };
-        let peer = rec
-            .peer_id
-            .as_deref()
-            .map(|id| book::resolve_name(id).unwrap_or_else(|| id.to_string()))
-            .unwrap_or_else(|| "anonymous".into());
-        println!(
-            "  {arrow} {peer}\t{}\t{}\t{}",
-            rec.name,
-            human_size(rec.transferred),
-            rec.status
-        );
-    }
+/// One history row, in the same shape the live rows above use — direction arrow,
+/// who, what, how much, how it ended. Shared so `status` and `history` can never
+/// drift into two dialects for the same record.
+pub(crate) fn print_history_row(rec: &crate::history::HistoryRecord) {
+    let arrow = if rec.direction == "send" {
+        "→"
+    } else {
+        "←"
+    };
+    let peer = rec
+        .peer_id
+        .as_deref()
+        .map(|id| book::resolve_name(id).unwrap_or_else(|| id.to_string()))
+        .unwrap_or_else(|| "anonymous".into());
+    println!(
+        "  {arrow} {peer}\t{}\t{}\t{}",
+        rec.name,
+        human_size(rec.transferred),
+        rec.status
+    );
 }
 
 /// Smooths a transfer's throughput with a **time-based exponentially weighted
@@ -347,7 +359,7 @@ pub(crate) async fn show_transfers_live(
     paint(&st, &transfers, &pending, &mut samples, watch);
     print_deposits(&deposits_view);
     print_resumable();
-    print_history();
+    print_history_pointer();
 
     if !watch {
         return Ok(());
@@ -373,7 +385,7 @@ pub(crate) async fn show_transfers_live(
                 paint(&st, &transfers, &pending, &mut samples, true);
                 print_deposits(&deposits_view);
                 print_resumable();
-                print_history();
+                print_history_pointer();
             }
             ev = events.next() => match ev {
                 Ok(Some(_)) => {}       // absorbed — the 1s tick handles redraw

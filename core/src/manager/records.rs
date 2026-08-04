@@ -238,3 +238,54 @@ pub(super) fn load_records<T: serde::de::DeserializeOwned>(dir: &Path, prefix: &
     }
     out
 }
+
+/// On-disk record of a live short pairing code the daemon is hosting, so it comes
+/// back after a restart. Kept in its own file, with its own prefix, rather than as
+/// fields on [`SendRecord`] — see the note above on evolving these records: adding
+/// a field to an existing struct silently orphans every record already written.
+///
+/// It holds two secrets — the code itself and the slot's owner token — plus a
+/// ticket whose `Plain` key delivery carries the content key in the clear, so it
+/// goes through [`write_record_private`] like the rest.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(super) struct CodeRecord {
+    /// The transfer this code belongs to (the same id its [`SendRecord`] has).
+    pub(super) id: u64,
+    pub(super) slot: String,
+    pub(super) secret: String,
+    pub(super) relay: String,
+    pub(super) owner_token: Vec<u8>,
+    /// The exact bytes handed to a receiver that pairs. Stored rather than
+    /// re-derived from the send, so hosting a code is a pure function of this
+    /// record and needs no ordering with the send's own resume.
+    pub(super) payload: Vec<u8>,
+    /// The code as it was shown to the user (with `@relay` when embedded).
+    pub(super) shown: String,
+    /// `None` = serve until cancelled (`--keep`).
+    pub(super) max_sessions: Option<u32>,
+    pub(super) max_failures: u32,
+    /// Receivers served and wrong-code attempts so far. Persisted on every change:
+    /// a restart that reset the failure count would hand an attacker its guess
+    /// budget back.
+    pub(super) sessions_done: u32,
+    pub(super) failures: u32,
+}
+
+pub(super) fn code_record_path(dir: &Path, id: u64) -> PathBuf {
+    dir.join(format!("code-{id}.pc"))
+}
+
+pub(super) fn persist_code(dir: &Path, rec: &CodeRecord) {
+    if let Ok(bytes) = postcard::to_allocvec(rec) {
+        let _ = std::fs::create_dir_all(dir);
+        let _ = write_record_private(&code_record_path(dir, rec.id), &bytes);
+    }
+}
+
+pub(super) fn remove_code(dir: &Path, id: u64) {
+    let _ = std::fs::remove_file(code_record_path(dir, id));
+}
+
+pub(super) fn load_codes(dir: &Path) -> Vec<CodeRecord> {
+    load_records(dir, "code-")
+}

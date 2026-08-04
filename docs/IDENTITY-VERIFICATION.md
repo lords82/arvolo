@@ -50,29 +50,73 @@ without an IdP.
 - It is a *display aid* for the out-of-band comparison ("read me your eight words").
   The full base32 remains the authoritative value for matching.
 
-### 2. Explicit verify command (to do)
-- `arvolo contact verify <name>` that shows the fingerprint and, after the user
-  confirms, **marks the contact as verified** in the contact book
-  ([`cli/src/book.rs`](../cli/src/book.rs)).
-- Per-contact persisted state: `unverified` / `verified` (+ timestamp).
-- When sending to an `unverified` contact, a non-blocking warning.
+### 2. Explicit verify command (shipped)
+- `arvolo contacts verify <name-or-id>` shows the fingerprint and, after the user
+  confirms, **marks the identity verified** in the contact book
+  ([`cli/src/book/verified.rs`](../cli/src/book/verified.rs)). `arvolo contacts
+  unverify` undoes it.
+- Per-contact persisted state: `unverified` / `verified`, **with the date the mark
+  was made** — the ledger is `id = <unix-seconds>`
+  ([`Verified`](../cli/src/book/verified.rs)), so `arvolo contacts list` can answer
+  "how long ago did I actually check this?" and `verify` can tell a first check
+  from a re-check.
+- The date travels between your devices with the mark (`MarkEntry::since`), so it
+  means the same thing on each. It is **not** an input to the CRDT merge: the
+  Lamport clock decides which write wins and the date rides along, or convergence
+  would depend on two machines agreeing about the time.
+- A mark made before this existed reads back as verified with **no date**, which is
+  deliberately distinct from "verified just now": dropping the mark would have
+  undone a security decision the user made, and inventing a date would have lied
+  about it.
+- Sending to an unverified recipient prints a non-blocking warning naming the
+  fingerprint and the command to fix it (`warn_if_unverified`). It does not block:
+  a warning that stops the send is a warning that gets switched off.
+- `arvolo contacts trust` — which lets the daemon auto-download — refuses an
+  unverified contact outright unless `--force`.
 
-### 3. Key-change detection / after-the-fact anti-MITM (to do)
-- The contact book stores the verified key. If a contact's key **changes**,
-  `send`/`recv` flag it prominently ("X's key changed — re-verify the fingerprint
-  before continuing"), Signal-style.
-- Closes the attack where someone swaps the key of an already-known contact.
+### 3. Key-change detection / after-the-fact anti-MITM (shipped)
+- The contact book stores the key it verified. If a contact's key **changes**,
+  `arvolo contacts add` warns prominently and **clears both the verified and the
+  trusted marks** ([`contact_add`](../cli/src/book/contacts.rs)), so auto-download
+  stops until the new key is confirmed.
+- That demotion is also what surfaces the change at send time: an identity whose
+  key changed is no longer verified, so §2's warning fires on the next send. There
+  is deliberately no *separate* key-change record — the mark is the state.
+- The demotion propagates to your other devices as a CRDT tombstone
+  ([`sync_bridge.rs`](../cli/src/book/sync_bridge.rs)), so re-verifying is a
+  conscious act on each of them.
+- Closes the attack where someone swaps the key of an already-known contact,
+  **provided the swap arrives through `contacts add`**. A key learned only from an
+  incoming transfer is never auto-rebound, so there is nothing to demote.
 
-### 4. Verified exchange via in-person pairing (to do)
-- When two people pair in person / on the same LAN, the SPAKE2 flow can **also**
-  exchange and pin the long-term identities (contact verified "for free", no
-  manual word comparison).
-- Uses the existing PAKE channel ([`core/src/code.rs`](../core/src/code.rs)); no
-  new infrastructure needed.
+### 4. Verified exchange via in-person pairing (shipped)
+- `arvolo contacts pair` — one side shows a short code, the other types it, and
+  **both** end up with the other saved and marked verified. No fingerprint
+  comparison, no pasting a 52-character id.
+- The verification is real, not a courtesy: the SPAKE2 channel only forms between
+  two parties that knew the same code, so a key arriving through it is
+  authenticated *by* the code. Its strength is that of the channel you read the
+  code over, plus the relay's rate limiting against guessing (§6.1/§6.4 of
+  [`PROTOCOL.md`](PROTOCOL.md)) — the same terms `arvolo code` already relies on.
+- This required one protocol addition. The rendezvous was one-directional (a
+  sender fills a slot, a receiver empties it), which cannot express an *exchange*;
+  a per-session `b.` key now carries a sealed reply back, under a key
+  domain-separated from the payload's.
+- It therefore **requires a relay with rendezvous v2**. The command checks before
+  showing you a code, and refuses rather than completing half a trade: an exchange
+  where only one side ends up holding the other's id leaves the two of you
+  disagreeing about what just happened, which is worse than a clean failure.
+- Do not confuse it with `arvolo device pair`, which shares your **secret**
+  identity to make another machine you. This trades **public** ids between two
+  different people.
 
-### 5. QR verification (to do, optional)
+### 5. QR verification (to do, optional — and largely superseded)
 - Show the fingerprint / key as a **QR**; scanning it in person is equivalent to
   comparing the eight words but without typos. Useful for the future GUI/mobile.
+- Mostly answered by §4: `arvolo contacts pair --qr` already renders the *pairing
+  code* as a QR, and scanning that both exchanges and verifies. A fingerprint QR
+  would only help where the two sides cannot reach a common relay, since pairing
+  needs one and reading eight words aloud does not.
 
 ---
 
@@ -90,11 +134,16 @@ governs, and it lives in the separate commercial repo.
 
 ---
 
-## Suggested priority (open core)
-1. `contact verify` + verified state in the contact book (#2).
-2. Key-change detection (#3) — the biggest security gain for the cost.
-3. In-person pairing that pins identities (#4).
-4. QR (#5) — when the GUI/mobile arrives.
+## State of the plan (open core)
 
-To be built driven by real usage, consistent with the philosophy of
-[`ROADMAP-FUTURE.md`](ROADMAP-FUTURE.md).
+§1–§4 are shipped: the fingerprint, `contacts verify` (with the date of the
+check), key-change demotion, and the mutual `contacts pair`. What remains is §5
+(a fingerprint QR), which pairing has largely answered.
+
+Nothing yet *acts* on the verification date — there is no expiry, no "re-verify
+after N months" nudge. That is deliberate for now: an expiry policy is a decision
+about someone else's threat model, and the date has to exist before it can be
+argued about.
+
+Everything further is to be built driven by real usage, consistent with the
+philosophy of [`ROADMAP-FUTURE.md`](ROADMAP-FUTURE.md).

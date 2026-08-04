@@ -103,6 +103,16 @@ impl Inner {
         }
     }
 
+    /// Attach (or clear) the live pairing code a send is reachable by, so a UI can
+    /// show it without having witnessed the command that created it — including
+    /// after a daemon restart, where the code comes back but the terminal that
+    /// printed it is long gone.
+    pub(super) fn set_code(&self, id: u64, code: Option<String>) {
+        if let Some(t) = self.transfers.lock().unwrap().get_mut(&id) {
+            t.code = code;
+        }
+    }
+
     /// Rebuild an owned identity for a spawned task (avoids borrowing `self.me`
     /// across the task's awaits). Cheap: it's a 32-byte key.
     pub(super) fn identity(&self) -> Result<Identity> {

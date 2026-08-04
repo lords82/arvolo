@@ -8,7 +8,12 @@
 //! * a **deposit** — a file left on a relay (a public link or a sealed mailbox
 //!   send), whose id is 8 hex chars ([`crate::deposits::id_for`]);
 //! * a **resumable send** — an interrupted P2P send saved locally, whose id is
-//!   also 8 hex chars ([`crate::sessions::id_for`]).
+//!   also 8 hex chars ([`crate::sessions::id_for`]);
+//! * the **`arvm…` ticket or download link itself** — for withdrawing something
+//!   sent from *another* machine, where there is no local record and so no local
+//!   copy of the revoke token. That one case is why `--token` exists, and it is
+//!   the only case that needs it. This used to be a separate `arvolo revoke`
+//!   verb; it was never a separate intention.
 //!
 //! The ids don't fall into tidy disjoint shapes, so **presence in a store decides**
 //! — the stores are asked first, and only an id nothing on disk claims is read as a
@@ -26,9 +31,10 @@
 
 use anyhow::{bail, Result};
 
+use crate::commands::offline;
 use crate::{deposits, sessions};
 
-pub(crate) async fn cancel_cmd(id: String) -> Result<()> {
+pub(crate) async fn cancel_cmd(id: String, token: Option<String>) -> Result<()> {
     if deposits::load(&id).is_some() {
         return cancel_deposit(&id).await;
     }
@@ -38,10 +44,29 @@ pub(crate) async fn cancel_cmd(id: String) -> Result<()> {
         println!("Dropped resumable send '{id}' — the ticket you shared no longer works.");
         return Ok(());
     }
+    if let Some((relay, claim)) = offline::withdrawal_target(&id) {
+        // A ticket for something we deposited ourselves: the local record holds
+        // the token already, so don't make the user find it — and the local path
+        // also retracts the offer pointing at the blob, which a bare token
+        // revocation cannot do.
+        let local = deposits::id_for(&claim);
+        if deposits::load(&local).is_some() {
+            return cancel_deposit(&local).await;
+        }
+        let Some(token) = token else {
+            bail!(
+                "this machine has no record of that ticket, so withdrawing it needs \
+                 `--token <t>` — the revoke token printed when you sent it. (From the \
+                 machine that sent it, `arvolo cancel <id>` needs no token; the id is \
+                 in `arvolo status`.)"
+            )
+        };
+        return offline::revoke_by_token(&relay, &claim, &token).await;
+    }
     if let Ok(tid) = id.parse::<u64>() {
         return cancel_transfer(tid).await;
     }
-    bail!("no transfer, deposit or resumable send with id '{id}' — see `arvolo transfers`")
+    bail!("no transfer, deposit or resumable send with id '{id}' — see `arvolo status`")
 }
 
 /// A live transfer: only the daemon can stop one, since only the daemon is running it.
@@ -107,8 +132,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("ARVOLO_CONFIG_DIR", dir.path());
 
-        let err = cancel_cmd("00ff00ff".into()).await.unwrap_err().to_string();
-        assert!(err.contains("arvolo transfers"), "got: {err}");
+        let err = cancel_cmd("00ff00ff".into(), None)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("arvolo status"), "got: {err}");
 
         std::env::remove_var("ARVOLO_CONFIG_DIR");
     }
@@ -147,7 +175,7 @@ expires = 1700003600
 
         // Long expired, so the relay is never dialled: this returns on the deposit
         // path alone. Down the transfer path it would say "no daemon"/"no transfer".
-        cancel_cmd("73406183".into())
+        cancel_cmd("73406183".into(), None)
             .await
             .expect("an all-digit id must reach the deposit it names");
         assert!(deposits::load("73406183").is_none(), "must be withdrawn");
@@ -179,8 +207,68 @@ expires = 1700003600
         assert!(sessions::load(&rec.id).is_ok());
         assert!(deposits::load(&rec.id).is_none(), "not a deposit id");
 
-        cancel_cmd(rec.id.clone()).await.unwrap();
+        cancel_cmd(rec.id.clone(), None).await.unwrap();
         assert!(sessions::load(&rec.id).is_err(), "session must be gone");
+
+        std::env::remove_var("ARVOLO_CONFIG_DIR");
+    }
+
+    /// A link this machine never sent can only be withdrawn with its token, and
+    /// the error has to name the flag — this is the one case where `cancel` needs
+    /// something the user has to go and find.
+    #[tokio::test]
+    async fn a_foreign_link_without_a_token_names_the_flag() {
+        let _guard = crate::testlock::ENV
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("ARVOLO_CONFIG_DIR", dir.path());
+
+        let err = cancel_cmd("https://relay.example.com/dl/someclaim#k".into(), None)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("--token"), "got: {err}");
+
+        std::env::remove_var("ARVOLO_CONFIG_DIR");
+    }
+
+    /// The same link, but this machine *does* hold the record: the token is ours
+    /// already, so it must take the local path instead of demanding one — and that
+    /// path is also the only one that retracts the recipient's offer.
+    #[tokio::test]
+    async fn a_link_we_still_have_a_record_of_needs_no_token() {
+        let _guard = crate::testlock::ENV
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("ARVOLO_CONFIG_DIR", dir.path());
+
+        // Long expired, so the relay is never dialled: this returns on the local
+        // deposit path alone.
+        let id = deposits::id_for("someclaim");
+        let toml = format!(
+            r#"
+id = "{id}"
+kind = "link"
+relay = "http://192.0.2.1:1"
+claim = "someclaim"
+revoke_token = "tok"
+name = "f.txt"
+size = 3
+max = 4294967295
+created = 1700000000
+expires = 1700003600
+"#
+        );
+        let deposits_dir = dir.path().join("deposits");
+        std::fs::create_dir_all(&deposits_dir).unwrap();
+        std::fs::write(deposits_dir.join(format!("{id}.toml")), toml).unwrap();
+
+        cancel_cmd("https://192.0.2.1:1/dl/someclaim#k".into(), None)
+            .await
+            .expect("a ticket we hold the record for must withdraw without a token");
+        assert!(deposits::load(&id).is_none(), "must be withdrawn");
 
         std::env::remove_var("ARVOLO_CONFIG_DIR");
     }

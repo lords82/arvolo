@@ -24,6 +24,7 @@ use anyhow::{Context, Result};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
+use crate::code;
 use crate::crypto::{Identity, PublicId};
 use crate::flow::{self, RecvEvent};
 use crate::presence::{self, InboxSubscription};
@@ -93,6 +94,10 @@ pub struct Transfer {
     /// the engine knows the real time: a client that stamps rows when it first sees
     /// them files every transfer under "today" the moment it restarts.
     pub created: u64,
+    /// The short pairing code this send is currently reachable by, if the daemon
+    /// is hosting one. Cleared when the code retires; the send itself carries on,
+    /// since the ticket is a separate capability.
+    pub code: Option<String>,
 }
 
 /// What an offline send actually left on the relay, carried by
@@ -185,6 +190,16 @@ pub enum ManagerEvent {
     Failed { id: u64, error: String },
     /// A transfer was cancelled.
     Cancelled { id: u64 },
+    /// A short pairing code is live and listening for receivers. Raised on the
+    /// first claim and again after a restart, so a front-end can show the code
+    /// without having to have seen the command that created it.
+    CodeReady { id: u64, code: String },
+    /// A receiver proved it knows the code and has been handed the ticket.
+    CodePaired { id: u64, done: u32 },
+    /// The code stopped working (used up, guessed at too often, cancelled, or the
+    /// relay let the slot go). The send itself carries on — the ticket is a
+    /// separate capability, and whoever already has it keeps downloading.
+    CodeClosed { id: u64, reason: String },
     /// The local address book changed (a contact added/removed/renamed, a verified
     /// or trusted mark set or cleared). Payload-free on purpose: the book lives on
     /// disk, outside the engine, so this is a "refetch your contacts" nudge for
@@ -361,6 +376,7 @@ impl TransferManager {
                     swarm_peers: 0,
                     pieces_from_peers: 0,
                     download_peers: 0,
+                    code: None,
                 },
             );
             // Keep the map from growing without bound over a long session: once
@@ -781,6 +797,156 @@ impl TransferManager {
         Ok((id, ticket))
     }
 
+    /// Serve an anonymous ticket **and** host a short pairing code for it in the
+    /// background, so `arvolo code` can hand off to the daemon the way `arvolo
+    /// ticket` already does. Returns the transfer id and the code to show.
+    ///
+    /// `max_sessions` is `Some(1)` for the default one-shot code and `None` for
+    /// `--keep`. Needs a relay that speaks rendezvous v2: a v1 slot cannot outlive
+    /// the process that claimed it, which is the whole point here.
+    pub async fn serve_code(
+        &self,
+        payload: PathBuf,
+        name: String,
+        archive: bool,
+        relay: String,
+        embed: bool,
+        max_sessions: Option<u32>,
+    ) -> Result<(u64, String)> {
+        anyhow::ensure!(
+            code::relay_rz_version(&relay).await == code::RzVersion::V2,
+            "relay {relay} is too old to host a background code (needs rendezvous v2) — \
+             run `arvolo code --foreground`, which serves it in this terminal instead"
+        );
+        // Claim before serving: a code that can't be minted should leave no
+        // half-started transfer behind.
+        let (shown, host) = code::claim_code(&relay, embed)
+            .await
+            .context("claim a pairing code")?;
+
+        let (id, ticket) = match self
+            .serve_ticket(payload, name, archive, Some(relay.clone()))
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = host.close().await;
+                return Err(e);
+            }
+        };
+
+        let opts = code::HostOpts {
+            max_sessions,
+            ..code::HostOpts::default()
+        };
+        let rec = CodeRecord {
+            id,
+            slot: host.slot.clone(),
+            secret: host.secret.clone(),
+            relay: host.relay.clone(),
+            owner_token: host.owner_token.to_vec(),
+            payload: ticket.into_bytes(),
+            shown: shown.clone(),
+            max_sessions,
+            max_failures: opts.max_failures,
+            sessions_done: 0,
+            failures: 0,
+        };
+        if let Some(dir) = &self.inner.state_dir {
+            persist_code(dir, &rec);
+        }
+        // A child of the transfer's own token: `arvolo cancel <id>` retires the
+        // code with the send, while the daemon merely exiting leaves the slot
+        // alive on the relay for the next start to reattach to.
+        let cancel = self
+            .inner
+            .cancels
+            .lock()
+            .unwrap()
+            .get(&id)
+            .map(|c| c.child_token())
+            .unwrap_or_default();
+        tokio::spawn(code_host_task(
+            self.inner.clone(),
+            rec,
+            host,
+            opts,
+            code::HostState::default(),
+            cancel,
+        ));
+        Ok((id, shown))
+    }
+
+    /// Bring a persisted code back after a restart, alongside the send it belongs
+    /// to. The slot usually outlives the daemon (its lease is an hour, renewed on
+    /// every listen), so the common case is simply reattaching; a slot that did
+    /// lapse is re-claimed under the same nameplate so a code already written down
+    /// keeps working.
+    fn resume_code(&self, rec: CodeRecord, id: u64) {
+        let Ok(owner_token) = <[u8; 32]>::try_from(rec.owner_token.as_slice()) else {
+            tracing::warn!("dropping a code record with a malformed owner token");
+            return;
+        };
+        let host = code::CodeHost {
+            slot: rec.slot.clone(),
+            secret: rec.secret.clone(),
+            relay: rec.relay.clone(),
+            owner_token,
+        };
+        let opts = code::HostOpts {
+            max_sessions: rec.max_sessions,
+            max_failures: rec.max_failures,
+            ..code::HostOpts::default()
+        };
+        // Carried over verbatim — a restart that reset the failure count would
+        // hand an attacker its guess budget back.
+        let state = code::HostState {
+            sessions_done: rec.sessions_done,
+            failures: rec.failures,
+        };
+        let rec = CodeRecord { id, ..rec };
+        let cancel = self
+            .inner
+            .cancels
+            .lock()
+            .unwrap()
+            .get(&id)
+            .map(|c| c.child_token())
+            .unwrap_or_default();
+        let inner = self.inner.clone();
+        tokio::spawn(async move {
+            match host.reattach().await {
+                Ok(code::Reattach::Ok) => {}
+                Ok(code::Reattach::Expired) => match host.reclaim().await {
+                    Ok(code::Reattach::Ok) => {}
+                    _ => {
+                        tracing::warn!("pairing code {} could not be reclaimed", rec.shown);
+                        if let Some(dir) = &inner.state_dir {
+                            remove_code(dir, id);
+                        }
+                        inner.emit(ManagerEvent::CodeClosed {
+                            id,
+                            reason: "the rendezvous slot was taken over".to_string(),
+                        });
+                        return;
+                    }
+                },
+                Ok(code::Reattach::Taken) | Err(_) => {
+                    tracing::warn!("pairing code {} is no longer ours", rec.shown);
+                    if let Some(dir) = &inner.state_dir {
+                        remove_code(dir, id);
+                    }
+                    inner.emit(ManagerEvent::CodeClosed {
+                        id,
+                        reason: "the rendezvous slot was taken over".to_string(),
+                    });
+                    return;
+                }
+            }
+            code_host_task(inner, rec, host, opts, state, cancel).await;
+        });
+    }
+
     /// Re-serve a persisted send after a daemon restart: rebind the same node id
     /// and content key (from the saved ticket) so the original ticket reconnects.
     /// Only anonymous (`Plain`-key) tickets are resumable here; `--to` sends aren't.
@@ -806,7 +972,9 @@ impl TransferManager {
         }
     }
 
-    fn resume_serve(&self, rec: SendRecord) -> Result<()> {
+    /// Returns the **new** transfer id: a resumed send is registered afresh, and
+    /// anything keyed to the old id (a hosted pairing code) has to follow it.
+    fn resume_serve(&self, rec: SendRecord) -> Result<u64> {
         let expected = crate::chunked::ChunkTicket::decode(&rec.ticket).context("decode ticket")?;
         let key: [u8; crate::crypto::CHUNK_KEY_LEN] = match &expected.key {
             crate::chunked::KeyDelivery::Plain(k) => {
@@ -853,7 +1021,7 @@ impl TransferManager {
                 Err(e) => finish(&inner, id, false, Err(e)),
             }
         });
-        Ok(())
+        Ok(id)
     }
 
     // ---- receiving (offers) ----------------------------------------------
@@ -1174,6 +1342,15 @@ impl TransferManager {
         let sends = load_sends(&dir);
         let sendtos = load_sendtos(&dir);
         let depositeds = load_depositeds(&dir);
+        // Indexed by the id they were written under; `resume_serve` allocates a
+        // fresh one, so each is re-keyed as its send comes back.
+        let mut codes: HashMap<u64, CodeRecord> = load_codes(&dir)
+            .into_iter()
+            .map(|rec| {
+                remove_code(&dir, rec.id);
+                (rec.id, rec)
+            })
+            .collect();
         let n = downloads.len() + sends.len() + sendtos.len() + depositeds.len();
         for rec in depositeds {
             // Re-registers under a fresh id; drop the stale record either way
@@ -1205,12 +1382,27 @@ impl TransferManager {
             }
         }
         for rec in sends {
+            let old_id = rec.id;
             remove_send(&dir, rec.id);
             // Re-serve the same ticket (same key + node seed). Best-effort: a send
             // whose file changed/vanished just isn't resumed.
-            if let Err(e) = self.resume_serve(rec) {
-                tracing::warn!("could not resume a send: {e:#}");
+            match self.resume_serve(rec) {
+                // A send that hosted a pairing code brings it back too, re-keyed
+                // onto the fresh id the resume registered.
+                Ok(new_id) => {
+                    if let Some(code) = codes.remove(&old_id) {
+                        self.resume_code(code, new_id);
+                    }
+                }
+                Err(e) => tracing::warn!("could not resume a send: {e:#}"),
             }
+        }
+        // Any code whose send didn't come back has nothing left to hand out.
+        for rec in codes.into_values() {
+            tracing::warn!(
+                "dropping pairing code {}: its send did not resume",
+                rec.shown
+            );
         }
         n
     }

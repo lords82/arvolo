@@ -9,7 +9,7 @@
 //! inbox, on a real relay, to catch.
 //!
 //! Driven through the actual binary against an in-process relay: the one-shot
-//! `send --to … --ticket` path has no daemon behind it, so the tokens that retract
+//! `send <who> --deposit` path has no daemon behind it, so the tokens that retract
 //! the offer only survive if the *record* keeps them — which is the whole fix.
 
 use std::path::Path;
@@ -79,22 +79,21 @@ async fn cancelling_a_mailbox_send_also_retracts_the_recipients_offer() {
     let (ok, _) = run(alice.path(), &relay, &["contacts", "add", "bob", &bob_b32]).await;
     assert!(ok, "contacts add");
 
-    // `--ticket` forces the mailbox path even though presence is unknown: one blob
+    // `--deposit` forces the mailbox path even though presence is unknown: one blob
     // on the relay, one offer in bob's inbox, no daemon anywhere.
     let (ok, out) = run(
         alice.path(),
         &relay,
         &[
             "send",
-            file.to_str().unwrap(),
-            "--to",
             "bob",
-            "--ticket",
+            file.to_str().unwrap(),
+            "--deposit",
             "--use-http",
         ],
     )
     .await;
-    assert!(ok, "send --to bob --ticket failed: {out}");
+    assert!(ok, "send bob --deposit failed: {out}");
 
     let inbox = InboxSubscription::new(relay.clone(), &bob);
     let offers = inbox.poll().await.expect("poll bob's inbox");

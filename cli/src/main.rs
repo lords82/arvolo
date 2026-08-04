@@ -1,11 +1,12 @@
 //! arvolo CLI.
 //!
-//! One `send` picks the channel by situation; one `recv` takes any ticket/code:
-//!   arvolo send <file>                 P2P: prints an `arvc…` ticket to share
-//!   arvolo send <file> --to <id>       to a contact: live if online, else mailbox + `arvm…`
-//!   arvolo send <file> --to <id> --ticket   force the mailbox/`arvm…` path
-//!   arvolo send <file> --link          public browser download link
-//!   arvolo recv <arvc…|arvm…|code>     fetch — auto-detects P2P vs mailbox
+//! Sending splits on one question — *do I know who gets this?* If you do, `send`
+//! delivers to them; if you don't, you name the artefact you want to hand around:
+//!   arvolo send <who> <file>       to a contact: live if online, else mailbox + `arvm…`
+//!   arvolo link <file>             public browser download link
+//!   arvolo code <file>             short pairing code to read out loud
+//!   arvolo ticket <file>           self-contained `arvc…` ticket to paste
+//!   arvolo recv <arvc…|arvm…|code|link>   fetch — one verb, auto-detects which
 //!
 //! P2P transport is encrypted by QUIC and each chunk is end-to-end encrypted;
 //! the offline path is end-to-end encrypted with HPKE. The relay only ever sees
@@ -16,7 +17,7 @@ use std::io::IsTerminal;
 use std::sync::atomic::Ordering;
 
 use anyhow::Result;
-use clap::Parser;
+use clap::FromArgMatches;
 
 mod book;
 mod deposits;
@@ -32,29 +33,47 @@ mod sync;
 
 mod args;
 mod commands;
+mod completions;
 mod output;
 #[cfg(test)]
 pub(crate) mod testlock;
 mod ui;
 mod util;
 
-use args::{Cli, Command, DeviceAction, SyncAction};
+use args::{build_cli, Cli, Command, DeviceAction, MeAction};
 use commands::cancel::cancel_cmd;
 use commands::contacts::contacts_cmd;
 #[cfg(unix)]
-use commands::daemon::{accept_cmd, daemon, pause_cmd, reject_cmd, resume_cmd};
-use commands::identity::{id, name_cmd, version_cmd};
-use commands::offline::revoke;
+use commands::daemon::{accept_cmd, daemon, pause_cmd, reject_cmd};
+use commands::history::history_cmd;
+use commands::identity::{me, name_cmd};
 use commands::receive::{listen, recv};
-use commands::send::send;
-use commands::transfers::transfers_cmd;
+use commands::resume::resume_cmd;
+use commands::send::{code_cmd, link, send_to, ticket_cmd};
+use commands::status::status_cmd;
 use output::{init_tracing, VERBOSITY};
 use ui::*;
 use util::*;
 
+fn main() -> Result<()> {
+    restore_default_sigpipe();
+    // Answer the shell first, before anything else exists to get in the way — no
+    // tokio runtime, no first-run wizard, and above all nothing written to stdout,
+    // which at this point belongs to the completion protocol. `complete()` returns
+    // immediately on a normal run and exits the process on a completion request.
+    //
+    // Running outside the runtime is also what lets a candidate provider block on
+    // a short daemon query of its own; see `completions::with_daemon`.
+    clap_complete::CompleteEnv::with_factory(build_cli).complete();
+    run()
+}
+
 #[tokio::main]
-async fn main() -> Result<()> {
-    let cli = Cli::parse();
+async fn run() -> Result<()> {
+    // Built rather than derived-parsed, so `--help` shows the grouped command
+    // listing; `e.exit()` keeps clap's own exit codes and stream choices.
+    let matches = build_cli().get_matches();
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
     VERBOSITY.store(cli.verbose, Ordering::Relaxed);
     init_tracing(cli.verbose);
 
@@ -66,35 +85,56 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Command::Send {
+            who,
             paths,
-            resume,
-            code,
+            deposit,
+            note,
             relay,
             use_http,
-            to,
-            ticket,
-            note,
-            link,
             ttl,
             max,
             password,
-            foreground,
             qr,
         } => {
-            send(
-                paths, resume, code, relay, use_http, to, ticket, note, link, ttl, max, password,
-                foreground, qr,
+            send_to(
+                who, paths, deposit, note, relay, use_http, ttl, max, password, qr,
             )
             .await
         }
+        Command::Link {
+            paths,
+            relay,
+            use_http,
+            ttl,
+            max,
+            password,
+            qr,
+        } => link(paths, relay, use_http, ttl, max, password, qr).await,
+        Command::Code {
+            paths,
+            relay,
+            use_http,
+            keep,
+            foreground,
+            qr,
+        } => code_cmd(paths, relay, use_http, keep, foreground, qr).await,
+        Command::Ticket {
+            paths,
+            relay,
+            use_http,
+            foreground,
+            qr,
+        } => ticket_cmd(paths, relay, use_http, foreground, qr).await,
         Command::Recv {
             ticket,
             out,
             password,
         } => recv(ticket, out, password).await,
-        Command::Id => id(),
-        Command::Name { name } => name_cmd(name),
-        Command::Version => version_cmd().await,
+        Command::Me { action } => match action {
+            None => me(),
+            Some(MeAction::Name { name }) => name_cmd(name),
+        },
+        Command::Completions { shell } => completions::completions_cmd(shell),
         Command::Contacts { action } => contacts_cmd(action).await,
         Command::Device { action } => match action {
             DeviceAction::Pair {
@@ -103,13 +143,11 @@ async fn main() -> Result<()> {
                 qr,
             } => sync::device_pair(relay, use_http, qr).await,
             DeviceAction::Join { code, yes } => sync::device_join(code, yes).await,
+            DeviceAction::Sync => sync::sync_now(None, false).await,
+            DeviceAction::Status => sync::sync_status().await,
         },
-        Command::Sync { action } => match action.unwrap_or(SyncAction::Now) {
-            SyncAction::Now => sync::sync_now(None, false).await,
-            SyncAction::Status => sync::sync_status().await,
-        },
-        Command::Transfers { watch, action } => transfers_cmd(watch, action).await,
-        Command::Revoke { target, token } => revoke(target, token).await,
+        Command::Status { watch, action } => status_cmd(watch, action).await,
+        Command::History { all, action } => history_cmd(all, action),
         Command::Listen {
             download_dir,
             relay,
@@ -141,11 +179,30 @@ async fn main() -> Result<()> {
         Command::Accept { offer_id, out } => accept_cmd(offer_id, out).await,
         #[cfg(unix)]
         Command::Reject { offer_id } => reject_cmd(offer_id).await,
-        Command::Cancel { id } => cancel_cmd(id).await,
+        Command::Cancel { id, token } => cancel_cmd(id, token).await,
         #[cfg(unix)]
         Command::Pause { id } => pause_cmd(id).await,
-        #[cfg(unix)]
-        Command::Resume { id } => resume_cmd(id).await,
+        Command::Resume { id, path, qr } => resume_cmd(id, path, qr).await,
+    }
+}
+
+/// Die quietly when the reader goes away, the way every other Unix tool does.
+///
+/// Rust's runtime ignores `SIGPIPE` so that a failed write surfaces as an
+/// `io::Error` — sound for a library, wrong for a CLI: `println!` has nowhere to
+/// return that error to, so it panics. `arvolo history | head` would end in a
+/// backtrace about a broken pipe rather than simply stopping, and any command
+/// that prints a long list invites exactly that pipe.
+///
+/// Restoring the default disposition makes the process take the signal and exit,
+/// which is what `head` closing its end is asking for.
+fn restore_default_sigpipe() {
+    #[cfg(unix)]
+    // SAFETY: `signal` with `SIG_DFL` on `SIGPIPE` is async-signal-safe and this
+    // runs before any thread is spawned, so no other thread can observe the
+    // handler mid-change.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
 }
 

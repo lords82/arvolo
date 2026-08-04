@@ -277,21 +277,25 @@ pub(crate) async fn recv_offline(
     Ok(())
 }
 
-/// `arvolo revoke <arvm…|link> --token` — delete a mailbox blob or a browser link
-/// from the relay. Auto-detects the target: an `arvm…` offline ticket or a
-/// `…/dl/<claim>` download link.
-pub(crate) async fn revoke(target: String, token: String) -> Result<()> {
-    if let Ok(t) = arvolo_core::offline::OfflineTicket::decode(&target) {
-        vprintln!("asking relay {} to delete claim {}…", t.relay, t.claim);
-        flow::revoke_offline(&t.relay, &t.claim, &token).await?;
-        println!("Revoked — the blob is no longer available on the relay.");
-        return Ok(());
+/// The relay and claim a withdrawal target names, if it names one: an `arvm…`
+/// offline ticket or a `…/dl/<claim>` download link. `None` for anything else —
+/// which is how [`crate::commands::cancel`] tells a ticket from an id.
+pub(crate) fn withdrawal_target(target: &str) -> Option<(String, String)> {
+    if let Ok(t) = arvolo_core::offline::OfflineTicket::decode(target) {
+        return Some((t.relay, t.claim));
     }
-    if let Ok((relay, claim)) = parse_dl_link(&target) {
-        vprintln!("asking relay {relay} to delete claim {claim}…");
-        flow::revoke_offline(&relay, &claim, &token).await?;
-        println!("Link revoked — the file is deleted from the relay and the link no longer works.");
-        return Ok(());
-    }
-    anyhow::bail!("not an arvolo offline ticket (arvm…) or a download link (…/dl/<claim>)")
+    parse_dl_link(target).ok()
+}
+
+/// Delete a mailbox blob or a browser link from the relay using the revoke token
+/// printed when it was sent.
+///
+/// This is the path for something *this machine has no record of* — typically
+/// sent from another machine — which is exactly why the token has to be supplied
+/// by hand: the local record is where it would otherwise have come from.
+pub(crate) async fn revoke_by_token(relay: &str, claim: &str, token: &str) -> Result<()> {
+    vprintln!("asking relay {relay} to delete claim {claim}…");
+    flow::revoke_offline(relay, claim, token).await?;
+    println!("Revoked — the file is deleted from the relay; the ticket/link no longer works.");
+    Ok(())
 }

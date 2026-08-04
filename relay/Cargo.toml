@@ -34,6 +34,7 @@ arvolo-core.workspace = true
 tempfile = "3"
 tokio = { workspace = true }
 tower = { version = "0.5", features = ["util"] }
+tokio-util = { version = "0.7" }
 http-body-util = "0.1"
 data-encoding = "2"
 blake3 = "1"

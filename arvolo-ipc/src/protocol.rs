@@ -54,6 +54,19 @@ pub enum Request {
         paths: Vec<String>,
         seed_relay: Option<String>,
     },
+    /// Serve a short pairing code in the background: the daemon hosts the
+    /// rendezvous *and* the ticket behind it. → [`Response::CodeServed`].
+    ///
+    /// `keep` serves every receiver until cancelled instead of retiring the code
+    /// after the first. A daemon too old to know this variant answers
+    /// `Error("bad request: …")` (see the recovery in the daemon's `handle_conn`),
+    /// which the CLI reads as "fall back to serving it in the foreground".
+    ServeCode {
+        paths: Vec<String>,
+        relay: Option<String>,
+        #[serde(default)]
+        keep: bool,
+    },
     /// Deposit a public, browser-openable **download link** for `path` (on the
     /// daemon's filesystem) on the relay → [`Response::Link`]. `ttl` defaults to
     /// 7 days, `max` to unlimited when omitted.
@@ -107,6 +120,11 @@ pub enum Response {
     Served {
         id: u64,
         ticket: String,
+    },
+    /// A background code-serve started: its transfer id + the code to read out.
+    CodeServed {
+        id: u64,
+        code: String,
     },
     /// A public download link (`{relay}/dl/{claim}#{key}`).
     Link(String),
@@ -182,6 +200,10 @@ pub struct TransferDto {
     /// days. Optional on the wire: an older daemon predates it and reports 0.
     #[serde(default)]
     pub created: u64,
+    /// The live pairing code this send is reachable by, while one is being hosted.
+    /// Cleared once the code retires — the send itself carries on.
+    #[serde(default)]
+    pub code: Option<String>,
 }
 
 /// A parked incoming offer awaiting the user's accept/reject.
@@ -301,6 +323,22 @@ pub enum EventDto {
     Cancelled {
         id: u64,
     },
+    /// A short pairing code is live for this send (freshly minted, or restored
+    /// after a daemon restart).
+    CodeReady {
+        id: u64,
+        code: String,
+    },
+    /// A receiver used the code and now holds the ticket.
+    CodePaired {
+        id: u64,
+        done: u32,
+    },
+    /// The code stopped working. The send behind it carries on.
+    CodeClosed {
+        id: u64,
+        reason: String,
+    },
     /// The address book changed under the daemon. Carries nothing: re-issue
     /// [`Request::ListContacts`] to pick the new book up.
     ContactsChanged,
@@ -339,6 +377,7 @@ impl From<&Transfer> for TransferDto {
             pieces_from_peers: t.pieces_from_peers,
             download_peers: t.download_peers,
             created: t.created,
+            code: t.code.clone(),
         }
     }
 }
@@ -403,6 +442,18 @@ impl From<&ManagerEvent> for EventDto {
                 error: error.clone(),
             },
             ManagerEvent::Cancelled { id } => EventDto::Cancelled { id: *id },
+            ManagerEvent::CodeReady { id, code } => EventDto::CodeReady {
+                id: *id,
+                code: code.clone(),
+            },
+            ManagerEvent::CodePaired { id, done } => EventDto::CodePaired {
+                id: *id,
+                done: *done,
+            },
+            ManagerEvent::CodeClosed { id, reason } => EventDto::CodeClosed {
+                id: *id,
+                reason: reason.clone(),
+            },
             ManagerEvent::ContactsChanged => EventDto::ContactsChanged,
         }
     }

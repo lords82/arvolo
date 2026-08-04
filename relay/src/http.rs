@@ -13,8 +13,8 @@ use axum::{
 use serde::Deserialize;
 
 use crate::limits::{
-    rz_posts_per_min, rz_rate_limit, rz_slots_per_min, write_rate_limit, writes_per_min, ClientIp,
-    RzAction,
+    rz_claims_per_hour, rz_posts_per_min, rz_rate_limit, rz_slots_per_min, write_rate_limit,
+    writes_per_min, ClientIp, RzAction,
 };
 use crate::mailbox::{InboxStatus, MailboxError};
 use crate::state::{
@@ -144,12 +144,18 @@ async fn dl_sw_handler(State(state): State<AppState>) -> Response {
         .into_response()
 }
 
-/// Advertise this relay's optional features so a client can fail fast. Currently
-/// just `links` (public browser download links).
+/// Advertise this relay's optional features so a client can fail fast: `links`
+/// (public browser download links) and `rz2` (long-lived, multi-session pairing
+/// slots — [`RZ_OWN_KEY`] and friends).
+///
+/// The two are read with opposite defaults on purpose. A client that can't reach
+/// this endpoint assumes links are allowed (worst case: a deposit is refused
+/// later), but assumes `rz2` is absent — announcing a v2 code no relay can host
+/// would strand a receiver, so the missing field must mean "no".
 async fn features_handler(State(state): State<AppState>) -> impl IntoResponse {
     (
         [(axum::http::header::CONTENT_TYPE, "application/json")],
-        format!("{{\"links\":{}}}", state.links_enabled),
+        format!("{{\"links\":{},\"rz2\":true}}", state.links_enabled),
     )
 }
 
@@ -256,7 +262,9 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/release/{token}/{hash}", post(release_handler))
         .route(
             "/v1/rz/{slot}/{key}",
-            post(rz_post_handler).get(rz_get_handler),
+            post(rz_post_handler)
+                .get(rz_get_handler)
+                .delete(rz_delete_handler),
         )
         .route(
             "/v1/inbox/{slot}",
@@ -299,13 +307,163 @@ const RZ_TTL: u64 = 600;
 const RZ_CLAIM_KEY: &str = "ms";
 /// Key holding the encrypted ticket; fetching it burns the whole slot.
 const RZ_TICKET_KEY: &str = "tkt";
+/// Most unexpired rows one slot may hold. Bounds what guessing a 4-digit
+/// nameplate is worth to an attacker once keys are no longer a fixed set of three.
+const MAX_RZ_KEYS_PER_SLOT: i64 = 32;
 
-/// Store a rendezvous value. The claim key (`ms`) fails with 409 if the slot is
-/// already taken, so the sender can pick a fresh nameplate.
+// ---- rendezvous v2: a long-lived slot with one sub-session per receiver ----
+//
+// v1 is one in-memory handshake over three fixed keys, and the first `tkt` fetch
+// destroys the slot. That makes a code short-lived, single-use, and impossible to
+// resume after the sender restarts — its SPAKE2 scalar lived only in RAM.
+//
+// v2 keeps the same 4-digit nameplate and the same code grammar, but models the
+// slot as a mailbox the owner holds a capability for. Each receiver picks its own
+// random `sid` and gets four private keys; the owner answers each with a FRESH
+// SPAKE2 run. The owner's entire state is then `(slot, code, token)` — three
+// things that fit on disk — which is what makes a code survive a restart.
+
+/// Claim key of a v2 slot. Value is `blake3(owner_token) || created_at_le` —
+/// the token itself never reaches the relay, and the creation stamp rides along
+/// so the absolute lifetime cap needs no extra column.
+const RZ_OWN_KEY: &str = "own";
+/// Owner-only listing of receivers waiting for an answer; renews the slot.
+const RZ_SESSIONS_KEY: &str = "sessions";
+/// Receiver's SPAKE2 message (public write, owner read).
+const RZ_P_RECV: &str = "r.";
+/// Sender's SPAKE2 message (owner write, public read).
+const RZ_P_SEND: &str = "s.";
+/// Receiver's key confirmation (public write, owner read).
+const RZ_P_CONF: &str = "c.";
+/// Sealed payload for one session (owner write, public read — and reading it
+/// burns that session's keys, never the slot).
+const RZ_P_TKT: &str = "t.";
+/// Sealed payload travelling the other way, receiver → sender (public write,
+/// owner read). The rest of the rendezvous is one-directional: the sender puts
+/// something in a slot and the receiver takes it. This is what lets the two ends
+/// *exchange* rather than hand over — a mutual `arvolo contacts pair`, where each
+/// side ends up knowing the other's public id.
+///
+/// Public write, like `c.`: the receiver holds no owner token, and cannot be
+/// asked for one. That is safe because the value is sealed under a key derived
+/// from the completed PAKE, so only a party that proved it knew the code can
+/// produce one the sender will open — and the relay itself never sees inside.
+const RZ_P_BACK: &str = "b.";
+/// Body a v2 `own` GET returns. A fixed marker: the stored hash is a verifier and
+/// must never be echoed, or holding it would be as good as holding the token.
+const RZ_V2_MARKER: &[u8] = b"2";
+/// Bytes of the `own` row: 32-byte token hash + 8-byte creation stamp.
+const RZ_OWN_ROW_LEN: usize = 40;
+/// How far each owner touch pushes the slot's expiry out.
+const RZ_V2_LEASE_SECS: u64 = 3600;
+/// Hard ceiling on a slot's life no amount of renewing can pass. Without it a
+/// renewable slot is a permanent nameplate squat, and there are only 10k.
+const RZ_MAX_SLOT_LIFETIME: u64 = 24 * 3600;
+/// Long-poll bounds for the sessions listing, mirroring the inbox's.
+const RZ_SESSIONS_MAX_WAIT: u64 = 30;
+const RZ_SESSIONS_POLL_MS: u64 = 500;
+
+/// The `Authorization: Bearer <base32>` token, decoded. Same header the inbox
+/// uses; deliberately not a query parameter, which would land in access logs.
+fn rz_bearer(headers: &HeaderMap) -> Option<Vec<u8>> {
+    let auth = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())?;
+    let token = auth
+        .strip_prefix("Bearer ")
+        .or_else(|| auth.strip_prefix("bearer "))?;
+    data_encoding::BASE32_NOPAD
+        .decode(token.trim().to_ascii_uppercase().as_bytes())
+        .ok()
+}
+
+/// The `own` row of `slot`, if it is a live v2 slot: `(token_hash, created_at)`.
+fn rz_own_row(state: &AppState, slot: &str) -> Option<([u8; 32], u64)> {
+    let row = state.mailbox.rz_get(slot, RZ_OWN_KEY, now_unix())?;
+    if row.len() != RZ_OWN_ROW_LEN {
+        return None;
+    }
+    let mut hash = [0u8; 32];
+    hash.copy_from_slice(&row[..32]);
+    let mut stamp = [0u8; 8];
+    stamp.copy_from_slice(&row[32..]);
+    Some((hash, u64::from_le_bytes(stamp)))
+}
+
+/// Verify the request holds this slot's owner token; yields its creation stamp.
+/// 404 when the slot isn't a live v2 slot, 403 when the token is absent or wrong —
+/// the owner needs to tell "my slot expired, re-claim it" from "someone else has
+/// this nameplate now, the code is dead".
+fn rz_owner(
+    state: &AppState,
+    headers: &HeaderMap,
+    slot: &str,
+) -> Result<u64, (StatusCode, String)> {
+    let Some((want, created)) = rz_own_row(state, slot) else {
+        return Err((StatusCode::NOT_FOUND, "no such rendezvous slot".into()));
+    };
+    let Some(token) = rz_bearer(headers) else {
+        return Err((StatusCode::FORBIDDEN, "slot owner token required".into()));
+    };
+    if !constant_time_eq(blake3::hash(&token).as_bytes(), &want) {
+        return Err((StatusCode::FORBIDDEN, "not the owner of this slot".into()));
+    }
+    Ok(created)
+}
+
+/// When a v2 row written now should expire: one lease out, but never past the
+/// slot's absolute ceiling.
+fn rz_v2_expiry(created: u64) -> u64 {
+    let now = now_unix();
+    now.saturating_add(RZ_V2_LEASE_SECS)
+        .min(created.saturating_add(RZ_MAX_SLOT_LIFETIME))
+}
+
+/// `?wait=` on a rendezvous GET: how many seconds the sessions listing may be
+/// held open. Ignored by every other key.
+#[derive(Deserialize)]
+struct RzWait {
+    #[serde(default)]
+    wait: u64,
+}
+
+/// Whether `key` belongs to a v2 sub-session, and which side may write it.
+fn rz_session_prefix(key: &str) -> Option<&'static str> {
+    [RZ_P_RECV, RZ_P_SEND, RZ_P_CONF, RZ_P_TKT, RZ_P_BACK]
+        .into_iter()
+        .find(|p| key.starts_with(p) && key.len() > p.len())
+}
+
+/// Whether `k` is an acceptable rendezvous key: `^[a-z0-9][a-z0-9._-]{0,63}$`.
+///
+/// Any path segment used to be a valid key, which was harmless while the whole
+/// vocabulary was `ms`/`mr`/`tkt`. It stops being harmless as soon as part of a
+/// key comes from the peer: an unvalidated key is unbounded in length, lands
+/// verbatim in the access log, and — the sharp edge — would carry SQL `LIKE`
+/// wildcards (`%`, `_`) into any prefix-matched delete, letting one session erase
+/// another's rows. Validating here means deletes can always name exact keys.
+fn valid_rz_key(k: &str) -> bool {
+    !k.is_empty()
+        && k.len() <= 64
+        && k.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())
+        && k.bytes().all(|b| {
+            b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'_' | b'-')
+        })
+}
+
+/// Store a rendezvous value. The claim key (`ms` for v1, `own` for v2) fails with
+/// 409 if the slot is already taken, so the sender can pick a fresh nameplate.
+///
+/// Write authorization by key, so that knowing a session id is not the same as
+/// being able to answer it: `own` and the receiver's `r.`/`c.` are open (first
+/// write wins), while the sender's `s.`/`t.` require the owner token. Without
+/// that split a hostile receiver could pre-write the answer to its own session
+/// and poison it with two POSTs.
 async fn rz_post_handler(
     State(state): State<AppState>,
     AxumPath((slot, key)): AxumPath<(String, String)>,
     ip: ClientIp,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Result<String, (StatusCode, String)> {
     rz_rate_limit(
@@ -316,6 +474,15 @@ async fn rz_post_handler(
         rz_posts_per_min(),
         rz_slots_per_min(),
     )?;
+    if !valid_rz_key(&key) {
+        return Err((StatusCode::BAD_REQUEST, "invalid rendezvous key".into()));
+    }
+    if key == RZ_SESSIONS_KEY {
+        return Err((
+            StatusCode::METHOD_NOT_ALLOWED,
+            "sessions is read-only".into(),
+        ));
+    }
     if body.len() > MAX_RZ_VALUE_BYTES {
         return Err((
             StatusCode::PAYLOAD_TOO_LARGE,
@@ -326,19 +493,86 @@ async fn rz_post_handler(
     if state.mailbox.rz_count() >= max_rz_rows() {
         return Err((StatusCode::INSUFFICIENT_STORAGE, "relay at capacity".into()));
     }
-    let exp = now_unix().saturating_add(RZ_TTL);
+    // Same guard, per slot: the global cap alone would let one guessed nameplate
+    // soak up the whole table.
+    if state.mailbox.rz_slot_row_count(&slot, now_unix()) >= MAX_RZ_KEYS_PER_SLOT {
+        return Err((
+            StatusCode::INSUFFICIENT_STORAGE,
+            "rendezvous slot is full".into(),
+        ));
+    }
+    // Which protocol this write belongs to, and what it is allowed to do.
+    let own = rz_own_row(&state, &slot);
+    let exp = if key == RZ_OWN_KEY {
+        // A v2 claim. Costs a per-IP claim budget on top of the POST budget:
+        // renewal being free is what would otherwise make squatting all 10k
+        // nameplates a one-off purchase.
+        rz_rate_limit(
+            &state.rz_limiter,
+            ip.0,
+            RzAction::Claim,
+            now_unix(),
+            rz_claims_per_hour(),
+            rz_slots_per_min(),
+        )?;
+        if body.len() != 32 {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "own takes a 32-byte token hash".into(),
+            ));
+        }
+        // Don't let a v2 claim graft itself onto a live v1 pairing (or vice
+        // versa): a mixed slot has no coherent authorization story. 409 is what
+        // both clients already retry with a fresh nameplate on.
+        if state
+            .mailbox
+            .rz_get(&slot, RZ_CLAIM_KEY, now_unix())
+            .is_some()
+        {
+            return Err((StatusCode::CONFLICT, "slot already taken".into()));
+        }
+        now_unix().saturating_add(RZ_V2_LEASE_SECS)
+    } else if let Some(prefix) = rz_session_prefix(&key) {
+        let Some((_, created)) = own else {
+            return Err((StatusCode::NOT_FOUND, "no such rendezvous slot".into()));
+        };
+        // Only the slot owner may speak for the sender.
+        if prefix == RZ_P_SEND || prefix == RZ_P_TKT {
+            rz_owner(&state, &headers, &slot)?;
+        }
+        let exp = rz_v2_expiry(created);
+        if exp <= now_unix() {
+            return Err((StatusCode::GONE, "rendezvous slot has expired".into()));
+        }
+        exp
+    } else {
+        // Legacy v1 key. A slot already claimed under v2 is taken, full stop.
+        if own.is_some() {
+            return Err((StatusCode::CONFLICT, "slot already taken".into()));
+        }
+        now_unix().saturating_add(RZ_TTL)
+    };
     // First-writer-wins for EVERY rendezvous key, not just the slot claim (`ms`).
     // Each key of a pairing (`ms` sender msg, `mr` receiver msg, `tkt` encrypted
     // ticket) is legitimately written exactly once; allowing overwrite (the old
     // INSERT-OR-REPLACE on `mr`/`tkt`) let anyone who guesses the slot (a 4-digit
     // nameplate, only 10k values) clobber an in-flight ticket/message and grief the
     // pairing. Claiming on first write closes that without affecting the honest flow.
+    // The `own` row carries its creation stamp so the absolute lifetime cap can be
+    // enforced later without a schema change.
+    let value = if key == RZ_OWN_KEY {
+        let mut v = body.to_vec();
+        v.extend_from_slice(&now_unix().to_le_bytes());
+        v
+    } else {
+        body.to_vec()
+    };
     let claimed = state
         .mailbox
-        .rz_claim(&slot, &key, &body, exp)
+        .rz_claim(&slot, &key, &value, exp)
         .map_err(err_response)?;
     if !claimed {
-        let msg = if key == RZ_CLAIM_KEY {
+        let msg = if key == RZ_CLAIM_KEY || key == RZ_OWN_KEY {
             "slot already taken"
         } else {
             "rendezvous key already written"
@@ -348,12 +582,18 @@ async fn rz_post_handler(
     Ok("ok".into())
 }
 
-/// Read a rendezvous value (404 until posted). Reading the ticket burns the slot.
+/// Read a rendezvous value (404 until posted). Reading a v1 ticket burns the whole
+/// slot; reading a v2 session's ticket burns only that session.
 async fn rz_get_handler(
     State(state): State<AppState>,
     AxumPath((slot, key)): AxumPath<(String, String)>,
+    Query(q): Query<RzWait>,
     ip: ClientIp,
+    headers: HeaderMap,
 ) -> Result<Bytes, (StatusCode, String)> {
+    if !valid_rz_key(&key) {
+        return Err((StatusCode::BAD_REQUEST, "invalid rendezvous key".into()));
+    }
     // Polling one slot is never throttled; touching many *distinct* slots (a
     // nameplate sweep hunting for in-flight pairings) is.
     rz_rate_limit(
@@ -364,6 +604,60 @@ async fn rz_get_handler(
         rz_posts_per_min(),
         rz_slots_per_min(),
     )?;
+
+    // How a receiver learns which protocol a code speaks. Answers a fixed marker,
+    // never the stored verifier.
+    if key == RZ_OWN_KEY {
+        return match rz_own_row(&state, &slot) {
+            Some(_) => Ok(Bytes::from_static(RZ_V2_MARKER)),
+            None => Err((StatusCode::NOT_FOUND, "not yet".into())),
+        };
+    }
+    if key == RZ_SESSIONS_KEY {
+        return rz_sessions(&state, &headers, &slot, q.wait).await;
+    }
+    if let Some(prefix) = rz_session_prefix(&key) {
+        // The receiver's half is addressed to the owner alone: leaking the list of
+        // live session ids would undo the point of an unguessable one. `b.` is the
+        // receiver's reply, so it belongs to the owner for the same reason.
+        if prefix == RZ_P_RECV || prefix == RZ_P_CONF || prefix == RZ_P_BACK {
+            rz_owner(&state, &headers, &slot)?;
+        }
+        let Some(v) = state.mailbox.rz_get(&slot, &key, now_unix()) else {
+            return Err((StatusCode::NOT_FOUND, "not yet".into()));
+        };
+        if prefix == RZ_P_TKT {
+            // Burn this session only — the slot goes on serving the next receiver.
+            // `b.` is deliberately absent: the receiver writes its reply *after*
+            // collecting the payload, so it does not exist yet and would only be
+            // deleted before it could arrive.
+            let sid = &key[RZ_P_TKT.len()..];
+            let keys: Vec<String> = [RZ_P_RECV, RZ_P_SEND, RZ_P_CONF, RZ_P_TKT]
+                .iter()
+                .map(|p| format!("{p}{sid}"))
+                .collect();
+            state.mailbox.rz_delete_keys(&slot, &keys);
+        }
+        if prefix == RZ_P_BACK {
+            // Reading the reply burns it, mirroring `t.`: it has reached the one
+            // party entitled to it, and leaving it behind would keep a row alive
+            // for the rest of the slot's lease for nobody's benefit.
+            state
+                .mailbox
+                .rz_delete_keys(&slot, std::slice::from_ref(&key));
+        }
+        return Ok(Bytes::from(v));
+    }
+
+    // A v1 receiver polling a slot that is now a v2 rendezvous would otherwise
+    // sit on 404 for its full two-minute timeout. Say so immediately: `poll_get`
+    // treats any non-404 error as fatal, so an old client fails legibly.
+    if key == RZ_CLAIM_KEY && rz_own_row(&state, &slot).is_some() {
+        return Err((
+            StatusCode::GONE,
+            "this code needs a newer arvolo (rendezvous v2)".into(),
+        ));
+    }
     match state.mailbox.rz_get(&slot, &key, now_unix()) {
         Some(v) => {
             if key == RZ_TICKET_KEY {
@@ -372,6 +666,79 @@ async fn rz_get_handler(
             Ok(Bytes::from(v))
         }
         None => Err((StatusCode::NOT_FOUND, "not yet".into())),
+    }
+}
+
+/// Owner-only: retire a v2 slot early (`DELETE /v1/rz/{slot}/own`). Cancelling a
+/// background code should actually free its nameplate, not leave it squatted for
+/// the rest of its lease.
+async fn rz_delete_handler(
+    State(state): State<AppState>,
+    AxumPath((slot, key)): AxumPath<(String, String)>,
+    ip: ClientIp,
+    headers: HeaderMap,
+) -> Result<String, (StatusCode, String)> {
+    rz_rate_limit(
+        &state.rz_limiter,
+        ip.0,
+        RzAction::GetSlot(&slot),
+        now_unix(),
+        rz_posts_per_min(),
+        rz_slots_per_min(),
+    )?;
+    if key != RZ_OWN_KEY {
+        return Err((
+            StatusCode::METHOD_NOT_ALLOWED,
+            "only the slot claim can be deleted".into(),
+        ));
+    }
+    rz_owner(&state, &headers, &slot)?;
+    state.mailbox.rz_delete_slot(&slot);
+    Ok("ok".into())
+}
+
+/// Owner-only: the session ids waiting for an answer (`r.{sid}` posted, `s.{sid}`
+/// not yet), one per line, long-polling up to `wait` seconds for the first.
+///
+/// This doubles as the slot's renewal — the owner asking "who is waiting?" is
+/// exactly the signal that the code is still wanted, so there is no separate
+/// keepalive to spend a POST on, and a code idling for hours costs one
+/// distinct-slot GET per rate-limit window.
+async fn rz_sessions(
+    state: &AppState,
+    headers: &HeaderMap,
+    slot: &str,
+    wait: u64,
+) -> Result<Bytes, (StatusCode, String)> {
+    let created = rz_owner(state, headers, slot)?;
+    let exp = rz_v2_expiry(created);
+    if exp <= now_unix() {
+        return Err((StatusCode::GONE, "rendezvous slot has expired".into()));
+    }
+    state.mailbox.rz_touch_slot(slot, exp, now_unix());
+
+    let deadline = now_unix().saturating_add(wait.min(RZ_SESSIONS_MAX_WAIT));
+    loop {
+        let answered: std::collections::HashSet<String> = state
+            .mailbox
+            .rz_slot_keys_prefixed(slot, RZ_P_SEND, now_unix())
+            .into_iter()
+            .map(|k| k[RZ_P_SEND.len()..].to_string())
+            .collect();
+        let pending: Vec<String> = state
+            .mailbox
+            .rz_slot_keys_prefixed(slot, RZ_P_RECV, now_unix())
+            .into_iter()
+            .map(|k| k[RZ_P_RECV.len()..].to_string())
+            .filter(|sid| !answered.contains(sid))
+            .collect();
+        if !pending.is_empty() {
+            return Ok(Bytes::from(pending.join("\n")));
+        }
+        if now_unix() >= deadline {
+            return Ok(Bytes::new());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(RZ_SESSIONS_POLL_MS)).await;
     }
 }
 
@@ -961,7 +1328,16 @@ async fn seed_handler(
 
 /// The relay's iroh blob-node address plus a fresh transfer token, so the sender
 /// can advertise the relay as a provider and use the token to seed/release.
-async fn addr_handler(State(state): State<AppState>) -> Result<String, (StatusCode, String)> {
+///
+/// Counted against the same per-IP write budget as the actual writes: this is
+/// unauthenticated and mints a token per call, which made it the one remaining
+/// endpoint an anonymous caller could hammer for free while every other
+/// mutation on the relay was already limited.
+async fn addr_handler(
+    State(state): State<AppState>,
+    ip: ClientIp,
+) -> Result<String, (StatusCode, String)> {
+    write_rate_limit(&state.write_limiter, ip.0, now_unix(), writes_per_min())?;
     let addr = state
         .blobs
         .addr_encoded()
@@ -993,4 +1369,61 @@ async fn release_handler(
         let _ = state.mailbox.delete_seed_one(&token, &hash);
     }
     Ok("ok".into())
+}
+
+#[cfg(test)]
+mod rz_v2_tests {
+    use super::*;
+
+    #[test]
+    fn key_grammar() {
+        for ok in ["ms", "own", "r.abc", "t.a-b_c", "x", "0"] {
+            assert!(valid_rz_key(ok), "{ok:?} should be valid");
+        }
+        for bad in [
+            "",
+            "MS",
+            "-a",
+            ".a",
+            "_a",
+            "a b",
+            "a/b",
+            "a%b",
+            &"x".repeat(65),
+        ] {
+            assert!(!valid_rz_key(bad), "{bad:?} should be invalid");
+        }
+        assert!(valid_rz_key(&"x".repeat(64)));
+    }
+
+    #[test]
+    fn session_prefixes_need_a_session_id() {
+        assert_eq!(rz_session_prefix("r.abc"), Some(RZ_P_RECV));
+        assert_eq!(rz_session_prefix("s.abc"), Some(RZ_P_SEND));
+        assert_eq!(rz_session_prefix("c.abc"), Some(RZ_P_CONF));
+        assert_eq!(rz_session_prefix("t.abc"), Some(RZ_P_TKT));
+        // A bare prefix is not a session, and neither is anything else.
+        for not in ["r.", "s.", "own", "sessions", "ms", "mr", "tkt", "rabc"] {
+            assert_eq!(rz_session_prefix(not), None, "{not:?}");
+        }
+    }
+
+    #[test]
+    fn renewal_never_outlives_the_absolute_cap() {
+        let now = now_unix();
+
+        // A fresh slot leases a full hour at a time.
+        assert_eq!(rz_v2_expiry(now), now + RZ_V2_LEASE_SECS);
+
+        // A slot near its ceiling gets only what is left of the 24 hours — this is
+        // what stops a renewable slot from being a permanent nameplate squat.
+        let old = now - (RZ_MAX_SLOT_LIFETIME - 100);
+        assert_eq!(rz_v2_expiry(old), old + RZ_MAX_SLOT_LIFETIME);
+        assert!(rz_v2_expiry(old) < now + RZ_V2_LEASE_SECS);
+
+        // Past the ceiling the expiry is already behind us, which the handlers
+        // turn into 410 Gone rather than a silently un-renewed slot.
+        let ancient = now - (RZ_MAX_SLOT_LIFETIME + 10);
+        assert!(rz_v2_expiry(ancient) <= now);
+    }
 }

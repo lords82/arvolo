@@ -6,7 +6,7 @@ encrypted; the relay only ever holds ciphertext.
 
 > The only setting the client *requires* is the relay URL (`ARVOLO_RELAY` or the
 > `relay` key in `config.toml`). Without it you can't use pairing codes,
-> `send --to`, the mailbox, download links, or the swarm. Everything else has a
+> `arvolo send`, the mailbox, download links, or the swarm. Everything else has a
 > sane default.
 
 ---
@@ -125,7 +125,7 @@ relay and writes `~/.config/arvolo/config.toml`:
 ```text
 Welcome to Arvolo — no configuration found, quick one-time setup.
 
-Relay URL: brokers pairing codes, `send --to`, the mailbox, download
+Relay URL: brokers pairing codes, `arvolo send`, the mailbox, download
 links and the swarm. Leave empty to skip (plain P2P `arvc…` tickets
 still work without a relay).
   • Production (TLS):  just the hostname, e.g. relay.example.com
@@ -153,7 +153,7 @@ relay = "relay.example.com"
 Your identity is created automatically on first use:
 
 ```sh
-arvolo id        # show your public id
+arvolo me               # show your public id
 ```
 
 ---
@@ -164,14 +164,14 @@ arvolo id        # show your public id
 
 ```sh
 # sender
-arvolo send --code ./photo.jpg
+arvolo code ./photo.jpg
 #   ->  4821-crater-mango          (with a configured relay; else @<relay>)
 
 # receiver
 arvolo recv 4821-crater-mango
 ```
 
-**No relay at all** — plain `arvolo send ./file` prints a self-contained `arvc…`
+**No relay at all** — `arvolo ticket ./file` prints a self-contained `arvc…`
 P2P ticket; the receiver runs `arvolo recv arvc…`.
 
 **Send to a known contact** — the tool picks the channel (live if they're online,
@@ -182,13 +182,13 @@ mailbox if not):
 arvolo listen --auto-accept-contacts
 
 # sender
-arvolo send ./photo.jpg --to alice
+arvolo send alice ./photo.jpg
 ```
 
 **Offline mailbox** — leave an encrypted file on the relay until they fetch it:
 
 ```sh
-arvolo send ./report.pdf --to <id-or-contact> --ticket   # prints an arvm… ticket
+arvolo send <id-or-contact> ./report.pdf --deposit   # prints an arvm… ticket
 arvolo recv arvm…                                         # fetches + decrypts (burns on read)
 ```
 
@@ -196,11 +196,11 @@ arvolo recv arvm…                                         # fetches + decrypts
 lives only in the URL `#fragment`, so the relay stays zero-knowledge:
 
 ```sh
-arvolo send ./report.pdf --link
+arvolo link ./report.pdf
 #   ->  https://relay.example.com/dl/<claim>#<key>
 ```
 
-Track everything with `arvolo transfers` (add `--watch` for a live view).
+Track everything with `arvolo status` (add `--watch` for a live view).
 
 ---
 
@@ -208,8 +208,8 @@ Track everything with `arvolo transfers` (add `--watch` for a live view).
 
 - [ ] Relay reachable over HTTPS (`curl https://relay.example.com/healthz` → `ok`).
 - [ ] Client `relay` set in `config.toml` (or `ARVOLO_RELAY`).
-- [ ] `arvolo id` prints your public id.
-- [ ] A test `arvolo send --code ./file` + `arvolo recv <code>` round-trips.
+- [ ] `arvolo me` prints your public id.
+- [ ] A test `arvolo code ./file` + `arvolo recv <code>` round-trips.
 
 For the full environment-variable reference and every command, see the
 [README](../README.md); for production hardening, [`DEPLOY.md`](DEPLOY.md).

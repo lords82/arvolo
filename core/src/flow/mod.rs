@@ -24,6 +24,7 @@ pub use recv::{
     RecvOutcome,
 };
 pub use send::{prepare_send, resume_send, SendEvent, SendSession};
+pub use sidecar::read_ticket;
 
 pub(crate) use recv::{archive_stage_path, seeding_enabled, spawn_swarm_coordinator};
 

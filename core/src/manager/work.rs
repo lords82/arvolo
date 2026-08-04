@@ -870,6 +870,108 @@ pub(super) fn finish(inner: &Inner, id: u64, cancelled: bool, result: Result<Opt
     }
 }
 
+// ---- hosting a short pairing code -----------------------------------------
+
+/// Drive a [`CodeHost`](crate::code::CodeHost) for a transfer: announce the code,
+/// answer receivers, and persist the counters as they change.
+///
+/// The code and the send it points at are separate lifetimes on purpose. A
+/// one-shot code retires the moment its receiver has the ticket, while the send
+/// keeps serving — the download has only just started, and whoever holds the
+/// ticket may reconnect for days.
+pub(super) async fn code_host_task(
+    inner: Arc<Inner>,
+    rec: CodeRecord,
+    host: crate::code::CodeHost,
+    opts: crate::code::HostOpts,
+    state: crate::code::HostState,
+    cancel: CancellationToken,
+) {
+    use crate::code::HostEvent;
+
+    let id = rec.id;
+    inner.set_code(id, Some(rec.shown.clone()));
+    inner.emit(ManagerEvent::CodeReady {
+        id,
+        code: rec.shown.clone(),
+    });
+
+    let payload = rec.payload.clone();
+    let ev_inner = inner.clone();
+    let st_inner = inner.clone();
+    // Everything the persisted record needs that doesn't change, so the state
+    // callback can rebuild it without borrowing the host it is running inside.
+    let template = rec;
+
+    let result = host
+        .run(
+            &payload,
+            &opts,
+            state,
+            cancel,
+            move |ev| match ev {
+                HostEvent::Paired { done, .. } => {
+                    ev_inner.emit(ManagerEvent::CodePaired { id, done })
+                }
+                HostEvent::Closed { reason } => ev_inner.emit(ManagerEvent::CodeClosed {
+                    id,
+                    reason: close_reason_text(reason),
+                }),
+                HostEvent::BadCode { failures, max, .. } => {
+                    tracing::warn!("pairing code: wrong code attempt {failures}/{max}")
+                }
+                HostEvent::Listening | HostEvent::Rejected { .. } => {}
+            },
+            move |s| {
+                if let Some(dir) = &st_inner.state_dir {
+                    persist_code(
+                        dir,
+                        &CodeRecord {
+                            id,
+                            slot: template.slot.clone(),
+                            secret: template.secret.clone(),
+                            relay: template.relay.clone(),
+                            owner_token: template.owner_token.clone(),
+                            payload: template.payload.clone(),
+                            shown: template.shown.clone(),
+                            max_sessions: template.max_sessions,
+                            max_failures: template.max_failures,
+                            sessions_done: s.sessions_done,
+                            failures: s.failures,
+                        },
+                    );
+                }
+            },
+        )
+        .await;
+
+    // However it ended, the code is not coming back — don't restore it on the
+    // next start, and stop showing it on the transfer.
+    inner.set_code(id, None);
+    if let Some(dir) = &inner.state_dir {
+        remove_code(dir, id);
+    }
+    if let Err(e) = result {
+        tracing::warn!("pairing code host stopped: {e:#}");
+        inner.emit(ManagerEvent::CodeClosed {
+            id,
+            reason: format!("{e:#}"),
+        });
+    }
+}
+
+/// A one-line explanation of why a code stopped, for a UI or a log.
+fn close_reason_text(reason: crate::code::CloseReason) -> String {
+    use crate::code::CloseReason::*;
+    match reason {
+        MaxSessions => "used up — every receiver it was meant for has it".to_string(),
+        TooManyFailures => "retired after too many wrong-code attempts".to_string(),
+        Expired => "the rendezvous slot expired".to_string(),
+        Taken => "the rendezvous slot was taken over".to_string(),
+        Cancelled => "cancelled".to_string(),
+    }
+}
+
 // ---- resumable-download persistence ---------------------------------------
 
 #[cfg(test)]

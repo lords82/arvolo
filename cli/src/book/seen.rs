@@ -13,9 +13,9 @@ pub struct SenderStatus {
     pub name: Option<String>,
     pub seen_before: bool,
     pub verified: bool,
-    /// Only consumed by the daemon's auto-download policy, which is `#[cfg(unix)]`;
-    /// on non-unix it's computed but never read.
-    #[cfg_attr(not(unix), allow(dead_code))]
+    /// The standing "don't ask me about this person" from `contacts trust`. Read
+    /// by the daemon's auto-download policy and by an inline `listen`, so it is
+    /// consulted on every platform.
     pub trusted: bool,
 }
 

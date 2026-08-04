@@ -160,6 +160,7 @@ async fn dispatch(d: &Daemon, cmd: Request) -> Response {
         }
         Request::Push { to, paths, note } => push(d, to, paths, note).await,
         Request::ServeTicket { paths, seed_relay } => serve_ticket(d, paths, seed_relay).await,
+        Request::ServeCode { paths, relay, keep } => serve_code(d, paths, relay, keep).await,
         Request::CreateLink { path, ttl, max } => create_link(d, path, ttl, max).await,
         // Handled in `handle_conn` before dispatch; reachable only if a client
         // pipelines Subscribe with other commands, which we don't support.
@@ -228,6 +229,50 @@ async fn serve_ticket(d: &Daemon, paths: Vec<String>, seed_relay: Option<String>
                 spawn_temp_cleanup(rx, id, t);
             }
             Response::Served { id, ticket }
+        }
+        Err(e) => {
+            if let Some(t) = temp {
+                let _ = std::fs::remove_file(t);
+            }
+            Response::Error(format!("{e:#}"))
+        }
+    }
+}
+
+/// Host a short pairing code in the daemon: the rendezvous *and* the ticket
+/// behind it, so the terminal that asked for the code can go away.
+async fn serve_code(d: &Daemon, paths: Vec<String>, relay: Option<String>, keep: bool) -> Response {
+    if paths.is_empty() {
+        return Response::Error("provide at least one file or folder to serve".into());
+    }
+    let Some(relay) = relay.or_else(crate::book::default_relay_or_builtin) else {
+        return Response::Error(
+            "a pairing code needs a rendezvous relay: pass --relay <host>, set ARVOLO_RELAY, \
+             or configure `relay` in config.toml"
+                .into(),
+        );
+    };
+    let paths: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
+    let (payload, name, archive, temp) = match crate::resolve_payload(&paths) {
+        Ok(v) => v,
+        Err(e) => return Response::Error(format!("{e:#}")),
+    };
+    // Same cleanup contract as `serve_ticket`: a packed archive has to stay
+    // readable for the whole session, so it goes when the transfer ends.
+    let watch = temp.clone().map(|t| (d.manager.subscribe(), t));
+    // The code is always self-contained (`code@relay`): the daemon knows which
+    // relay it claimed on, and the receiver shouldn't have to be configured.
+    let max_sessions = (!keep).then_some(1);
+    match d
+        .manager
+        .serve_code(payload, name, archive, relay, true, max_sessions)
+        .await
+    {
+        Ok((id, code)) => {
+            if let Some((rx, t)) = watch {
+                spawn_temp_cleanup(rx, id, t);
+            }
+            Response::CodeServed { id, code }
         }
         Err(e) => {
             if let Some(t) = temp {

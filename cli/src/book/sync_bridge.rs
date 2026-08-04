@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -57,12 +57,14 @@ pub(crate) fn save_meta(state: &SyncState, lamport: u64, device: DeviceId) -> Re
 
 pub(crate) fn tombstone_marks(
     state: &mut BTreeMap<String, MarkReg>,
-    present: &BTreeSet<String>,
+    present: &Marks,
     lamport: &mut u64,
     device: DeviceId,
 ) {
-    // A pubkey present in the ledger but not yet active in the sidecar → add.
-    for pk in present {
+    // A pubkey present in the ledger but not yet active in the sidecar → add,
+    // carrying the ledger's own "marked at" so the stamp reaches other devices
+    // instead of being reset to whenever this reconciliation happened to run.
+    for (pk, since) in present {
         let need = !matches!(state.get(pk), Some(r) if !r.deleted);
         if need {
             *lamport += 1;
@@ -74,6 +76,7 @@ pub(crate) fn tombstone_marks(
                         device,
                     },
                     deleted: false,
+                    since: *since,
                 },
             );
         }
@@ -83,7 +86,7 @@ pub(crate) fn tombstone_marks(
     // pubkey from the verified/trusted TOMLs) into the CRDT and out to peers.
     let stale: Vec<String> = state
         .iter()
-        .filter(|(pk, r)| !r.deleted && !present.contains(*pk))
+        .filter(|(pk, r)| !r.deleted && !present.contains_key(*pk))
         .map(|(pk, _)| pk.clone())
         .collect();
     for pk in stale {
@@ -96,6 +99,8 @@ pub(crate) fn tombstone_marks(
                     device,
                 },
                 deleted: true,
+                // A tombstone has nothing to be "since": the mark is gone.
+                since: 0,
             },
         );
     }
@@ -161,6 +166,12 @@ pub fn build_local_snapshot() -> Result<SyncSnapshot> {
     tombstone_marks(
         &mut state.trusted,
         &load_trusted().trusted,
+        &mut lamport,
+        device,
+    );
+    tombstone_marks(
+        &mut state.blocked,
+        &load_blocked().blocked,
         &mut lamport,
         device,
     );
@@ -252,7 +263,7 @@ pub(crate) fn project_to_ledgers(state: &SyncState) -> Result<()> {
     let mut v = Verified::default();
     for (pk, r) in &state.verified {
         if !r.deleted {
-            v.verified.insert(pk.clone());
+            v.verified.insert(pk.clone(), r.since);
         }
     }
     save_verified(&v)?;
@@ -260,10 +271,18 @@ pub(crate) fn project_to_ledgers(state: &SyncState) -> Result<()> {
     let mut t = Trusted::default();
     for (pk, r) in &state.trusted {
         if !r.deleted {
-            t.trusted.insert(pk.clone());
+            t.trusted.insert(pk.clone(), r.since);
         }
     }
     save_trusted(&t)?;
+
+    let mut b = Blocked::default();
+    for (pk, r) in &state.blocked {
+        if !r.deleted {
+            b.blocked.insert(pk.clone(), r.since);
+        }
+    }
+    save_blocked(&b)?;
 
     let mut s = Seen::default();
     for (pk, cnt) in &state.seen {

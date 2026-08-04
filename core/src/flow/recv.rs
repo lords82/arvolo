@@ -10,7 +10,9 @@ use crate::transfer::RelayChoice;
 
 use super::archive::unpack_archive_safely;
 use super::ctrl::{spawn_control_supervisor, ControlHandle};
-use super::sidecar::{read_sidecar, remove_stage_files, sidecar_path, write_sidecar};
+use super::sidecar::{
+    read_sidecar, remove_stage_files, sidecar_path, ticket_path, write_sidecar, write_ticket,
+};
 use super::storage::{available_space, disk_full_reason, is_local_storage_error};
 use super::CHUNK_KEY_AAD;
 
@@ -472,6 +474,16 @@ pub async fn recv_chunked(
         .truncate(false)
         .open(&download)
         .with_context(|| format!("open {}", download.display()))?;
+    // Record the ticket beside the partial *before* fetching anything, so an
+    // interrupted download can be resumed from the file alone. Without it a
+    // download started from a pairing code is unresumable: the code is consumed
+    // on first use, and the ticket it yielded lived only in this process.
+    write_ticket(&download, ticket);
+    if let Some(dir) = &archive_dir {
+        // For an archive the partial is a staged tar in a temp dir; the path the
+        // user knows is the unpack directory, so leave a copy they can point at.
+        write_ticket(dir, ticket);
+    }
     // Resume from the sidecar bitfield of already-verified pieces. This tolerates
     // the sparse, out-of-order output a piece-swarm produces (a length-based resume
     // cannot). An absent/mismatched sidecar starts fresh — any bytes already on disk
@@ -1073,8 +1085,12 @@ pub async fn recv_chunked(
     // Finalize the file so the seeder serves the last piece at its true length.
     file.set_len(t.total_size)?;
     drop(file);
-    // Download complete — the resume sidecar is no longer needed.
+    // Download complete — neither resume sidecar is needed any more.
     let _ = std::fs::remove_file(sidecar_path(&download));
+    let _ = std::fs::remove_file(ticket_path(&download));
+    if let Some(dir) = &archive_dir {
+        let _ = std::fs::remove_file(ticket_path(dir));
+    }
     // Seed-after-complete: a fully-downloaded peer keeps serving the swarm for a
     // while (the coordinator keeps announcing, now as a complete seeder). Opt-in
     // via ARVOLO_SEED_AFTER=<seconds> (0/unset = off) so a finished transfer
@@ -1147,7 +1163,9 @@ pub fn discard_incomplete(ticket: &str, out_path: &Path) {
     };
     remove_stage_files(&download);
     let _ = std::fs::remove_file(sidecar_path(&download));
+    let _ = std::fs::remove_file(ticket_path(&download));
     let _ = std::fs::remove_file(&download);
+    let _ = std::fs::remove_file(ticket_path(out_path));
 }
 
 /// Reduce a sender-supplied (untrusted) name to a single, safe path component,

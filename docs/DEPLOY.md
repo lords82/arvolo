@@ -171,6 +171,32 @@ affecting a normal client. When the relay sits behind a reverse proxy, set
 rather than the proxy's — and only then, since a directly-exposed relay would let a
 client spoof it. The nginx `limit_req` above is still recommended as a first line.
 
+**Budget the long-lived pairing slots.** Rendezvous v2 (PROTOCOL §7.2.2) lets a
+short code outlive the process that minted it, which is what makes `arvolo code`
+serviceable from the daemon — and which also makes a nameplate worth squatting.
+There are only 10,000 of them, and a v2 slot renews for free, so grabbing them all
+would otherwise be a one-off purchase.
+
+```ini
+Environment=ARVOLO_RZ_CLAIMS_PER_HOUR=10   # new v2 slots per IP per hour (0 = off)
+Environment=ARVOLO_MAX_RZ_ROWS=250000      # global rendezvous row cap
+```
+
+`ARVOLO_RZ_CLAIMS_PER_HOUR` is the one that matters on a public relay: ordinary use
+is a handful of codes a day, while a squatter needs thousands. Slots also carry a
+hard 24-hour ceiling no amount of renewing can pass, and cancelling a code deletes
+its slot rather than holding the nameplate to the end of its lease. Raise
+`ARVOLO_MAX_RZ_ROWS` above its 100,000 default if you expect many concurrent codes:
+each live slot can hold up to 32 rows (a claim plus a few in-flight sessions).
+
+**Upgrade the relay before the clients.** A v2-capable client against an older
+relay is not broken — it reads `/v1/features`, sees no `rz2`, and falls back to the
+v1 exchange — but nothing improves until the relay is upgraded. In the other
+direction an upgraded relay serves old clients unchanged, and answers a v1 receiver
+that lands on a v2 slot with `410 Gone` instead of leaving it to poll for two
+minutes. There is no schema migration (v2 adds no columns), so a relay rollback is
+safe: the orphaned rows expire within one TTL.
+
 The relay logs a startup **warning** whenever the seed offload is left unlimited, or
 when it binds a non-loopback address in plaintext without `ARVOLO_INSECURE=1`.
 
@@ -183,7 +209,7 @@ the warning — do **not** set it merely to quiet the log on a directly-exposed 
 
 ### Disabling browser download links (optional)
 
-Public browser download links (`send --link`) let anyone with the link
+Public browser download links (`arvolo link`) let anyone with the link
 fetch a file with no account — convenient, but some deployments prefer to allow
 only recipient-sealed sends. Start the relay with:
 
@@ -194,7 +220,7 @@ Environment=ARVOLO_DISABLE_LINKS=1
 Then the relay reports `{"links":false}` on `GET /v1/features`, serves `403` for
 the `/dl` page and its assets, and refuses link deposits. `arvolo send
 --link` fails **immediately** (before uploading) with a message telling the user
-the administrator disabled the feature; normal `send --to` and all other
+the administrator disabled the feature; normal `arvolo send` and all other
 paths are unaffected.
 
 ## 4. The NAT relay (`iroh-relay`)
@@ -216,7 +242,7 @@ On each device using `arvolo`:
 export ARVOLO_IROH_RELAY=https://relay.example.com
 
 # sends to a contact use YOUR relay (mailbox when they're offline; --use-http for plaintext)
-arvolo send file --to <id> --relay mailbox.example.com
+arvolo send <id> file --relay mailbox.example.com
 ```
 
 With `ARVOLO_IROH_RELAY` set and your own mailbox URL, **no third-party server is

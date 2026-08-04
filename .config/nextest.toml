@@ -1,0 +1,20 @@
+# Why nextest at all: this suite is full of tests that spawn real processes —
+# daemons, relays, receivers. Under plain `cargo test` a test that deadlocks
+# holds its whole binary hostage forever (a `code_daemon` run once sat for 38
+# minutes on a loaded machine before anyone noticed), and a test binary that
+# dies badly strands its child daemons (`kill_on_drop` only helps when the
+# parent gets to drop them — orphans have been found days old). Nextest runs
+# one process per test, so a hang is killed and *named*, and takes only its
+# own children down with it.
+
+[profile.default]
+# The suite's honest slow end is ~100s (code_daemon serially, pairing's SPAKE2
+# rounds), so: flag at 2 minutes, kill at 6. A genuine hang used to be
+# "the suite never finishes"; now it is a failure with the test's name on it.
+slow-timeout = { period = "120s", terminate-after = 3 }
+
+[profile.ci]
+# Same shape, harsher deadline: CI runners are 2-core, and a wedged run there
+# burns the job's whole 6-hour budget silently.
+slow-timeout = { period = "120s", terminate-after = 2 }
+fail-fast = false

@@ -68,12 +68,29 @@ pub(crate) fn write_private(path: &Path, contents: &str) -> std::io::Result<()> 
 }
 
 /// Binary counterpart of [`write_private`] for the postcard-encoded sync sidecar.
+///
+/// Writes a sibling temp file, chmods it, then `rename`s it over the target. The
+/// rename is atomic within a directory, so a reader never sees a half-written
+/// ledger — which a plain `write` allowed, because `arvolo contacts …` runs as a
+/// separate process from the daemon and `project_to_ledgers` rewrites all five
+/// files from scratch on every sync round. Permissions go on the temp file
+/// *before* the rename, so the final path is never briefly world-readable.
+///
+/// This closes torn reads, **not** lost updates: two processes that each
+/// read-modify-write the same ledger can still have one overwrite the other. That
+/// needs locking across the read too, and is left as a known limitation.
 pub(crate) fn write_private_bytes(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    std::fs::write(path, bytes)?;
+    let tmp = path.with_extension(format!("tmp{}", std::process::id()));
+    std::fs::write(&tmp, bytes)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+    }
+    // A failed rename would otherwise leave the temp file behind for good.
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
     }
     Ok(())
 }
@@ -92,6 +109,10 @@ pub(crate) fn verified_path() -> PathBuf {
 
 pub(crate) fn trusted_path() -> PathBuf {
     config_dir().join("trusted.toml")
+}
+
+pub(crate) fn blocked_path() -> PathBuf {
+    config_dir().join("blocked.toml")
 }
 
 pub(crate) fn names_path() -> PathBuf {
@@ -115,6 +136,7 @@ pub(crate) fn book_stamp() -> u64 {
         names_path(),
         verified_path(),
         trusted_path(),
+        blocked_path(),
     ] {
         // A missing file is a state like any other (hashes as the empty vec), so
         // creating or deleting one moves the stamp.

@@ -4,8 +4,11 @@ pub(crate) mod cancel;
 pub(crate) mod contacts;
 #[cfg(unix)]
 pub(crate) mod daemon;
+pub(crate) mod history;
 pub(crate) mod identity;
 pub(crate) mod offline;
+pub(crate) mod pair;
 pub(crate) mod receive;
+pub(crate) mod resume;
 pub(crate) mod send;
-pub(crate) mod transfers;
+pub(crate) mod status;

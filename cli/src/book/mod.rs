@@ -1,7 +1,9 @@
 //! Local config + contacts (address book), stored under ~/.config/arvolo.
 
+mod blocked;
 mod config;
 mod contacts;
+mod marks;
 mod names;
 mod paths;
 mod seen;
@@ -9,8 +11,10 @@ mod sync_bridge;
 mod trusted;
 mod verified;
 
+pub(crate) use blocked::*;
 pub(crate) use config::*;
 pub(crate) use contacts::*;
+pub(crate) use marks::*;
 pub(crate) use names::*;
 pub(crate) use paths::*;
 pub(crate) use seen::*;
@@ -148,6 +152,162 @@ mod tests {
         data_encoding::BASE32_NOPAD
             .encode(&id.to_bytes())
             .to_lowercase()
+    }
+
+    /// A block has to reach the user's other devices, or silencing someone on the
+    /// laptop still lets them through on the desktop — which is not a block, just
+    /// a preference. Unblocking has to propagate too, as a tombstone.
+    #[test]
+    fn sync_merge_propagates_block_and_unblock() {
+        let _guard = crate::testlock::ENV
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir_a = tempfile::tempdir().unwrap();
+        let dir_b = tempfile::tempdir().unwrap();
+        let spammer = b32(&Identity::generate().public());
+
+        std::env::set_var("ARVOLO_CONFIG_DIR", dir_a.path());
+        mark_blocked(&spammer).unwrap();
+        assert!(is_blocked(&spammer));
+        let snap = build_local_snapshot().unwrap();
+
+        std::env::set_var("ARVOLO_CONFIG_DIR", dir_b.path());
+        apply_merged_state(&snap).unwrap();
+        assert!(is_blocked(&spammer), "the block must reach device B");
+
+        // And lifting it propagates as well.
+        std::env::set_var("ARVOLO_CONFIG_DIR", dir_a.path());
+        assert!(unmark_blocked(&spammer).unwrap());
+        let snap = build_local_snapshot().unwrap();
+        std::env::set_var("ARVOLO_CONFIG_DIR", dir_b.path());
+        apply_merged_state(&snap).unwrap();
+        assert!(!is_blocked(&spammer), "the unblock must reach device B too");
+
+        std::env::remove_var("ARVOLO_CONFIG_DIR");
+    }
+
+    /// A ledger written before marks carried a timestamp must still read as
+    /// *verified* — dropping the mark on upgrade would silently undo a security
+    /// decision the user made deliberately. It comes back with no date, which is
+    /// honestly different from "verified just now".
+    #[test]
+    fn a_ledger_without_timestamps_still_reads_as_verified() {
+        let _guard = crate::testlock::ENV
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("ARVOLO_CONFIG_DIR", dir.path());
+        let id = b32(&Identity::generate().public());
+
+        // The original shape: a bare list of ids.
+        std::fs::write(
+            dir.path().join("verified.toml"),
+            format!("verified = [\"{id}\"]\n"),
+        )
+        .unwrap();
+
+        assert!(is_verified(&id), "the mark must survive the format change");
+        assert!(
+            verified_since(&id).is_none(),
+            "but with no date, not a fabricated one"
+        );
+
+        // Re-verifying stamps it, and the file is rewritten in the new shape.
+        mark_verified(&id).unwrap();
+        assert!(verified_since(&id).is_some());
+        let text = std::fs::read_to_string(dir.path().join("verified.toml")).unwrap();
+        assert!(text.contains(&id) && text.contains('='));
+
+        std::env::remove_var("ARVOLO_CONFIG_DIR");
+    }
+
+    /// The date has to reach the user's other devices, or "verified 2 years ago"
+    /// would mean something different on each machine.
+    #[test]
+    fn sync_carries_when_a_mark_was_made() {
+        let _guard = crate::testlock::ENV
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir_a = tempfile::tempdir().unwrap();
+        let dir_b = tempfile::tempdir().unwrap();
+        let id = b32(&Identity::generate().public());
+
+        std::env::set_var("ARVOLO_CONFIG_DIR", dir_a.path());
+        contact_add("alice", &id).unwrap();
+        mark_verified("alice").unwrap();
+        let when_a = verified_since(&id).expect("stamped on A");
+        let snap = build_local_snapshot().unwrap();
+
+        std::env::set_var("ARVOLO_CONFIG_DIR", dir_b.path());
+        apply_merged_state(&snap).unwrap();
+        assert_eq!(
+            verified_since(&id),
+            Some(when_a),
+            "B must see the same date A recorded, not the moment it merged"
+        );
+
+        std::env::remove_var("ARVOLO_CONFIG_DIR");
+    }
+
+    /// Renaming keeps the marks, which is the entire reason it exists: doing it as
+    /// remove + add silently drops them.
+    #[test]
+    fn rename_keeps_verified_and_trusted() {
+        let _guard = crate::testlock::ENV
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("ARVOLO_CONFIG_DIR", dir.path());
+        let id = b32(&Identity::generate().public());
+
+        contact_add("alice", &id).unwrap();
+        mark_verified("alice").unwrap();
+        mark_trusted("alice").unwrap();
+
+        contact_rename("alice", "alessandra").unwrap();
+        assert!(contact_list().iter().any(|(n, _)| n == "alessandra"));
+        assert!(!contact_list().iter().any(|(n, _)| n == "alice"));
+        assert!(
+            is_verified(&id) && is_trusted(&id),
+            "marks survive a rename"
+        );
+
+        // A name already in use is refused rather than silently merging two people.
+        contact_add("bob", &b32(&Identity::generate().public())).unwrap();
+        assert!(contact_rename("alessandra", "bob").is_err());
+
+        std::env::remove_var("ARVOLO_CONFIG_DIR");
+    }
+
+    /// Removing a contact takes its advertised-name row with it (that row would
+    /// otherwise sync forever with nobody to own it) but keeps the `seen` counter,
+    /// which is TOFU evidence: forgetting it would make a known sender look new.
+    #[test]
+    fn remove_forgets_the_name_row_but_not_that_we_have_seen_them() {
+        let _guard = crate::testlock::ENV
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("ARVOLO_CONFIG_DIR", dir.path());
+        let id = b32(&Identity::generate().public());
+
+        contact_add("alice", &id).unwrap();
+        observe_advertised_name(&id, "Alice A.");
+        accept_name("alice").unwrap();
+        record_seen(&id);
+        assert!(display_name_of(&id).is_some());
+
+        assert!(contact_remove("alice").unwrap());
+        assert!(
+            display_name_of(&id).is_none(),
+            "the name row goes with them"
+        );
+        assert!(
+            sender_status(&id).seen_before,
+            "but we still remember having received from this key"
+        );
+
+        std::env::remove_var("ARVOLO_CONFIG_DIR");
     }
 
     #[test]

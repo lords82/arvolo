@@ -70,7 +70,11 @@ pub async fn device_pair(relay: Option<String>, use_http: bool, qr: bool) -> Res
         );
     }
 
-    let (code, complete) = code::publish_bytes(bytes, &relay, true)
+    // Whichever rendezvous the relay speaks. Pairing stays strictly one-shot
+    // either way — this hands over the identity secret itself — but on a v2 relay
+    // it gains key confirmation, so a joiner who mistypes the code is turned away
+    // instead of being handed the sealed identity blob to fail on.
+    let (code, sender) = code::publish_auto(&bytes, &relay, true)
         .await
         .context("start device pairing")?;
 
@@ -86,7 +90,29 @@ pub async fn device_pair(relay: Option<String>, use_http: bool, qr: bool) -> Res
     );
     eprintln!("Waiting for the new device… (Ctrl-C to cancel)");
 
-    complete.run().await.context("device pairing")?;
+    match sender {
+        code::CodeSender::V1(complete) => complete.run().await.context("device pairing")?,
+        code::CodeSender::V2(host) => {
+            let opts = code::HostOpts {
+                max_sessions: Some(1),
+                ..code::HostOpts::default()
+            };
+            let reason = host
+                .run(
+                    &bytes,
+                    &opts,
+                    code::HostState::default(),
+                    tokio_util::sync::CancellationToken::new(),
+                    |_| {},
+                    |_| {},
+                )
+                .await
+                .context("device pairing")?;
+            if reason != code::CloseReason::MaxSessions {
+                bail!("device pairing did not complete ({reason:?})");
+            }
+        }
+    }
     eprintln!("✓ New device linked — it now shares your identity and address book.");
     Ok(())
 }

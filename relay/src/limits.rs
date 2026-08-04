@@ -26,10 +26,19 @@ pub const DEFAULT_RZ_POSTS_PER_MIN: u32 = 30;
 /// never throttled); sweeping the 10k-nameplate space needs thousands. `0`
 /// disables the limit. Override with `ARVOLO_RZ_SLOTS_PER_MIN`.
 pub const DEFAULT_RZ_SLOTS_PER_MIN: u32 = 60;
+/// Default per-IP cap on **new v2 slot claims** per hour. A v2 slot outlives its
+/// 10-minute v1 ancestor and renews for free, so claiming is the one rendezvous
+/// action whose cost must not amortize: without this, squatting all 10k
+/// nameplates — and denying `arvolo code` relay-wide — is a one-off purchase of
+/// 10k POSTs. A human claims a handful a day. `0` disables the limit. Override
+/// with `ARVOLO_RZ_CLAIMS_PER_HOUR`.
+pub const DEFAULT_RZ_CLAIMS_PER_HOUR: u32 = 10;
 /// Bound on tracked client IPs (memory guard for the limiter map).
 const MAX_RZ_LIMITER_IPS: usize = 100_000;
 /// The per-IP accounting window.
 const RZ_LIMITER_WINDOW_SECS: u64 = 60;
+/// The per-IP accounting window for slot claims — long, because that is the point.
+const RZ_CLAIM_WINDOW_SECS: u64 = 3600;
 
 pub(crate) fn rz_posts_per_min() -> u32 {
     env_usize("ARVOLO_RZ_POSTS_PER_MIN", DEFAULT_RZ_POSTS_PER_MIN as usize) as u32
@@ -37,6 +46,13 @@ pub(crate) fn rz_posts_per_min() -> u32 {
 
 pub(crate) fn rz_slots_per_min() -> u32 {
     env_usize("ARVOLO_RZ_SLOTS_PER_MIN", DEFAULT_RZ_SLOTS_PER_MIN as usize) as u32
+}
+
+pub(crate) fn rz_claims_per_hour() -> u32 {
+    env_usize(
+        "ARVOLO_RZ_CLAIMS_PER_HOUR",
+        DEFAULT_RZ_CLAIMS_PER_HOUR as usize,
+    ) as u32
 }
 
 /// Whether to trust `X-Forwarded-For` for the client IP (set `ARVOLO_TRUST_PROXY`
@@ -60,6 +76,10 @@ pub struct RzIpWindow {
     window_start: u64,
     posts: u32,
     slots: std::collections::HashSet<String>,
+    /// Claims run on their own, much longer window, so the minute-scale reset
+    /// below must not touch them.
+    claim_window_start: u64,
+    claims: u32,
 }
 
 /// Per-IP rendezvous limiter state (keyed by client IP).
@@ -104,6 +124,9 @@ pub(crate) enum RzAction<'a> {
     Post,
     /// One read touching this slot (`GET /v1/rz/{slot}/…`).
     GetSlot(&'a str),
+    /// One new long-lived slot claimed (`POST /v1/rz/{slot}/own`). Accounted on
+    /// an hourly window; charged on top of the `Post` it also is.
+    Claim,
 }
 
 /// Enforce the per-IP rendezvous limits. `Ok(())` admits the request; `Err` is
@@ -124,7 +147,12 @@ pub(crate) fn rz_rate_limit(
     // map is still saturated (an active flood from many IPs), fail open rather
     // than letting the limiter itself become the DoS.
     if map.len() >= MAX_RZ_LIMITER_IPS && !map.contains_key(&ip) {
-        map.retain(|_, w| now < w.window_start + RZ_LIMITER_WINDOW_SECS);
+        // Keep an IP whose *claim* window is still live even if its minute window
+        // elapsed, so memory pressure can't hand back a fresh claim budget.
+        map.retain(|_, w| {
+            now < w.window_start + RZ_LIMITER_WINDOW_SECS
+                || now < w.claim_window_start + RZ_CLAIM_WINDOW_SECS
+        });
         if map.len() >= MAX_RZ_LIMITER_IPS {
             return Ok(());
         }
@@ -155,6 +183,21 @@ pub(crate) fn rz_rate_limit(
                 }
                 w.slots.insert(slot.to_string());
             }
+        }
+        RzAction::Claim => {
+            if now >= w.claim_window_start + RZ_CLAIM_WINDOW_SECS {
+                w.claim_window_start = now;
+                w.claims = 0;
+            }
+            // `post_cap` carries the claim cap for this action — see the call in
+            // `rz_post_handler`, which passes `rz_claims_per_hour()`.
+            if post_cap > 0 && w.claims >= post_cap {
+                return Err((
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "too many new rendezvous slots from this address".into(),
+                ));
+            }
+            w.claims += 1;
         }
     }
     Ok(())
@@ -268,6 +311,34 @@ mod rz_limiter_tests {
         assert!(rz_rate_limit(&lim, ip(1), RzAction::GetSlot("44"), 100, 10, 2).is_err());
         // Already-counted slots keep working (the legit peer is never cut off).
         assert!(rz_rate_limit(&lim, ip(1), RzAction::GetSlot("42"), 100, 10, 2).is_ok());
+    }
+
+    #[test]
+    fn claims_are_capped_per_ip_on_an_hourly_window() {
+        let lim: RzLimiter = Mutex::new(HashMap::new());
+        for _ in 0..3 {
+            assert!(rz_rate_limit(&lim, ip(1), RzAction::Claim, 100, 3, 10).is_ok());
+        }
+        assert!(rz_rate_limit(&lim, ip(1), RzAction::Claim, 100, 3, 10).is_err());
+        assert!(rz_rate_limit(&lim, ip(2), RzAction::Claim, 100, 3, 10).is_ok());
+
+        // A minute later the claim budget is still spent — that is the point:
+        // squatting nameplates must not amortize. Ordinary posts, on their own
+        // window, are unaffected.
+        let later = 100 + RZ_LIMITER_WINDOW_SECS + 1;
+        assert!(rz_rate_limit(&lim, ip(1), RzAction::Claim, later, 3, 10).is_err());
+        assert!(rz_rate_limit(&lim, ip(1), RzAction::Post, later, 3, 10).is_ok());
+
+        // An hour later it refills.
+        assert!(rz_rate_limit(
+            &lim,
+            ip(1),
+            RzAction::Claim,
+            100 + RZ_CLAIM_WINDOW_SECS,
+            3,
+            10
+        )
+        .is_ok());
     }
 
     #[test]

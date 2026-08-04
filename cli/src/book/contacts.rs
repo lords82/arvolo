@@ -81,11 +81,11 @@ pub fn contact_add(name: &str, id: &str) -> Result<Option<KeyChange>> {
             // The old key was possibly verified/trusted; the new one is neither
             // until the user re-verifies out-of-band — clear both marks.
             let mut v = load_verified();
-            if v.verified.remove(old_id) {
+            if v.verified.remove(old_id).is_some() {
                 save_verified(&v)?;
             }
             let mut t = load_trusted();
-            if t.trusted.remove(old_id) {
+            if t.trusted.remove(old_id).is_some() {
                 save_trusted(&t)?;
             }
             Some(change)
@@ -99,11 +99,70 @@ pub fn contact_add(name: &str, id: &str) -> Result<Option<KeyChange>> {
 }
 
 /// Remove a contact; returns whether it existed.
+///
+/// Also drops the identity's row in `names.toml`. A pinned advertised name for a
+/// contact you deleted is state with no owner: it would survive forever and keep
+/// syncing to your other devices. The `seen` counter is **kept** on purpose —
+/// that is the TOFU ledger, and forgetting it would make an already-known sender
+/// look brand new next time, which weakens a defence rather than tidying up.
 pub fn contact_remove(name: &str) -> Result<bool> {
     let mut c = load_contacts();
-    let existed = c.contacts.remove(name).is_some();
+    let Some(id) = c.contacts.remove(name) else {
+        return Ok(false);
+    };
     save_contacts(&c)?;
-    Ok(existed)
+    // Only if no other alias still points at that identity.
+    if !c.contacts.values().any(|other| *other == id) {
+        forget_name_row(&id)?;
+    }
+    Ok(true)
+}
+
+/// Give a contact a different local name, keeping everything else about them.
+///
+/// The alternative people reach for — `remove` then `add` — silently loses the
+/// verified and trusted marks, because `remove` clears them. Nothing needs to be
+/// re-verified to rename someone: those ledgers are keyed by **id**, so moving the
+/// name→id binding leaves them untouched by construction.
+pub fn contact_rename(old: &str, new: &str) -> Result<()> {
+    let mut c = load_contacts();
+    anyhow::ensure!(
+        !c.contacts.contains_key(new),
+        "'{new}' is already a contact — pick another name, or remove that one first"
+    );
+    let id = c
+        .contacts
+        .remove(old)
+        .with_context(|| format!("no such contact '{old}'"))?;
+    c.contacts.insert(new.to_string(), id);
+    save_contacts(&c)?;
+    Ok(())
+}
+
+/// Advertised-name rows for identities no contact points at any more.
+///
+/// These accumulate from contacts removed before [`contact_remove`] learned to
+/// clean up after itself, and they keep syncing between devices. Returns how many
+/// were dropped.
+pub fn prune_orphan_names() -> Result<usize> {
+    let known: std::collections::BTreeSet<String> =
+        load_contacts().contacts.into_values().collect();
+    let mut names = load_names();
+    let before = names.names.len();
+    names.names.retain(|id, _| known.contains(id));
+    let removed = before - names.names.len();
+    if removed > 0 {
+        save_names(&names)?;
+    }
+    Ok(removed)
+}
+
+fn forget_name_row(id_b32: &str) -> Result<()> {
+    let mut names = load_names();
+    if names.names.remove(id_b32).is_some() {
+        save_names(&names)?;
+    }
+    Ok(())
 }
 
 /// All contacts, sorted by name.

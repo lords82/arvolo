@@ -56,6 +56,10 @@ pub(crate) async fn listen(
     #[cfg(unix)]
     {
         if let Some(client) = daemon_client().await {
+            // Say so. Two different things happen under one verb depending on
+            // what else is running, and a user who can't tell which one they got
+            // can't explain the difference in behaviour they're about to see.
+            eprintln!("(a daemon is already listening — attaching to it as the approver)");
             if download_dir.is_some() {
                 eprintln!(
                     "note: --download-dir is ignored when attaching to the daemon \
@@ -110,6 +114,12 @@ pub(crate) async fn listen(
                 match ev {
                     ManagerEvent::OfferReceived { id, from, name, size, note, sender_name } => {
                         let from_b32 = encode_id(&from);
+                        // Same as the daemon: a blocked sender never reaches the
+                        // prompt, or blocking would just be a slower "no".
+                        if book::is_blocked(&from_b32) {
+                            manager.reject_offer(&id).await;
+                            continue;
+                        }
                         let status = book::sender_status(&from_b32);
                         eprintln!("\n📨 Incoming file offer:");
                         eprintln!("   from: {}{}", status.name.clone().unwrap_or_else(|| from_b32.clone()),
@@ -121,7 +131,16 @@ pub(crate) async fn listen(
                         }
                         note_advertised_name(&from_b32, &sender_name);
 
-                        let accept = if yes {
+                        // `trusted` comes first and is unconditional: it is the
+                        // standing "don't ask me about this person" the user set
+                        // with `contacts trust`. Leaving it out here is why the
+                        // same `listen` used to behave differently depending on
+                        // whether a daemon happened to be up — the daemon-attached
+                        // path honours it, this one didn't.
+                        let accept = if status.trusted {
+                            eprintln!("   ⬇ auto-downloading: trusted contact");
+                            true
+                        } else if yes {
                             true
                         } else if auto_accept_verified && status.verified {
                             eprintln!("   (auto-accepting: verified contact)");

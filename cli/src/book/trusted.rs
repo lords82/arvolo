@@ -1,5 +1,3 @@
-use std::collections::BTreeSet;
-
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
@@ -7,8 +5,8 @@ use super::*;
 
 #[derive(Default, Serialize, Deserialize)]
 pub(crate) struct Trusted {
-    #[serde(default)]
-    pub(crate) trusted: BTreeSet<String>,
+    #[serde(default, deserialize_with = "de_marks")]
+    pub(crate) trusted: Marks,
 }
 
 pub(crate) fn load_trusted() -> Trusted {
@@ -27,31 +25,28 @@ pub(crate) fn save_trusted(t: &Trusted) -> Result<()> {
 /// Does the user trust this identity to auto-download without a prompt? Distinct
 /// from [`is_verified`]: verified = key authenticity; trusted = auto-accept.
 pub fn is_trusted(id_b32: &str) -> bool {
-    load_trusted().trusted.contains(id_b32)
+    load_trusted().trusted.contains_key(id_b32)
 }
 
-/// Trust a contact (by name) to auto-download. Errors if the name isn't saved.
-pub fn mark_trusted(name: &str) -> Result<String> {
-    let id = load_contacts()
-        .contacts
-        .get(name)
-        .cloned()
-        .with_context(|| format!("no such contact '{name}'"))?;
+/// Trust an identity to auto-download. Takes a saved contact name **or** a raw
+/// base32 id — see [`mark_verified`] for why both. Returns the id that was marked.
+pub fn mark_trusted(who: &str) -> Result<String> {
+    let id = resolve_recipient_id(who)?;
     let mut t = load_trusted();
-    t.trusted.insert(id.clone());
+    t.trusted.insert(id.clone(), marked_now());
     save_trusted(&t)?;
     Ok(id)
 }
 
-/// Remove a contact's trusted mark (by name).
-pub fn unmark_trusted(name: &str) -> Result<()> {
-    if let Some(id) = load_contacts().contacts.get(name) {
-        let mut t = load_trusted();
-        if t.trusted.remove(id) {
-            save_trusted(&t)?;
-        }
+/// Clear an identity's trusted mark. `Ok(false)` means there was nothing to clear.
+pub fn unmark_trusted(who: &str) -> Result<bool> {
+    let id = resolve_recipient_id(who)?;
+    let mut t = load_trusted();
+    if t.trusted.remove(&id).is_none() {
+        return Ok(false);
     }
-    Ok(())
+    save_trusted(&t)?;
+    Ok(true)
 }
 
 // ---- advertised display names (TOFU on the sender's self-chosen name) ------

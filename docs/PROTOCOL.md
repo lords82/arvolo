@@ -119,7 +119,7 @@ contacts.
 ## 4. Capability & ticket formats
 
 ### 4.1 `arvc…` — chunked P2P ticket
-Produced by `arvolo send`. A base32 postcard of
+Produced by `arvolo ticket`. A base32 postcard of
 [`ChunkTicket`](../core/src/chunked.rs): total size, chunk size (16 MiB), the
 ordered list of chunk **BLAKE3 hashes**, one or more provider **iroh
 `EndpointAddr`**s, an optional relay backfill descriptor, a suggested name, an
@@ -132,7 +132,7 @@ ordered list of chunk **BLAKE3 hashes**, one or more provider **iroh
   learn the authenticated sender. AAD `arvolo/chunk-key/v1`.
 
 ### 4.2 `arvm…` — offline (mailbox) ticket
-Produced by `arvolo send --to` (mailbox path). A base32 postcard of
+Produced by `arvolo send` (mailbox path). A base32 postcard of
 [`OfflineTicket`](../core/src/offline.rs): the `relay` URL, the `claim`, the
 `sender` public id, and a password `salt` (empty if no `--password`). The file is
 HPKE-sealed **directly** to the recipient (no separate content key); the relay
@@ -144,7 +144,7 @@ receiver needs no configuration. It is **not** the ticket; it is the SPAKE2
 password used to fetch the ticket from a relay rendezvous (§7.2).
 
 ### 4.4 Download link — `https://<relay>/dl/<claim>#<key>`
-Produced by `arvolo send --link`. The `claim` addresses a relay blob (a
+Produced by `arvolo link`. The `claim` addresses a relay blob (a
 chunked AES-256-GCM **container**, §7.6); the `#fragment` carries the 32-byte
 content key in base64url. Browsers never send the fragment to the server, so the
 relay stays zero-knowledge.
@@ -199,7 +199,46 @@ swarm announce) additionally share a per-IP write-rate limit
 | GET | `/v1/addr` | none | The relay blob node's iroh address + a seed token (for backfill). |
 | POST | `/v1/seed` | seed token | Seed (backfill) a sender's chunks into the relay's blob store so a transfer finishes even if the sender goes offline. Capped per request and in total. |
 | POST | `/v1/release/{token}/{hash}` | release token | Release a seeded chunk. |
-| POST / GET | `/v1/rz/{slot}/{key}` | none, rate-limited | **Rendezvous** for short-code pairing: each key (`ms`, `mr`, `tkt`) is first-writer-wins; reading `tkt` burns the slot. Values are size-capped; slots TTL out. Per-IP rate limits (POSTs/min and *distinct slots* touched by GET/min — polling one slot is never throttled) blunt nameplate sweeps and pairing griefing (§7.2). |
+| POST / GET / DELETE | `/v1/rz/{slot}/{key}` | per-key (below) | **Rendezvous** for short-code pairing (§7.2). Keys match `^[a-z0-9][a-z0-9._-]{0,63}$`; values are size-capped; a slot holds at most 32 rows and TTLs out. Every key is first-writer-wins. Per-IP rate limits (POSTs/min, *distinct slots* touched by GET/min — polling one slot is never throttled, and new v2 claims/hour) blunt nameplate sweeps and pairing griefing. |
+
+Rendezvous keys are a small reserved vocabulary, and who may write which is what
+keeps a receiver from answering on the sender's behalf — without the split below, a
+hostile receiver could pre-write the reply to its own session and poison it with
+two POSTs.
+
+| key | POST | GET |
+|---|---|---|
+| `own` | anyone, first write claims the slot (v2). Body is a 32-byte `blake3(owner_token)`; the stored row also carries a creation stamp for the absolute lifetime cap | anyone → the fixed marker `2`, **never** the stored verifier |
+| `sessions` | never (405) | owner token only; long-polls up to `?wait=30` and renews the slot's lease as a side effect — there is no separate keepalive |
+| `r.{sid}`, `c.{sid}` | anyone, first-writer-wins, requires a claimed slot | owner token only (the list of live session ids must not leak) |
+| `s.{sid}`, `t.{sid}` | **owner token only** | anyone; reading `t.` deletes that session's `r./s./c./t.` and nothing else |
+| `b.{sid}` | anyone, first-writer-wins, requires a claimed slot | owner token only; reading it burns that one row |
+| `ms`, `mr`, `tkt` | v1, unchanged | v1, unchanged — except `ms` answers **410 Gone** on a v2 slot, so an old client fails immediately instead of polling for its full two-minute timeout |
+| `own` (DELETE) | — | owner token only: retires the code and frees the nameplate |
+
+The owner token travels in `Authorization: Bearer`, never a query parameter —
+query strings are logged verbatim by reverse proxies.
+
+**The reply key (`b.`) — the one direction the rendezvous did not have.** Every
+other key moves the payload one way: the owner fills the slot, a receiver empties
+it. That cannot express an *exchange*, where both sides must come away holding
+something of the other's — which is what `arvolo contacts pair` needs, since
+neither participant is more the sender than the other.
+
+`b.{sid}` carries a sealed reply back. Public write, because the receiver holds no
+owner token and cannot be asked for one; owner read, for the same reason `r.`/`c.`
+are. That split is safe because the value is sealed under a key derived from the
+**completed** PAKE and domain-separated from the payload's
+(`arvolo/code/reply-key/v2` vs `…/ticket-key/v2`): only a party that already
+proved it knew the code can produce one the owner will open, the relay never sees
+inside, and the two directions cannot be crossed. The receiver writes it only
+*after* opening the payload, so a wrong code writes nothing at all.
+
+A relay without the key rejects the write (the prefix is unknown, so it falls
+through to the v1 branch and 409s). `arvolo contacts pair` treats that as fatal —
+it checks the relay's version before showing a code, and refuses a half-completed
+trade — while the primitive itself only reports it, leaving the policy to callers
+that may legitimately not need a reply.
 | POST / GET | `/v1/inbox/{slot}` | session (GET) | Post a sealed-sender **offer** to a recipient's inbox / long-poll for offers. |
 | POST | `/v1/inbox/{slot}/session` | proof-of-possession | Start a read session: returns a nonce sealed to the slot owner + a relay MAC over `(slot, nonce, exp)`. |
 | DELETE | `/v1/inbox/{slot}/{id}` | poster token | Retract your own offer. |
@@ -209,7 +248,7 @@ swarm announce) additionally share a per-IP write-rate limit
 | GET | `/v1/swarm/{swarm_id}/peers` | none | List the live peers announced for a swarm. A poisoned/fake announce can only waste a dial: every chunk is verified by BLAKE3 hash + AEAD, so bad providers are detected, not trusted. |
 | GET | `/dl/{claim}` | none | The browser **download page** (static HTML, strict CSP). |
 | GET | `/dl.js`, `/arvolo-sw.js` | none | The download script and streaming service worker (embedded in the binary). |
-| GET | `/v1/features` | none | Advertise optional features so a client can fail fast, e.g. `{"links":true}`. |
+| GET | `/v1/features` | none | Advertise optional features so a client can fail fast: `{"links":true,"rz2":true}`. The two are read with **opposite defaults** on purpose — an unreachable or older relay means "links allowed" (worst case, a deposit is refused later) but "no rz2", because minting a v2 code no relay can host would strand whoever types it. |
 | GET | `/healthz` | none | Liveness. |
 
 ### 6.2 Slots (opaque per-identity addresses)
@@ -275,7 +314,7 @@ availability guards need configuring:
 
 ### 7.1 P2P transfer (ticket)
 ```
-sender:  arvolo send file           → prints arvc… (providers = sender's iroh addr)
+sender:  arvolo ticket file         → prints arvc… (providers = sender's iroh addr)
 receiver: arvolo recv arvc…
   1. parse ticket: chunk hashes, providers, key delivery
   2. if Sealed → HPKE-open the content key with your identity (learns sender)
@@ -294,8 +333,17 @@ Both online ⇒ data flows **directly**; the relay is never touched.
 > is specific to the **browser link** path, where the relay serves the decryptor.
 
 ### 7.2 Short-code pairing (SPAKE2 over rendezvous)
+
+The code a user types is the same in both protocol versions — `N-word-word` with
+an optional `@relay` — and nothing in it says which one it speaks. The receiver
+works that out from the slot: a **v2** slot carries an `own` marker, a **v1** slot
+carries the sender's SPAKE2 message under `ms`. Whichever appears first wins, so a
+receiver that types the code before the sender has finished claiming still lands in
+the right place.
+
+#### 7.2.1 v1 — one exchange, in memory (legacy)
 ```
-sender:  arvolo send --code --relay R file  → 4821-crater-mango[@R]
+sender:  arvolo code --relay R --foreground file  → 4821-crater-mango[@R]
   - run SPAKE2 (password = code); PUT the sender message + the SPAKE2-encrypted
     ticket to /v1/rz/{slot}/{key}
 receiver: arvolo recv 4821-crater-mango[@R]
@@ -304,20 +352,72 @@ receiver: arvolo recv 4821-crater-mango[@R]
 The relay sees only PAKE messages and the encrypted ticket; a wrong code derives a
 different key and simply fails — no offline dictionary attack.
 
+Three limits follow from modelling the code as a single live handshake: it serves
+exactly one receiver, it dies with the process that holds the SPAKE2 scalar, and
+the relay's slot TTL bounds it to minutes. All three are why a v1 code cannot be
+hosted in the daemon.
+
+#### 7.2.2 v2 — a long-lived slot, one sub-session per receiver
+```
+sender:   POST /v1/rz/{slot}/own      body = blake3(owner_token)
+          (409 → nameplate taken, pick another; the token never leaves the sender)
+          GET  /v1/rz/{slot}/sessions?wait=30   Authorization: Bearer <owner_token>
+          → the session ids waiting for an answer; renews the lease as a side effect
+receiver: POST /v1/rz/{slot}/r.{sid}  body = its SPAKE2 message   (sid: 128 random bits)
+sender:   POST /v1/rz/{slot}/s.{sid}  body = a FRESH SPAKE2 message for this receiver
+receiver: POST /v1/rz/{slot}/c.{sid}  body = key confirmation (below)
+sender:   POST /v1/rz/{slot}/t.{sid}  body = the payload sealed to this session
+receiver: GET  /v1/rz/{slot}/t.{sid}  → burns this session's four keys, not the slot
+```
+The sender's whole state is `(slot, code, relay, owner_token)` — four values that
+fit in a file. That is what makes a v2 code survive the sender restarting, and it
+is the only reason the daemon can host one.
+
+**Key confirmation.** Before sealing anything, the sender requires
+`blake3::keyed_hash(derive_key("arvolo/code/confirm-recv/v2", pake_key), slot ‖ 0x00 ‖ sid)`
+from the receiver. Only that direction is explicit: the sender's own confirmation
+is already the AEAD tag on the payload, which a wrong key cannot open. The point of
+the receiver's is that it lets the sender **count** wrong codes — without it, every
+guesser is handed ciphertext and the sender never learns anything. Payloads are
+sealed under `derive_key("arvolo/code/ticket-key/v2", pake_key ‖ 0x00 ‖ slot ‖ 0x00 ‖ sid)`,
+so no two sessions — or protocol versions — share a key. A wrong confirmation is
+answered with noise rather than silence, so a mistyped code fails at once instead
+of waiting out a timeout.
+
+**Reflection.** `start_symmetric` uses M=N, so an attacker can echo the sender's
+own message back as a receiver's. It learns nothing (the sender derives `g^{x²}`,
+which the attacker cannot compute) but without a guard it would burn a third of the
+guess budget for two POSTs. The sender remembers every message it has posted for a
+slot and refuses a byte-identical one **without** charging it as a guess.
+
 > **Active-attack model (what a short code buys you).** The nameplate (the digit
 > part) *is* the rendezvous slot, so an attacker can sweep the 10k-nameplate space
-> to find an in-flight pairing, then race the real receiver: post `mr` first with a
-> *guessed* word pair. SPAKE2 makes that exactly **one online guess per exchange**
-> (1 in 65,536 with the 256-word list) with **visible failure** — the honest
-> receiver hits `409 CONFLICT` or a ticket that won't decrypt, so a hijack never
-> goes unnoticed; the attacker can also fetch-and-burn `tkt` outright. Either way
-> the worst realistic outcome is denial of service of that one pairing, not
-> disclosure — the same model as magic-wormhole. First-writer-wins on every
-> rendezvous key plus the per-IP rate limits (§6.1, §6.4) make sweeping slow and
-> noisy; if a pairing fails unexpectedly, just generate a new code.
+> to find an in-flight pairing, then race the real receiver with a *guessed* word
+> pair. SPAKE2 makes that **one online guess per exchange** (1 in 65,536 with the
+> 256-word list). Under v1 the slot burns on first fetch, so that is one guess,
+> full stop. Under v2 a code is reusable, so the bound is instead **one guess per
+> session, at most three per code**: the third wrong key confirmation retires the
+> code outright, and the counter is persisted, so restarting the sender does not
+> hand the budget back.
+>
+> The cost of that bound is a cheap grief: three hostile sessions kill a code, and
+> the user is told so and has to make a new one. That is the same severity as v1's
+> fetch-and-burn of `tkt`, so it is not a new class of problem — but it is now
+> deliberate, and the error message says what happened. Failure stays **visible**
+> either way: the honest receiver sees `409 CONFLICT`, a payload that won't decrypt,
+> or a retired code — never a silent hijack. The worst realistic outcome is denial
+> of service of that one pairing, not disclosure — the same model as
+> magic-wormhole.
+>
+> **Nameplate exhaustion.** A v2 slot outlives its v1 ancestor and renews for free,
+> which would make squatting all 10,000 nameplates a one-off purchase of 10k POSTs
+> and deny `arvolo code` relay-wide. Two countermeasures: a per-IP budget on **new
+> claims** (`ARVOLO_RZ_CLAIMS_PER_HOUR`, default 10), and an absolute lifetime no
+> amount of renewing can pass (24h). Cancelling a code deletes its slot rather than
+> leaving it squatted for the rest of the lease.
 
 ### 7.3 Relay backfill (sender may go offline)
-With `--seed-relay`, the sender also seeds its chunks to the relay's blob node
+When a relay is configured, the sender also seeds its chunks to its blob node
 (`/v1/addr` → `/v1/seed`), and the ticket lists the relay as an **additional
 provider**. The receiver fetches from whichever provider answers (chunk protocol
 over iroh); if the sender drops, the relay finishes the transfer. Seeded chunks
@@ -325,7 +425,7 @@ are released/reaped afterwards.
 
 ### 7.4 Offline mailbox (recipient away)
 ```
-sender:  arvolo send file --to R --ticket
+sender:  arvolo send R file --deposit
   1. HPKE-seal the file to R (auth mode; optional Argon2id password wrap)
   2. POST /v1/deposit (encapped key + optional revoke-hash) → claim
   3. print arvm… (relay, claim, sender, salt) + save a local deposit session (§8)
@@ -342,7 +442,7 @@ fetched) or delete it early via `/v1/entry/{claim}` with the revoke token.
 > is the *fetch* capability: someone who intercepts the ticket can download the
 > ciphertext (useless to them) and thereby **burn** the one-shot download before
 > the recipient gets it. A denial-of-service, never a disclosure; prefer
-> `send --to` over `listen`/pairing when no private channel exists.
+> `arvolo send` over `listen`/pairing when no private channel exists.
 
 ### 7.5 Always-open client (presence + inbox)
 The always-open model lets a sender **push** a file to a contact who is running
@@ -395,7 +495,7 @@ fetched it. The recipient's `listen` surfaces each offer (sender, name, size)
 and, on accept, runs the underlying transfer (an `arvc` ticket over P2P, or an
 `arvm` fetch) transparently.
 
-**Two-phase watchdog (`send --to`).** `arvolo send --to` decides live-vs-mailbox on a real
+**Two-phase watchdog (`arvolo send`).** `arvolo send` decides live-vs-mailbox on a real
 signal rather than a blind timer:
 
 ```
@@ -409,7 +509,7 @@ Mailbox fallback deposits the file as in §7.4 and the sender can confirm delive
 later via claim status.
 
 ### 7.6 Browser download link
-`arvolo send --link` produces a URL any browser can open — no arvolo, no
+`arvolo link` produces a URL any browser can open — no arvolo, no
 account — while keeping the relay zero-knowledge.
 
 **Container.** [`core/src/link.rs`](../core/src/link.rs) encrypts the file into a
@@ -467,7 +567,7 @@ links off entirely by starting the relay with `ARVOLO_DISABLE_LINKS=1`. Then the
 relay (a) reports `{"links":false}` on `/v1/features`, (b) serves `403` for the
 `/dl` page, script, and service worker, and (c) refuses HPKE-less (link) deposits
 with `403`. The client checks `/v1/features` **before** encrypting, so
-`send --link` fails immediately with a message explaining the
+`arvolo link` fails immediately with a message explaining the
 administrator disabled the feature; recipient-sealed sends (`--to`) are
 unaffected. An older relay without `/v1/features` is treated as allowing links.
 
@@ -483,7 +583,7 @@ engine's front-ends write it from the `Deposited` event (the engine itself sits
 below this store), so a mailbox send is listed and withdrawable whether or not a
 daemon was running.
 
-`arvolo transfers` lists them under **left on relay**, each with a **live relay
+`arvolo status` lists them under **left on relay**, each with a **live relay
 status** (polls `/v1/entry/{claim}/status`): `present`, `gone (downloaded /
 revoked)`, or `unknown (relay unreachable)`, plus whether it has locally expired.
 The local record is a *receipt*, not a status — nothing reports a download back —

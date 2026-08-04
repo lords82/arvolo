@@ -120,6 +120,22 @@ impl DaemonClient {
         }
     }
 
+    /// Host a short pairing code in the daemon; returns (transfer id, code).
+    pub async fn serve_code(
+        &mut self,
+        paths: Vec<String>,
+        relay: Option<String>,
+        keep: bool,
+    ) -> Result<(u64, String)> {
+        match self
+            .request(Request::ServeCode { paths, relay, keep })
+            .await?
+        {
+            Response::CodeServed { id, code } => Ok((id, code)),
+            other => unexpected(other),
+        }
+    }
+
     /// Deposit a public browser download link for `path` (on the daemon's
     /// filesystem); returns the shareable URL.
     pub async fn create_link(

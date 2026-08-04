@@ -22,7 +22,7 @@ residency and digital-sovereignty requirements straightforward to meet.
 > take it — never silently failed), a **chunked, streamed offline mailbox** (big
 > files aren't buffered in RAM), folders, and burn-after-read pickup. Plus an
 > **always-open client**
-> (`listen`/`push`) that receives pushed files with a live watchdog, and
+> (`listen`/`daemon`) that receives sent files with a live watchdog, and
 > **browser download links** — share a URL that decrypts in any browser, no
 > install. Desktop GUI, relay federation, and mobile are planned (see Roadmap).
 
@@ -71,7 +71,7 @@ docker run -d --name arvolo-relay -p 6282:6282 -v arvolo-data:/data \
 
 ```sh
 # sender (relay is used only to bootstrap the code exchange, never for your data)
-arvolo send --code --relay relay.example.com ./photo.jpg
+arvolo code --relay relay.example.com ./photo.jpg
 #   ->  4821-crater-mango@relay.example.com
 
 # receiver
@@ -80,30 +80,35 @@ arvolo recv 4821-crater-mango@relay.example.com
 
 The relay address defaults to `https://` — just pass the host. With a configured
 default relay (see [Config](#config)) the code is even shorter, just
-`4821-crater-mango`. Plain `arvolo send ./file` (no `--code`) prints a
+`4821-crater-mango`. `arvolo ticket ./file` prints a
 self-contained `arvc…` ticket instead — no relay needed at all.
 
+With a daemon running, `arvolo code` returns straight away and the daemon holds the
+code open for you — through this terminal closing and through the daemon itself
+restarting. `arvolo status` shows it again when you need to read it out, and
+`arvolo cancel <id>` retires it.
+
 > **No trusted relay needed for P2P.** A pure `arvc` transfer touches no relay at
-> all; with `--code`, the relay is only a SPAKE2 rendezvous — it can't read your data
+> all; with `arvolo code`, the relay is only a SPAKE2 rendezvous — it can't read your data
 > or MITM the exchange without the code, only deny service. (The one path where a
-> relay must be trusted is the browser `--link`, whose decryptor the relay serves.)
+> relay must be trusted is `arvolo link`, whose browser decryptor the relay serves.)
 
 Relay without TLS (LAN / dev)? Add `--use-http`:
 
 ```sh
-arvolo send --code --relay relay.local:6282 --use-http ./photo.jpg
+arvolo code --relay relay.local:6282 --use-http ./photo.jpg
 ```
 
 **Offline mailbox** — recipient is away; encrypt to their identity and leave it
 on a relay until they fetch it:
 
 ```sh
-arvolo id                                          # recipient shows their public id
-arvolo send ./report.pdf --to <id-or-contact> --ticket  # deposit (HPKE E2E) + print an arvm ticket
-arvolo recv arvm…                                  # recipient fetches + decrypts (burns on read)
+arvolo me                                     # recipient shows their public id
+arvolo send <id-or-contact> ./report.pdf --deposit   # deposit (HPKE E2E) + print an arvm ticket
+arvolo recv arvm…                             # recipient fetches + decrypts (burns on read)
 ```
 
-**Send to a known recipient** — `send --to` picks the channel automatically: if
+**Send to a known recipient** — `send` picks the channel automatically: if
 they're online it's delivered live to their daemon; if offline it's deposited on
 the relay (mailbox) and an `arvm…` ticket is printed so you can also hand it over.
 Each incoming offer shows sender, name, and size; accepted transfers download
@@ -114,7 +119,7 @@ transparently (no ticket to copy):
 arvolo listen --auto-accept-contacts
 
 # sender: online → live; offline → mailbox + a shareable arvm ticket
-arvolo send ./photo.jpg --to alice
+arvolo send alice ./photo.jpg
 ```
 
 **Browser download link** — share a URL anyone can open in a browser to download
@@ -122,46 +127,101 @@ and decrypt the file, **no arvolo install and no account**. The key lives only i
 the link's `#fragment`, so an **honest** relay stays zero-knowledge. Note: the
 browser path runs `dl.js` *served by the relay*, so a **hostile** relay operator
 could serve modified code that grabs the key (like Firefox Send) — for
-confidentiality against an untrusted relay use a recipient-sealed `--to` send, or
+confidentiality against an untrusted relay use a recipient-sealed `arvolo send`, or
 only link against a relay you host/trust. See [PROTOCOL.md §7.6](docs/PROTOCOL.md):
 
 ```sh
-arvolo send ./report.pdf --link
+arvolo link ./report.pdf
 #   ->  https://relay.example.com/dl/<claim>#<key>
 
 # The link is listed among everything you've left on a relay; cancel it (and
 # delete the file from the relay) anytime:
-arvolo transfers
+arvolo status
 arvolo cancel <id>
 ```
 
 ## Commands
 
+Sending splits on one question: **do you know who gets this?**
+
+If you do, `send` delivers to them. If you don't, you ask for the artefact you
+want to hand around yourself — and the command is its name. Multiple paths or a
+folder are packed into one archive in every case.
+
 | Command | What it does |
 |---|---|
-| `arvolo send <paths…>` | Get files/folders to someone — the tool picks the channel (multiple paths / a folder are packed into one archive). Without `--to`: prints an `arvc…` P2P ticket to share; if a daemon is running it serves it in the **background** (track with `arvolo transfers`). |
-| &nbsp;&nbsp;`--to <name\|id>` | Send to a known recipient: **online** → delivered live to their daemon; **offline** → deposited on the relay (mailbox) + an `arvm…` ticket printed so you can also hand it over. |
-| &nbsp;&nbsp;`--ticket` | With `--to`: force the mailbox/`arvm…` path even if they're online (send-and-forget). |
-| &nbsp;&nbsp;`--link` | Produce a public **browser download link** instead (decrypts client-side; `--to` not used; no download cap by default). |
-| &nbsp;&nbsp;`--code` | Show a short pairing code instead of the P2P ticket (no `--to`; needs a relay). |
-| &nbsp;&nbsp;`--ttl --max --password` | Mailbox/link tuning: expiry, download cap, E2E password. |
-| &nbsp;&nbsp;`--seed-relay <host>` | P2P ticket send: also seed to a relay so it finishes even if you go offline (lazy backfill). |
-| &nbsp;&nbsp;`--foreground` | Serve the P2P ticket in **this terminal** (blocking, Ctrl-C to stop) instead of the daemon. |
-| &nbsp;&nbsp;`--relay --use-http --qr` | Relay for `--code`/mailbox/link; `http://` for bare hosts (LAN/dev); render the ticket/code/link as a QR. |
-| `arvolo recv <ticket\|code> [-o out] [--password]` | Receive from **any** ticket or code — auto-detects: `arvc…`/pairing-code fetch live P2P (resumes, unpacks folders), `arvm…`/download-link decrypt from the relay. |
-| `arvolo id` | Show your public id (created on first use). |
-| `arvolo name ["…"]` | Show or set your display name — the self-chosen name advertised to recipients inside each sealed offer (a petname claim, never a verified identity; empty clears it). |
-| `arvolo version` | CLI version + whether the daemon is running (and its version). |
-| `arvolo contacts add\|list\|verify\|remove\|trust\|untrust\|accept-name` | Address book of recipients (used by `--to`); TOFU + out-of-band fingerprint verification. `trust` lets the daemon auto-download that contact's files (default: ask). `accept-name` approves a sender's advertised display name — first use pins it, a later change is quarantined (old name kept) until you approve. |
-| `arvolo listen [--download-dir --auto-accept-contacts --auto-accept-verified]` | Stay online and receive files contacts send to you (offers, live watchdog, transparent download). |
-| `arvolo revoke <arvm…\|link> --token <t>` | Delete a deposited mailbox ticket **or** a browser download link from the relay (auto-detects which). For one you sent from **another machine** — locally, `arvolo cancel <id>` needs no token. |
-| `arvolo transfers [--watch]` | One view of everything: with a daemon, live in/out transfers + pending offers; then, daemon or not, what you've **left on a relay** (links / sealed deposits, with live relay status), the **resumable** sends, and the history (`--watch` redraws). |
-| &nbsp;&nbsp;`clear` / `clear-history` | `clear` closes out what's over — drops completed/cancelled/failed rows from the list, keeping anything still going (a mailbox send awaiting pickup looks done but isn't). `clear-history` wipes the history log. Neither touches the relay: withdraw with `arvolo cancel <id>`. |
-| `arvolo cancel <id>` | Take back anything `transfers` lists: a running transfer (a number), a file left on a relay (**deleted from the relay**, not just locally), or a resumable send. |
-| `arvolo daemon [--download-dir --relay]` | Run the always-on background engine + local control socket (systemd/launchd). See [`docs/DAEMON.md`](docs/DAEMON.md). |
-| `arvolo accept <id>` / `reject <id>` | Approve or decline a parked offer (ids from `arvolo transfers`; needs a running daemon). |
+| `arvolo send <who> <paths…>` | Deliver to a saved contact or a public id: **online** → live to their daemon; **offline** → deposited on the relay (mailbox) + an `arvm…` ticket printed so you can also hand it over. |
+| &nbsp;&nbsp;`--deposit` | Don't try a live delivery — deposit even if they're online (send-and-forget). |
+| &nbsp;&nbsp;`-m/--note "…"` | A short note delivered *with* the file, sealed inside the offer (the relay never sees it). |
+| `arvolo link <paths…>` | A public **browser download link**: whoever opens it needs no arvolo and no account (decrypts client-side; no download cap by default). |
+| `arvolo code <paths…>` | A short pairing code like `4821-crater-mango` you can read out loud. Needs a relay for the rendezvous; the file still travels P2P. With a daemon running it's hosted in the **background** — the command returns, `arvolo status` shows the code, and it survives a daemon restart. |
+| &nbsp;&nbsp;`--keep` | Serve everyone who has the code until you `arvolo cancel` it, instead of retiring it after the first receiver. |
+| `arvolo ticket <paths…>` | A self-contained `arvc…` P2P ticket to paste into a chat — no relay needed at all. With a daemon running it's served in the **background** (track with `arvolo status`). |
+| &nbsp;&nbsp;`--foreground` | Serve it in **this terminal** instead (blocking, Ctrl-C to stop). Applies to `ticket` and `code` alike. |
+| &nbsp;&nbsp;`--ttl --max --password` | Deposit/link tuning: expiry, download cap, E2E password (`send`/`link`). |
+| &nbsp;&nbsp;`--relay --use-http --qr` | Relay to use; `http://` for bare hosts (LAN/dev); render the ticket/code/link as a QR. |
+| `arvolo recv <ticket\|code\|link> [-o out] [--password]` | Receive from **any** of them — one verb, auto-detected: `arvc…`/pairing-code fetch live P2P (resumes, unpacks folders), `arvm…`/download-link decrypt from the relay. |
+| `arvolo status [--watch]` | Everything you can still **act on**: with a daemon, live in/out transfers + pending offers; then, daemon or not, what you've **left on a relay** (links / sealed deposits, with live relay status) and the **resumable** sends (`--watch` redraws). |
+| &nbsp;&nbsp;`clear` | Closes out what's over — drops completed/cancelled/failed rows, keeping anything still going (a mailbox send awaiting pickup looks done but isn't). Never touches the relay: withdraw with `arvolo cancel <id>`. |
+| `arvolo history [--all]` | What already **happened**: the log of finished transfers, 20 most recent by default. Read-only — nothing here can still be acted on, which is what separates it from `status`. |
+| &nbsp;&nbsp;`clear` | Forget the log. Leaves the live list, your relay deposits and your resumable sends alone. |
+| `arvolo cancel <id>` | Take back anything `status` lists: a running transfer (a number), a file left on a relay (**deleted from the relay**, not just locally), or a resumable send. |
+| &nbsp;&nbsp;`<arvm…\|link> --token <t>` | Withdraw something you sent from **another machine**, where there's no local record to hold the token. From the sending machine the id alone is enough. |
+| `arvolo pause <id>` / `resume <id>` | Hold a running transfer and restart it. `resume` also replays an interrupted send — by session id, or by the `arvc…` ticket you shared plus its file, so the ticket you handed out keeps working — and finishes an interrupted **download** when given the path to its partial (a pairing code is spent on use, so the path is the way back, not the code). |
+| `arvolo listen [--download-dir --auto-accept-contacts --auto-accept-verified]` | Stay reachable **for this session**, deciding offer by offer (Ctrl-C ends it). Attaches to a running daemon as its approver rather than starting a second engine. |
+| `arvolo daemon [--download-dir --relay]` | Stay reachable **always**, as a background service: nobody is at the keyboard, so it decides from your trust settings and notifies you about the rest. Also the local control socket every other command drives. See [`docs/DAEMON.md`](docs/DAEMON.md). |
+| `arvolo accept <id>` / `reject <id>` | Approve or decline a parked offer (ids from `arvolo status`; needs a running daemon). |
+| `arvolo contacts pair [code]` | **Trade public ids over a short code** — show one, or type theirs. Both sides end up saved *and* verified: the code is a SPAKE2 secret, so the channel only forms between two people who both know it, which is what authenticates the key. `--qr` to show it scannable. |
+| `arvolo contacts list [--json --no-presence]` | The book, with who's online. Probes run concurrently; a relay that doesn't answer reports **unknown**, never "offline". |
+| `arvolo contacts add\|remove\|rename` | `rename` keeps the verified and trusted marks — doing it as remove + add drops them. |
+| `arvolo contacts verify\|unverify\|trust\|untrust` | TOFU + out-of-band fingerprint verification; each takes a contact name **or** a raw id. `trust` lets the daemon auto-download that contact's files (default: ask) and refuses an unverified key unless `--force`. |
+| `arvolo contacts block\|unblock [who]` | Drop someone's offers on arrival — no prompt, no notification. Syncs to your other devices. No argument lists who is blocked. |
+| `arvolo contacts accept-name` | Approve a sender's advertised display name — first use pins it, a later change is quarantined (old name kept) until you approve. |
+| `arvolo contacts export\|import` | Move a book between machines you don't want sharing an identity. Verified/trusted marks are **not** imported without `--with-marks`. |
+| `arvolo contacts prune` | Drop advertised-name records left behind by removed contacts. |
+| `arvolo device pair\|join\|sync\|status` | Use arvolo on more than one device: `pair` shows a code, `join` takes it (sharing one identity), `sync` propagates the address book, `status` reports fingerprint and last sync. See [Multiple devices](#multiple-devices). |
+| `arvolo me` | Your public id (on stdout, so it pipes), fingerprint and display name. |
+| &nbsp;&nbsp;`name ["…"]` | Show or set your display name — the self-chosen name advertised to recipients inside each sealed offer (a petname claim, never a verified identity; empty clears it). |
+| `arvolo completions <shell>` | Shell integration for `<TAB>`. See [Completion](#tab-completion). |
 
-Run `arvolo <cmd> --help` for the full flag list.
+Add `-v` to any command to have it narrate what it's doing (`-vv`, `-vvv` for
+more). Run `arvolo <cmd> --help` for the full flag list.
+
+## Multiple devices
+
+Pairing shares **one identity** across your devices, so contacts see a single id
+and any device can open what was sent to you. It carries your address book along,
+and keeps it in step afterwards.
+
+```sh
+# on a device you already use
+arvolo device pair
+#   ->  arvolo device join 4821-crater-mango
+
+# on the new device — this REPLACES its identity with the shared one
+arvolo device join 4821-crater-mango
+
+# later, after adding a contact on one of them
+arvolo device sync        # on each device; `listen`/`daemon` also sync automatically
+arvolo device status      # fingerprint, contact count, last sync
+```
+
+## TAB completion
+
+Completion is computed by arvolo itself rather than baked into a static script,
+so `<TAB>` offers **your contact names** after `arvolo send` and the **live ids**
+from `arvolo status` after `cancel`, `resume`, `pause`, `accept` and `reject` —
+not just the command names.
+
+```sh
+arvolo completions zsh  > ~/.zfunc/_arvolo      # and put ~/.zfunc on your fpath
+arvolo completions bash > ~/.local/share/bash-completion/completions/arvolo
+arvolo completions fish > ~/.config/fish/completions/arvolo.fish
+```
+
+Also available for `elvish` and `powershell`. Re-run it after upgrading arvolo:
+the shell side and the binary are versioned together. Completion never touches
+the network, and falls back to what's on disk if the daemon isn't answering.
 
 ## Config
 
@@ -174,7 +234,7 @@ non-interactive; `ARVOLO_NO_WIZARD=1` to disable). See
 `~/.config/arvolo/config.toml`:
 
 ```toml
-relay = "relay.example.com"   # default relay for --code / recv <code> / send --to (https assumed)
+relay = "relay.example.com"   # default relay for code / link / send / recv (https assumed)
 download_dir = "/srv/arvolo/incoming"   # where accepted files are saved (default: ~/Arvolo)
 ```
 
@@ -248,11 +308,12 @@ Everything below is **optional** (defaults shown).
 - **Short-code pairing** (magic-wormhole style): a SPAKE2 PAKE over a relay
   rendezvous exchanges the ticket, so two short words are safe (no offline
   dictionary attack) and the relay never sees the ticket in the clear.
-- **Always-open client**: `listen` keeps a client online; senders `push` offers
+- **Always-open client**: `listen`/`daemon` keep a client online; `arvolo send`
+  delivers offers
   through a zero-knowledge inbox (proof-of-possession session auth) and presence
   beacons, with a two-phase watchdog that delivers **live P2P** when the recipient
   is online and falls back to the **mailbox** when they aren't.
-- **Browser download links**: `send --link` deposits a chunked AES-256-GCM
+- **Browser download links**: `arvolo link` deposits a chunked AES-256-GCM
   container; the relay serves a self-contained page that fetches the ciphertext and
   decrypts it in the browser (key only in the URL `#fragment`), streaming to disk
   without buffering the whole file. Each link is a local **session** whose removal
@@ -282,7 +343,7 @@ Build & test: `cargo build && cargo test`.
 
 ## Roadmap
 
-Shipped recently: the always-open client (`listen`/`push`) and browser download
+Shipped recently: the always-open client (`listen`/`daemon`) and browser download
 links (the Firefox Send heir). Planned next: desktop GUI, relay federation (short
 codes across independent relays), and mobile. Post-MVP ideas are tracked in
 [`docs/ROADMAP-FUTURE.md`](docs/ROADMAP-FUTURE.md).

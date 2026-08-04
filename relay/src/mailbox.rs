@@ -622,6 +622,58 @@ impl Mailbox {
             .ok()
     }
 
+    /// Push every unexpired row of `slot` out to `expires_at`, unless it is
+    /// already later. Returns how many rows moved. This is the whole of slot
+    /// renewal: a long-lived rendezvous stays alive because its owner keeps
+    /// asking for its sessions, not because it holds a separate lease.
+    pub fn rz_touch_slot(&self, slot: &str, expires_at: u64, now: u64) -> usize {
+        self.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE rendezvous SET expires_at = ?2
+                 WHERE slot = ?1 AND expires_at > ?3 AND expires_at < ?2",
+                params![slot, expires_at as i64, now as i64],
+            )
+            .unwrap_or(0)
+    }
+
+    /// Delete named keys of one slot. Exact keys only — never a `LIKE` pattern
+    /// built from a peer-supplied session id, which `_`/`%` would turn into a
+    /// wildcard that reaches into other sessions' rows.
+    pub fn rz_delete_keys(&self, slot: &str, keys: &[String]) {
+        let conn = self.conn.lock().unwrap();
+        for key in keys {
+            let _ = conn.execute(
+                "DELETE FROM rendezvous WHERE slot = ?1 AND key = ?2",
+                params![slot, key],
+            );
+        }
+    }
+
+    /// Unexpired keys of `slot` starting with `prefix`. The prefix is always one
+    /// of our own constants (`r.`, `s.`), never peer input — so the `LIKE` pattern
+    /// below carries no wildcard a caller could have chosen.
+    pub fn rz_slot_keys_prefixed(&self, slot: &str, prefix: &str, now: u64) -> Vec<String> {
+        let pattern = format!("{prefix}%");
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = match conn.prepare(
+            "SELECT key FROM rendezvous
+             WHERE slot = ?1 AND key LIKE ?2 AND expires_at > ?3
+             ORDER BY key",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let rows = stmt.query_map(params![slot, pattern, now as i64], |r| {
+            r.get::<_, String>(0)
+        });
+        match rows {
+            Ok(it) => it.filter_map(Result::ok).collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
     /// Delete a whole rendezvous slot (all its keys) — called after the ticket is
     /// fetched (burn) so nothing lingers.
     pub fn rz_delete_slot(&self, slot: &str) {
@@ -630,6 +682,24 @@ impl Mailbox {
             .lock()
             .unwrap()
             .execute("DELETE FROM rendezvous WHERE slot = ?1", params![slot]);
+    }
+
+    /// Number of unexpired rows held by one slot (per-slot capacity guard).
+    ///
+    /// The fixed three-key pairing could never grow a slot, so nothing bounded it.
+    /// A slot whose keys are chosen by whoever shows up can, so every write past
+    /// the claim is checked against [`MAX_RZ_KEYS_PER_SLOT`]: guessing a 4-digit
+    /// nameplate must not buy an unbounded number of rows.
+    pub fn rz_slot_row_count(&self, slot: &str, now: u64) -> i64 {
+        self.conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM rendezvous WHERE slot = ?1 AND expires_at > ?2",
+                params![slot, now as i64],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap_or(0)
     }
 
     /// Number of rendezvous rows currently stored (capacity guard).

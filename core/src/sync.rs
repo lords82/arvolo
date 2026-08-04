@@ -81,12 +81,23 @@ pub struct ContactEntry {
     pub deleted: bool,
 }
 
-/// One verified/trusted mark, keyed by pubkey (a 2P-set element with a clock).
+/// One verified/trusted/blocked mark, keyed by pubkey (a 2P-set element with a
+/// clock).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MarkEntry {
     pub pubkey: String,
     pub clock: Lamport,
     pub deleted: bool,
+    /// Unix seconds when the mark was made — "verified since", "trusted since".
+    ///
+    /// Wall-clock, and deliberately **not** an input to the merge: the Lamport
+    /// clock decides which register wins and this rides along with it. Using it to
+    /// order anything would make convergence depend on how well two machines agree
+    /// about the time, which is exactly what Lamport clocks exist to avoid.
+    ///
+    /// `0` means unknown — a mark made before this was recorded.
+    #[serde(default)]
+    pub since: u64,
 }
 
 /// One TOFU seen counter. Merged by `max` (idempotent; preserves the only value
@@ -129,6 +140,11 @@ pub struct SyncSnapshot {
     /// a snapshot written by an older device (no `names`) still deserializes.
     #[serde(default)]
     pub names: Vec<NameEntry>,
+    /// Silenced identities. Same 2P-set shape as `verified`/`trusted`, and the same
+    /// `#[serde(default)]` reason: an older device sends no `blocked` at all, which
+    /// merges as "no information", never as "unblock everything".
+    #[serde(default)]
+    pub blocked: Vec<MarkEntry>,
 }
 
 /// The sealed inbox payload carrying a snapshot to the user's other devices.
@@ -174,11 +190,13 @@ pub struct ContactReg {
     pub deleted: bool,
 }
 
-/// A mark register (verified/trusted): clock + tombstone for a pubkey.
+/// A mark register (verified/trusted/blocked): clock + tombstone for a pubkey,
+/// plus when the mark was made (see [`MarkEntry::since`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MarkReg {
     pub clock: Lamport,
     pub deleted: bool,
+    pub since: u64,
 }
 
 /// A name register: the approved (`pinned`) and awaiting-approval (`pending`)
@@ -206,6 +224,8 @@ pub struct SyncState {
     pub seen: BTreeMap<String, u64>,
     /// pubkey → advertised-name register.
     pub names: BTreeMap<String, NameReg>,
+    /// pubkey → blocked mark.
+    pub blocked: BTreeMap<String, MarkReg>,
 }
 
 impl SyncState {
@@ -228,6 +248,7 @@ impl SyncState {
                 MarkReg {
                     clock: m.clock,
                     deleted: m.deleted,
+                    since: m.since,
                 },
             );
         }
@@ -237,6 +258,17 @@ impl SyncState {
                 MarkReg {
                     clock: m.clock,
                     deleted: m.deleted,
+                    since: m.since,
+                },
+            );
+        }
+        for m in &s.blocked {
+            state.blocked.insert(
+                m.pubkey.clone(),
+                MarkReg {
+                    clock: m.clock,
+                    deleted: m.deleted,
+                    since: m.since,
                 },
             );
         }
@@ -281,6 +313,7 @@ impl SyncState {
                     pubkey: pubkey.clone(),
                     clock: r.clock,
                     deleted: r.deleted,
+                    since: r.since,
                 })
                 .collect(),
             trusted: self
@@ -290,6 +323,17 @@ impl SyncState {
                     pubkey: pubkey.clone(),
                     clock: r.clock,
                     deleted: r.deleted,
+                    since: r.since,
+                })
+                .collect(),
+            blocked: self
+                .blocked
+                .iter()
+                .map(|(pubkey, r)| MarkEntry {
+                    pubkey: pubkey.clone(),
+                    clock: r.clock,
+                    deleted: r.deleted,
+                    since: r.since,
                 })
                 .collect(),
             seen: self
@@ -330,6 +374,7 @@ impl SyncState {
         }
         merge_marks(&mut self.verified, &other.verified);
         merge_marks(&mut self.trusted, &other.trusted);
+        merge_marks(&mut self.blocked, &other.blocked);
         for (pubkey, count) in &other.seen {
             let e = self.seen.entry(pubkey.clone()).or_insert(0);
             *e = (*e).max(*count);
@@ -358,6 +403,9 @@ impl SyncState {
             m = m.max(r.clock.counter);
         }
         for r in self.names.values() {
+            m = m.max(r.clock.counter);
+        }
+        for r in self.blocked.values() {
             m = m.max(r.clock.counter);
         }
         m
@@ -479,6 +527,7 @@ mod tests {
             contacts,
             verified: vec![],
             trusted: vec![],
+            blocked: vec![],
             seen: vec![],
             names: vec![],
         })
@@ -493,6 +542,7 @@ mod tests {
             contacts: vec![contact("alice", "aaaa", lam(3, 1), false)],
             verified: vec![],
             trusted: vec![],
+            blocked: vec![],
             seen: vec![SeenEntry {
                 pubkey: "aaaa".into(),
                 count: 2,
@@ -512,6 +562,7 @@ mod tests {
             contacts: vec![],
             verified: vec![],
             trusted: vec![],
+            blocked: vec![],
             seen: vec![],
             names: vec![],
         };
@@ -563,8 +614,10 @@ mod tests {
                 pubkey: "k".into(),
                 clock: lam(1, 1),
                 deleted: false,
+                since: 0,
             }],
             trusted: vec![],
+            blocked: vec![],
             seen: vec![SeenEntry {
                 pubkey: "k".into(),
                 count: 3,
@@ -579,8 +632,10 @@ mod tests {
                 pubkey: "k".into(),
                 clock: lam(2, 2),
                 deleted: true,
+                since: 0,
             }],
             trusted: vec![],
+            blocked: vec![],
             seen: vec![SeenEntry {
                 pubkey: "k".into(),
                 count: 5,
@@ -631,6 +686,7 @@ mod tests {
             contacts: vec![],
             verified: vec![],
             trusted: vec![],
+            blocked: vec![],
             seen: vec![],
             names: vec![NameEntry {
                 pubkey: pubkey.into(),
@@ -670,6 +726,7 @@ mod tests {
             contacts: vec![],
             verified: vec![],
             trusted: vec![],
+            blocked: vec![],
             seen: vec![],
             names: vec![NameEntry {
                 pubkey: pubkey.into(),

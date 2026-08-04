@@ -1,7 +1,7 @@
 //! End-to-end advertised-display-name (petname) flow driven through the real
 //! `arvolo` binary against a relay running in-process:
-//!   1. the sender sets a display name (`arvolo name`) and deposits an offer to the
-//!      receiver (`send --to --ticket` → mailbox + inbox offer carrying the name);
+//!   1. the sender sets a display name (`arvolo me name`) and deposits an offer to
+//!      the receiver (`send <who> --deposit` → mailbox + inbox offer carrying it);
 //!   2. the receiver's `listen` shows the advertised name on the incoming offer —
 //!      as a *new*, unverified petname claim, distinct from the local alias;
 //!   3. the receiver approves it (`contacts accept-name`) → it pins, and
@@ -78,14 +78,14 @@ async fn advertised_name_shown_and_approved_end_to_end() {
     let cfg_recv = TempDir::new().unwrap();
 
     // Two distinct identities.
-    let send_id = first_word(run(cfg_send.path(), &relay, &["id"]).await.1);
-    let recv_id = first_word(run(cfg_recv.path(), &relay, &["id"]).await.1);
+    let send_id = first_word(run(cfg_send.path(), &relay, &["me"]).await.1);
+    let recv_id = first_word(run(cfg_recv.path(), &relay, &["me"]).await.1);
     assert!(!send_id.is_empty() && !recv_id.is_empty());
     assert_ne!(send_id, recv_id);
 
     // Sender advertises a self-chosen display name.
-    let (ok, _) = run(cfg_send.path(), &relay, &["name", "Lorenzo"]).await;
-    assert!(ok, "arvolo name");
+    let (ok, _) = run(cfg_send.path(), &relay, &["me", "name", "Lorenzo"]).await;
+    assert!(ok, "arvolo me name");
 
     // Receiver saves the sender under a LOCAL alias — it must stay primary; the
     // advertised name is shown alongside, never replacing it.
@@ -120,10 +120,10 @@ async fn advertised_name_shown_and_approved_end_to_end() {
     let (ok, out) = run(
         cfg_send.path(),
         &relay,
-        &["send", file.to_str().unwrap(), "--to", &recv_id, "--ticket"],
+        &["send", &recv_id, file.to_str().unwrap(), "--deposit"],
     )
     .await;
-    assert!(ok, "send --to --ticket failed: {out}");
+    assert!(ok, "send --deposit failed: {out}");
 
     // The receiver's listen shows the advertised name as a NEW, unverified claim.
     let mut saw_name = false;

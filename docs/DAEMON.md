@@ -5,9 +5,9 @@ The **daemon** turns the engine into a persistent background service so you can:
 
 - **stay online and receive** files without keeping a terminal open, surviving
   logout/reboot when run under systemd/launchd;
-- **queue several sends** at once — `arvolo send --to` hands off to the daemon and the
+- **queue several sends** at once — `arvolo send` hands off to the daemon and the
   transfers run concurrently;
-- **see everything in one place** — `arvolo transfers` lists incoming *and* outgoing
+- **see everything in one place** — `arvolo status` lists incoming *and* outgoing
   transfers plus offers awaiting approval;
 - **auto-download from people you trust** while everyone else waits for your
   approval (the default).
@@ -24,7 +24,7 @@ arvolo daemon                       # foreground; Ctrl-C or SIGTERM to stop
 arvolo daemon --download-dir ~/Downloads/arvolo
 ```
 
-Downloads default to `~/.config/arvolo/downloads`. Change the folder with the
+Downloads default to `~/Arvolo`. Change the folder with the
 `--download-dir` flag, the `ARVOLO_DOWNLOAD_DIR` env var, or a `download_dir` key
 in `~/.config/arvolo/config.toml` (flag > env > config > default) — handy for a
 service, so accepted files land where you want without editing the unit:
@@ -41,29 +41,61 @@ A second `arvolo daemon` refuses to start while one is already running
 Then, from any terminal (or a second machine's account):
 
 ```sh
-arvolo transfers              # live transfers (→ out, ← in) + pending offers + history
-arvolo transfers --watch      # redraw as things progress
-arvolo accept <offer-id>      # download a parked offer (id from `arvolo transfers`)
+arvolo status                 # is the daemon up? live transfers (→ out, ← in) + pending offers
+arvolo status --watch         # redraw as things progress
+arvolo history                # what already happened (the log)
+arvolo accept <offer-id>      # download a parked offer (id from `arvolo status`)
 arvolo reject <offer-id>      # decline it
 arvolo cancel <transfer-id>   # stop a running transfer
-arvolo send <file> --to bob   # hand a send to the daemon (live if online, else mailbox)
-arvolo send <file>            # plain P2P ticket, served by the daemon in the background
+arvolo send bob <file>        # hand a send to the daemon (live if online, else mailbox)
+arvolo ticket <file>          # plain P2P ticket, served by the daemon in the background
+arvolo code <file>            # short dictatable code, hosted by the daemon
 arvolo listen                 # attach as an interactive approver (Ctrl-C detaches)
-arvolo version                # is the daemon up? which version?
 ```
 
-A plain `arvolo send <file>` (no `--to`) hands its `arvc…` ticket to the daemon by
-default: it serves in the background and you watch it (who's pulling, %, delivered)
-with `arvolo transfers`, surviving your terminal. `arvolo send <file> --foreground`
-keeps the old inline behavior (serve here, Ctrl-C to stop).
+`arvolo ticket <file>` hands its `arvc…` ticket to the daemon by default: it
+serves in the background and you watch it (who's pulling, %, delivered) with
+`arvolo status`, surviving your terminal. `arvolo ticket <file> --foreground`
+keeps the inline behavior (serve here, Ctrl-C to stop).
 
-With no daemon running, `push`/`listen` fall back to their old in-process
+`arvolo code <file>` does the same for a short code. It prints the code and
+returns; the daemon holds the rendezvous open and serves the file behind it.
+`arvolo status` shows the live code, so you can read it out again later — useful,
+because the terminal that printed it is usually long gone:
+
+```
+  [3] → anonymous  holiday.zip  0/2.1 GB  (active)
+        code: arvolo recv 4821-crater-mango@relay.example.com
+```
+
+The code **outlives a daemon restart**: it is re-attached to its rendezvous when
+the daemon comes back, so one already written down keeps working. By default it
+retires once its receiver has the file — the transfer carries on after that, since
+the ticket is a separate capability and the download has only just started. Pass
+`--keep` to serve everyone who has the code until you `arvolo cancel <id>`; that is
+a bigger capability, so it is opt-in rather than the default. `--foreground` keeps
+the old inline behaviour.
+
+Three wrong-code attempts retire a code on the spot, and the sender says so — just
+run `arvolo code` again for a new one. Hosting a background code needs a relay
+running rendezvous v2; against an older one the command falls back to serving in
+the foreground and tells you why.
+
+**Resuming a download.** An interrupted receive leaves the partial file, its piece
+bitfield, and the ticket it was fetched under. Finish it with the path, not the
+code — a code is consumed on use, so it is not the way back:
+
+```sh
+arvolo resume ~/Arvolo/holiday.zip
+```
+
+With no daemon running, `send`/`listen`/`code` fall back to their in-process
 behavior, so nothing you already do breaks.
 
 ## Trust: auto-download vs. ask
 
 Every incoming offer **asks for approval by default** — it parks (visible in
-`arvolo transfers`) and (on a desktop) raises a notification. Mark the senders you
+`arvolo status`) and (on a desktop) raises a notification. Mark the senders you
 trust to skip the prompt:
 
 ```sh
@@ -89,7 +121,7 @@ Templates live in [`packaging/`](../packaging/):
   → `~/.config/systemd/user/`. Edit `ExecStart` + `ARVOLO_RELAY`, then
   `systemctl --user enable --now arvolo` and `loginctl enable-linger "$USER"` so
   it keeps running after logout. On a headless server the desktop notification is
-  a no-op — the offer still shows in `arvolo transfers` and the journal.
+  a no-op — the offer still shows in `arvolo status` and the journal.
 
 Both run the daemon in the **foreground** (the supervisor manages the process and
 restarts it on failure); `stop` sends SIGTERM, which removes the socket cleanly.

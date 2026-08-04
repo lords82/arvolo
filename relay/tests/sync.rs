@@ -46,6 +46,7 @@ fn sample_snapshot() -> SyncSnapshot {
         }],
         verified: vec![],
         trusted: vec![],
+        blocked: vec![],
         seen: vec![],
         names: vec![],
     }

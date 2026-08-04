@@ -22,12 +22,39 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@nextest
       - name: Build
         run: cargo build --all-targets --locked
+      # Nextest for per-test timeouts and one-process-per-test isolation (see
+      # .config/nextest.toml for why this suite needs both). It does not run
+      # doctests — those keep going through `cargo test`.
       - name: Test
-        run: cargo test --locked
+        run: cargo nextest run --locked --profile ci
+      - name: Doctests
+        run: cargo test --doc --locked
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
+
+  relay-image:
+    # Build (never push) the same image release.yml publishes on a tag. The
+    # Dockerfile's dependency-cache stage lists every workspace member's
+    # manifest by hand, so it silently falls behind whenever a member joins the
+    # workspace — that exact rot once broke the image for months and nobody
+    # noticed, because a tag was the first time anyone built it. This makes
+    # every PR the first time.
+    name: relay image (build only)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: relay/Dockerfile
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
   fmt:
     name: rustfmt

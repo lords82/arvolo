@@ -103,6 +103,15 @@ pub(crate) async fn daemon(
                         sender_name,
                     }) => {
                         let from_b32 = encode_id(&from);
+                        // Blocked senders are dropped before anything else: no name
+                        // observed, no offer parked, no notification. Doing it here
+                        // rather than at the prompt is the point — a block that still
+                        // queued the offer would only move the chore, not remove it.
+                        if book::is_blocked(&from_b32) {
+                            tracing::debug!("dropping offer from blocked sender {from_b32}");
+                            manager.reject_offer(&id).await;
+                            continue;
+                        }
                         // Record any advertised-name change durably (surfaced later in
                         // `contacts list` / to an attached front-end); never blocks.
                         book::observe_advertised_name(&from_b32, &sender_name);
@@ -440,6 +449,11 @@ pub(crate) fn print_transfer_dto(t: &ipc::protocol::TransferDto, rate: Option<u6
         "  [{}] {arrow} {peer}  {}{progress}{speed}  ({}){peers}",
         t.id, t.name, t.status
     );
+    // A code hosted in the daemon has no terminal left to have printed it — this
+    // list is where you come back to read it out again.
+    if let Some(code) = &t.code {
+        println!("        code: arvolo recv {code}");
+    }
 }
 
 /// `arvolo accept <offer_id>` — approve a parked offer and download it.
@@ -517,6 +531,50 @@ pub(crate) async fn serve_ticket_via_daemon(
     println!(
         "Tracked as transfer {id} — follow it with `arvolo transfers`, stop it with `arvolo cancel {id}`."
     );
+    Ok(())
+}
+
+/// Hand a pairing code to the daemon: it hosts the rendezvous *and* serves the
+/// ticket behind it. Prints the code and returns; the code outlives this terminal
+/// and a daemon restart alike.
+#[cfg(unix)]
+pub(crate) async fn serve_code_via_daemon(
+    mut client: ipc::client::DaemonClient,
+    paths: Vec<PathBuf>,
+    relay: Option<String>,
+    keep: bool,
+    qr: bool,
+) -> Result<()> {
+    // The daemon resolves paths on its own cwd — absolutize relative to ours.
+    let paths_s: Vec<String> = paths
+        .iter()
+        .map(|p| {
+            std::fs::canonicalize(p)
+                .with_context(|| format!("{}", p.display()))
+                .map(|abs| abs.to_string_lossy().into_owned())
+        })
+        .collect::<Result<Vec<_>>>()
+        .context("no such file or folder to serve")?;
+    let (id, code) = client
+        .serve_code(paths_s, relay, keep)
+        .await
+        .context("daemon refused to host the code")?;
+    println!("\nOn the other device:\n");
+    println!("    arvolo recv {code}\n");
+    if qr {
+        print_qr(&code);
+    }
+    if keep {
+        println!(
+            "Serving via the daemon, for anyone with the code. Tracked as transfer {id} — \
+             follow it with `arvolo status`, stop it with `arvolo cancel {id}`."
+        );
+    } else {
+        println!(
+            "Serving via the daemon. The code works once; the transfer keeps going after that. \
+             Tracked as {id} — follow it with `arvolo status`, stop it with `arvolo cancel {id}`."
+        );
+    }
     Ok(())
 }
 

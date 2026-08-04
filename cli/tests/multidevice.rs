@@ -2,8 +2,8 @@
 //! relay running in-process:
 //!   1. `device pair` (device A) + `device join` (device B) → both end up sharing
 //!      one identity, and B imports A's address book (G2: pairing);
-//!   2. A adds a new contact, `sync now` on A then B → the contact appears on B
-//!      (G3: the `sync now` orchestration and the mutable-cell round-trip).
+//!   2. A adds a new contact, `device sync` on A then B → the contact appears on B
+//!      (G3: the `device sync` orchestration and the mutable-cell round-trip).
 //!
 //! Pairing and sync ride the HTTP relay (rendezvous + inbox), so no iroh/NAT relay
 //! is involved and the test is deterministic on localhost.
@@ -108,8 +108,8 @@ async fn device_pair_join_and_sync_end_to_end() {
     let _ = tokio::time::timeout(Duration::from_secs(25), pair.wait()).await;
 
     // After pairing the two devices share ONE identity...
-    let (_, id_a) = run(cfg_a.path(), &relay, &["id"]).await;
-    let (_, id_b) = run(cfg_b.path(), &relay, &["id"]).await;
+    let (_, id_a) = run(cfg_a.path(), &relay, &["me"]).await;
+    let (_, id_b) = run(cfg_b.path(), &relay, &["me"]).await;
     let id_a = id_a.split_whitespace().next().unwrap_or("");
     let id_b = id_b.split_whitespace().next().unwrap_or("");
     assert!(!id_a.is_empty());
@@ -122,18 +122,18 @@ async fn device_pair_join_and_sync_end_to_end() {
         "B imported the address book: {list_b}"
     );
 
-    // Now exercise `sync now`: A adds a new contact and publishes; B pulls it.
+    // Now exercise `device sync`: A adds a new contact and publishes; B pulls it.
     let bob = fresh_id();
     let (ok, _) = run(cfg_a.path(), &relay, &["contacts", "add", "bob", &bob]).await;
     assert!(ok, "contacts add bob on A");
-    let (ok, _) = run(cfg_a.path(), &relay, &["sync", "now"]).await;
-    assert!(ok, "sync now on A");
-    let (ok, _) = run(cfg_b.path(), &relay, &["sync", "now"]).await;
-    assert!(ok, "sync now on B");
+    let (ok, _) = run(cfg_a.path(), &relay, &["device", "sync"]).await;
+    assert!(ok, "device sync on A");
+    let (ok, _) = run(cfg_b.path(), &relay, &["device", "sync"]).await;
+    assert!(ok, "device sync on B");
 
     let (_, list_b) = run(cfg_b.path(), &relay, &["contacts", "list"]).await;
     assert!(
         list_b.contains("bob"),
-        "sync now propagated the new contact to B: {list_b}"
+        "device sync propagated the new contact to B: {list_b}"
     );
 }

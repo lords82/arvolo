@@ -32,6 +32,43 @@ pub(super) fn write_sidecar(download: &Path, bitfield: &[u8]) {
     }
 }
 
+/// Path of the ticket sidecar: the `arvc…` ticket this partial is being fetched
+/// under, so an interrupted download can be resumed without going back to
+/// whatever delivered the ticket in the first place.
+///
+/// That last part is the whole point. A short pairing code hands the ticket over
+/// exactly once — the rendezvous slot (or, in v2, that session) is burned on
+/// fetch — so a receiver that kept the ticket only in memory had no way back:
+/// the partial and its bitfield were on disk, and unusable. Costs one small file.
+pub(crate) fn ticket_path(download: &Path) -> PathBuf {
+    let mut s = download.as_os_str().to_os_string();
+    s.push(".arvticket");
+    PathBuf::from(s)
+}
+
+/// Record the ticket next to the partial (owner-only on unix). Best-effort: a
+/// failed write only costs the ability to resume, never correctness.
+///
+/// Owner-only matters here — a `Plain`-key ticket carries the file's content key
+/// in the clear, the same reason the manager's resume records are 0600.
+pub(crate) fn write_ticket(download: &Path, ticket: &str) {
+    let path = ticket_path(download);
+    if std::fs::write(&path, ticket.as_bytes()).is_ok() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        }
+    }
+}
+
+/// The ticket recorded next to a partial download, if any.
+pub fn read_ticket(download: &Path) -> Option<String> {
+    let raw = std::fs::read_to_string(ticket_path(download)).ok()?;
+    let t = raw.trim().to_string();
+    (!t.is_empty()).then_some(t)
+}
+
 /// Remove any `{download}.arvpart.*` per-chunk staging files.
 pub(super) fn remove_stage_files(download: &Path) {
     let Some(name) = download.file_name().and_then(|n| n.to_str()) else {

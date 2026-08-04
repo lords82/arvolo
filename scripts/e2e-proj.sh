@@ -40,18 +40,18 @@ wait_for() {
 
 # The offer id `proj` is holding for a file named $1 (empty if none).
 peer_offer_for() {
-  peer "$ARVOLO transfers 2>&1 | grep -F '$1' | grep -o 'arvolo accept [a-z0-9]*' | awk '{print \$3}' | head -1"
+  peer "$ARVOLO status 2>&1 | grep -F '$1' | grep -o 'arvolo accept [a-z0-9]*' | awk '{print \$3}' | head -1"
 }
 # The offer id *we* are holding for a file named $1.
 self_offer_for() {
-  $ARVOLO transfers 2>&1 | grep -F "$1" | grep -o 'arvolo accept [a-z0-9]*' | awk '{print $3}' | head -1
+  $ARVOLO status 2>&1 | grep -F "$1" | grep -o 'arvolo accept [a-z0-9]*' | awk '{print $3}' | head -1
 }
-self_status_of() { $ARVOLO transfers 2>&1 | grep -F "$1" | head -1; }
+self_status_of() { $ARVOLO status 2>&1 | grep -F "$1" | head -1; }
 
 require() {
   command -v "$ARVOLO" >/dev/null || { echo "no $ARVOLO on PATH"; exit 1; }
-  $ARVOLO transfers >/dev/null 2>&1 || { echo "local daemon not answering"; exit 1; }
-  peer "$ARVOLO transfers" >/dev/null || { echo "peer daemon not answering"; exit 1; }
+  $ARVOLO status >/dev/null 2>&1 || { echo "local daemon not answering"; exit 1; }
+  peer "$ARVOLO status" >/dev/null || { echo "peer daemon not answering"; exit 1; }
 }
 
 # ---------------------------------------------------------------- cases
@@ -61,7 +61,7 @@ case_live_send() {
   say "invio live P2P (destinatario online)"
   local f="live-$$.txt" body="live $(date +%s)"
   echo "$body" > "$TMP/$f"
-  $ARVOLO send --to "$PEER_NAME" "$TMP/$f" >/dev/null 2>&1
+  $ARVOLO send "$PEER_NAME" "$TMP/$f" >/dev/null 2>&1
 
   local id; id=$(wait_for "[ -n \"\$(peer_offer_for $f)\" ]" 60 && peer_offer_for "$f")
   [ -n "$id" ] && ok "l'offerta raggiunge il peer" || { bad "nessuna offerta sul peer"; return; }
@@ -73,7 +73,7 @@ case_live_send() {
     bad "il file non è arrivato integro"
   fi
   # The sender must conclude on its own — this is the bug that left sends at 0%.
-  if wait_for "$ARVOLO transfers 2>&1 | grep -F '$f' | grep -qE 'completed|deposited'"; then
+  if wait_for "$ARVOLO status 2>&1 | grep -F '$f' | grep -qE 'completed|deposited'"; then
     ok "il mittente conclude da solo: $(self_status_of "$f" | sed 's/.*(\(.*\))/\1/')"
   else
     bad "il mittente non conclude (resta $(self_status_of "$f"))"
@@ -88,9 +88,9 @@ case_mailbox_send() {
   echo "$body" > "$TMP/$f"
 
   peer "systemctl stop arvolo" >/dev/null; sleep 3
-  $ARVOLO send --to "$PEER_NAME" "$TMP/$f" >/dev/null 2>&1
+  $ARVOLO send "$PEER_NAME" "$TMP/$f" >/dev/null 2>&1
 
-  if wait_for "$ARVOLO transfers 2>&1 | grep -F '$f' | grep -q deposited" 120; then
+  if wait_for "$ARVOLO status 2>&1 | grep -F '$f' | grep -q deposited" 120; then
     ok "depositato sul relay mentre il destinatario è offline"
   else
     bad "non depositato (stato: $(self_status_of "$f"))"
@@ -116,11 +116,11 @@ case_cancel_withdraws() {
   echo "da annullare" > "$TMP/$f"
 
   peer "systemctl stop arvolo" >/dev/null; sleep 3
-  $ARVOLO send --to "$PEER_NAME" "$TMP/$f" >/dev/null 2>&1
-  wait_for "$ARVOLO transfers 2>&1 | grep -F '$f' | grep -q deposited" 120 \
+  $ARVOLO send "$PEER_NAME" "$TMP/$f" >/dev/null 2>&1
+  wait_for "$ARVOLO status 2>&1 | grep -F '$f' | grep -q deposited" 120 \
     || { bad "non è arrivato a deposited, caso saltato"; peer "systemctl start arvolo" >/dev/null; return; }
 
-  local n; n=$($ARVOLO transfers 2>&1 | grep -F "$f" | grep -oE '^\s*\[[0-9]+\]' | tr -dc '0-9')
+  local n; n=$($ARVOLO status 2>&1 | grep -F "$f" | grep -oE '^\s*\[[0-9]+\]' | tr -dc '0-9')
   $ARVOLO cancel "$n" >/dev/null 2>&1
   sleep 4
   peer "systemctl start arvolo" >/dev/null; sleep 8
@@ -136,7 +136,7 @@ case_cancel_withdraws() {
 case_incoming() {
   say "ricezione: proj → questa macchina"
   local f="incoming-$$.txt" body="in arrivo $(date +%s)"
-  peer "echo '$body' > /tmp/$f && $ARVOLO send --to $SELF_NAME /tmp/$f" >/dev/null 2>&1
+  peer "echo '$body' > /tmp/$f && $ARVOLO send $SELF_NAME /tmp/$f" >/dev/null 2>&1
 
   local id; id=$(wait_for "[ -n \"\$(self_offer_for $f)\" ]" 90 && self_offer_for "$f")
   [ -n "$id" ] && ok "l'offerta in arrivo appare qui" || { bad "nessuna offerta in arrivo"; return; }
@@ -154,7 +154,7 @@ case_incoming() {
 case_reject() {
   say "rifiutare un arrivo non salva nulla"
   local f="reject-$$.txt"
-  peer "echo rifiutami > /tmp/$f && $ARVOLO send --to $SELF_NAME /tmp/$f" >/dev/null 2>&1
+  peer "echo rifiutami > /tmp/$f && $ARVOLO send $SELF_NAME /tmp/$f" >/dev/null 2>&1
 
   local id; id=$(wait_for "[ -n \"\$(self_offer_for $f)\" ]" 90 && self_offer_for "$f")
   [ -n "$id" ] || { bad "nessuna offerta da rifiutare"; return; }
@@ -173,7 +173,7 @@ case_ticket() {
   head -c 200000 /dev/urandom > "$TMP/$f"
   local sum; sum=$(shasum -a 256 "$TMP/$f" | awk '{print $1}')
 
-  local out; out=$($ARVOLO send "$TMP/$f" 2>&1)
+  local out; out=$($ARVOLO ticket "$TMP/$f" 2>&1)
   local tk; tk=$(echo "$out" | grep -oiE 'arvc[a-z0-9]+' | head -1)
   [ -n "$tk" ] && ok "il ticket è stato generato" || { bad "nessun ticket: $out"; return; }
 
@@ -190,7 +190,7 @@ case_link() {
   say "link pubblico: scaricabile da un browser, senza Arvolo"
   local f="link-$$.txt" body="scaricami $(date +%s)"
   echo "$body" > "$TMP/$f"
-  local out; out=$($ARVOLO send --link "$TMP/$f" 2>&1)
+  local out; out=$($ARVOLO link "$TMP/$f" 2>&1)
   local url; url=$(echo "$out" | grep -oE 'https?://[^ ]+/dl/[^ ]+' | head -1)
   if [ -n "$url" ]; then
     # The key lives in the #fragment and never reaches the relay; assert the relay
@@ -212,7 +212,7 @@ case_folder() {
   local d="dir-$$"
   mkdir -p "$TMP/$d/sub"
   echo "uno" > "$TMP/$d/a.txt"; echo "due" > "$TMP/$d/sub/b.txt"
-  $ARVOLO send --to "$PEER_NAME" "$TMP/$d" >/dev/null 2>&1
+  $ARVOLO send "$PEER_NAME" "$TMP/$d" >/dev/null 2>&1
 
   local id; id=$(wait_for "[ -n \"\$(peer_offer_for $d)\" ]" 90 && peer_offer_for "$d")
   [ -n "$id" ] && ok "l'offerta della cartella arriva" || { bad "nessuna offerta per la cartella"; return; }
@@ -237,20 +237,20 @@ case_pause_resume() {
   # not accepted yet leaves the send Active — the real moment a user reaches for
   # pause. (An offline recipient is no good here: with a working relay the send
   # deposits within seconds and a deposit is not pausable.)
-  $ARVOLO send --to "$PEER_NAME" "$TMP/$f" >/dev/null 2>&1
+  $ARVOLO send "$PEER_NAME" "$TMP/$f" >/dev/null 2>&1
   local n
-  wait_for "$ARVOLO transfers 2>&1 | grep -F '$f' | grep -qE 'active|waiting'" 30
-  n=$($ARVOLO transfers 2>&1 | grep -F "$f" | grep -oE '^\s*\[[0-9]+\]' | tr -dc '0-9' | head -1)
+  wait_for "$ARVOLO status 2>&1 | grep -F '$f' | grep -qE 'active|waiting'" 30
+  n=$($ARVOLO status 2>&1 | grep -F "$f" | grep -oE '^\s*\[[0-9]+\]' | tr -dc '0-9' | head -1)
   [ -n "$n" ] || { bad "invio non trovato (stato: $(self_status_of "$f"))"; return; }
 
   $ARVOLO pause "$n" >/dev/null 2>&1
-  if wait_for "$ARVOLO transfers 2>&1 | grep -F '$f' | grep -q paused" 40; then
+  if wait_for "$ARVOLO status 2>&1 | grep -F '$f' | grep -q paused" 40; then
     ok "l'invio si mette in pausa"
   else
     bad "non è andato in pausa (stato: $(self_status_of "$f"))"
   fi
   $ARVOLO resume "$n" >/dev/null 2>&1
-  if wait_for "! $ARVOLO transfers 2>&1 | grep -F '$f' | grep -q paused" 40; then
+  if wait_for "! $ARVOLO status 2>&1 | grep -F '$f' | grep -q paused" 40; then
     ok "l'invio riprende"
   else
     bad "non è ripreso"
@@ -263,7 +263,7 @@ case_pause_resume() {
 # ---------------------------------------------------------------- run
 
 require
-say "peer: $PEER_HOST · relay: $($ARVOLO transfers 2>&1 | head -1 | grep -oE 'https?://[^ ]+')"
+say "peer: $PEER_HOST · relay: $($ARVOLO status 2>&1 | head -1 | grep -oE 'https?://[^ ]+')"
 
 for c in "${@:-all}"; do :; done
 if [ "${1:-all}" = "all" ]; then
