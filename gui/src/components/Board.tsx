@@ -67,7 +67,7 @@ export function Board() {
         title="Ricevuti"
         glyph="↙"
         glyphBg="#e9f3fb"
-        glyphColor="#0369a1"
+        glyphColor="var(--in)"
         countLabel={count("in")}
         sections={inSections}
         emptyTitle="Niente in arrivo"
@@ -132,7 +132,7 @@ function Column(props: {
             marginLeft: "auto",
             fontSize: 10.5,
             fontWeight: 500,
-            color: "#a8a29a",
+            color: "var(--ink-mut)",
           }}
         >
           {props.countLabel}
@@ -169,14 +169,14 @@ function Column(props: {
                     fontWeight: 600,
                     letterSpacing: ".08em",
                     textTransform: "uppercase",
-                    color: "#a8a29a",
+                    color: "var(--ink-mut)",
                   }}
                 >
                   {sec.title}
                 </span>
                 <span
                   className="mono"
-                  style={{ fontSize: 9, fontWeight: 600, color: "#c9c2ba" }}
+                  style={{ fontSize: 9, fontWeight: 600, color: "var(--ink-weak)" }}
                 >
                   {sec.items.length}
                 </span>
@@ -218,16 +218,16 @@ function Empty({ title, body }: { title: string; body: string }) {
           alignItems: "center",
           justifyContent: "center",
           fontSize: 20,
-          color: "#c9c2ba",
+          color: "var(--ink-weak)",
         }}
       >
         ⊘
       </div>
-      <div style={{ fontSize: 13, fontWeight: 600, color: "#57534c" }}>{title}</div>
+      <div style={{ fontSize: 13, fontWeight: 600, color: "var(--ink-sec)" }}>{title}</div>
       <div
         style={{
           fontSize: 11.5,
-          color: "#a8a29a",
+          color: "var(--ink-mut)",
           maxWidth: 210,
           lineHeight: 1.5,
         }}
@@ -333,7 +333,7 @@ function TransferRow({ t }: { t: UITransfer }) {
             style={{
               fontSize: 10.5,
               fontWeight: 500,
-              color: "#c9c2ba",
+              color: "var(--ink-weak)",
               whiteSpace: "nowrap",
             }}
           >
@@ -361,8 +361,8 @@ function TransferRow({ t }: { t: UITransfer }) {
             {md.label}
           </Chip>
           <Chip
-            bg={t.encrypted ? "#e6f4ef" : "#f0ece7"}
-            color={t.encrypted ? "#0f766e" : "#8a827a"}
+            bg={t.encrypted ? "var(--teal-bg)" : "#f0ece7"}
+            color={t.encrypted ? "var(--teal)" : "#8a827a"}
           >
             {t.encrypted ? "E2E" : "Pubblico"}
           </Chip>
@@ -404,14 +404,14 @@ function TransferRow({ t }: { t: UITransfer }) {
             </Chip>
           )}
           {multi ? (
-            <Chip bg="#e9f3fb" color="#0369a1" glyph="⇄">
+            <Chip bg="#e9f3fb" color="var(--in)" glyph="⇄">
               {t.swarmPeers} peer
             </Chip>
           ) : (
             <span
               style={{
                 fontSize: 10.5,
-                color: "#a8a29a",
+                color: "var(--ink-mut)",
                 overflow: "hidden",
                 textOverflow: "ellipsis",
                 whiteSpace: "nowrap",
@@ -421,7 +421,7 @@ function TransferRow({ t }: { t: UITransfer }) {
             </span>
           )}
           {t.verified && (
-            <span style={{ fontSize: 9.5, fontWeight: 600, color: "#0f766e" }}>
+            <span style={{ fontSize: 9.5, fontWeight: 600, color: "var(--teal)" }}>
               ✓ verificato
             </span>
           )}
@@ -446,7 +446,7 @@ function TransferRow({ t }: { t: UITransfer }) {
           style={{
             fontSize: 9.5,
             fontWeight: 500,
-            color: "#a8a29a",
+            color: "var(--ink-mut)",
             marginTop: 2,
             overflow: "hidden",
             textOverflow: "ellipsis",
@@ -505,19 +505,19 @@ function RowMenu({ t }: { t: UITransfer }) {
     actions.push({
       label: "Apri dettagli",
       glyph: "⤢",
-      color: "#171514",
+      color: "var(--ink)",
       onClick: () => store.openIncoming(t.offerId!),
     });
     actions.push({
       label: "Accetta",
       glyph: "✓",
-      color: "#16a34a",
+      color: "var(--green)",
       onClick: () => void store.accept(t.offerId!, null).catch(() => {}),
     });
     actions.push({
       label: "Rifiuta",
       glyph: "✕",
-      color: "#dc2626",
+      color: "var(--red)",
       onClick: () => void store.reject(t.offerId!).catch(() => {}),
     });
   } else {
@@ -536,21 +536,21 @@ function RowMenu({ t }: { t: UITransfer }) {
       actions.push({
         label: "Metti in pausa",
         glyph: "⏸",
-        color: "#171514",
+        color: "var(--ink)",
         onClick: () => void store.pause(t.id).catch(() => {}),
       });
     if (t.status === "in attesa")
       actions.push({
         label: "Riprendi",
         glyph: "▶",
-        color: "#171514",
+        color: "var(--ink)",
         onClick: () => void store.resume(t.id).catch(() => {}),
       });
     if (t.status === "completato" && t.path)
       actions.push({
         label: "Apri cartella",
         glyph: "⌖",
-        color: "#171514",
+        color: "var(--ink)",
         onClick: () => {
           revealItemInDir(t.path!).catch(() => {});
           store.toggleMenu(null);
@@ -564,7 +564,7 @@ function RowMenu({ t }: { t: UITransfer }) {
       actions.push({
         label: "Verifica identità…",
         glyph: "✓",
-        color: "#0f766e",
+        color: "var(--teal)",
         onClick: () => {
           store.toggleMenu(null);
           store.openContacts();
@@ -573,13 +573,13 @@ function RowMenu({ t }: { t: UITransfer }) {
     actions.push({
       label: "Sposta su",
       glyph: "↑",
-      color: "#171514",
+      color: "var(--ink)",
       onClick: () => store.moveItem(t.key, -1),
     });
     actions.push({
       label: "Sposta giù",
       glyph: "↓",
-      color: "#171514",
+      color: "var(--ink)",
       onClick: () => store.moveItem(t.key, 1),
     });
     if (!cancelling)
@@ -588,13 +588,13 @@ function RowMenu({ t }: { t: UITransfer }) {
           ? {
               label: t.dir === "out" ? "Annulla invio" : "Annulla",
               glyph: "✕",
-              color: "#dc2626",
+              color: "var(--red)",
               onClick: () => void store.cancel(t.id).catch(() => {}),
             }
           : {
               label: "Elimina",
               glyph: "✕",
-              color: "#dc2626",
+              color: "var(--red)",
               onClick: () => void store.removeRow(t.key).catch(() => {}),
             }
       );
@@ -616,7 +616,7 @@ function RowMenu({ t }: { t: UITransfer }) {
           borderRadius: 7,
           cursor: "pointer",
           fontSize: 16,
-          color: "#a8a29a",
+          color: "var(--ink-mut)",
           lineHeight: 1,
         }}
       >
@@ -682,7 +682,7 @@ const btnGhost: React.CSSProperties = {
 };
 const btnAccept: React.CSSProperties = {
   border: "none",
-  background: "#16a34a",
+  background: "var(--green)",
   color: "#fff",
   borderRadius: 8,
   padding: "6px 12px",

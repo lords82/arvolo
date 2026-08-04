@@ -13,7 +13,7 @@ import { useStore } from "../store";
 import { shortId } from "../format";
 import type { ContactDto } from "../types";
 
-const AVATAR_COLORS = ["#c2410c", "#0369a1", "#7c3aed", "#be185d", "#0f766e", "#4b5563"];
+const AVATAR_COLORS = ["#c2410c", "var(--in)", "#7c3aed", "#be185d", "var(--teal)", "#4b5563"];
 function colorFor(name: string): string {
   let h = 0;
   for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
@@ -47,36 +47,20 @@ export function ContactsPanel() {
 
   if (!isOpen) return null;
 
+  // A full view in the main pane (the sidebar's "Rubrica"), not an overlay.
   return (
     <div
-      onClick={(e) => {
-        if (e.target === e.currentTarget) close();
-      }}
       style={{
-        position: "fixed",
-        inset: 0,
-        background: "rgba(20,16,12,.4)",
+        flex: 1,
+        minWidth: 0,
+        background: "var(--card)",
+        border: "1px solid var(--line)",
+        borderRadius: 16,
         display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        backdropFilter: "blur(2px)",
-        zIndex: 100,
+        flexDirection: "column",
+        overflow: "hidden",
       }}
     >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        style={{
-          width: 600,
-          maxHeight: 640,
-          background: "#fff",
-          borderRadius: 18,
-          boxShadow: "0 30px 70px -12px rgba(0,0,0,.45)",
-          display: "flex",
-          flexDirection: "column",
-          overflow: "hidden",
-          animation: "pop .14s ease",
-        }}
-      >
         <div
           style={{
             display: "flex",
@@ -88,7 +72,7 @@ export function ContactsPanel() {
         >
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ fontSize: 15, fontWeight: 700 }}>Rubrica</div>
-            <div style={{ fontSize: 11.5, color: "#a8a29a" }}>
+            <div style={{ fontSize: 11.5, color: "var(--ink-mut)" }}>
               Le persone a cui invii, e come ti fidi di loro
             </div>
           </div>
@@ -96,8 +80,8 @@ export function ContactsPanel() {
             onClick={() => setAdding((v) => !v)}
             style={{
               border: "none",
-              background: adding ? "#f4f1ee" : "#171514",
-              color: adding ? "#57534c" : "#fff",
+              background: adding ? "#f4f1ee" : "var(--ink)",
+              color: adding ? "var(--ink-sec)" : "#fff",
               borderRadius: 9,
               padding: "8px 14px",
               fontSize: 12,
@@ -134,7 +118,7 @@ export function ContactsPanel() {
           />
 
           {contacts.length === 0 ? (
-            <div style={{ fontSize: 12.5, color: "#a8a29a", padding: "18px 4px" }}>
+            <div style={{ fontSize: 12.5, color: "var(--ink-mut)", padding: "18px 4px" }}>
               Nessun contatto. Aggiungine uno con “+ Aggiungi”: ti serve il suo ID
               pubblico (chiediglielo — lo trova in alto nella sua app o con{" "}
               <span className="mono">arvolo me</span>).
@@ -143,7 +127,6 @@ export function ContactsPanel() {
             contacts.map((c) => <ContactRow key={c.id + c.name} c={c} />)
           )}
         </div>
-      </div>
     </div>
   );
 }
@@ -173,18 +156,18 @@ function MeCard({
         marginBottom: 14,
       }}
     >
-      <div style={{ fontSize: 10, fontWeight: 600, letterSpacing: ".06em", textTransform: "uppercase", color: "#a8a29a", marginBottom: 6 }}>
+      <div style={{ fontSize: 10, fontWeight: 600, letterSpacing: ".06em", textTransform: "uppercase", color: "var(--ink-mut)", marginBottom: 6 }}>
         Tu
       </div>
-      <div className="mono selectable" style={{ fontSize: 11, color: "#57534c", wordBreak: "break-all" }}>
+      <div className="mono selectable" style={{ fontSize: 11, color: "var(--ink-sec)", wordBreak: "break-all" }}>
         {myId}
       </div>
-      <div style={{ fontSize: 11.5, color: "#57534c", marginTop: 6 }}>
+      <div style={{ fontSize: 11.5, color: "var(--ink-sec)", marginTop: 6 }}>
         Fingerprint: <span className="mono selectable">{fingerprint}</span>
-        <span style={{ color: "#a8a29a" }}> — è quello che gli altri confrontano per verificarti</span>
+        <span style={{ color: "var(--ink-mut)" }}> — è quello che gli altri confrontano per verificarti</span>
       </div>
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8 }}>
-        <span style={{ fontSize: 11.5, color: "#57534c" }}>Nome visibile:</span>
+        <span style={{ fontSize: 11.5, color: "var(--ink-sec)" }}>Nome visibile:</span>
         {editing ? (
           <>
             <input
@@ -205,7 +188,7 @@ function MeCard({
                 void setMyName(name).catch(() => {});
                 setEditing(false);
               }}
-              style={smallBtn("#171514", "#fff")}
+              style={smallBtn("var(--ink)", "#fff")}
             >
               Salva
             </button>
@@ -215,13 +198,13 @@ function MeCard({
             <span style={{ fontSize: 11.5, fontWeight: 600 }}>
               {displayName || "(nessuno)"}
             </span>
-            <button onClick={() => setEditing(true)} style={smallBtn("#fff", "#171514", true)}>
+            <button onClick={() => setEditing(true)} style={smallBtn("#fff", "var(--ink)", true)}>
               Cambia
             </button>
           </>
         )}
       </div>
-      <div style={{ fontSize: 10.5, color: "#a8a29a", marginTop: 4 }}>
+      <div style={{ fontSize: 10.5, color: "var(--ink-mut)", marginTop: 4 }}>
         Il nome viaggia cifrato dentro le offerte che invii; chi lo riceve deve
         comunque approvarlo.
       </div>
@@ -300,7 +283,7 @@ function AddContactForm({ done }: { done: () => void }) {
         }}
       />
       {rekeying && (
-        <div style={{ fontSize: 11, color: "#b45309", marginBottom: 8 }}>
+        <div style={{ fontSize: 11, color: "var(--amber)", marginBottom: 8 }}>
           ⚠ “{existing!.name}” esiste già con un'altra chiave. Salvando la
           sostituisci e i suoi segni <b>verificato</b> e <b>fidato</b> vengono
           azzerati (va ri-verificata).
@@ -311,7 +294,7 @@ function AddContactForm({ done }: { done: () => void }) {
         onClick={() => void save()}
         style={{
           border: "none",
-          background: name.trim() && id.trim() ? "#171514" : "#e2ddd6",
+          background: name.trim() && id.trim() ? "var(--ink)" : "#e2ddd6",
           color: "#fff",
           borderRadius: 8,
           padding: "9px 16px",
@@ -376,13 +359,13 @@ function ContactRow({ c }: { c: ContactDto }) {
           <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
             <span style={{ fontSize: 13, fontWeight: 600 }}>{c.name}</span>
             {c.display_name && c.display_name !== c.name && (
-              <span style={{ fontSize: 11, color: "#a8a29a" }}>“{c.display_name}”</span>
+              <span style={{ fontSize: 11, color: "var(--ink-mut)" }}>“{c.display_name}”</span>
             )}
-            {c.verified && <Badge bg="#e6f4ef" color="#0f766e">✓ verificato</Badge>}
+            {c.verified && <Badge bg="var(--teal-bg)" color="var(--teal)">✓ verificato</Badge>}
             {c.trusted && <Badge bg="#eaf3ec" color="#2f7d4f">⬇ auto-download</Badge>}
             {c.blocked && <Badge bg="#fdecec" color="#b91c1c">⊘ bloccato</Badge>}
           </div>
-          <div className="mono" style={{ fontSize: 10, color: "#a8a29a", marginTop: 2 }}>
+          <div className="mono" style={{ fontSize: 10, color: "var(--ink-mut)", marginTop: 2 }}>
             {shortId(c.id)} · {c.fingerprint}
           </div>
         </div>
@@ -408,7 +391,7 @@ function ContactRow({ c }: { c: ContactDto }) {
           <button
             disabled={busy}
             onClick={() => void run(() => store.acceptName(c.name))}
-            style={smallBtn("#171514", "#fff")}
+            style={smallBtn("var(--ink)", "#fff")}
           >
             Approva
           </button>
@@ -418,14 +401,14 @@ function ContactRow({ c }: { c: ContactDto }) {
       {/* row actions */}
       <div style={{ display: "flex", gap: 6, marginTop: 9, flexWrap: "wrap" }}>
         {!c.verified ? (
-          <button disabled={busy} onClick={() => setFlow({ kind: "verify" })} style={smallBtn("#e6f4ef", "#0f766e")}>
+          <button disabled={busy} onClick={() => setFlow({ kind: "verify" })} style={smallBtn("var(--teal-bg)", "var(--teal)")}>
             Verifica…
           </button>
         ) : (
           <button
             disabled={busy}
             onClick={() => void run(() => store.markUnverified(c.name))}
-            style={smallBtn("#fff", "#57534c", true)}
+            style={smallBtn("#fff", "var(--ink-sec)", true)}
           >
             Togli verifica
           </button>
@@ -438,7 +421,7 @@ function ContactRow({ c }: { c: ContactDto }) {
           <button
             disabled={busy}
             onClick={() => void run(() => store.markUntrusted(c.name))}
-            style={smallBtn("#fff", "#57534c", true)}
+            style={smallBtn("#fff", "var(--ink-sec)", true)}
           >
             Togli fiducia
           </button>
@@ -448,14 +431,14 @@ function ContactRow({ c }: { c: ContactDto }) {
             Blocca
           </button>
         ) : (
-          <button disabled={busy} onClick={() => void run(() => store.unblockContact(c.name))} style={smallBtn("#fff", "#57534c", true)}>
+          <button disabled={busy} onClick={() => void run(() => store.unblockContact(c.name))} style={smallBtn("#fff", "var(--ink-sec)", true)}>
             Sblocca
           </button>
         )}
         <button
           disabled={busy}
           onClick={() => setFlow({ kind: "rename", value: c.name })}
-          style={smallBtn("#fff", "#57534c", true)}
+          style={smallBtn("#fff", "var(--ink-sec)", true)}
         >
           Rinomina
         </button>
@@ -490,11 +473,11 @@ function ContactRow({ c }: { c: ContactDto }) {
             <button
               disabled={busy || !c.fingerprint}
               onClick={() => void run(() => store.markVerified(c.name))}
-              style={smallBtn("#0f766e", "#fff")}
+              style={smallBtn("var(--teal)", "#fff")}
             >
               Coincide — segna verificato
             </button>
-            <button disabled={busy} onClick={() => setFlow(null)} style={smallBtn("#fff", "#57534c", true)}>
+            <button disabled={busy} onClick={() => setFlow(null)} style={smallBtn("#fff", "var(--ink-sec)", true)}>
               Annulla
             </button>
           </div>
@@ -503,7 +486,7 @@ function ContactRow({ c }: { c: ContactDto }) {
 
       {flow?.kind === "trust-force" && (
         <FlowBox>
-          <div style={{ fontSize: 11.5, color: "#b45309", lineHeight: 1.5 }}>
+          <div style={{ fontSize: 11.5, color: "var(--amber)", lineHeight: 1.5 }}>
             ⚠ {c.name} non è verificato: l'auto-download da una chiave mai
             confermata è un rischio MITM. Meglio verificarlo prima; puoi comunque
             forzare.
@@ -512,11 +495,11 @@ function ContactRow({ c }: { c: ContactDto }) {
             <button
               disabled={busy}
               onClick={() => void run(() => store.markTrusted(c.name, true))}
-              style={smallBtn("#b45309", "#fff")}
+              style={smallBtn("var(--amber)", "#fff")}
             >
               Forza la fiducia
             </button>
-            <button disabled={busy} onClick={() => setFlow(null)} style={smallBtn("#fff", "#57534c", true)}>
+            <button disabled={busy} onClick={() => setFlow(null)} style={smallBtn("#fff", "var(--ink-sec)", true)}>
               Annulla
             </button>
           </div>
@@ -541,15 +524,15 @@ function ContactRow({ c }: { c: ContactDto }) {
             <button
               disabled={busy || !flow.value.trim() || flow.value.trim() === c.name}
               onClick={() => void run(() => store.renameContact(c.name, flow.value.trim()))}
-              style={smallBtn("#171514", "#fff")}
+              style={smallBtn("var(--ink)", "#fff")}
             >
               Rinomina
             </button>
-            <button disabled={busy} onClick={() => setFlow(null)} style={smallBtn("#fff", "#57534c", true)}>
+            <button disabled={busy} onClick={() => setFlow(null)} style={smallBtn("#fff", "var(--ink-sec)", true)}>
               Annulla
             </button>
           </div>
-          <div style={{ fontSize: 10.5, color: "#a8a29a", marginTop: 6 }}>
+          <div style={{ fontSize: 10.5, color: "var(--ink-mut)", marginTop: 6 }}>
             Rinominare mantiene chiave e segni verificato/fidato.
           </div>
         </FlowBox>
@@ -569,7 +552,7 @@ function ContactRow({ c }: { c: ContactDto }) {
             >
               Rimuovi
             </button>
-            <button disabled={busy} onClick={() => setFlow(null)} style={smallBtn("#fff", "#57534c", true)}>
+            <button disabled={busy} onClick={() => setFlow(null)} style={smallBtn("#fff", "var(--ink-sec)", true)}>
               Annulla
             </button>
           </div>

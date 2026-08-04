@@ -60,6 +60,11 @@ function fresh() {
     depositsLoading: false,
     depositsError: null,
     revoking: [],
+    // The view flags: a test that navigated away (e.g. opened the Rubrica) must
+    // not leave the next test staring at the wrong pane.
+    historyOpen: false,
+    contactsOpen: false,
+    receiveOpen: false,
   });
 }
 

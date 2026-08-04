@@ -116,7 +116,7 @@ export function ReceiveModal() {
               height: 36,
               borderRadius: 10,
               background: "#e9f3fb",
-              color: "#0369a1",
+              color: "var(--in)",
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
@@ -129,7 +129,7 @@ export function ReceiveModal() {
           </div>
           <div style={{ flex: 1 }}>
             <div style={{ fontSize: 15, fontWeight: 700 }}>Ricevi</div>
-            <div style={{ fontSize: 11.5, color: "#a8a29a" }}>
+            <div style={{ fontSize: 11.5, color: "var(--ink-mut)" }}>
               Incolla un ticket, un codice o un deposito che ti hanno mandato
             </div>
           </div>
@@ -187,7 +187,7 @@ export function ReceiveModal() {
             <div
               style={{
                 fontSize: 11.5,
-                color: kind === "link" ? "#b45309" : "#57534c",
+                color: kind === "link" ? "var(--amber)" : "var(--ink-sec)",
                 marginBottom: 10,
               }}
             >
@@ -229,7 +229,7 @@ export function ReceiveModal() {
               cursor: "pointer",
             }}
           >
-            <span style={{ fontSize: 11.5, color: "#57534c" }}>Salva in</span>
+            <span style={{ fontSize: 11.5, color: "var(--ink-sec)" }}>Salva in</span>
             <span style={{ fontSize: 11.5, fontWeight: 500 }}>
               {dest ?? (defaultDir || "cartella predefinita")} ⌵
             </span>
@@ -241,7 +241,7 @@ export function ReceiveModal() {
             style={{
               width: "100%",
               border: "none",
-              background: busy || !acceptable ? "#e2ddd6" : "#0369a1",
+              background: busy || !acceptable ? "#e2ddd6" : "var(--in)",
               color: "#fff",
               borderRadius: 11,
               padding: 13,

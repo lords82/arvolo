@@ -22,11 +22,11 @@ function dayLabel(unixSecs: number): string {
 }
 
 function statusLabel(s: string): { text: string; color: string } {
-  if (s === "completed") return { text: "Completato", color: "#16a34a" };
+  if (s === "completed") return { text: "Completato", color: "var(--green)" };
   if (s === "cancelled") return { text: "Annullato", color: "#8a827a" };
-  if (s === "deposited") return { text: "Depositato", color: "#0369a1" };
-  if (s.startsWith("failed")) return { text: "Fallito", color: "#dc2626" };
-  return { text: s, color: "#57534c" };
+  if (s === "deposited") return { text: "Depositato", color: "var(--in)" };
+  if (s.startsWith("failed")) return { text: "Fallito", color: "var(--red)" };
+  return { text: s, color: "var(--ink-sec)" };
 }
 
 export function HistoryPanel() {
@@ -50,36 +50,20 @@ export function HistoryPanel() {
     else groups.push({ day, items: [r] });
   }
 
+  // A full view in the main pane (the sidebar's "Storico"), not an overlay.
   return (
     <div
-      onClick={(e) => {
-        if (e.target === e.currentTarget) close();
-      }}
       style={{
-        position: "fixed",
-        inset: 0,
-        background: "rgba(20,16,12,.4)",
+        flex: 1,
+        minWidth: 0,
+        background: "var(--card)",
+        border: "1px solid var(--line)",
+        borderRadius: 16,
         display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        backdropFilter: "blur(2px)",
-        zIndex: 100,
+        flexDirection: "column",
+        overflow: "hidden",
       }}
     >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        style={{
-          width: 560,
-          maxHeight: 620,
-          background: "#fff",
-          borderRadius: 18,
-          boxShadow: "0 30px 70px -12px rgba(0,0,0,.45)",
-          display: "flex",
-          flexDirection: "column",
-          overflow: "hidden",
-          animation: "pop .14s ease",
-        }}
-      >
         <div
           style={{
             display: "flex",
@@ -91,7 +75,7 @@ export function HistoryPanel() {
         >
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ fontSize: 15, fontWeight: 700 }}>Storico</div>
-            <div style={{ fontSize: 11.5, color: "#a8a29a" }}>
+            <div style={{ fontSize: 11.5, color: "var(--ink-mut)" }}>
               I trasferimenti conclusi — qui non c'è più niente da fare, solo da ricordare
             </div>
           </div>
@@ -106,7 +90,7 @@ export function HistoryPanel() {
               fontSize: 11.5,
               fontWeight: 600,
               cursor: loading ? "default" : "pointer",
-              color: loading ? "#a8a29a" : "#171514",
+              color: loading ? "var(--ink-mut)" : "var(--ink)",
             }}
           >
             {loading ? "…" : "Aggiorna"}
@@ -163,7 +147,7 @@ export function HistoryPanel() {
             </div>
           )}
           {history.length === 0 && !loading && !error && (
-            <div style={{ fontSize: 12.5, color: "#a8a29a", padding: "22px 4px", textAlign: "center" }}>
+            <div style={{ fontSize: 12.5, color: "var(--ink-mut)", padding: "22px 4px", textAlign: "center" }}>
               Ancora niente: quello che completi (o annulli) finirà qui.
             </div>
           )}
@@ -176,7 +160,7 @@ export function HistoryPanel() {
                   fontWeight: 600,
                   letterSpacing: ".08em",
                   textTransform: "uppercase",
-                  color: "#a8a29a",
+                  color: "var(--ink-mut)",
                   padding: "10px 4px 4px",
                 }}
               >
@@ -209,7 +193,7 @@ export function HistoryPanel() {
                         fontSize: 11,
                         fontWeight: 700,
                         background: r.direction === "send" ? "#fff3e9" : "#e9f3fb",
-                        color: r.direction === "send" ? "#c2410c" : "#0369a1",
+                        color: r.direction === "send" ? "#c2410c" : "var(--in)",
                       }}
                     >
                       {r.direction === "send" ? "↗" : "↙"}
@@ -225,11 +209,11 @@ export function HistoryPanel() {
                         }}
                       >
                         {r.name}
-                        <span className="mono" style={{ fontWeight: 500, color: "#c9c2ba", fontSize: 10, marginLeft: 6 }}>
+                        <span className="mono" style={{ fontWeight: 500, color: "var(--ink-weak)", fontSize: 10, marginLeft: 6 }}>
                           {extOf(r.name)} · {fmtBytes(r.total_size)}
                         </span>
                       </div>
-                      <div style={{ fontSize: 10.5, color: "#a8a29a" }}>
+                      <div style={{ fontSize: 10.5, color: "var(--ink-mut)" }}>
                         {r.direction === "send" ? "a" : "da"}{" "}
                         {peerLabel(r.peer, undefined)}
                         {" · "}
@@ -248,7 +232,6 @@ export function HistoryPanel() {
             </div>
           ))}
         </div>
-      </div>
     </div>
   );
 }

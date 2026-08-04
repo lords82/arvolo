@@ -2,8 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useStore } from "./store";
-import { shortId } from "./format";
 import { Board } from "./components/Board";
+import { Sidebar } from "./components/Sidebar";
 import { SendSheet } from "./components/SendSheet";
 import { IncomingModal } from "./components/IncomingModal";
 import { DepositsPanel } from "./components/DepositsPanel";
@@ -22,11 +22,10 @@ export function App() {
   const reload = useStore((s) => s.reload);
   const openSheet = useStore((s) => s.openSheet);
   const openIncoming = useStore((s) => s.openIncoming);
-  const openDeposits = useStore((s) => s.openDeposits);
-  const openReceive = useStore((s) => s.openReceive);
-  const openContacts = useStore((s) => s.openContacts);
-  const openHistory = useStore((s) => s.openHistory);
   const restartDaemon = useStore((s) => s.restartDaemon);
+  const historyOpen = useStore((s) => s.historyOpen);
+  const contactsOpen = useStore((s) => s.contactsOpen);
+  const depositsOpen = useStore((s) => s.depositsOpen);
   // Select the stable map, derive the array with useMemo — a selector returning
   // a fresh array every call makes useSyncExternalStore loop forever.
   const transfers = useStore((s) => s.transfers);
@@ -35,7 +34,6 @@ export function App() {
     [transfers]
   );
   const [dragging, setDragging] = useState(false);
-  const [copied, setCopied] = useState(false);
 
   // Stale-daemon detection: the CLI refuses to talk to a mismatched daemon; the
   // GUI shows a banner instead (an old daemon reports version "" here).
@@ -114,14 +112,20 @@ export function App() {
     openSheet(Array.isArray(sel) ? sel : [sel]);
   }
 
-  const myCode = status?.public_id ?? "";
+  const viewTitle = depositsOpen
+    ? "Depositi"
+    : historyOpen
+      ? "Storico"
+      : contactsOpen
+        ? "Rubrica"
+        : "Trasferimenti";
+  const boardView = !depositsOpen && !historyOpen && !contactsOpen;
 
   return (
     <div
       style={{
         height: "100%",
         display: "flex",
-        flexDirection: "column",
         background: "var(--canvas)",
         minWidth: 0,
       }}
@@ -138,7 +142,7 @@ export function App() {
             inset: 0,
             zIndex: 200,
             background: "rgba(249,115,22,.10)",
-            border: "3px dashed #f97316",
+            border: "3px dashed var(--out)",
             borderRadius: 12,
             display: "flex",
             flexDirection: "column",
@@ -154,7 +158,7 @@ export function App() {
               width: 56,
               height: 56,
               borderRadius: 16,
-              background: "#f97316",
+              background: "var(--out)",
               color: "#fff",
               display: "flex",
               alignItems: "center",
@@ -173,503 +177,303 @@ export function App() {
         </div>
       )}
 
-      {/* App header (native OS title bar sits above this). */}
+      <Sidebar />
+
+      {/* main column: slim topbar, banners, then the active view */}
       <div
         style={{
+          flex: 1,
           display: "flex",
-          alignItems: "center",
-          gap: 8,
-          padding: "10px 16px",
-          borderBottom: "1px solid var(--line)",
-          background: "linear-gradient(#fff,#faf8f6)",
-          flex: "none",
+          flexDirection: "column",
+          minWidth: 0,
         }}
       >
         <div
           style={{
-            width: 22,
-            height: 22,
-            borderRadius: 6,
-            background: "#f97316",
             display: "flex",
             alignItems: "center",
-            justifyContent: "center",
-            color: "#fff",
-            fontWeight: 700,
-            fontSize: 13,
+            gap: 10,
+            padding: "12px 18px 8px",
+            flex: "none",
           }}
         >
-          A
-        </div>
-        <span style={{ fontSize: 14, fontWeight: 600 }}>Arvolo</span>
-
-        <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 10 }}>
-          <ConnPill connected={connected} />
-          {/* Receive: paste a ticket/code someone sent you — the GUI's `arvolo recv`. */}
-          <button
-            onClick={openReceive}
-            title="Ricevi da un ticket o un codice"
-            aria-label="Ricevi"
-            style={headerBtn}
-          >
-            <svg
-              width="15"
-              height="15"
-              viewBox="0 0 16 16"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.3"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              aria-hidden="true"
-            >
-              <path d="M8 2.5v8" />
-              <path d="M4.8 7.6 8 10.8l3.2-3.2" />
-              <path d="M3 13.2h10" />
-            </svg>
-          </button>
-          {/* Address book: people, trust and blocks. */}
-          <button
-            onClick={openContacts}
-            title="Rubrica"
-            aria-label="Rubrica"
-            style={headerBtn}
-          >
-            <svg
-              width="15"
-              height="15"
-              viewBox="0 0 16 16"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              aria-hidden="true"
-            >
-              <circle cx="6" cy="5.4" r="2.4" />
-              <path d="M1.8 13.4c.5-2.4 2.2-3.6 4.2-3.6s3.7 1.2 4.2 3.6" />
-              <path d="M10.6 3.4a2.4 2.4 0 0 1 0 4" />
-              <path d="M11.9 9.9c1.2.4 2 1.4 2.3 3" />
-            </svg>
-          </button>
-          {/* History: the log of what already finished. */}
-          <button
-            onClick={() => void openHistory()}
-            title="Storico"
-            aria-label="Storico"
-            style={headerBtn}
-          >
-            <svg
-              width="15"
-              height="15"
-              viewBox="0 0 16 16"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              aria-hidden="true"
-            >
-              <circle cx="8" cy="8" r="5.6" />
-              <path d="M8 5v3.2l2.2 1.3" />
-            </svg>
-          </button>
-          {/* Links and sealed deposits: what is still on a relay, and revocable.
-              No count badge — this list is fetched on open, never pushed, so a
-              number here would be stale the moment someone downloaded a link. */}
-          <button
-            onClick={() => void openDeposits()}
-            title="Link e depositi attivi"
-            aria-label="Link e depositi"
-            style={headerBtn}
-          >
-            <svg
-              width="15"
-              height="15"
-              viewBox="0 0 16 16"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              aria-hidden="true"
-            >
-              <path d="M6.6 8.7a2.4 2.4 0 0 0 3.6.3l2-2a2.4 2.4 0 0 0-3.4-3.4l-1.1 1.1" />
-              <path d="M9.4 7.3a2.4 2.4 0 0 0-3.6-.3l-2 2a2.4 2.4 0 0 0 3.4 3.4l1.1-1.1" />
-            </svg>
-          </button>
-          {/* Arrivals bell: red badge = offers awaiting a decision. */}
-          <button
-            onClick={() =>
-              pendingOffers.length && openIncoming(pendingOffers[0].offerId!)
-            }
-            title={
-              pendingOffers.length
-                ? `${pendingOffers.length} file in arrivo da confermare`
-                : "Nessun arrivo in attesa"
-            }
-            style={{
-              position: "relative",
-              border: "1px solid var(--line-strong)",
-              background: "#fff",
-              borderRadius: 8,
-              width: 30,
-              height: 30,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              cursor: pendingOffers.length ? "pointer" : "default",
-              color: pendingOffers.length ? "#171514" : "#a8a29a",
-            }}
-          >
-            {/* Line-art bell, drawn to sit with the other glyph icons (✉ ✓ ⏸)
-                rather than the colour emoji it replaces. */}
-            <svg
-              width="15"
-              height="15"
-              viewBox="0 0 16 16"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              aria-hidden="true"
-            >
-              <path d="M8 2.4a3.6 3.6 0 0 1 3.6 3.6c0 2.5.6 3.5 1.1 4.1a.3.3 0 0 1-.2.5H3.5a.3.3 0 0 1-.2-.5c.5-.6 1.1-1.6 1.1-4.1A3.6 3.6 0 0 1 8 2.4Z" />
-              <path d="M8 1.2v1.2" />
-              <path d="M6.6 12.6a1.4 1.4 0 0 0 2.8 0" />
-            </svg>
-            {pendingOffers.length > 0 && (
-              <span
-                style={{
-                  position: "absolute",
-                  top: -6,
-                  right: -6,
-                  minWidth: 16,
-                  height: 16,
-                  borderRadius: 20,
-                  background: "#dc2626",
-                  color: "#fff",
-                  fontSize: 9,
-                  fontWeight: 700,
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  padding: "0 4px",
-                }}
-                className="mono"
-              >
-                {pendingOffers.length}
-              </span>
-            )}
-          </button>
-          {myCode && (
+          <span style={{ fontSize: 16, fontWeight: 700 }}>{viewTitle}</span>
+          <div style={{ marginLeft: "auto" }}>
+            {/* Arrivals bell: red badge = offers awaiting a decision. Lives up
+                here — not in the sidebar — so it is reachable from every view. */}
             <button
-              onClick={() => {
-                navigator.clipboard.writeText(myCode);
-                setCopied(true);
-                setTimeout(() => setCopied(false), 1200);
-              }}
-              title="Copia il tuo codice"
+              onClick={() =>
+                pendingOffers.length && openIncoming(pendingOffers[0].offerId!)
+              }
+              title={
+                pendingOffers.length
+                  ? `${pendingOffers.length} file in arrivo da confermare`
+                  : "Nessun arrivo in attesa"
+              }
               style={{
+                position: "relative",
+                border: "1px solid var(--line-strong)",
+                background: "var(--card)",
+                borderRadius: 8,
+                width: 30,
+                height: 30,
                 display: "flex",
                 alignItems: "center",
-                gap: 8,
-                background: copied ? "#eef7f0" : "#f4f1ee",
-                border: "none",
-                borderRadius: 20,
-                padding: "5px 12px",
-                cursor: "pointer",
-                transition: "background .15s",
+                justifyContent: "center",
+                cursor: pendingOffers.length ? "pointer" : "default",
+                color: pendingOffers.length ? "var(--ink)" : "var(--ink-mut)",
               }}
             >
-              <span
-                className="mono"
-                style={{ fontSize: 11, color: copied ? "#16a34a" : "#8a827a" }}
+              <svg
+                width="15"
+                height="15"
+                viewBox="0 0 16 16"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
               >
-                {copied ? "copiato ✓" : shortId(myCode)}
-              </span>
-              <span
+                <path d="M8 2.4a3.6 3.6 0 0 1 3.6 3.6c0 2.5.6 3.5 1.1 4.1a.3.3 0 0 1-.2.5H3.5a.3.3 0 0 1-.2-.5c.5-.6 1.1-1.6 1.1-4.1A3.6 3.6 0 0 1 8 2.4Z" />
+                <path d="M8 1.2v1.2" />
+                <path d="M6.6 12.6a1.4 1.4 0 0 0 2.8 0" />
+              </svg>
+              {pendingOffers.length > 0 && (
+                <span
+                  style={{
+                    position: "absolute",
+                    top: -6,
+                    right: -6,
+                    minWidth: 16,
+                    height: 16,
+                    borderRadius: 20,
+                    background: "var(--red)",
+                    color: "#fff",
+                    fontSize: 9,
+                    fontWeight: 700,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    padding: "0 4px",
+                  }}
+                  className="mono"
+                >
+                  {pendingOffers.length}
+                </span>
+              )}
+            </button>
+          </div>
+        </div>
+
+        {actionError && (
+          <div
+            role="alert"
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              padding: "7px 18px",
+              background: "#fdecec",
+              borderBottom: "1px solid #f5c2c2",
+              fontSize: 11.5,
+              color: "#b91c1c",
+              flex: "none",
+            }}
+          >
+            <span>⚠</span>
+            <span className="selectable" style={{ flex: 1, minWidth: 0 }}>
+              {actionError}
+            </span>
+            <button
+              onClick={dismissActionError}
+              aria-label="Chiudi"
+              style={{
+                border: "none",
+                background: "transparent",
+                color: "#b91c1c",
+                fontSize: 13,
+                cursor: "pointer",
+                padding: "0 4px",
+              }}
+            >
+              ✕
+            </button>
+          </div>
+        )}
+
+        {loadError && (
+          <div
+            role="alert"
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              padding: "7px 18px",
+              background: "#fdecec",
+              borderBottom: "1px solid #f5c2c2",
+              fontSize: 11.5,
+              color: "#b91c1c",
+              flex: "none",
+            }}
+          >
+            <span>⚠</span>
+            <span className="selectable" style={{ flex: 1, minWidth: 0 }}>
+              {loadError}
+            </span>
+            <button
+              onClick={() => void reload()}
+              style={{
+                border: "1px solid rgba(185,28,28,.3)",
+                background: "#fff",
+                color: "#b91c1c",
+                borderRadius: 7,
+                padding: "3px 10px",
+                fontSize: 11,
+                fontWeight: 600,
+                cursor: "pointer",
+              }}
+            >
+              Riprova
+            </button>
+          </div>
+        )}
+
+        {versionMismatch && (
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              padding: "7px 18px",
+              background: "#fdf3e3",
+              borderBottom: "1px solid #f0dfc0",
+              fontSize: 11.5,
+              color: "#8a5a1e",
+              flex: "none",
+            }}
+          >
+            <span style={{ flex: 1 }}>
+              ⚠ Il daemon in esecuzione è la versione{" "}
+              <b>{status?.version || "precedente"}</b>, questa app è la {guiVersion}.
+            </span>
+            <button
+              onClick={() => void restartDaemon().catch(() => {})}
+              style={{
+                border: "1px solid rgba(138,90,30,.35)",
+                background: "#fff",
+                color: "#8a5a1e",
+                borderRadius: 7,
+                padding: "3px 10px",
+                fontSize: 11,
+                fontWeight: 600,
+                cursor: "pointer",
+              }}
+            >
+              Riavvia il daemon
+            </button>
+          </div>
+        )}
+
+        {boardView ? (
+          <>
+            {/* Quick-send drop zone. */}
+            <div
+              onClick={pick}
+              onDragEnter={(e) => {
+                e.preventDefault();
+                setDragging(true);
+              }}
+              onDragOver={(e) => e.preventDefault()}
+              onDragLeave={(e) => {
+                e.preventDefault();
+                setDragging(false);
+              }}
+              style={{
+                margin: "4px 18px 4px",
+                borderRadius: 14,
+                border: `2px dashed ${dragging ? "var(--out)" : "#e2ddd6"}`,
+                background: dragging ? "rgba(249,115,22,.08)" : "#fbf9f7",
+                display: "flex",
+                alignItems: "center",
+                gap: 14,
+                padding: "13px 18px",
+                cursor: "pointer",
+                transition: ".12s",
+              }}
+            >
+              <div
                 style={{
-                  width: 18,
-                  height: 18,
-                  borderRadius: 5,
-                  background: "#fff",
+                  width: 38,
+                  height: 38,
+                  borderRadius: 11,
+                  background: "var(--out)",
                   display: "flex",
                   alignItems: "center",
                   justifyContent: "center",
-                  fontSize: 10,
+                  color: "#fff",
+                  fontSize: 19,
+                  flex: "none",
                 }}
               >
-                ⧉
-              </span>
-            </button>
-          )}
-        </div>
-      </div>
+                ↑
+              </div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 13.5, fontWeight: 600 }}>
+                  {dragging
+                    ? "Rilascia per scegliere il destinatario"
+                    : "Trascina qui un file per inviarlo"}
+                </div>
+                <div style={{ fontSize: 11.5, color: "var(--ink-mut)" }}>
+                  Trascina più file insieme per inviarli come gruppo · poi scegli
+                  persona, ID/QR, codice, link o ticket.
+                </div>
+              </div>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  pick();
+                }}
+                style={{
+                  flex: "none",
+                  border: "none",
+                  background: "var(--ink)",
+                  color: "#fff",
+                  borderRadius: 9,
+                  padding: "9px 16px",
+                  fontSize: 12.5,
+                  fontWeight: 600,
+                  cursor: "pointer",
+                }}
+              >
+                Scegli file
+              </button>
+            </div>
 
-      {actionError && (
-        <div
-          role="alert"
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 8,
-            padding: "7px 18px",
-            background: "#fdecec",
-            borderBottom: "1px solid #f5c2c2",
-            fontSize: 11.5,
-            color: "#b91c1c",
-            flex: "none",
-          }}
-        >
-          <span>⚠</span>
-          <span className="selectable" style={{ flex: 1, minWidth: 0 }}>
-            {actionError}
-          </span>
-          <button
-            onClick={dismissActionError}
-            aria-label="Chiudi"
+            <ControlRow />
+
+            <Board />
+          </>
+        ) : (
+          <div
             style={{
-              border: "none",
-              background: "transparent",
-              color: "#b91c1c",
-              fontSize: 13,
-              cursor: "pointer",
-              padding: "0 4px",
+              flex: 1,
+              minHeight: 0,
+              display: "flex",
+              padding: "0 18px 14px",
             }}
           >
-            ✕
-          </button>
-        </div>
-      )}
-
-      {loadError && (
-        <div
-          role="alert"
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 8,
-            padding: "7px 18px",
-            background: "#fdecec",
-            borderBottom: "1px solid #f5c2c2",
-            fontSize: 11.5,
-            color: "#b91c1c",
-            flex: "none",
-          }}
-        >
-          <span>⚠</span>
-          <span className="selectable" style={{ flex: 1, minWidth: 0 }}>
-            {loadError}
-          </span>
-          <button
-            onClick={() => void reload()}
-            style={{
-              border: "1px solid rgba(185,28,28,.3)",
-              background: "#fff",
-              color: "#b91c1c",
-              borderRadius: 7,
-              padding: "3px 10px",
-              fontSize: 11,
-              fontWeight: 600,
-              cursor: "pointer",
-            }}
-          >
-            Riprova
-          </button>
-        </div>
-      )}
-
-      {versionMismatch && (
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 8,
-            padding: "7px 18px",
-            background: "#fdf3e3",
-            borderBottom: "1px solid #f0dfc0",
-            fontSize: 11.5,
-            color: "#8a5a1e",
-            flex: "none",
-          }}
-        >
-          <span style={{ flex: 1 }}>
-            ⚠ Il daemon in esecuzione è la versione{" "}
-            <b>{status?.version || "precedente"}</b>, questa app è la {guiVersion}.
-          </span>
-          <button
-            onClick={() => void restartDaemon().catch(() => {})}
-            style={{
-              border: "1px solid rgba(138,90,30,.35)",
-              background: "#fff",
-              color: "#8a5a1e",
-              borderRadius: 7,
-              padding: "3px 10px",
-              fontSize: 11,
-              fontWeight: 600,
-              cursor: "pointer",
-            }}
-          >
-            Riavvia il daemon
-          </button>
-        </div>
-      )}
-
-      {/* Quick-send drop zone. */}
-      <div
-        onClick={pick}
-        onDragEnter={(e) => {
-          e.preventDefault();
-          setDragging(true);
-        }}
-        onDragOver={(e) => e.preventDefault()}
-        onDragLeave={(e) => {
-          e.preventDefault();
-          setDragging(false);
-        }}
-        style={{
-          margin: "16px 18px 4px",
-          borderRadius: 14,
-          border: `2px dashed ${dragging ? "#f97316" : "#e2ddd6"}`,
-          background: dragging ? "rgba(249,115,22,.08)" : "#fbf9f7",
-          display: "flex",
-          alignItems: "center",
-          gap: 14,
-          padding: "13px 18px",
-          cursor: "pointer",
-          transition: ".12s",
-        }}
-      >
-        <div
-          style={{
-            width: 38,
-            height: 38,
-            borderRadius: 11,
-            background: "#f97316",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            color: "#fff",
-            fontSize: 19,
-            flex: "none",
-          }}
-        >
-          ↑
-        </div>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: 13.5, fontWeight: 600 }}>
-            {dragging
-              ? "Rilascia per scegliere il destinatario"
-              : "Trascina qui un file per inviarlo"}
+            {depositsOpen && <DepositsPanel />}
+            {historyOpen && <HistoryPanel />}
+            {contactsOpen && <ContactsPanel />}
           </div>
-          <div style={{ fontSize: 11.5, color: "#a8a29a" }}>
-            Trascina più file insieme per inviarli come gruppo · poi scegli
-            persona, ID/QR, link o ticket.
-          </div>
-        </div>
-        <button
-          onClick={(e) => {
-            e.stopPropagation();
-            pick();
-          }}
-          style={{
-            flex: "none",
-            border: "none",
-            background: "#171514",
-            color: "#fff",
-            borderRadius: 9,
-            padding: "9px 16px",
-            fontSize: 12.5,
-            fontWeight: 600,
-            cursor: "pointer",
-          }}
-        >
-          Scegli file
-        </button>
-      </div>
-
-      <ControlRow />
-
-      <Board />
-
-      {/* Security footer. */}
-      <div
-        style={{
-          flex: "none",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          gap: 7,
-          padding: 9,
-          borderTop: "1px solid var(--line)",
-          background: "#fff",
-        }}
-      >
-        <span
-          style={{
-            fontSize: 8.5,
-            fontWeight: 600,
-            background: "#e6f4ef",
-            color: "#0f766e",
-            padding: "2px 6px",
-            borderRadius: 20,
-          }}
-        >
-          E2E
-        </span>
-        <span style={{ fontSize: 10.5, color: "#a8a29a" }}>
-          Cifratura end-to-end attiva · i file non transitano in chiaro dai server
-        </span>
+        )}
       </div>
 
       <SendSheet />
       <IncomingModal />
-      <DepositsPanel />
       <ReceiveModal />
-      <ContactsPanel />
-      <HistoryPanel />
     </div>
-  );
-}
-
-/** The shared look of the small square header buttons. */
-const headerBtn: React.CSSProperties = {
-  border: "1px solid var(--line-strong)",
-  background: "#fff",
-  borderRadius: 8,
-  width: 30,
-  height: 30,
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "center",
-  cursor: "pointer",
-  color: "#171514",
-};
-
-function ConnPill({ connected }: { connected: boolean }) {
-  const color = connected ? "#16a34a" : "#dc2626";
-  const bg = connected ? "#eef7f0" : "#fdecec";
-  return (
-    <span
-      style={{
-        display: "inline-flex",
-        alignItems: "center",
-        gap: 5,
-        fontSize: 10.5,
-        fontWeight: 500,
-        color,
-        background: bg,
-        padding: "4px 9px",
-        borderRadius: 20,
-      }}
-    >
-      <span
-        style={{ width: 6, height: 6, borderRadius: "50%", background: color }}
-      />
-      {connected ? "Connesso" : "Disconnesso"}
-    </span>
   );
 }
 
@@ -693,7 +497,7 @@ function ControlRow() {
         display: "flex",
         alignItems: "center",
         gap: 10,
-        padding: "10px 18px 2px",
+        padding: "6px 18px 2px",
         flex: "none",
       }}
     >
@@ -709,7 +513,7 @@ function ControlRow() {
           padding: "8px 12px",
         }}
       >
-        <span style={{ fontSize: 13, color: "#a8a29a" }}>⌕</span>
+        <span style={{ fontSize: 13, color: "var(--ink-mut)" }}>⌕</span>
         <input
           value={search}
           onChange={(e) => setSearch(e.target.value)}
@@ -720,7 +524,7 @@ function ControlRow() {
             outline: "none",
             background: "transparent",
             fontSize: 12.5,
-            color: "#171514",
+            color: "var(--ink)",
           }}
         />
       </div>
@@ -756,7 +560,7 @@ function ControlRow() {
             fontSize: 12,
             fontWeight: 600,
             cursor: "pointer",
-            color: "#57534c",
+            color: "var(--ink-sec)",
           }}
         >
           Pulisci

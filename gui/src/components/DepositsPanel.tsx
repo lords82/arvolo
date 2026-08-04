@@ -22,35 +22,22 @@ export function DepositsPanel() {
 
   if (!open) return null;
 
+  // A full view in the main pane (the sidebar's "Depositi"), not an overlay: it
+  // used to be a modal, but a place you *navigate to* shouldn't dim the app
+  // behind it. The ✕ stays as "torna ai trasferimenti".
   return (
     <div
-      onClick={(e) => {
-        if (e.target === e.currentTarget) close();
-      }}
       style={{
-        position: "fixed",
-        inset: 0,
-        background: "rgba(20,16,12,.4)",
+        flex: 1,
+        minWidth: 0,
+        background: "var(--card)",
+        border: "1px solid var(--line)",
+        borderRadius: 16,
         display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        backdropFilter: "blur(2px)",
-        zIndex: 100,
+        flexDirection: "column",
+        overflow: "hidden",
       }}
     >
-      <div
-        style={{
-          width: 560,
-          maxHeight: 600,
-          background: "#fff",
-          borderRadius: 18,
-          boxShadow: "0 30px 70px -12px rgba(0,0,0,.45)",
-          display: "flex",
-          flexDirection: "column",
-          overflow: "hidden",
-          animation: "pop .14s ease",
-        }}
-      >
         <div
           style={{
             display: "flex",
@@ -62,7 +49,7 @@ export function DepositsPanel() {
         >
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ fontSize: 15, fontWeight: 700 }}>Link e depositi</div>
-            <div style={{ fontSize: 11.5, color: "#a8a29a" }}>
+            <div style={{ fontSize: 11.5, color: "var(--ink-mut)" }}>
               Quello che hai lasciato su un relay e puoi ancora ritirare
             </div>
           </div>
@@ -77,7 +64,7 @@ export function DepositsPanel() {
               fontSize: 11.5,
               fontWeight: 600,
               cursor: loading ? "default" : "pointer",
-              color: loading ? "#a8a29a" : "#171514",
+              color: loading ? "var(--ink-mut)" : "var(--ink)",
             }}
           >
             {loading ? "Controllo…" : "Aggiorna"}
@@ -135,13 +122,12 @@ export function DepositsPanel() {
           </div>
         )}
 
-        <div style={{ overflowY: "auto", padding: "8px 12px 14px" }}>
-          {deposits.length === 0 ? (
-            <Empty loading={loading} />
-          ) : (
-            deposits.map((d) => <Row key={d.id} d={d} />)
-          )}
-        </div>
+      <div style={{ flex: 1, overflowY: "auto", padding: "8px 12px 14px" }}>
+        {deposits.length === 0 ? (
+          <Empty loading={loading} />
+        ) : (
+          deposits.map((d) => <Row key={d.id} d={d} />)
+        )}
       </div>
     </div>
   );
@@ -150,14 +136,14 @@ export function DepositsPanel() {
 function Empty({ loading }: { loading: boolean }) {
   return (
     <div style={{ padding: "34px 20px", textAlign: "center" }}>
-      <div style={{ fontSize: 13, fontWeight: 600, color: "#57534c" }}>
+      <div style={{ fontSize: 13, fontWeight: 600, color: "var(--ink-sec)" }}>
         {loading ? "Controllo…" : "Nessun link o deposito attivo"}
       </div>
       {!loading && (
         <div
           style={{
             fontSize: 11.5,
-            color: "#a8a29a",
+            color: "var(--ink-mut)",
             marginTop: 6,
             lineHeight: 1.5,
           }}
@@ -201,7 +187,7 @@ function Row({ d }: { d: DepositDto }) {
           height: 34,
           borderRadius: 9,
           background: isLink ? "#f3edff" : "#f0ece7",
-          color: isLink ? "#7c3aed" : "#57534c",
+          color: isLink ? "#7c3aed" : "var(--ink-sec)",
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
@@ -224,17 +210,17 @@ function Row({ d }: { d: DepositDto }) {
           }}
         >
           {d.name}
-          <span style={{ fontWeight: 500, color: "#a8a29a", marginLeft: 6 }}>
+          <span style={{ fontWeight: 500, color: "var(--ink-mut)", marginLeft: 6 }}>
             {fmtBytes(d.size)}
           </span>
         </div>
         <div style={{ fontSize: 11, marginTop: 2 }}>
           <span style={{ color: meta.color, fontWeight: 600 }}>{meta.text}</span>
-          <span style={{ color: "#a8a29a" }}> · {meta.detail}</span>
+          <span style={{ color: "var(--ink-mut)" }}> · {meta.detail}</span>
         </div>
         <div
           className="mono"
-          style={{ fontSize: 10, color: "#a8a29a", marginTop: 2 }}
+          style={{ fontSize: 10, color: "var(--ink-mut)", marginTop: 2 }}
         >
           {isLink ? d.link : `sigillato per ${peerLabel(d.recipient, "")}`}
         </div>
@@ -273,7 +259,7 @@ function Row({ d }: { d: DepositDto }) {
               disabled={busy}
               style={{
                 border: "none",
-                background: "#dc2626",
+                background: "var(--red)",
                 color: "#fff",
                 borderRadius: 8,
                 padding: "6px 11px",
@@ -311,7 +297,7 @@ function Row({ d }: { d: DepositDto }) {
             style={{
               border: "1px solid var(--line-strong)",
               background: "#fff",
-              color: busy ? "#a8a29a" : "#b91c1c",
+              color: busy ? "var(--ink-mut)" : "#b91c1c",
               borderRadius: 8,
               padding: "6px 11px",
               fontSize: 11.5,

@@ -513,11 +513,26 @@ export const useStore = create<State>((set, get) => {
     closeIncoming: () => set({ incomingOfferId: null }),
     openReceive: () => set({ receiveOpen: true, openMenuKey: null }),
     closeReceive: () => set({ receiveOpen: false }),
-    openContacts: () => set({ contactsOpen: true, openMenuKey: null }),
+    // The three flags below are the app's *view*: at most one is on, and all off
+    // means the board. The setters keep the exclusivity so the sidebar can treat
+    // them as one selection — two panels claiming the main pane at once is a
+    // state the UI cannot draw.
+    openContacts: () =>
+      set({
+        contactsOpen: true,
+        historyOpen: false,
+        depositsOpen: false,
+        openMenuKey: null,
+      }),
     closeContacts: () => set({ contactsOpen: false }),
 
     openHistory: async () => {
-      set({ historyOpen: true, openMenuKey: null });
+      set({
+        historyOpen: true,
+        contactsOpen: false,
+        depositsOpen: false,
+        openMenuKey: null,
+      });
       await get().loadHistory();
     },
     closeHistory: () => set({ historyOpen: false, historyError: null }),
@@ -541,7 +556,12 @@ export const useStore = create<State>((set, get) => {
     },
 
     openDeposits: async () => {
-      set({ depositsOpen: true, openMenuKey: null });
+      set({
+        depositsOpen: true,
+        historyOpen: false,
+        contactsOpen: false,
+        openMenuKey: null,
+      });
       await get().loadDeposits();
     },
     closeDeposits: () => set({ depositsOpen: false, depositsError: null }),

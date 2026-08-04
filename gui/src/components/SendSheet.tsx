@@ -7,10 +7,10 @@ type Tab = "contatti" | "id" | "code" | "link" | "ticket";
 
 const AVATAR_COLORS = [
   "#c2410c",
-  "#0369a1",
+  "var(--in)",
   "#7c3aed",
   "#be185d",
-  "#0f766e",
+  "var(--teal)",
   "#4b5563",
 ];
 function colorFor(name: string): string {
@@ -155,7 +155,7 @@ export function SendSheet() {
             {extOf(name)}
           </div>
           <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontSize: 13, color: "#a8a29a" }}>Invia</div>
+            <div style={{ fontSize: 13, color: "var(--ink-mut)" }}>Invia</div>
             <div
               style={{
                 fontSize: 15,
@@ -167,7 +167,7 @@ export function SendSheet() {
             >
               {name}{" "}
               {sizeLabel && (
-                <span style={{ fontWeight: 500, color: "#a8a29a", fontSize: 12 }}>
+                <span style={{ fontWeight: 500, color: "var(--ink-mut)", fontSize: 12 }}>
                   {sizeLabel}
                 </span>
               )}
@@ -213,8 +213,8 @@ export function SendSheet() {
                   fontSize: 12,
                   fontWeight: 600,
                   cursor: "pointer",
-                  background: active ? "#171514" : "#f4f1ee",
-                  color: active ? "#fff" : "#57534c",
+                  background: active ? "var(--ink)" : "#f4f1ee",
+                  color: active ? "#fff" : "var(--ink-sec)",
                 }}
               >
                 {label}
@@ -336,7 +336,7 @@ function ContactsGrid({
 }) {
   if (!contacts.length) {
     return (
-      <div style={{ fontSize: 12.5, color: "#a8a29a", padding: "8px 2px" }}>
+      <div style={{ fontSize: 12.5, color: "var(--ink-mut)", padding: "8px 2px" }}>
         Nessun contatto in rubrica. Aggiungine uno dalla CLI
         (<span className="mono">arvolo contacts add</span>) oppure invia a un ID
         dalla scheda “ID / QR”.
@@ -388,7 +388,7 @@ function ContactsGrid({
                   width: 14,
                   height: 14,
                   borderRadius: "50%",
-                  background: "#0f766e",
+                  background: "var(--teal)",
                   border: "2px solid #fff",
                   color: "#fff",
                   fontSize: 8,
@@ -402,7 +402,7 @@ function ContactsGrid({
             )}
           </div>
           <span style={{ fontSize: 12.5, fontWeight: 600 }}>{c.name}</span>
-          <span style={{ fontSize: 10.5, color: "#a8a29a" }}>
+          <span style={{ fontSize: 10.5, color: "var(--ink-mut)" }}>
             {c.verified ? "verificato" : "non verificato"}
           </span>
         </button>
@@ -434,7 +434,7 @@ function IdTab({
 
   return (
     <div>
-      <div style={{ fontSize: 12.5, color: "#57534c", marginBottom: 8 }}>
+      <div style={{ fontSize: 12.5, color: "var(--ink-sec)", marginBottom: 8 }}>
         Incolla il codice del destinatario per inviare.
       </div>
       <input
@@ -458,7 +458,7 @@ function IdTab({
         style={{
           width: "100%",
           border: "none",
-          background: code.trim() ? "#f97316" : "#e2ddd6",
+          background: code.trim() ? "var(--out)" : "#e2ddd6",
           color: "#fff",
           borderRadius: 11,
           padding: 12,
@@ -486,13 +486,13 @@ function IdTab({
             <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 4 }}>
               Il tuo codice
             </div>
-            <div style={{ fontSize: 11.5, color: "#a8a29a", lineHeight: 1.5 }}>
+            <div style={{ fontSize: 11.5, color: "var(--ink-mut)", lineHeight: 1.5 }}>
               Fallo inquadrare a chi vuole inviarti file — oppure copialo dalla
               barra in alto. La scansione con fotocamera arriverà più avanti.
             </div>
             <div
               className="mono"
-              style={{ fontSize: 11, color: "#57534c", marginTop: 6 }}
+              style={{ fontSize: 11, color: "var(--ink-sec)", marginTop: 6 }}
             >
               {shortId(myCode)}
             </div>
@@ -534,7 +534,7 @@ function CodeTab({
 
   return (
     <div>
-      <div style={{ fontSize: 12.5, color: "#57534c", marginBottom: 14 }}>
+      <div style={{ fontSize: 12.5, color: "var(--ink-sec)", marginBottom: 14 }}>
         Genera un <b>codice breve</b> tipo{" "}
         <span className="mono">4821-crater-mango</span>: si detta a voce o si
         scrive a mano, e chi lo riceve fa <span className="mono">arvolo recv
@@ -570,7 +570,7 @@ function CodeTab({
               style={{
                 flex: 1,
                 border: "none",
-                background: "#171514",
+                background: "var(--ink)",
                 color: "#fff",
                 borderRadius: 10,
                 padding: 11,
@@ -587,7 +587,7 @@ function CodeTab({
               <img src={qr} width={160} height={160} style={{ borderRadius: 12 }} alt="QR del codice" />
             </div>
           )}
-          <div style={{ fontSize: 11.5, color: "#a8a29a" }}>
+          <div style={{ fontSize: 11.5, color: "var(--ink-mut)" }}>
             Lo trovi anche sulla riga dell'invio nella board; interrompilo con
             “Annulla invio”.
           </div>
@@ -600,7 +600,7 @@ function CodeTab({
               alignItems: "center",
               gap: 8,
               fontSize: 12,
-              color: "#57534c",
+              color: "var(--ink-sec)",
               marginBottom: 14,
               cursor: "pointer",
             }}
@@ -613,7 +613,7 @@ function CodeTab({
             Valido per più persone (finché non lo annulli)
           </label>
           {keep && (
-            <div style={{ fontSize: 11, color: "#b45309", marginBottom: 12 }}>
+            <div style={{ fontSize: 11, color: "var(--amber)", marginBottom: 12 }}>
               ⚠ Un codice riutilizzabile resta valido per chiunque lo intercetti,
               finché non lo annulli.
             </div>
@@ -647,20 +647,20 @@ function LinkTab({
   const [max, setMax] = useState<string>("");
   return (
     <div>
-      <div style={{ fontSize: 12.5, color: "#57534c", marginBottom: 14 }}>
+      <div style={{ fontSize: 12.5, color: "var(--ink-sec)", marginBottom: 14 }}>
         Crea un URL scaricabile: chiunque abbia il link scarica il file dal
         browser, anche senza Arvolo. La chiave resta nel frammento
         <span className="mono"> #…</span> del link — il relay vede solo cifrato.
       </div>
       {multi && (
-        <div style={{ fontSize: 11.5, color: "#b45309", marginBottom: 10 }}>
+        <div style={{ fontSize: 11.5, color: "var(--amber)", marginBottom: 10 }}>
           ⚠ Hai selezionato più file: il link userà il primo. Per inviarli tutti
           insieme usa Ticket o Persone.
         </div>
       )}
       {!link && (
         <div style={{ display: "flex", gap: 10, marginBottom: 14 }}>
-          <label style={{ flex: 1, fontSize: 11, color: "#57534c" }}>
+          <label style={{ flex: 1, fontSize: 11, color: "var(--ink-sec)" }}>
             Scade dopo
             <select
               value={ttl}
@@ -683,7 +683,7 @@ function LinkTab({
               ))}
             </select>
           </label>
-          <label style={{ flex: 1, fontSize: 11, color: "#57534c" }}>
+          <label style={{ flex: 1, fontSize: 11, color: "var(--ink-sec)" }}>
             Max download (vuoto = senza limite)
             <input
               type="number"
@@ -725,7 +725,7 @@ function LinkTab({
               onClick={() => navigator.clipboard.writeText(link)}
               style={{
                 border: "none",
-                background: "#171514",
+                background: "var(--ink)",
                 color: "#fff",
                 borderRadius: 10,
                 padding: "0 16px",
@@ -737,7 +737,7 @@ function LinkTab({
               Copia
             </button>
           </div>
-          <div style={{ fontSize: 11.5, color: "#a8a29a" }}>
+          <div style={{ fontSize: 11.5, color: "var(--ink-mut)" }}>
             Chiunque abbia questo link può scaricarlo. Puoi revocarlo quando vuoi
             da{" "}
             <button
@@ -795,7 +795,7 @@ function TicketTab({
 
   return (
     <div>
-      <div style={{ fontSize: 12.5, color: "#57534c", marginBottom: 14 }}>
+      <div style={{ fontSize: 12.5, color: "var(--ink-sec)", marginBottom: 14 }}>
         Genera un <b>ticket</b>: chi ce l'ha scarica il file in P2P direttamente da
         te (o dai peer), senza passare da un server. Vale come una chiave —
         tienilo privato, chiunque l'abbia può aprire il file.
@@ -828,7 +828,7 @@ function TicketTab({
               style={{
                 flex: 1,
                 border: "none",
-                background: "#171514",
+                background: "var(--ink)",
                 color: "#fff",
                 borderRadius: 10,
                 padding: 11,
@@ -867,7 +867,7 @@ function TicketTab({
               />
             </div>
           )}
-          <div style={{ fontSize: 11.5, color: "#a8a29a", marginTop: 10 }}>
+          <div style={{ fontSize: 11.5, color: "var(--ink-mut)", marginTop: 10 }}>
             Il tuo dispositivo deve restare online finché il primo peer completa
             il download.
           </div>
@@ -885,7 +885,7 @@ function primaryBtn(busy: boolean): React.CSSProperties {
   return {
     width: "100%",
     border: "none",
-    background: busy ? "#e2ddd6" : "#f97316",
+    background: busy ? "#e2ddd6" : "var(--out)",
     color: "#fff",
     borderRadius: 11,
     padding: 13,

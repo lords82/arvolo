@@ -114,12 +114,12 @@ export function IncomingModal() {
         >
           <div
             className="avatar"
-            style={{ width: 46, height: 46, background: "#0f766e", fontSize: 16 }}
+            style={{ width: 46, height: 46, background: "var(--teal)", fontSize: 16 }}
           >
             {initials(label)}
           </div>
           <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontSize: 12, color: "#a8a29a" }}>File in arrivo</div>
+            <div style={{ fontSize: 12, color: "var(--ink-mut)" }}>File in arrivo</div>
             <div style={{ fontSize: 15, fontWeight: 700 }}>{label}</div>
           </div>
           <span
@@ -174,7 +174,7 @@ export function IncomingModal() {
               <div style={{ fontSize: 13, fontWeight: 600 }}>{offer.name}</div>
               <div
                 className="mono"
-                style={{ fontSize: 11, fontWeight: 500, color: "#a8a29a" }}
+                style={{ fontSize: 11, fontWeight: 500, color: "var(--ink-mut)" }}
               >
                 {fmtBytes(offer.size)}
               </div>
@@ -200,7 +200,7 @@ export function IncomingModal() {
                   fontWeight: 600,
                   letterSpacing: ".06em",
                   textTransform: "uppercase",
-                  color: "#a8a29a",
+                  color: "var(--ink-mut)",
                   marginBottom: 5,
                 }}
               >
@@ -224,11 +224,11 @@ export function IncomingModal() {
             }}
           >
             {offer.verified ? (
-              <span style={{ fontWeight: 600, color: "#0f766e" }}>
+              <span style={{ fontWeight: 600, color: "var(--teal)" }}>
                 ✓ Identità verificata
               </span>
             ) : (
-              <span style={{ fontWeight: 600, color: "#b45309" }}>
+              <span style={{ fontWeight: 600, color: "var(--amber)" }}>
                 ⚠ Identità non verificata
               </span>
             )}
@@ -237,8 +237,8 @@ export function IncomingModal() {
                 onClick={() => setVerifying(true)}
                 style={{
                   border: "1px solid rgba(15,118,110,.35)",
-                  background: "#e6f4ef",
-                  color: "#0f766e",
+                  background: "var(--teal-bg)",
+                  color: "var(--teal)",
                   borderRadius: 7,
                   padding: "3px 8px",
                   fontSize: 10.5,
@@ -309,7 +309,7 @@ export function IncomingModal() {
                   }}
                   style={{
                     border: "none",
-                    background: "#0f766e",
+                    background: "var(--teal)",
                     color: "#fff",
                     borderRadius: 7,
                     padding: "6px 11px",
@@ -403,8 +403,8 @@ export function IncomingModal() {
               cursor: "pointer",
             }}
           >
-            <span style={{ fontSize: 11.5, color: "#57534c" }}>Salva in</span>
-            <span style={{ fontSize: 11.5, fontWeight: 500, color: "#171514" }}>
+            <span style={{ fontSize: 11.5, color: "var(--ink-sec)" }}>Salva in</span>
+            <span style={{ fontSize: 11.5, fontWeight: 500, color: "var(--ink)" }}>
               {dest
                 ? shortenPath(dest)
                 : defaultDir
@@ -436,7 +436,7 @@ export function IncomingModal() {
               style={{
                 flex: 1,
                 border: "none",
-                background: "#16a34a",
+                background: "var(--green)",
                 color: "#fff",
                 borderRadius: 11,
                 padding: 12,

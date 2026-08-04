@@ -58,6 +58,8 @@ beforeEach(() => {
     depositsError: null,
     depositsLoading: false,
     actionError: null,
+    historyOpen: false,
+    contactsOpen: false,
   } as never);
 });
 afterEach(cleanup);
@@ -308,10 +310,10 @@ describe("the panel", () => {
 });
 
 describe("reaching the panel from the app", () => {
-  it("159. the header button opens it and fetches what is out there", async () => {
+  it("159. the sidebar entry opens it and fetches what is out there", async () => {
     harness.snapshot.deposits = [deposit({ name: "vacanze.zip" })];
     render(<App />);
-    fireEvent.click(screen.getByLabelText("Link e depositi"));
+    fireEvent.click(screen.getByText("Depositi"));
     expect(await screen.findByText("vacanze.zip")).toBeDefined();
     expect(harness.recorder.listDeposits).toBeGreaterThan(0);
   });
@@ -323,7 +325,7 @@ describe("reaching the panel from the app", () => {
     useStore.setState({ deposits: [deposit({ name: "vecchio.zip" })] });
     harness.snapshot.deposits = [deposit({ name: "nuovo.zip" })];
     render(<App />);
-    fireEvent.click(screen.getByLabelText("Link e depositi"));
+    fireEvent.click(screen.getByText("Depositi"));
     expect(await screen.findByText("nuovo.zip")).toBeDefined();
     expect(screen.queryByText("vecchio.zip")).toBeNull();
   });
