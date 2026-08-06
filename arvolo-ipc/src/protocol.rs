@@ -42,11 +42,30 @@ pub enum Request {
     ListContacts,
     /// Send files/folders to a contact; paths are on the *daemon's* filesystem.
     /// → [`Response::TransferId`].
+    ///
+    /// The mailbox options mirror `arvolo send`'s: they only bite when the send
+    /// actually lands in the relay mailbox — either because `deposit` forced it,
+    /// or because the recipient turned out to be offline. All four carry
+    /// `#[serde(default)]` so a daemon that predates them still decodes a newer
+    /// client's `Push` (it just ignores the options) instead of failing the
+    /// request outright.
     Push {
         to: String,
         paths: Vec<String>,
         #[serde(default)]
         note: String,
+        /// Skip the live attempt and deposit on the relay even if they're online.
+        #[serde(default)]
+        deposit: bool,
+        /// Mailbox time-to-live in seconds (daemon default: 7 days).
+        #[serde(default)]
+        ttl: Option<u64>,
+        /// Max downloads before the relay deletes the blob (daemon default: 1).
+        #[serde(default)]
+        max: Option<u32>,
+        /// End-to-end password on the deposit; the recipient must supply it.
+        #[serde(default)]
+        password: Option<String>,
     },
     /// Serve an anonymous P2P ticket in the background (no recipient); paths are on
     /// the *daemon's* filesystem. → [`Response::Served`].
@@ -150,8 +169,100 @@ pub enum Request {
     /// offers this daemon sends → [`Response::Ok`]. Applies immediately to the
     /// running engine, and persists to config like `arvolo me name`.
     SetMyName { name: String },
+    /// Everything on the settings screen: the effective relay and download folder,
+    /// where they came from, and the raw `config.toml` values behind them
+    /// → [`Response::Config`].
+    GetConfig,
+    /// Write settings back to `config.toml`. Every field is a three-state edit:
+    /// absent leaves the key alone, a value sets it, and an explicit "clear"
+    /// comments it out → [`Response::Config`] with the state that resulted, so a
+    /// UI never has to guess what the daemon made of its patch.
+    SetConfig(ConfigPatch),
+    /// Drop advertised-name records left behind by contacts that no longer exist
+    /// → [`Response::Cleared`] with the count (`arvolo contacts prune`).
+    PruneNames,
+    /// Read-only multi-device summary: shared identity, book size, whether auto
+    /// sync is on, and when a round last succeeded → [`Response::Sync`].
+    SyncStatus,
+    /// Run one address-book sync round against this identity's inbox cell now
+    /// → [`Response::Sync`] reflecting the state after the round.
+    SyncNow,
+    /// Begin a pairing exchange. Pairing is not request/reply — it waits for a
+    /// human on another machine — so this returns a session handle immediately
+    /// (→ [`Response::PairingStarted`]) and the outcome arrives as
+    /// [`EventDto::PairingCode`] / [`EventDto::PairingDone`] /
+    /// [`EventDto::PairingFailed`] on the event stream.
+    StartPairing {
+        kind: PairKind,
+        /// Hosting only: which relay to claim the code on. Defaults to the
+        /// configured relay.
+        #[serde(default)]
+        relay: Option<String>,
+        /// Joining only: the code read off the other machine.
+        #[serde(default)]
+        code: Option<String>,
+        /// Contact pairing only: what to file the other person under. When absent
+        /// the daemon names them after their fingerprint, since there is nobody at
+        /// a prompt to ask.
+        #[serde(default)]
+        name: Option<String>,
+    },
+    /// Abandon a pairing session started above → [`Response::Ok`]. Also what a UI
+    /// sends when its pairing sheet is closed: an unattended `device pair` would
+    /// otherwise keep offering this device's identity secret for its full window.
+    CancelPairing { session: String },
     /// Turn this connection into an event stream (no further requests on it).
     Subscribe,
+}
+
+/// Which of the two pairings — they share a mechanism and share nothing else.
+///
+/// `Contact*` trades **public** ids between two different people and marks each
+/// verified. `Device*` hands this device's **identity secret** to another machine
+/// so both become the same person. Conflating them is the one mistake in this
+/// area that cannot be undone, so they are separate variants rather than a
+/// boolean, and the joining side is separate from the hosting side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PairKind {
+    /// Show a code; save whoever answers it as a verified contact.
+    ContactHost,
+    /// Answer someone's code; save them as a verified contact.
+    ContactJoin,
+    /// Show a code that hands this device's identity to a new one.
+    DeviceHost,
+    /// Answer a code and *replace* this device's identity with the shared one.
+    DeviceJoin,
+}
+
+/// A settings edit. `None` means "don't touch this key"; `Some(Clear)` comments it
+/// out so the built-in default applies again. Two levels of optionality look
+/// redundant until you need to tell "leave the relay alone" from "stop overriding
+/// the relay" — a distinction a bare `Option<String>` cannot carry.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ConfigPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay: Option<Setting<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub download_dir: Option<Setting<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<Setting<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync: Option<Setting<bool>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<Setting<bool>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub swarm: Option<Setting<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub concurrency: Option<Setting<u32>>,
+}
+
+/// One field of a [`ConfigPatch`]: set it to a value, or clear it back to default.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Setting<T> {
+    Set(T),
+    Clear,
 }
 
 /// The daemon's answer to a [`Request`].
@@ -178,6 +289,14 @@ pub enum Response {
     Contacts(Vec<ContactDto>),
     Deposits(Vec<DepositDto>),
     History(Vec<HistoryDto>),
+    /// The settings screen's state, after any edit that produced it.
+    Config(ConfigDto),
+    /// The multi-device summary.
+    Sync(SyncDto),
+    /// A pairing session is running; its code and outcome arrive as events.
+    PairingStarted {
+        session: String,
+    },
     /// How many rows a bulk removal actually dropped.
     Cleared(usize),
     Ok,
@@ -357,6 +476,87 @@ pub struct DepositDto {
     pub max_downloads: Option<u32>,
 }
 
+/// The settings screen: what is in force, and what `config.toml` actually says.
+///
+/// The two are not the same and a UI must be able to show both. `relay` is what
+/// the next send will use — which may come from `ARVOLO_RELAY`, from the file, or
+/// from the value compiled into the binary — while `relay_configured` is the file's
+/// own key, the only one an edit can change. Showing only the first makes a
+/// built-in default look like a saved setting; showing only the second leaves the
+/// field blank on a machine that is demonstrably reaching a relay.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ConfigDto {
+    /// The relay in force, normalized to a full URL. `None` only when there is no
+    /// built-in default either.
+    pub relay: Option<String>,
+    /// `config.toml`'s own `relay` key, empty when unset.
+    #[serde(default)]
+    pub relay_configured: String,
+    /// Where `relay` came from: "env" | "config" | "builtin" | "none". A UI shows
+    /// this so an unchangeable value isn't presented as an editable one.
+    #[serde(default)]
+    pub relay_source: String,
+    /// The folder accepted downloads land in, resolved.
+    #[serde(default)]
+    pub download_dir: String,
+    /// `config.toml`'s own `download_dir` key, empty when unset.
+    #[serde(default)]
+    pub download_dir_configured: String,
+    /// Whether `download_dir` is being forced by `ARVOLO_DOWNLOAD_DIR`, in which
+    /// case editing the file would change nothing until that is unset.
+    #[serde(default)]
+    pub download_dir_from_env: bool,
+    /// The display name advertised inside outgoing offers, empty when none.
+    #[serde(default)]
+    pub display_name: String,
+    /// Automatic address-book sync across linked devices.
+    #[serde(default)]
+    pub sync: bool,
+    /// Keep seeding completed files into the swarm. `None` = daemon default.
+    #[serde(default)]
+    pub seed: Option<bool>,
+    /// Swarm mode: "on" | "off" | "relay-only". Empty = daemon default.
+    #[serde(default)]
+    pub swarm: String,
+    /// Parallel chunk fetches. `None` = daemon default.
+    #[serde(default)]
+    pub concurrency: Option<u32>,
+    /// Absolute path of `config.toml`, so a UI can offer "reveal in file manager"
+    /// for everything it deliberately does not expose as a control.
+    #[serde(default)]
+    pub config_path: String,
+    /// Absolute path of the identity key file.
+    #[serde(default)]
+    pub identity_path: String,
+}
+
+/// Multi-device state: one identity across several machines, and the address book
+/// they keep in step through an encrypted cell on the relay inbox.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SyncDto {
+    /// The shared identity's word fingerprint — the same on every linked device,
+    /// which is exactly what makes it the thing to compare when checking a link.
+    pub fingerprint: String,
+    /// The shared identity's base32 public id.
+    #[serde(default)]
+    pub public_id: String,
+    /// How many contacts the book currently holds.
+    pub contacts: usize,
+    /// Whether the daemon runs sync rounds on its own.
+    pub enabled: bool,
+    /// Unix seconds of the last successful round, 0 for "not since this daemon
+    /// started". Deliberately not persisted: a stamp from a previous run says
+    /// nothing about whether sync works *now*.
+    #[serde(default)]
+    pub last_sync: u64,
+    /// How many updates the last round merged from the other devices.
+    #[serde(default)]
+    pub last_merged: usize,
+    /// Why the last round failed, empty when it didn't.
+    #[serde(default)]
+    pub last_error: String,
+}
+
 /// Serializable mirror of [`ManagerEvent`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -423,6 +623,34 @@ pub enum EventDto {
     /// The address book changed under the daemon. Carries nothing: re-issue
     /// [`Request::ListContacts`] to pick the new book up.
     ContactsChanged,
+    /// A hosted pairing session has its code — this is what the other machine
+    /// types. Only ever emitted for the `*Host` kinds.
+    PairingCode {
+        session: String,
+        code: String,
+    },
+    /// A pairing session finished successfully. `summary` is a ready-to-show
+    /// sentence (who was saved, or how many contacts came across), and
+    /// `needs_restart` marks the one case a UI must act on: a device join replaced
+    /// the identity this daemon is running as, so it has to come back up as the
+    /// new one before anything else it says can be believed.
+    PairingDone {
+        session: String,
+        kind: PairKind,
+        summary: String,
+        #[serde(default)]
+        needs_restart: bool,
+    },
+    /// A pairing session ended without pairing. `cancelled` separates "the user
+    /// closed the sheet" from a real failure, so a UI can stay quiet about the
+    /// former instead of showing an error nobody needs to read.
+    PairingFailed {
+        session: String,
+        kind: PairKind,
+        error: String,
+        #[serde(default)]
+        cancelled: bool,
+    },
 }
 
 fn direction_str(d: Direction) -> &'static str {
@@ -552,12 +780,84 @@ mod tests {
                 to: "alice".into(),
                 paths: vec!["a.txt".into(), "b/".into()],
                 note: "have a look".into(),
+                deposit: false,
+                ttl: None,
+                max: None,
+                password: None,
             },
         };
         let line = serde_json::to_string(&env).unwrap();
         let back: RequestEnvelope = serde_json::from_str(&line).unwrap();
         assert_eq!(back.id, 7);
         assert_eq!(back.cmd, env.cmd);
+    }
+
+    /// The four mailbox options were added to `Push` after the fact. They carry
+    /// `#[serde(default)]` precisely so that the old shape — the one every
+    /// already-installed client still sends — keeps decoding. Without this, an
+    /// upgrade would break every request from a client older than the daemon,
+    /// which is the exact window an upgrade leaves behind.
+    #[test]
+    fn push_without_the_mailbox_options_still_decodes() {
+        let old = r#"{"push":{"to":"alice","paths":["a.txt"],"note":"hi"}}"#;
+        let back: Request = serde_json::from_str(old).unwrap();
+        assert_eq!(
+            back,
+            Request::Push {
+                to: "alice".into(),
+                paths: vec!["a.txt".into()],
+                note: "hi".into(),
+                deposit: false,
+                ttl: None,
+                max: None,
+                password: None,
+            }
+        );
+    }
+
+    /// A `Setting` is externally tagged, so clearing a key is the bare string
+    /// `"clear"` and setting one is `{"set": …}`. The GUI writes this shape by
+    /// hand in TypeScript; a change here silently turns every settings edit into
+    /// a rejected request.
+    #[test]
+    fn config_patch_wire_shape_is_stable() {
+        let patch = ConfigPatch {
+            relay: Some(Setting::Set("relay.example".into())),
+            display_name: Some(Setting::Clear),
+            ..ConfigPatch::default()
+        };
+        assert_eq!(
+            serde_json::to_string(&patch).unwrap(),
+            r#"{"relay":{"set":"relay.example"},"display_name":"clear"}"#,
+            "wire shape changed — update gui/src/types.ts to match"
+        );
+        // An absent key means "leave it alone" and must not appear at all.
+        let empty = serde_json::to_string(&ConfigPatch::default()).unwrap();
+        assert_eq!(empty, "{}");
+    }
+
+    /// The pairing events reach the GUI through the same externally tagged
+    /// stream as everything else (`gui/src/events.ts` mirrors it by hand).
+    #[test]
+    fn pairing_events_keep_their_wire_shape() {
+        assert_eq!(
+            serde_json::to_string(&EventDto::PairingCode {
+                session: "pair-1".into(),
+                code: "4821-crater-mango".into(),
+            })
+            .unwrap(),
+            r#"{"pairing_code":{"session":"pair-1","code":"4821-crater-mango"}}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&EventDto::PairingDone {
+                session: "pair-1".into(),
+                kind: PairKind::DeviceJoin,
+                summary: "ok".into(),
+                needs_restart: true,
+            })
+            .unwrap(),
+            r#"{"pairing_done":{"session":"pair-1","kind":"device_join","summary":"ok","needs_restart":true}}"#
+        );
     }
 
     #[test]

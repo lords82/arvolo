@@ -11,12 +11,14 @@ use anyhow::Result;
 use arvolo_core::manager::{ManagerEvent, TransferManager};
 use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
+use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::RecvError;
 use tokio_util::sync::CancellationToken;
 
+use super::pairing::Sessions;
 use super::protocol::{
-    ContactDto, EventDto, HistoryDto, OfferDto, Request, RequestEnvelope, Response, ServerMessage,
-    StatusDto, TransferDto,
+    ConfigDto, ConfigPatch, ContactDto, EventDto, HistoryDto, OfferDto, Request, RequestEnvelope,
+    Response, ServerMessage, Setting, StatusDto, SyncDto, TransferDto,
 };
 
 /// Shared daemon state handed to every connection handler. Cheap to clone.
@@ -30,6 +32,48 @@ pub struct Daemon {
     /// Offers parked awaiting the user's approval (populated by the daemon's
     /// engine task; drained on accept/reject).
     pub pending: Arc<Mutex<HashMap<String, OfferDto>>>,
+    /// Events the daemon raises itself, rather than relaying from the engine:
+    /// pairing progress, which has no `ManagerEvent` behind it. Merged into the
+    /// same subscriber stream so a client has one place to listen.
+    pub side_events: broadcast::Sender<EventDto>,
+    /// Pairing sessions in flight.
+    pub pairings: Sessions,
+    /// What the last address-book sync round did. In memory on purpose: a stamp
+    /// restored from disk would describe a daemon run that is over, and "synced 2
+    /// minutes ago" is only worth showing when it is this process that did it.
+    pub sync_state: Arc<Mutex<SyncState>>,
+}
+
+/// The outcome of the most recent sync round, for [`Request::SyncStatus`].
+#[derive(Debug, Clone, Default)]
+pub struct SyncState {
+    pub last_sync: u64,
+    pub last_merged: usize,
+    pub last_error: String,
+}
+
+impl Daemon {
+    /// A daemon with the auxiliary state defaulted — every field the IPC layer
+    /// owns rather than the caller. Keeps `commands::daemon` from having to know
+    /// about broadcast channels and session maps to build one.
+    pub fn new(
+        manager: TransferManager,
+        relay: Option<String>,
+        download_dir: PathBuf,
+        pending: Arc<Mutex<HashMap<String, OfferDto>>>,
+    ) -> Self {
+        Daemon {
+            manager,
+            relay,
+            download_dir,
+            pending,
+            // Deep enough that a client which stalls briefly does not miss a
+            // pairing code; a lagged receiver is skipped, never blocking the sender.
+            side_events: broadcast::channel(64).0,
+            pairings: Sessions::default(),
+            sync_state: Arc::new(Mutex::new(SyncState::default())),
+        }
+    }
 }
 
 /// Accept connections until `shutdown` fires, one task per connection.
@@ -158,7 +202,29 @@ async fn dispatch(d: &Daemon, cmd: Request) -> Response {
                 Err(e) => Response::Error(format!("{e:#}")),
             }
         }
-        Request::Push { to, paths, note } => push(d, to, paths, note).await,
+        Request::Push {
+            to,
+            paths,
+            note,
+            deposit,
+            ttl,
+            max,
+            password,
+        } => {
+            push(
+                d,
+                to,
+                paths,
+                note,
+                MailboxOpts {
+                    deposit,
+                    ttl,
+                    max,
+                    password,
+                },
+            )
+            .await
+        }
         Request::ServeTicket { paths, seed_relay } => serve_ticket(d, paths, seed_relay).await,
         Request::ServeCode { paths, relay, keep } => serve_code(d, paths, relay, keep).await,
         Request::CreateLink { path, ttl, max } => create_link(d, path, ttl, max).await,
@@ -223,6 +289,37 @@ async fn dispatch(d: &Daemon, cmd: Request) -> Response {
             Ok(n) => Response::Cleared(n),
             Err(e) => Response::Error(format!("{e:#}")),
         },
+        Request::GetConfig => Response::Config(config_dto(d)),
+        Request::SetConfig(patch) => match apply_config_patch(d, patch) {
+            Ok(()) => Response::Config(config_dto(d)),
+            Err(e) => Response::Error(format!("{e:#}")),
+        },
+        Request::PruneNames => match crate::book::prune_orphan_names() {
+            Ok(n) => Response::Cleared(n),
+            Err(e) => Response::Error(format!("{e:#}")),
+        },
+        Request::SyncStatus => match sync_dto(d) {
+            Ok(s) => Response::Sync(s),
+            Err(e) => Response::Error(format!("{e:#}")),
+        },
+        Request::SyncNow => sync_now(d).await,
+        Request::StartPairing {
+            kind,
+            relay,
+            code,
+            name,
+        } => {
+            let session =
+                super::pairing::start(&d.pairings, d.side_events.clone(), kind, relay, code, name);
+            Response::PairingStarted { session }
+        }
+        Request::CancelPairing { session } => {
+            // A handle this daemon doesn't know is not an error worth surfacing: the
+            // session finishing and the UI closing its sheet race by nature, and the
+            // user's intent — "stop pairing" — is satisfied either way.
+            d.pairings.cancel(&session);
+            Response::Ok
+        }
         Request::SetMyName { name } => match crate::book::set_my_display_name(&name) {
             Ok(()) => {
                 // The engine advertises the name inside each sealed offer — flip it
@@ -240,7 +337,21 @@ async fn dispatch(d: &Daemon, cmd: Request) -> Response {
     }
 }
 
-async fn push(d: &Daemon, to: String, paths: Vec<String>, note: String) -> Response {
+/// What a [`Request::Push`] asked for beyond "send this to them".
+struct MailboxOpts {
+    deposit: bool,
+    ttl: Option<u64>,
+    max: Option<u32>,
+    password: Option<String>,
+}
+
+async fn push(
+    d: &Daemon,
+    to: String,
+    paths: Vec<String>,
+    note: String,
+    opts: MailboxOpts,
+) -> Response {
     if paths.is_empty() {
         return Response::Error("provide at least one file or folder to push".into());
     }
@@ -257,16 +368,37 @@ async fn push(d: &Daemon, to: String, paths: Vec<String>, note: String) -> Respo
     // Subscribe *before* sending so a temp archive is cleaned up even if the
     // transfer's terminal event fires before we start watching.
     let watch = temp.clone().map(|t| (d.manager.subscribe(), t));
-    match d
-        .manager
-        .send_to(&recipient, payload, name, archive, note)
-        .await
-    {
-        Ok(id) => {
+
+    // A forced deposit is a different engine call, not a flag on the same one: it
+    // skips the presence check and the held/retry loop entirely (see
+    // `TransferManager::deposit_to`). The ticket comes back so a UI can offer the
+    // `arvm…` for hand-delivery, exactly as `arvolo send --deposit` prints it.
+    let outcome = if opts.deposit {
+        let mailbox = arvolo_core::manager::MailboxOpts {
+            ttl: opts.ttl,
+            max: opts.max,
+            password: opts.password.filter(|p| !p.is_empty()),
+        };
+        d.manager
+            .deposit_to(&recipient, payload, name, note, mailbox)
+            .await
+            .map(|(id, ticket)| (id, Some(ticket)))
+    } else {
+        d.manager
+            .send_to(&recipient, payload, name, archive, note)
+            .await
+            .map(|id| (id, None))
+    };
+
+    match outcome {
+        Ok((id, ticket)) => {
             if let Some((rx, t)) = watch {
                 spawn_temp_cleanup(rx, id, t);
             }
-            Response::TransferId(id)
+            match ticket {
+                Some(ticket) => Response::Served { id, ticket },
+                None => Response::TransferId(id),
+            }
         }
         Err(e) => {
             if let Some(t) = temp {
@@ -274,6 +406,150 @@ async fn push(d: &Daemon, to: String, paths: Vec<String>, note: String) -> Respo
             }
             Response::Error(format!("{e:#}"))
         }
+    }
+}
+
+/// The settings screen's view of this daemon: what is in force, where it came
+/// from, and what the file itself says. See [`ConfigDto`] on why both.
+fn config_dto(d: &Daemon) -> ConfigDto {
+    let file = crate::book::config_snapshot();
+    let env_relay = std::env::var("ARVOLO_RELAY")
+        .ok()
+        .filter(|s| !s.trim().is_empty());
+    let configured = file.relay.clone().unwrap_or_default();
+    let relay_source = if env_relay.is_some() {
+        "env"
+    } else if !configured.trim().is_empty() {
+        "config"
+    } else if d.relay.is_some() {
+        "builtin"
+    } else {
+        "none"
+    };
+    let env_dir = std::env::var("ARVOLO_DOWNLOAD_DIR")
+        .ok()
+        .filter(|s| !s.trim().is_empty());
+
+    ConfigDto {
+        relay: d.relay.clone(),
+        relay_configured: configured,
+        relay_source: relay_source.into(),
+        download_dir: d.download_dir.display().to_string(),
+        download_dir_configured: file.download_dir.unwrap_or_default(),
+        download_dir_from_env: env_dir.is_some(),
+        display_name: crate::book::my_display_name(),
+        sync: crate::book::sync_enabled(),
+        seed: file.seed,
+        swarm: file.swarm.unwrap_or_default(),
+        concurrency: file.concurrency,
+        config_path: crate::book::config_path().display().to_string(),
+        identity_path: crate::identity_path().display().to_string(),
+    }
+}
+
+/// Write a [`ConfigPatch`] into `config.toml`, key by key.
+///
+/// Most keys only take effect on the next daemon start, and a UI is expected to
+/// say so — rewriting the running engine's relay under a live transfer is not
+/// something a settings screen should do silently. The display name is the one
+/// exception: it is advertised per-offer, so it is flipped live here as
+/// [`Request::SetMyName`] does.
+fn apply_config_patch(d: &Daemon, patch: ConfigPatch) -> anyhow::Result<()> {
+    use crate::book::set_config_value;
+
+    fn text(s: &Setting<String>) -> Option<toml::Value> {
+        match s {
+            Setting::Set(v) if !v.trim().is_empty() => {
+                Some(toml::Value::String(v.trim().to_string()))
+            }
+            // An empty string is how a text field says "cleared"; treating it as a
+            // value would write `relay = ""`, which reads back as a configured
+            // relay that is the empty string.
+            _ => None,
+        }
+    }
+
+    if let Some(s) = &patch.relay {
+        set_config_value("relay", text(s))?;
+    }
+    if let Some(s) = &patch.download_dir {
+        set_config_value("download_dir", text(s))?;
+    }
+    if let Some(s) = &patch.swarm {
+        set_config_value("swarm", text(s))?;
+    }
+    if let Some(s) = &patch.sync {
+        set_config_value(
+            "sync",
+            match s {
+                Setting::Set(v) => Some(toml::Value::Boolean(*v)),
+                Setting::Clear => None,
+            },
+        )?;
+    }
+    if let Some(s) = &patch.seed {
+        set_config_value(
+            "seed",
+            match s {
+                Setting::Set(v) => Some(toml::Value::Boolean(*v)),
+                Setting::Clear => None,
+            },
+        )?;
+    }
+    if let Some(s) = &patch.concurrency {
+        set_config_value(
+            "concurrency",
+            match s {
+                Setting::Set(v) => Some(toml::Value::Integer(i64::from(*v))),
+                Setting::Clear => None,
+            },
+        )?;
+    }
+    if let Some(s) = &patch.display_name {
+        let name = match s {
+            Setting::Set(v) => v.trim().to_string(),
+            Setting::Clear => String::new(),
+        };
+        crate::book::set_my_display_name(&name)?;
+        d.manager.set_display_name(name);
+    }
+    Ok(())
+}
+
+fn sync_dto(d: &Daemon) -> anyhow::Result<SyncDto> {
+    let pid = d.manager.public_id();
+    let st = d.sync_state.lock().unwrap().clone();
+    Ok(SyncDto {
+        fingerprint: pid.fingerprint(),
+        public_id: crate::encode_id(&pid),
+        contacts: crate::book::contact_list().len(),
+        enabled: crate::book::sync_enabled(),
+        last_sync: st.last_sync,
+        last_merged: st.last_merged,
+        last_error: st.last_error,
+    })
+}
+
+/// Run one sync round on demand and report the state it left behind. The round's
+/// own error is recorded rather than returned: a UI that asked "sync now" wants
+/// the panel to say what happened, not to lose the rest of the summary because
+/// the relay was briefly unreachable.
+async fn sync_now(d: &Daemon) -> Response {
+    let outcome = crate::sync::sync_round(d.relay.clone()).await;
+    {
+        let mut st = d.sync_state.lock().unwrap();
+        match &outcome {
+            Ok(merged) => {
+                st.last_sync = crate::util::now_unix();
+                st.last_merged = *merged;
+                st.last_error = String::new();
+            }
+            Err(e) => st.last_error = format!("{e:#}"),
+        }
+    }
+    match sync_dto(d) {
+        Ok(s) => Response::Sync(s),
+        Err(e) => Response::Error(format!("{e:#}")),
     }
 }
 
@@ -587,18 +863,37 @@ fn spawn_temp_cleanup(
     });
 }
 
+/// Fan both event sources out onto one subscribed connection: the engine's
+/// [`ManagerEvent`]s, and the events the daemon raises itself (pairing progress,
+/// which has no transfer behind it). A client subscribes once and gets everything.
+///
+/// A closed engine channel ends the stream — the engine is the daemon. A closed
+/// *side* channel does not: it only means nobody currently holds a sender, which
+/// is the normal state between pairings.
 async fn stream_events(daemon: &Daemon, write: &mut (impl AsyncWrite + Unpin)) {
-    let mut rx = daemon.manager.subscribe();
+    let mut engine = daemon.manager.subscribe();
+    let mut side = daemon.side_events.subscribe();
     loop {
-        match rx.recv().await {
-            Ok(ev) => {
-                let msg = ServerMessage::Event(EventDto::from(&ev));
-                if write_msg(write, &msg).await.is_err() {
-                    return; // client hung up
+        let ev = tokio::select! {
+            e = engine.recv() => match e {
+                Ok(ev) => EventDto::from(&ev),
+                Err(RecvError::Lagged(_)) => continue,
+                Err(RecvError::Closed) => return,
+            },
+            e = side.recv() => match e {
+                Ok(ev) => ev,
+                Err(RecvError::Lagged(_)) => continue,
+                Err(RecvError::Closed) => {
+                    // Re-subscribe rather than tear the connection down: losing
+                    // pairing events would leave a UI's pairing sheet waiting on an
+                    // outcome that can no longer reach it.
+                    side = daemon.side_events.subscribe();
+                    continue;
                 }
-            }
-            Err(RecvError::Lagged(_)) => continue,
-            Err(RecvError::Closed) => return,
+            },
+        };
+        if write_msg(write, &ServerMessage::Event(ev)).await.is_err() {
+            return; // client hung up
         }
     }
 }

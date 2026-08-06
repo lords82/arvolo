@@ -12,6 +12,7 @@
 
 pub use arvolo_ipc::{client, protocol};
 
+pub mod pairing;
 pub mod server;
 
 #[cfg(test)]

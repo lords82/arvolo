@@ -10,8 +10,8 @@ use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::UnixStream;
 
 use crate::protocol::{
-    ContactDto, DepositDto, EventDto, HistoryDto, OfferDto, Request, RequestEnvelope, Response,
-    ServerMessage, StatusDto, TransferDto,
+    ConfigDto, ConfigPatch, ContactDto, DepositDto, EventDto, HistoryDto, OfferDto, PairKind,
+    Request, RequestEnvelope, Response, ServerMessage, StatusDto, SyncDto, TransferDto,
 };
 use crate::socket_path;
 
@@ -99,8 +99,47 @@ impl DaemonClient {
     }
 
     pub async fn push(&mut self, to: String, paths: Vec<String>, note: String) -> Result<u64> {
-        match self.request(Request::Push { to, paths, note }).await? {
+        match self
+            .request(Request::Push {
+                to,
+                paths,
+                note,
+                deposit: false,
+                ttl: None,
+                max: None,
+                password: None,
+            })
+            .await?
+        {
             Response::TransferId(id) => Ok(id),
+            other => unexpected(other),
+        }
+    }
+
+    /// Deposit straight to the recipient's mailbox — `arvolo send --deposit`.
+    /// Returns the transfer id and the `arvm…` ticket for hand-delivery.
+    pub async fn deposit(
+        &mut self,
+        to: String,
+        paths: Vec<String>,
+        note: String,
+        ttl: Option<u64>,
+        max: Option<u32>,
+        password: Option<String>,
+    ) -> Result<(u64, String)> {
+        match self
+            .request(Request::Push {
+                to,
+                paths,
+                note,
+                deposit: true,
+                ttl,
+                max,
+                password,
+            })
+            .await?
+        {
+            Response::Served { id, ticket } => Ok((id, ticket)),
             other => unexpected(other),
         }
     }
@@ -290,6 +329,71 @@ impl DaemonClient {
     /// Set (or clear, with an empty string) the advertised display name.
     pub async fn set_my_name(&mut self, name: String) -> Result<()> {
         expect_ok(self.request(Request::SetMyName { name }).await?)
+    }
+
+    /// The settings screen's state.
+    pub async fn get_config(&mut self) -> Result<ConfigDto> {
+        match self.request(Request::GetConfig).await? {
+            Response::Config(c) => Ok(c),
+            other => unexpected(other),
+        }
+    }
+
+    /// Write settings back, and read the resulting state in the same round trip.
+    pub async fn set_config(&mut self, patch: ConfigPatch) -> Result<ConfigDto> {
+        match self.request(Request::SetConfig(patch)).await? {
+            Response::Config(c) => Ok(c),
+            other => unexpected(other),
+        }
+    }
+
+    /// Drop advertised-name records for contacts that no longer exist.
+    pub async fn prune_names(&mut self) -> Result<usize> {
+        match self.request(Request::PruneNames).await? {
+            Response::Cleared(n) => Ok(n),
+            other => unexpected(other),
+        }
+    }
+
+    pub async fn sync_status(&mut self) -> Result<SyncDto> {
+        match self.request(Request::SyncStatus).await? {
+            Response::Sync(s) => Ok(s),
+            other => unexpected(other),
+        }
+    }
+
+    pub async fn sync_now(&mut self) -> Result<SyncDto> {
+        match self.request(Request::SyncNow).await? {
+            Response::Sync(s) => Ok(s),
+            other => unexpected(other),
+        }
+    }
+
+    /// Begin a pairing exchange; the code and the outcome arrive as events on a
+    /// subscribed connection. Returns the session handle to cancel it by.
+    pub async fn start_pairing(
+        &mut self,
+        kind: PairKind,
+        relay: Option<String>,
+        code: Option<String>,
+        name: Option<String>,
+    ) -> Result<String> {
+        match self
+            .request(Request::StartPairing {
+                kind,
+                relay,
+                code,
+                name,
+            })
+            .await?
+        {
+            Response::PairingStarted { session } => Ok(session),
+            other => unexpected(other),
+        }
+    }
+
+    pub async fn cancel_pairing(&mut self, session: String) -> Result<()> {
+        expect_ok(self.request(Request::CancelPairing { session }).await?)
     }
 
     /// Turn this connection into an event stream. Sends `Subscribe`, consumes the

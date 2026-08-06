@@ -31,12 +31,12 @@ async fn spawn_test_daemon() -> (CancellationToken, tempfile::TempDir) {
     );
     let listener = tokio::net::UnixListener::bind(socket_path()).unwrap();
     let shutdown = CancellationToken::new();
-    let daemon = Daemon {
+    let daemon = Daemon::new(
         manager,
-        relay: Some("https://relay.test".into()),
-        download_dir: dir.path().join("downloads"),
-        pending: Arc::new(Mutex::new(HashMap::new())),
-    };
+        Some("https://relay.test".into()),
+        dir.path().join("downloads"),
+        Arc::new(Mutex::new(HashMap::new())),
+    );
     let stop = shutdown.clone();
     tokio::spawn(async move {
         let _ = server::run(daemon, listener, stop).await;
@@ -204,7 +204,10 @@ async fn history_and_display_name_over_the_socket() {
     assert!(client.list_history().await.expect("history").is_empty());
 
     client.set_my_name("Lorenzo".into()).await.expect("name");
-    assert_eq!(client.status().await.expect("status").display_name, "Lorenzo");
+    assert_eq!(
+        client.status().await.expect("status").display_name,
+        "Lorenzo"
+    );
     client.set_my_name("".into()).await.expect("clear name");
     assert_eq!(client.status().await.expect("status").display_name, "");
 
@@ -278,12 +281,12 @@ async fn revoking_a_deposit_the_engine_made_goes_through_the_engine() {
 
     let listener = tokio::net::UnixListener::bind(socket_path()).unwrap();
     let shutdown = CancellationToken::new();
-    let daemon = Daemon {
+    let daemon = Daemon::new(
         manager,
-        relay: Some("https://relay.test".into()),
-        download_dir: dir.path().join("downloads"),
-        pending: Arc::new(Mutex::new(HashMap::new())),
-    };
+        Some("https://relay.test".into()),
+        dir.path().join("downloads"),
+        Arc::new(Mutex::new(HashMap::new())),
+    );
     let stop = shutdown.clone();
     tokio::spawn(async move {
         let _ = server::run(daemon, listener, stop).await;

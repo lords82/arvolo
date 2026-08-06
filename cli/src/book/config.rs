@@ -37,45 +37,99 @@ pub fn my_display_name() -> String {
 }
 
 /// Persist the local user's display name into `config.toml` (creating the file if
-/// missing). An empty/blank value clears it. Edits the single `display_name` line
-/// in place — replacing an existing (possibly commented) one, else appending —
-/// so the file's comments and other keys are preserved. Values are TOML-escaped.
+/// missing). An empty/blank value clears it.
 pub fn set_my_display_name(name: &str) -> Result<()> {
+    let name = name.trim();
+    let value = (!name.is_empty()).then(|| toml::Value::String(name.to_string()));
+    set_config_value("display_name", value)
+}
+
+/// Set one key in `config.toml`, in place.
+///
+/// Replaces the first line that assigns `key` — commented or not — and appends
+/// when there is none, so the file's comments, ordering and every other key
+/// survive an edit. `None` comments the line back out, which is how a setting is
+/// *cleared*: the key stops being assigned and the built-in default applies again.
+/// Values go through `toml::Value`, so they are escaped rather than interpolated.
+///
+/// This is deliberately a line editor and not a parse-and-reserialize round trip:
+/// `config.toml` is a documented file a human is expected to read, and rewriting
+/// it through a TOML serializer would silently delete every comment in it — the
+/// self-documenting commented defaults included. That is too high a price for a
+/// GUI toggling one boolean.
+pub fn set_config_value(key: &str, value: Option<toml::Value>) -> Result<()> {
     let path = config_path();
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
-    let name = name.trim();
-    // The line the key should become: an active assignment, or the commented
-    // default when clearing (so `arvolo name ""` restores the documented stub).
-    let new_line = if name.is_empty() {
-        "#display_name = \"\"".to_string()
-    } else {
-        format!("display_name = {}", toml::Value::String(name.to_string()))
-    };
+    let new_line = value.as_ref().map(|v| format!("{key} = {v}"));
 
-    // Replace the first line that assigns `display_name` (commented or not).
-    let is_display_line = |l: &str| {
+    let assigns_key = |l: &str| {
         let t = l.trim_start().trim_start_matches('#').trim_start();
-        t.strip_prefix("display_name")
+        t.strip_prefix(key)
             .is_some_and(|r| r.trim_start().starts_with('='))
     };
+
     let mut out: Vec<String> = Vec::new();
     let mut replaced = false;
     for line in existing.lines() {
-        if !replaced && is_display_line(line) {
-            out.push(new_line.clone());
+        // Clearing keeps the old value visible behind the comment marker, so the
+        // file still shows what it used to be — restoring it is uncommenting a line.
+        if !replaced && assigns_key(line) {
+            match &new_line {
+                Some(l) => out.push(l.clone()),
+                None => {
+                    let t = line.trim_start();
+                    if t.starts_with('#') {
+                        out.push(line.to_string());
+                    } else {
+                        out.push(format!("#{t}"));
+                    }
+                }
+            }
             replaced = true;
         } else {
             out.push(line.to_string());
         }
     }
+    // Nothing to comment out when the key was never there in the first place.
     if !replaced {
-        out.push(new_line);
+        if let Some(l) = new_line {
+            out.push(l);
+        }
     }
     let mut text = out.join("\n");
     text.push('\n');
 
     std::fs::create_dir_all(config_dir()).ok();
     std::fs::write(&path, text).context("write config.toml")
+}
+
+/// The `config.toml` keys a settings screen both shows *and* offers to change,
+/// read in one go.
+///
+/// Deliberately a subset. Everything else in the file — temp dir, identity path,
+/// iroh relay, log level — is either derivable from elsewhere or is a knob whose
+/// wrong setting is hard to recover from through a dialog; those stay text-file
+/// settings, and the UI links to the file instead of half-exposing them.
+pub struct ConfigSnapshot {
+    pub relay: Option<String>,
+    pub download_dir: Option<String>,
+    pub seed: Option<bool>,
+    pub swarm: Option<String>,
+    pub concurrency: Option<u32>,
+}
+
+/// Read `config.toml` into a [`ConfigSnapshot`]. A missing or unparseable file
+/// reads as "nothing configured" rather than an error — the same fallback every
+/// other reader here uses, so a settings screen opens on a fresh install.
+pub fn config_snapshot() -> ConfigSnapshot {
+    let c = load_config();
+    ConfigSnapshot {
+        relay: c.relay,
+        download_dir: c.download_dir,
+        seed: c.seed,
+        swarm: c.swarm,
+        concurrency: c.concurrency,
+    }
 }
 
 /// Whether automatic multi-device address-book sync runs in `listen`/`daemon`.

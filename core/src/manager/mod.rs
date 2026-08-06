@@ -38,6 +38,25 @@ use records::*;
 use state::*;
 use work::*;
 
+/// How a payload should sit in the relay mailbox, when it ends up there.
+///
+/// These only ever apply to a *deposit*. A live P2P delivery has no relay copy to
+/// expire, cap or password-protect, so a send that goes through directly ignores
+/// them entirely — which is why [`TransferManager::send_to`] does not take them
+/// and [`TransferManager::deposit_to`] does. The automatic offline fallback uses
+/// [`MailboxOpts::default`] on purpose: it stands in for a live delivery the user
+/// asked for, and it must not invent a password nobody typed.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MailboxOpts {
+    /// Seconds the relay keeps the blob. `None` = the built-in week.
+    pub ttl: Option<u64>,
+    /// Downloads before the relay deletes it. `None` = burn-after-read (1).
+    pub max: Option<u32>,
+    /// End-to-end password: the blob cannot be opened without it, and the relay
+    /// never learns it. `None` = sealed to the recipient's key alone.
+    pub password: Option<String>,
+}
+
 /// Direction of a transfer, from this client's point of view.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Direction {
@@ -488,6 +507,58 @@ impl TransferManager {
         Ok(id)
     }
 
+    /// Deposit `payload` in `recipient`'s relay mailbox now, without trying a live
+    /// delivery first. Returns the transfer id and the `arvm…` ticket for the blob.
+    ///
+    /// This is `send --deposit`: send-and-forget. It differs from
+    /// [`send_to`](Self::send_to) in more than the presence check — there is no
+    /// held record and no retry loop, so the attempt either lands or fails, once.
+    /// That is deliberate. A held send is restored from disk after a restart, and
+    /// restoring one carrying a password would mean writing that password into the
+    /// state directory; retrying without it would silently deposit unprotected.
+    /// Neither is acceptable, so an explicit deposit simply doesn't become held.
+    pub async fn deposit_to(
+        &self,
+        recipient: &PublicId,
+        payload: PathBuf,
+        name: String,
+        note: String,
+        opts: MailboxOpts,
+    ) -> Result<(u64, String)> {
+        let relay = self
+            .inner
+            .relay
+            .clone()
+            .context("a relay is required to deposit to a contact's mailbox")?;
+        let size = std::fs::metadata(&payload).map(|m| m.len()).unwrap_or(0);
+        let (id, _cancel) =
+            self.register(Direction::Send, Some(recipient.clone()), name.clone(), size);
+
+        let ttl = opts.ttl.unwrap_or(OFFLINE_TTL_SECS);
+        match deposit_offline_and_offer(
+            &self.inner,
+            &relay,
+            recipient,
+            &payload,
+            &name,
+            &note,
+            &opts,
+        )
+        .await
+        {
+            Ok(out) => {
+                let ticket = out.ticket.clone();
+                spawn_offline_confirm(&self.inner, id, relay, out, unix_now().saturating_add(ttl));
+                Ok((id, ticket))
+            }
+            Err(e) => {
+                let msg = format!("{e}");
+                finish(&self.inner, id, false, Err(anyhow::anyhow!("{msg}")));
+                Err(anyhow::anyhow!("{msg}"))
+            }
+        }
+    }
+
     /// Pause an in-progress transfer (Active or Waiting): stop working on it and hold
     /// it as `Paused` until `resume`d or `cancel`led. Returns whether it was paused.
     ///
@@ -669,6 +740,9 @@ impl TransferManager {
                 revoke_token: rec.revoke_token,
                 offer_id: rec.offer_id,
                 poster_token: rec.poster_token,
+                // Restoring a deposit re-watches it; it never re-hands the ticket
+                // out, and the record deliberately doesn't keep one.
+                ticket: String::new(),
             },
             rec.expires,
         );

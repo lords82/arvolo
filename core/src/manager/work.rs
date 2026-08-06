@@ -232,8 +232,16 @@ pub(super) async fn deliver_to(
         // 2) Try the relay mailbox — unless it already refused as too large, or
         //    we're backing off after it was unavailable.
         if !too_big && Instant::now() >= next_relay_try {
-            match deposit_offline_and_offer(&inner, &relay, &recipient, &payload, &name, &note)
-                .await
+            match deposit_offline_and_offer(
+                &inner,
+                &relay,
+                &recipient,
+                &payload,
+                &name,
+                &note,
+                &MailboxOpts::default(),
+            )
+            .await
             {
                 Ok(out) => {
                     drop_held(&inner, id);
@@ -447,6 +455,10 @@ pub(super) struct DepositOutcome {
     /// The offer left in the recipient's inbox + its retract token.
     pub(super) offer_id: String,
     pub(super) poster_token: String,
+    /// The encoded `arvm…` ticket for the blob. The recipient's daemon does not
+    /// need it (the inbox offer carries its own copy) — this is the sender's, to
+    /// hand over out-of-band when the inbox route isn't wanted or isn't working.
+    pub(super) ticket: String,
 }
 
 /// A sealed mailbox deposit is burn-after-read: it is sealed to one recipient, so
@@ -454,9 +466,15 @@ pub(super) struct DepositOutcome {
 /// the [`DepositInfo`] describing it must not drift apart.
 pub(super) const OFFLINE_MAX_DOWNLOADS: u32 = 1;
 
-/// Deposit `payload` to the relay mailbox (sealed to `recipient`) and post a
-/// long-lived `arvm` offer pointing at it. Shared by the up-front offline path and
-/// the live-send watchdog fallback.
+/// Deposit `payload` to the relay mailbox (sealed to `recipient`) and post an
+/// `arvm` offer pointing at it. Shared by the up-front offline path, the
+/// live-send watchdog fallback, and the explicit "deposit it whatever happens"
+/// send.
+///
+/// `opts` is what the two callers differ on. The automatic fallback takes the
+/// defaults — it is standing in for a live delivery the user asked for, and a
+/// password nobody typed cannot be part of that. An explicit deposit carries
+/// whatever the user chose.
 pub(super) async fn deposit_offline_and_offer(
     inner: &Inner,
     relay: &str,
@@ -464,19 +482,22 @@ pub(super) async fn deposit_offline_and_offer(
     payload: &Path,
     name: &str,
     note: &str,
+    opts: &MailboxOpts,
 ) -> std::result::Result<DepositOutcome, flow::DepositError> {
     let size = std::fs::metadata(payload).map(|m| m.len()).unwrap_or(0);
+    let ttl = opts.ttl.unwrap_or(OFFLINE_TTL_SECS);
     let deposited = flow::deposit_offline(
         payload,
         recipient,
         &inner.me,
         relay,
-        OFFLINE_TTL_SECS,
-        OFFLINE_MAX_DOWNLOADS,
-        None,
+        ttl,
+        opts.max.unwrap_or(OFFLINE_MAX_DOWNLOADS),
+        opts.password.as_deref(),
     )
     .await?;
     let claim = deposited.ticket.claim.clone();
+    let ticket = deposited.ticket.encode();
     let offer = Offer {
         name: name.to_string(),
         size,
@@ -491,7 +512,7 @@ pub(super) async fn deposit_offline_and_offer(
         recipient,
         &inner.me,
         &offer,
-        Some(OFFLINE_TTL_SECS),
+        Some(ttl),
     )
     .await
     .map_err(|e| flow::DepositError::Unavailable(format!("deliver offer: {e:#}")))?;
@@ -501,6 +522,7 @@ pub(super) async fn deposit_offline_and_offer(
         revoke_token: deposited.revoke_token,
         offer_id: posted.id,
         poster_token: posted.poster_token,
+        ticket,
     })
 }
 
@@ -678,6 +700,10 @@ pub(super) fn spawn_offline_confirm(
         revoke_token,
         offer_id,
         poster_token,
+        // The sender's hand-delivery ticket is returned to the caller, not filed
+        // with the deposit: the record exists to *withdraw* the blob, and a ticket
+        // is a capability to fetch it.
+        ticket: _,
     } = out;
     inner.set_progress(id, size);
     inner.set_status(id, TransferStatus::Deposited);

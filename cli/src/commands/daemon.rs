@@ -224,13 +224,12 @@ pub(crate) async fn daemon(
     }
 
     let shutdown = daemon_shutdown_signal();
-    let daemon = ipc::server::Daemon {
-        manager,
-        relay: Some(relay),
-        download_dir,
-        pending,
-    };
+    let daemon = ipc::server::Daemon::new(manager, Some(relay), download_dir, pending);
+    let pairings = daemon.pairings.clone();
     let result = ipc::server::run(daemon, listener, shutdown).await;
+    // A hosted `device pair` offers this device's identity secret for its whole
+    // window. It must not outlive the daemon that was offering it.
+    pairings.cancel_all();
 
     inbox.cancel();
     std::fs::remove_file(&sock).ok();

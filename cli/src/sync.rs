@@ -201,6 +201,21 @@ pub async fn sync_status() -> Result<()> {
 /// full snapshot of the merged book, then delete the notes we merged (writer-side
 /// cleanup, so the slot tends to a single current snapshot).
 pub async fn sync_now(relay: Option<String>, quiet: bool) -> Result<()> {
+    let merged = sync_round(relay).await?;
+    if !quiet {
+        println!("✓ Synced ({merged} update(s) merged from your other devices).");
+    }
+    Ok(())
+}
+
+/// The round itself, without a word of output: pull and merge every snapshot our
+/// other devices published, publish a fresh full snapshot of the merged book, then
+/// delete the notes we merged (writer-side cleanup, so the slot tends to a single
+/// current snapshot). Returns how many snapshots were merged.
+///
+/// Split out from [`sync_now`] because the daemon runs this for a GUI that reports
+/// the outcome in a panel, and a `println!` from inside a daemon goes nowhere.
+pub async fn sync_round(relay: Option<String>) -> Result<usize> {
     let relay = resolve_relay(relay, false)?;
     let me = crate::my_identity()?;
     let key = sync::snapshot_key(&me.secret_bytes());
@@ -243,11 +258,5 @@ pub async fn sync_now(relay: Option<String>, quiet: bool) -> Result<()> {
         let _ = sub.ack(&id).await;
     }
 
-    if !quiet {
-        println!(
-            "✓ Synced ({} update(s) merged from your other devices).",
-            merged
-        );
-    }
-    Ok(())
+    Ok(merged)
 }
