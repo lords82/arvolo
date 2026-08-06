@@ -170,6 +170,14 @@ interface State {
   configLoading: boolean;
   configError: string | null;
 
+  /** Who is reachable right now, by public id. `null` in a slot means the relay
+   *  could not be asked — never "offline". Fetched when the people screen opens
+   *  and on demand, never as part of the address book itself: the book is read
+   *  from disk and is instant, this is a relay round trip per contact. */
+  presence: Record<string, boolean | null>;
+  presenceLoading: boolean;
+  loadPresence: () => Promise<void>;
+
   /** Multi-device summary, same fetch-on-open contract as `config`. */
   sync: SyncDto | null;
   syncLoading: boolean;
@@ -412,6 +420,8 @@ export const useStore = create<State>((set, get) => {
     incomingOfferId: null,
     receiveOpen: false,
     personOpen: null,
+    presence: {},
+    presenceLoading: false,
     config: null,
     configLoading: false,
     configError: null,
@@ -757,6 +767,22 @@ export const useStore = create<State>((set, get) => {
         set((s) => ({ deposits: s.deposits.filter((d) => d.id !== id) }));
       } finally {
         set((s) => ({ revoking: s.revoking.filter((r) => r !== id) }));
+      }
+    },
+
+    loadPresence: async () => {
+      const ids = get().contacts.map((c) => c.id);
+      if (!ids.length) return;
+      set({ presenceLoading: true });
+      try {
+        const rows = await api.presence(ids);
+        const presence: Record<string, boolean | null> = {};
+        for (const r of rows) presence[r.id] = r.online;
+        set({ presence, presenceLoading: false });
+      } catch {
+        // Keep whatever the last successful probe found, but stop claiming it is
+        // current: an unreachable daemon must not make everyone read as away.
+        set({ presence: {}, presenceLoading: false });
       }
     },
 

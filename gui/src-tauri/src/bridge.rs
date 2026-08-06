@@ -9,8 +9,8 @@ use std::path::PathBuf;
 
 use arvolo_ipc::client::DaemonClient;
 use arvolo_ipc::protocol::{
-    ConfigDto, ConfigPatch, ContactDto, DepositDto, HistoryDto, OfferDto, PairKind, StatusDto,
-    SyncDto, TransferDto,
+    ConfigDto, ConfigPatch, ContactDto, DepositDto, HistoryDto, OfferDto, PairKind, PresenceDto,
+    StatusDto, SyncDto, TransferDto,
 };
 use serde::Serialize;
 
@@ -96,6 +96,14 @@ pub async fn get_config() -> Result<ConfigDto, String> {
 pub async fn set_config(patch: ConfigPatch) -> Result<ConfigDto, String> {
     let mut c = client().await?;
     c.set_config(patch).await.or_else(err)
+}
+
+/// Who is reachable right now. `online: null` in a row means the relay could not
+/// be asked — the UI must render that as "unknown", never as "offline".
+#[tauri::command]
+pub async fn presence(ids: Vec<String>) -> Result<Vec<PresenceDto>, String> {
+    let mut c = client().await?;
+    c.presence(ids).await.or_else(err)
 }
 
 #[tauri::command]

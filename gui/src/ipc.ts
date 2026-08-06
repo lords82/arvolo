@@ -12,6 +12,7 @@ import type {
   HistoryDto,
   OfferDto,
   PairKind,
+  PresenceDto,
   StatusDto,
   SyncDto,
   TransferDto,
@@ -84,6 +85,9 @@ export const api = {
   getConfig: () => invoke<ConfigDto>("get_config"),
   setConfig: (patch: ConfigPatch) => invoke<ConfigDto>("set_config", { patch }),
   pruneNames: () => invoke<number>("prune_names"),
+  /** Who is reachable right now. Separate from `listContacts` because the book
+   *  is read from disk and is instant, while this is a relay round trip. */
+  presence: (ids: string[]) => invoke<PresenceDto[]>("presence", { ids }),
   syncStatus: () => invoke<SyncDto>("sync_status"),
   syncNow: () => invoke<SyncDto>("sync_now"),
   /** Begin a pairing exchange; returns the session handle. The code to read out

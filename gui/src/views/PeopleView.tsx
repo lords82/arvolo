@@ -16,7 +16,7 @@
 // has one rule worth surfacing: it never rebinds a name you already use, since
 // that would be a key change nobody asked about.
 
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { save as saveDialog, open as openDialog } from "@tauri-apps/plugin-dialog";
 import { fire, useStore } from "../store";
 import { api } from "../ipc";
@@ -39,6 +39,28 @@ import type { ContactDto } from "../types";
 type Filter = "all" | "verified" | "trusted" | "blocked";
 
 // ---------------------------------------------------------------------------
+
+/** Reachability, said honestly. Three states, because there are three: here,
+ *  away, and *not asked* — the relay may simply not have answered. */
+function PresenceDot({ id }: { id: string }) {
+  const online = useStore((s) => s.presence[id]);
+  if (online === undefined || online === null) {
+    return (
+      <span
+        className="dot"
+        title="Non lo so: il relay non ha risposto"
+        aria-label="Presenza sconosciuta"
+      />
+    );
+  }
+  return (
+    <span
+      className={`dot ${online ? "on" : "off"}`}
+      title={online ? "Online adesso" : "Non collegato"}
+      aria-label={online ? "Online" : "Non collegato"}
+    />
+  );
+}
 
 function PersonCard({ c }: { c: ContactDto }) {
   const openSheet = useStore((s) => s.openSheet);
@@ -121,8 +143,11 @@ function PersonCard({ c }: { c: ContactDto }) {
         <div className="person-top">
           <Avatar name={c.display_name || c.name} id={c.id} size={38} />
           <div className="grow" style={{ minWidth: 0 }}>
-            <div className="truncate" style={{ fontWeight: 620 }}>
-              {c.name}
+            <div className="hstack-sm">
+              <PresenceDot id={c.id} />
+              <span className="truncate" style={{ fontWeight: 620 }}>
+                {c.name}
+              </span>
             </div>
             <div className="t-xs t-mut truncate">
               {c.display_name && c.display_name !== c.name
@@ -475,6 +500,17 @@ export function PeopleView() {
   const startPairing = useStore((s) => s.startPairing);
   const addContact = useStore((s) => s.addContact);
   const pruneNames = useStore((s) => s.pruneNames);
+  const loadPresence = useStore((s) => s.loadPresence);
+  const presenceLoading = useStore((s) => s.presenceLoading);
+
+  // Probe when the set of contacts changes, not when the screen is navigated to.
+  // Navigation and the address book landing are two different moments — the
+  // snapshot is still in flight on a fresh launch — and probing at the first one
+  // asks the relay about an empty list.
+  const ids = contacts.map((c) => c.id).join(",");
+  useEffect(() => {
+    if (ids) fire(loadPresence());
+  }, [ids, loadPresence]);
 
   const [filter, setFilter] = useState<Filter>("all");
   const [q, setQ] = useState("");
@@ -590,6 +626,14 @@ export function PeopleView() {
         </Button>
         <Button size="sm" onClick={doImport} busy={importing}>
           Importa
+        </Button>
+        <Button
+          size="sm"
+          onClick={() => fire(loadPresence())}
+          busy={presenceLoading}
+          title="Chiedi al relay chi è collegato adesso"
+        >
+          <Icon.Relay size={13} /> Chi c'è
         </Button>
         <MenuButton
           label="Altre azioni sulla rubrica"

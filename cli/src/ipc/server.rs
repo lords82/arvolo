@@ -17,9 +17,15 @@ use tokio_util::sync::CancellationToken;
 
 use super::pairing::Sessions;
 use super::protocol::{
-    ConfigDto, ConfigPatch, ContactDto, EventDto, HistoryDto, OfferDto, Request, RequestEnvelope,
-    Response, ServerMessage, Setting, StatusDto, SyncDto, TransferDto,
+    ConfigDto, ConfigPatch, ContactDto, EventDto, HistoryDto, OfferDto, PresenceDto, Request,
+    RequestEnvelope, Response, ServerMessage, Setting, StatusDto, SyncDto, TransferDto,
 };
+
+/// How long one presence probe may take. They run concurrently, so this is also
+/// roughly the worst case for the whole batch — the same bound `arvolo contacts
+/// list` uses, and for the same reason: a relay that accepts the connection and
+/// then goes quiet must not hang the caller.
+const PRESENCE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Shared daemon state handed to every connection handler. Cheap to clone.
 #[derive(Clone)]
@@ -294,6 +300,7 @@ async fn dispatch(d: &Daemon, cmd: Request) -> Response {
             Ok(()) => Response::Config(config_dto(d)),
             Err(e) => Response::Error(format!("{e:#}")),
         },
+        Request::Presence { ids } => Response::Presence(presence(d, ids).await),
         Request::PruneNames => match crate::book::prune_orphan_names() {
             Ok(n) => Response::Cleared(n),
             Err(e) => Response::Error(format!("{e:#}")),
@@ -514,6 +521,54 @@ fn apply_config_patch(d: &Daemon, patch: ConfigPatch) -> anyhow::Result<()> {
         d.manager.set_display_name(name);
     }
     Ok(())
+}
+
+/// Ask the relay which of `ids` has a live presence beacon.
+///
+/// Every answer is an `Option` and stays one: a probe that errored means "could
+/// not ask", which is a third state and not the same as being away. Collapsing
+/// it into `false` is what makes an unreachable relay look exactly like everyone
+/// having gone home — the row would read "offline" with total confidence about
+/// something nobody actually checked.
+async fn presence(d: &Daemon, ids: Vec<String>) -> Vec<PresenceDto> {
+    let unknown = |ids: Vec<String>| {
+        ids.into_iter()
+            .map(|id| PresenceDto { id, online: None })
+            .collect()
+    };
+    let Some(relay) = d.relay.clone() else {
+        return unknown(ids);
+    };
+    let Ok(client) = reqwest::Client::builder().timeout(PRESENCE_TIMEOUT).build() else {
+        return unknown(ids);
+    };
+
+    let mut set = tokio::task::JoinSet::new();
+    for id in ids {
+        let Ok(pk) = crate::book::decode_id(&id) else {
+            // Not a public id at all: nothing to ask about, and reporting it as
+            // offline would be a claim we have no basis for.
+            set.spawn(async move { PresenceDto { id, online: None } });
+            continue;
+        };
+        let (client, relay) = (client.clone(), relay.clone());
+        set.spawn(async move {
+            PresenceDto {
+                online: arvolo_core::presence::check_online(&client, &relay, &pk)
+                    .await
+                    .ok(),
+                id,
+            }
+        });
+    }
+
+    let mut out = Vec::new();
+    while let Some(joined) = set.join_next().await {
+        if let Ok(dto) = joined {
+            out.push(dto);
+        }
+    }
+    out
 }
 
 fn sync_dto(d: &Daemon) -> anyhow::Result<SyncDto> {

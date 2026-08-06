@@ -67,6 +67,7 @@ fn main() {
             bridge::get_config,
             bridge::set_config,
             bridge::prune_names,
+            bridge::presence,
             bridge::sync_status,
             bridge::sync_now,
             bridge::start_pairing,

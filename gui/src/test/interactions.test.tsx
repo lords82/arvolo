@@ -553,6 +553,26 @@ describe("receiving from a pasted artefact", () => {
 // ---------------------------------------------------------------------------
 
 describe("the address book", () => {
+  it("an unreachable relay reads as unknown, never as offline", async () => {
+    harness.snapshot.contacts = [dto.contact({ name: "proj", id: "p1" })];
+    harness.fail = new Set(["presence"]);
+    render(<App />);
+    useStore.getState().go("people");
+    await screen.findByText("proj");
+    // Collapsing "could not ask" into "offline" is what makes a dead relay look
+    // exactly like everyone having gone home.
+    expect(await screen.findByLabelText("Presenza sconosciuta")).toBeTruthy();
+    expect(screen.queryByLabelText("Non collegato")).toBeNull();
+  });
+
+  it("a contact the relay reports as present is marked online", async () => {
+    harness.snapshot.contacts = [dto.contact({ name: "proj", id: "p1" })];
+    harness.snapshot.presence = { p1: true };
+    render(<App />);
+    useStore.getState().go("people");
+    expect(await screen.findByLabelText("Online")).toBeTruthy();
+  });
+
   it("Invia from a person card opens the sheet already addressed to them", async () => {
     harness.snapshot.contacts = [dto.contact({ name: "proj" })];
     render(<App />);

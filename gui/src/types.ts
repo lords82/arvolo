@@ -152,6 +152,16 @@ export interface ConfigPatch {
   concurrency?: Setting<number>;
 }
 
+/** Whether one identity is reachable on the relay right now.
+ *
+ *  `online` is nullable and that is the point: a network failure is not the same
+ *  as being away. `null` means the relay could not be asked, and the UI says
+ *  "non lo so" rather than "offline". */
+export interface PresenceDto {
+  id: string;
+  online: boolean | null;
+}
+
 /** Multi-device state: one identity across machines, address books kept in step
  *  through an encrypted cell on the relay inbox. */
 export interface SyncDto {

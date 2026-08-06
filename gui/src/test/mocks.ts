@@ -74,6 +74,8 @@ export interface Harness {
     deposits: DepositDto[];
     config: ConfigDto;
     sync: SyncDto;
+    /** Who the relay reports as online, by id. Absent = "could not ask". */
+    presence: Record<string, boolean | null>;
   };
   /** Make the next call to these commands reject. */
   fail: Set<string>;
@@ -150,6 +152,7 @@ function freshSnapshot(): Harness["snapshot"] {
       config_path: "/Users/ls/.config/arvolo/config.toml",
       identity_path: "/Users/ls/.config/arvolo/identity.key",
     },
+    presence: {},
     sync: {
       fingerprint: "able-otter-nine",
       public_id: "if2xmnescalwohxlex5qylevzs2cypwdnjxe7sxb76wcphc7daha",
@@ -213,6 +216,11 @@ export function makeIpcMock() {
         harness.recorder.setConfig.push(patch);
         return guard("setConfig", harness.snapshot.config);
       },
+      presence: (ids: string[]) =>
+        guard(
+          "presence",
+          ids.map((id) => ({ id, online: harness.snapshot.presence[id] ?? null }))
+        ),
       pruneNames: () => {
         harness.recorder.pruneNames++;
         return guard("pruneNames", 0);

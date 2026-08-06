@@ -181,6 +181,12 @@ pub enum Request {
     /// Drop advertised-name records left behind by contacts that no longer exist
     /// → [`Response::Cleared`] with the count (`arvolo contacts prune`).
     PruneNames,
+    /// Ask the relay who, among these ids, has a live presence beacon
+    /// → [`Response::Presence`]. Deliberately separate from
+    /// [`Request::ListContacts`]: the book is read from disk and is instant,
+    /// while this is a network round trip per contact, and folding the two would
+    /// make every address-book refresh wait on a relay.
+    Presence { ids: Vec<String> },
     /// Read-only multi-device summary: shared identity, book size, whether auto
     /// sync is on, and when a round last succeeded → [`Response::Sync`].
     SyncStatus,
@@ -293,6 +299,8 @@ pub enum Response {
     Config(ConfigDto),
     /// The multi-device summary.
     Sync(SyncDto),
+    /// Who is reachable right now, one entry per id asked about.
+    Presence(Vec<PresenceDto>),
     /// A pairing session is running; its code and outcome arrive as events.
     PairingStarted {
         session: String,
@@ -528,6 +536,19 @@ pub struct ConfigDto {
     /// Absolute path of the identity key file.
     #[serde(default)]
     pub identity_path: String,
+}
+
+/// Whether one identity is reachable on the relay right now.
+///
+/// `online` is an `Option` and that is the whole point. A network failure is not
+/// the same as being away, and collapsing the two is what makes a dead relay look
+/// exactly like everyone having gone home. `None` means the relay could not be
+/// asked, and a UI must say "non lo so" rather than "offline".
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PresenceDto {
+    pub id: String,
+    #[serde(default)]
+    pub online: Option<bool>,
 }
 
 /// Multi-device state: one identity across several machines, and the address book

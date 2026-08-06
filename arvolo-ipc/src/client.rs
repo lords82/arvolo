@@ -11,7 +11,8 @@ use tokio::net::UnixStream;
 
 use crate::protocol::{
     ConfigDto, ConfigPatch, ContactDto, DepositDto, EventDto, HistoryDto, OfferDto, PairKind,
-    Request, RequestEnvelope, Response, ServerMessage, StatusDto, SyncDto, TransferDto,
+    PresenceDto, Request, RequestEnvelope, Response, ServerMessage, StatusDto, SyncDto,
+    TransferDto,
 };
 use crate::socket_path;
 
@@ -351,6 +352,15 @@ impl DaemonClient {
     pub async fn prune_names(&mut self) -> Result<usize> {
         match self.request(Request::PruneNames).await? {
             Response::Cleared(n) => Ok(n),
+            other => unexpected(other),
+        }
+    }
+
+    /// Ask the relay who is reachable right now. `None` in a row means the relay
+    /// could not be asked — never "offline".
+    pub async fn presence(&mut self, ids: Vec<String>) -> Result<Vec<PresenceDto>> {
+        match self.request(Request::Presence { ids }).await? {
+            Response::Presence(v) => Ok(v),
             other => unexpected(other),
         }
     }
