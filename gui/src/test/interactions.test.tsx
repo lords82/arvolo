@@ -1,17 +1,23 @@
 // Clicks. Not the store behind them — the actual controls, driven the way a user
 // drives them.
 //
-// This layer was missing, and it is exactly where the "Accetta does nothing" bug
-// lived. The store tests called `await store.accept(...)`; the button calls
-// `store.accept(...)` with no await and no catch, from an `onClick` that cannot
-// await anything. A refusal therefore vanished into the event loop — invisible to
-// a test that awaited the promise itself, and to the user. Testing the function is
-// not testing the button.
+// This layer exists because of the "Accetta does nothing" bug. The store tests
+// called `await store.accept(...)`; the button calls `store.accept(...)` with no
+// await and no catch, from an `onClick` that cannot await anything. A refusal
+// therefore vanished into the event loop — invisible to a test that awaited the
+// promise itself, and to the user. Testing the function is not testing the button.
 //
 // So: press every control, and assert what the user would see happen.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { dto, harness, makeIpcMock, resetHarness } from "./mocks";
 
 vi.mock("../ipc", () => makeIpcMock());
@@ -19,17 +25,23 @@ vi.mock("@tauri-apps/api/webview", () => ({
   getCurrentWebview: () => ({ onDragDropEvent: () => Promise.resolve(() => {}) }),
 }));
 const dialogOpen = vi.fn(() => Promise.resolve(null as unknown));
-vi.mock("@tauri-apps/plugin-dialog", () => ({ open: (...a: unknown[]) => dialogOpen(...(a as [])) }));
+const dialogSave = vi.fn(() => Promise.resolve(null as unknown));
+vi.mock("@tauri-apps/plugin-dialog", () => ({
+  open: (...a: unknown[]) => dialogOpen(...(a as [])),
+  save: (...a: unknown[]) => dialogSave(...(a as [])),
+}));
 const revealItemInDir = vi.fn(() => Promise.resolve());
+const openUrl = vi.fn(() => Promise.resolve());
+const openPath = vi.fn(() => Promise.resolve());
 vi.mock("@tauri-apps/plugin-opener", () => ({
   revealItemInDir: (...a: unknown[]) => revealItemInDir(...(a as [])),
+  openUrl: (...a: unknown[]) => openUrl(...(a as [])),
+  openPath: (...a: unknown[]) => openPath(...(a as [])),
 }));
 
 import { useStore } from "../store";
 import { App } from "../App";
-import { Board } from "../components/Board";
-import { SendSheet } from "../components/SendSheet";
-import { IncomingModal } from "../components/IncomingModal";
+import { useToasts } from "../ui/Toasts";
 
 function fresh() {
   useStore.setState({
@@ -52,33 +64,38 @@ function fresh() {
     transfers: {},
     search: "",
     pauseAll: false,
-    openMenuKey: null,
     sheetPaths: null,
+    sheetTo: null,
     incomingOfferId: null,
+    personOpen: null,
+    paletteOpen: false,
     deposits: [],
-    depositsOpen: false,
     depositsLoading: false,
     depositsError: null,
     revoking: [],
-    // The view flags: a test that navigated away (e.g. opened the Rubrica) must
-    // not leave the next test staring at the wrong pane.
-    historyOpen: false,
-    contactsOpen: false,
+    pairing: null,
+    config: null,
+    sync: null,
+    // A test that navigated away must not leave the next one on the wrong screen.
+    route: "transfers",
     receiveOpen: false,
   });
+  useToasts.setState({ items: [] });
 }
 
 /** Seed the daemon's snapshot with one pending offer and mount the whole app,
  *  waiting for `init()`'s reload to land. Setting the store directly is not enough
  *  here: mounting `App` refetches, and would wipe a hand-placed row. */
 async function renderAppWithOffer() {
-  harness.snapshot.pending = [dto.offer({ id: "o1", from: "peer1", name: "arrivo.zip" })];
+  harness.snapshot.pending = [
+    dto.offer({ id: "o1", from: "peer1", name: "arrivo.zip" }),
+  ];
   render(<App />);
   await screen.findByText("arrivo.zip");
 }
 
 /** Same, for a send that is under way. */
-async function renderAppWithSend(over: Partial<Record<string, unknown>> = {}) {
+async function renderAppWithSend(over: Record<string, unknown> = {}) {
   harness.snapshot.transfers = [
     dto.transfer({ id: 1, name: "invio.txt", status: "active", ...(over as object) }),
   ];
@@ -86,417 +103,665 @@ async function renderAppWithSend(over: Partial<Record<string, unknown>> = {}) {
   await screen.findByText("invio.txt");
 }
 
-/** An offer row exactly as the store builds one. */
-function offerRow(over: Record<string, unknown> = {}) {
-  return {
-    key: "oo1",
-    id: 0,
-    offerId: "o1",
-    dir: "in" as const,
-    name: "arrivo.zip",
-    size: 100,
-    transferred: 0,
-    status: "in arrivo" as const,
-    peer: "proj",
-    peerId: "peer1",
-    encrypted: true,
-    verified: false,
-    method: "cloud" as const,
-    swarmPeers: 0,
-    downloadPeers: 0,
-    files: 1,
-    firstSeen: Date.now(),
-    rank: 1,
-    ...over,
-  };
+/** The row's overflow menu, opened. Every row action lives behind it. */
+async function openRowMenu(name: string) {
+  fireEvent.click(await screen.findByLabelText(`Azioni per ${name}`));
+  return screen.findByRole("menu");
 }
-function sendRow(over: Record<string, unknown> = {}) {
-  return { ...offerRow(), key: "t1", id: 1, offerId: undefined, dir: "out" as const, name: "invio.txt", status: "in corso" as const, ...over };
+
+/** The text of every toast currently on screen. Refusals land here now, rather
+ *  than in a banner: the store records them and `App` re-raises them. */
+function toastText(): string {
+  return document.querySelector(".toasts")?.textContent ?? "";
 }
 
 beforeEach(() => {
   resetHarness();
   fresh();
   dialogOpen.mockClear();
+  dialogSave.mockClear();
   revealItemInDir.mockClear();
+  openUrl.mockClear();
 });
 afterEach(cleanup);
 
-describe("the Accetta button", () => {
-  it("102. pressing it tells the daemon to accept", async () => {
-    useStore.setState({ transfers: { oo1: offerRow() as never } });
-    render(<Board />);
-    fireEvent.click(screen.getByText("Accetta"));
-    await waitFor(() => expect(harness.recorder.accept).toEqual([["o1", null]]));
+// ---------------------------------------------------------------------------
+
+describe("an incoming offer", () => {
+  it("102. opening the row and pressing Accetta tells the daemon", async () => {
+    await renderAppWithOffer();
+    fireEvent.click(screen.getByText("arrivo.zip"));
+    fireEvent.click(await screen.findByText("Accetta e scarica"));
+    await waitFor(() =>
+      expect(harness.recorder.accept).toEqual([["o1", null]])
+    );
   });
 
   it("103. when the daemon refuses, the user is told — not left guessing", async () => {
-    // THE bug: the click fires a promise nobody awaits, so the refusal used to
-    // disappear and the button looked inert. This is the test that was missing.
-    harness.fail = new Set(["acceptOffer"]);
     await renderAppWithOffer();
-    fireEvent.click(screen.getByText("Accetta"));
-    await waitFor(() => expect(useStore.getState().actionError).toMatch(/accettare/i));
-    expect(await screen.findByRole("alert")).toBeDefined();
+    harness.fail = new Set(["acceptOffer"]);
+    fireEvent.click(screen.getByText("arrivo.zip"));
+    fireEvent.click(await screen.findByText("Accetta e scarica"));
+    await waitFor(() => expect(toastText()).toMatch(/rifiut|Non è andata/i));
   });
 
   it("104. a refused accept keeps the row, so it can be retried", async () => {
-    useStore.setState({ transfers: { oo1: offerRow() as never } });
+    await renderAppWithOffer();
     harness.fail = new Set(["acceptOffer"]);
-    render(<Board />);
-    fireEvent.click(screen.getByText("Accetta"));
-    await waitFor(() => expect(useStore.getState().actionError).toBeTruthy());
-    expect(useStore.getState().transfers.oo1).toBeTruthy();
+    fireEvent.click(screen.getByText("arrivo.zip"));
+    fireEvent.click(await screen.findByText("Accetta e scarica"));
+    await waitFor(() => expect(toastText()).toBeTruthy());
+    expect(useStore.getState().transfers["oo1"]).toBeTruthy();
   });
 
-  it("105. it does not also open the details modal underneath it", async () => {
-    // The button sits inside a row whose own click opens the modal.
-    useStore.setState({ transfers: { oo1: offerRow() as never } });
-    render(<Board />);
-    fireEvent.click(screen.getByText("Accetta"));
-    await waitFor(() => expect(harness.recorder.accept).toHaveLength(1));
-    expect(useStore.getState().incomingOfferId).toBeNull();
-  });
-});
-
-describe("the Rifiuta button", () => {
-  it("106. pressing it tells the daemon to reject", async () => {
-    useStore.setState({ transfers: { oo1: offerRow() as never } });
-    render(<Board />);
-    fireEvent.click(screen.getByText("Rifiuta"));
+  it("106. Rifiuta tells the daemon to reject", async () => {
+    await renderAppWithOffer();
+    fireEvent.click(screen.getByText("arrivo.zip"));
+    fireEvent.click(await screen.findByText("Rifiuta"));
     await waitFor(() => expect(harness.recorder.reject).toEqual(["o1"]));
   });
 
   it("107. a refused reject reports itself and keeps the row", async () => {
-    harness.fail = new Set(["rejectOffer"]);
     await renderAppWithOffer();
-    fireEvent.click(screen.getByText("Rifiuta"));
-    await waitFor(() => expect(useStore.getState().actionError).toMatch(/rifiutare/i));
-    expect(useStore.getState().transfers.oo1, "a refused reject must keep the offer").toBeTruthy();
-  });
-});
-
-describe("clicking a row", () => {
-  it("108. an arrival opens its details", () => {
-    useStore.setState({ transfers: { oo1: offerRow() as never } });
-    render(<Board />);
+    harness.fail = new Set(["rejectOffer"]);
     fireEvent.click(screen.getByText("arrivo.zip"));
-    expect(useStore.getState().incomingOfferId).toBe("o1");
+    fireEvent.click(await screen.findByText("Rifiuta"));
+    await waitFor(() => expect(toastText()).toBeTruthy());
+    expect(useStore.getState().transfers["oo1"]).toBeTruthy();
   });
 
-  it("109. an ordinary transfer does not — there is nothing to confirm", () => {
-    useStore.setState({ transfers: { t1: sendRow() as never } });
-    render(<Board />);
+  it("108. clicking an arrival opens the decision dialog", async () => {
+    await renderAppWithOffer();
+    fireEvent.click(screen.getByText("arrivo.zip"));
+    expect(await screen.findByText("Ti stanno mandando un file")).toBeTruthy();
+  });
+
+  it("109. an ordinary transfer does not — there is nothing to confirm", async () => {
+    await renderAppWithSend();
     fireEvent.click(screen.getByText("invio.txt"));
-    expect(useStore.getState().incomingOfferId).toBeNull();
+    expect(screen.queryByText("Ti stanno mandando un file")).toBeNull();
+  });
+
+  it("135. it shows the sender's note", async () => {
+    harness.snapshot.pending = [
+      dto.offer({ id: "o1", from: "peer1", name: "arrivo.zip", note: "guarda qui" }),
+    ];
+    render(<App />);
+    fireEvent.click(await screen.findByText("arrivo.zip"));
+    expect(await screen.findByText("guarda qui")).toBeTruthy();
+  });
+
+  it("137. it names the real download folder, not a guess", async () => {
+    await renderAppWithOffer();
+    fireEvent.click(screen.getByText("arrivo.zip"));
+    await screen.findByText("Ti stanno mandando un file");
+    expect(document.body.textContent).toContain("/Users/ls/Arvolo");
+  });
+
+  it("134. Accetta without picking a folder uses the daemon's default", async () => {
+    await renderAppWithOffer();
+    fireEvent.click(screen.getByText("arrivo.zip"));
+    fireEvent.click(await screen.findByText("Accetta e scarica"));
+    await waitFor(() =>
+      expect(harness.recorder.accept[0][1]).toBeNull()
+    );
+  });
+
+  it("133. Accetta uses the folder the user picked", async () => {
+    dialogOpen.mockImplementation(() => Promise.resolve("/tmp/qui" as unknown));
+    await renderAppWithOffer();
+    fireEvent.click(screen.getByText("arrivo.zip"));
+    fireEvent.click(await screen.findByText("Scegli…"));
+    await waitFor(() =>
+      expect(
+        (screen.getByLabelText("Cartella di destinazione") as HTMLInputElement)
+          .value
+      ).toBe("/tmp/qui")
+    );
+    fireEvent.click(screen.getByText("Accetta e scarica"));
+    await waitFor(() =>
+      expect(harness.recorder.accept).toEqual([["o1", "/tmp/qui"]])
+    );
   });
 });
+
+// ---------------------------------------------------------------------------
 
 describe("the row menu", () => {
-  it("110. the ⋮ opens it, and its actions reach the daemon", async () => {
-    useStore.setState({ transfers: { t1: sendRow() as never } });
-    render(<Board />);
-    fireEvent.click(screen.getByLabelText("Azioni trasferimento"));
-    fireEvent.click(screen.getByText("Metti in pausa"));
+  it("110. it opens, and its actions reach the daemon", async () => {
+    await renderAppWithSend();
+    const menu = await openRowMenu("invio.txt");
+    fireEvent.click(within(menu).getByText("Metti in pausa"));
     await waitFor(() => expect(harness.recorder.pause).toEqual([1]));
   });
 
   it("111. a refused menu action reports itself", async () => {
-    harness.fail = new Set(["pause"]);
     await renderAppWithSend();
-    fireEvent.click(screen.getByLabelText("Azioni trasferimento"));
-    fireEvent.click(screen.getByText("Metti in pausa"));
-    await waitFor(() => expect(useStore.getState().actionError).toMatch(/pausa/i));
+    harness.fail = new Set(["pause"]);
+    const menu = await openRowMenu("invio.txt");
+    fireEvent.click(within(menu).getByText("Metti in pausa"));
+    await waitFor(() => expect(toastText()).toBeTruthy());
   });
 
   it("112. Riprendi resumes a paused transfer", async () => {
-    useStore.setState({ transfers: { t1: sendRow({ status: "in attesa" }) as never } });
-    render(<Board />);
-    fireEvent.click(screen.getByLabelText("Azioni trasferimento"));
-    fireEvent.click(screen.getByText("Riprendi"));
+    await renderAppWithSend({ status: "paused: dall'utente" });
+    const menu = await openRowMenu("invio.txt");
+    fireEvent.click(within(menu).getByText("Riprendi"));
     await waitFor(() => expect(harness.recorder.resume).toEqual([1]));
   });
 
-  it("113. Annulla invio cancels a live send", async () => {
-    useStore.setState({ transfers: { t1: sendRow() as never } });
-    render(<Board />);
-    fireEvent.click(screen.getByLabelText("Azioni trasferimento"));
-    fireEvent.click(screen.getByText("Annulla invio"));
+  it("113. Annulla asks first, then cancels — it is not undoable", async () => {
+    await renderAppWithSend();
+    const menu = await openRowMenu("invio.txt");
+    fireEvent.click(within(menu).getByText("Annulla"));
+    // The confirm stands between the click and the daemon.
+    expect(harness.recorder.cancel).toEqual([]);
+    fireEvent.click(await screen.findByText("Annulla il trasferimento"));
     await waitFor(() => expect(harness.recorder.cancel).toEqual([1]));
   });
 
-  it("114. Elimina removes a concluded one", async () => {
-    useStore.setState({ transfers: { t1: sendRow({ status: "completato" }) as never } });
-    render(<Board />);
-    fireEvent.click(screen.getByLabelText("Azioni trasferimento"));
-    fireEvent.click(screen.getByText("Elimina"));
+  it("114. Togli dalla lista removes a concluded one", async () => {
+    await renderAppWithSend({ status: "completed" });
+    const menu = await openRowMenu("invio.txt");
+    fireEvent.click(within(menu).getByText("Togli dalla lista"));
     await waitFor(() => expect(harness.recorder.remove).toEqual([1]));
   });
 
-  it("115. a refused Elimina keeps the row on screen", async () => {
-    harness.fail = new Set(["remove"]);
+  it("115. a refused removal keeps the row on screen", async () => {
     await renderAppWithSend({ status: "completed" });
-    fireEvent.click(screen.getByLabelText("Azioni trasferimento"));
-    fireEvent.click(screen.getByText("Elimina"));
-    await waitFor(() => expect(useStore.getState().actionError).toMatch(/eliminare/i));
-    expect(useStore.getState().transfers.t1, "a refused remove must keep the row").toBeTruthy();
+    harness.fail = new Set(["remove"]);
+    const menu = await openRowMenu("invio.txt");
+    fireEvent.click(within(menu).getByText("Togli dalla lista"));
+    await waitFor(() => expect(toastText()).toBeTruthy());
+    expect(screen.getByText("invio.txt")).toBeTruthy();
   });
 
-  it("116. Apri cartella reveals a completed download", async () => {
-    useStore.setState({
-      transfers: { t1: sendRow({ status: "completato", path: "/Users/ls/Arvolo/x" }) as never },
-    });
-    render(<Board />);
-    fireEvent.click(screen.getByLabelText("Azioni trasferimento"));
-    fireEvent.click(screen.getByText("Apri cartella"));
-    await waitFor(() => expect(revealItemInDir).toHaveBeenCalledWith("/Users/ls/Arvolo/x"));
-  });
-
-  it("117. Verifica identità routes to the Rubrica, where the fingerprint is shown", async () => {
-    // Marking a key verified means "I compared the fingerprint out-of-band", so
-    // the menu no longer marks on the spot: it opens the address book, whose
-    // verify flow puts the fingerprint on screen before asking for the click.
-    useStore.setState({
-      contacts: [dto.contact({ name: "proj", id: "peer1" })],
-      contactsById: { peer1: dto.contact({ name: "proj", id: "peer1" }) },
-      transfers: { t1: sendRow({ verified: false }) as never },
-    });
-    render(<Board />);
-    fireEvent.click(screen.getByLabelText("Azioni trasferimento"));
-    fireEvent.click(screen.getByText("Verifica identità…"));
-    expect(useStore.getState().contactsOpen).toBe(true);
-    expect(harness.recorder.markVerified).toEqual([]);
+  it("116. Apri la cartella reveals a completed download in the file manager", async () => {
+    await renderAppWithSend({ status: "completed" });
+    // `path` only ever arrives on the `completed` event, never in a snapshot.
+    useStore.setState((s) => ({
+      transfers: {
+        ...s.transfers,
+        t1: { ...s.transfers.t1, path: "/Users/ls/Arvolo/invio.txt" },
+      },
+    }));
+    const menu = await openRowMenu("invio.txt");
+    fireEvent.click(within(menu).getByText("Apri la cartella"));
+    await waitFor(() =>
+      expect(revealItemInDir).toHaveBeenCalledWith("/Users/ls/Arvolo/invio.txt")
+    );
   });
 
   it("118. Sposta giù reorders without touching the daemon", async () => {
-    useStore.setState({
-      transfers: {
-        t1: sendRow({ key: "t1", id: 1, name: "primo", rank: 2 }) as never,
-        t2: sendRow({ key: "t2", id: 2, name: "secondo", rank: 1 }) as never,
-      },
-    });
-    render(<Board />);
-    fireEvent.click(screen.getAllByLabelText("Azioni trasferimento")[0]);
-    fireEvent.click(screen.getByText("Sposta giù"));
-    expect(useStore.getState().transfers.t1.rank).toBe(1);
-    expect(harness.recorder.cancel).toEqual([]); // nothing was sent anywhere
-  });
-});
-
-describe("the header", () => {
-  it("119. the bell opens the oldest arrival", async () => {
-    await renderAppWithOffer();
-    fireEvent.click(screen.getByTitle(/1 file in arrivo/i));
-    expect(useStore.getState().incomingOfferId).toBe("o1");
-  });
-
-  it("120. with nothing waiting, the bell does nothing", () => {
-    render(<App />);
-    fireEvent.click(screen.getByTitle(/nessun arrivo/i));
-    expect(useStore.getState().incomingOfferId).toBeNull();
-  });
-
-  it("121. the code chip copies the id", async () => {
-    const writeText = vi.fn(() => Promise.resolve());
-    Object.assign(navigator, { clipboard: { writeText } });
-    render(<App />);
-    fireEvent.click(screen.getByTitle("Copia il tuo codice"));
-    expect(writeText).toHaveBeenCalledWith(
-      "if2xmnescalwohxlex5qylevzs2cypwdnjxe7sxb76wcphc7daha"
-    );
-    expect(await screen.findByText(/copiato/i)).toBeDefined();
-  });
-});
-
-describe("the control row", () => {
-  it("122. typing in the search filters the board", async () => {
     harness.snapshot.transfers = [
-      dto.transfer({ id: 1, name: "relazione.pdf" }),
-      dto.transfer({ id: 2, name: "foto.zip" }),
+      dto.transfer({ id: 1, name: "primo.txt", status: "active" }),
+      dto.transfer({ id: 2, name: "secondo.txt", status: "active" }),
     ];
     render(<App />);
-    await screen.findByText("relazione.pdf");
-    fireEvent.change(screen.getByPlaceholderText(/cerca file/i), {
-      target: { value: "relaz" },
-    });
-    expect(screen.getByText("relazione.pdf")).toBeDefined();
-    expect(screen.queryByText("foto.zip")).toBeNull();
-  });
-
-  it("123. Pausa tutto pauses what is running, and the label flips", async () => {
-    await renderAppWithSend();
-    fireEvent.click(screen.getByText("Pausa tutto"));
-    await waitFor(() => expect(harness.recorder.pause).toEqual([1]));
-    expect(await screen.findByText("Riprendi tutto")).toBeDefined();
-  });
-
-  it("124. Scegli file opens the OS picker", async () => {
-    render(<App />);
-    fireEvent.click(screen.getByText("Scegli file"));
-    await waitFor(() => expect(dialogOpen).toHaveBeenCalled());
+    await screen.findByText("primo.txt");
+    const before = useStore.getState().transfers.t2.rank;
+    const menu = await openRowMenu("secondo.txt");
+    fireEvent.click(within(menu).getByText("Sposta giù"));
+    await waitFor(() =>
+      expect(useStore.getState().transfers.t2.rank).not.toBe(before)
+    );
+    expect(harness.recorder.cancel).toEqual([]);
   });
 });
 
+// ---------------------------------------------------------------------------
+
+describe("the board's own controls", () => {
+  it("122. typing in the search filters the board", async () => {
+    harness.snapshot.transfers = [
+      dto.transfer({ id: 1, name: "trovami.txt", status: "active" }),
+      dto.transfer({ id: 2, name: "nascondimi.txt", status: "active" }),
+    ];
+    render(<App />);
+    await screen.findByText("trovami.txt");
+    fireEvent.change(screen.getByLabelText("Filtra i trasferimenti"), {
+      target: { value: "trovami" },
+    });
+    await waitFor(() => expect(screen.queryByText("nascondimi.txt")).toBeNull());
+    expect(screen.getByText("trovami.txt")).toBeTruthy();
+  });
+
+  it("123. Pulisci drops the finished rows, daemon-side first", async () => {
+    await renderAppWithSend({ status: "completed" });
+    fireEvent.click(await screen.findByText(/^Pulisci/));
+    await waitFor(() => expect(harness.recorder.clearFinished).toBe(1));
+  });
+
+  it("a pending arrival is announced from any other screen", async () => {
+    await renderAppWithOffer();
+    useStore.getState().go("history");
+    expect(
+      await screen.findByText(/vuole mandarti un file/i)
+    ).toBeTruthy();
+  });
+});
+
+// ---------------------------------------------------------------------------
+
 describe("the send panel", () => {
-  it("125. clicking a contact sends to them and closes the panel", async () => {
-    const c = dto.contact({ name: "proj", id: "peer1" });
-    useStore.setState({ contacts: [c], contactsById: { peer1: c }, sheetPaths: ["/a.txt"] });
-    render(<SendSheet />);
-    fireEvent.click(screen.getByText("proj"));
-    await waitFor(() =>
-      expect(harness.recorder.sendTo).toEqual([["proj", ["/a.txt"], ""]])
+  const openSend = async () => {
+    render(<App />);
+    fireEvent.click(await screen.findByText("Invia…"));
+    return screen.findByText("Cosa mandi");
+  };
+
+  it("124. File… opens the OS picker", async () => {
+    await openSend();
+    fireEvent.click(screen.getByText("File…"));
+    await waitFor(() => expect(dialogOpen).toHaveBeenCalled());
+  });
+
+  it("125. picking a contact and sending reaches the daemon", async () => {
+    harness.snapshot.contacts = [dto.contact({ name: "proj" })];
+    useStore.setState({ sheetPaths: ["/a.txt"] });
+    render(<App />);
+    fireEvent.click(await screen.findByText("proj"));
+    // "Invia" is also the header's own send button; the one under test is the
+    // sheet's submit.
+    fireEvent.click(
+      within(document.querySelector(".sheet-foot") as HTMLElement).getByText(
+        "Invia"
+      )
     );
-    expect(useStore.getState().sheetPaths).toBeNull();
+    await waitFor(() =>
+      expect(harness.recorder.sendTo[0]?.[0]).toBe("proj")
+    );
   });
 
   it("126. the note typed in rides along with the send", async () => {
-    const c = dto.contact({ name: "proj", id: "peer1" });
-    useStore.setState({ contacts: [c], contactsById: { peer1: c }, sheetPaths: ["/a.txt"] });
-    render(<SendSheet />);
-    fireEvent.change(screen.getByPlaceholderText(/messaggio/i), {
-      target: { value: "ecco i file" },
-    });
-    fireEvent.click(screen.getByText("proj"));
+    harness.snapshot.contacts = [dto.contact({ name: "proj" })];
+    useStore.setState({ sheetPaths: ["/a.txt"] });
+    render(<App />);
+    fireEvent.click(await screen.findByText("proj"));
+    fireEvent.change(
+      screen.getByPlaceholderText("Ecco i file di cui parlavamo."),
+      { target: { value: "eccolo" } }
+    );
+    fireEvent.click(
+      within(document.querySelector(".sheet-foot") as HTMLElement).getByText(
+        "Invia"
+      )
+    );
     await waitFor(() =>
-      expect(harness.recorder.sendTo).toEqual([["proj", ["/a.txt"], "ecco i file"]])
+      expect(harness.recorder.sendTo[0]?.[2]).toBe("eccolo")
     );
   });
 
-  it("127. a refused send shows why, inside the panel", async () => {
-    const c = dto.contact({ name: "proj", id: "peer1" });
-    useStore.setState({ contacts: [c], contactsById: { peer1: c }, sheetPaths: ["/a.txt"] });
+  it("127. a refused send says why instead of closing silently", async () => {
+    harness.snapshot.contacts = [dto.contact({ name: "proj" })];
     harness.fail = new Set(["sendTo"]);
-    render(<SendSheet />);
-    fireEvent.click(screen.getByText("proj"));
-    expect(await screen.findByText(/daemon refused/i)).toBeDefined();
-    // The panel stays open so the user can try another route.
+    useStore.setState({ sheetPaths: ["/a.txt"] });
+    render(<App />);
+    fireEvent.click(await screen.findByText("proj"));
+    fireEvent.click(
+      within(document.querySelector(".sheet-foot") as HTMLElement).getByText(
+        "Invia"
+      )
+    );
+    await waitFor(() => expect(toastText()).toBeTruthy());
+    // Still open, so the user can change something and retry.
     expect(useStore.getState().sheetPaths).not.toBeNull();
   });
 
-  it("128. the ID tab sends to a pasted code", async () => {
+  it("129. the Ticket mode mints a ticket and shows it", async () => {
     useStore.setState({ sheetPaths: ["/a.txt"] });
-    render(<SendSheet />);
-    fireEvent.click(screen.getByText("ID / QR"));
-    fireEvent.change(screen.getByPlaceholderText(/if2xmne/i), {
-      target: { value: "abc123" },
-    });
-    fireEvent.click(screen.getByText("Invia a questo ID"));
-    await waitFor(() => expect(harness.recorder.sendTo).toEqual([["abc123", ["/a.txt"], ""]]));
+    render(<App />);
+    fireEvent.click(await screen.findByText("Ticket"));
+    fireEvent.click(screen.getByText("Crea il ticket"));
+    expect(await screen.findByText("arvc-test")).toBeTruthy();
   });
 
-  it("129. the Ticket tab mints a ticket and shows it", async () => {
+  it("130. the Link mode creates a link and shows it", async () => {
     useStore.setState({ sheetPaths: ["/a.txt"] });
-    render(<SendSheet />);
-    fireEvent.click(screen.getByText("Ticket"));
-    fireEvent.click(screen.getByText("Genera ticket P2P"));
-    expect(await screen.findByText("arvc-test")).toBeDefined();
-  });
-
-  it("130. the Link tab creates a link and shows it", async () => {
-    useStore.setState({ sheetPaths: ["/a.txt"] });
-    render(<SendSheet />);
-    fireEvent.click(screen.getByText("Link"));
-    fireEvent.click(screen.getByText("Crea link di download"));
+    render(<App />);
+    fireEvent.click(await screen.findByText("Link"));
+    fireEvent.click(screen.getByText("Crea il link"));
     expect(
-      await screen.findByDisplayValue("https://relay.test/dl/abc#key")
-    ).toBeDefined();
+      await screen.findByText("https://relay.test/dl/abc#key")
+    ).toBeTruthy();
   });
 
   it("131. a relay that refuses links says so instead of showing nothing", async () => {
-    useStore.setState({ sheetPaths: ["/a.txt"] });
     harness.fail = new Set(["createLink"]);
-    render(<SendSheet />);
-    fireEvent.click(screen.getByText("Link"));
-    fireEvent.click(screen.getByText("Crea link di download"));
-    expect(await screen.findByText(/daemon refused/i)).toBeDefined();
+    useStore.setState({ sheetPaths: ["/a.txt"] });
+    render(<App />);
+    fireEvent.click(await screen.findByText("Link"));
+    fireEvent.click(screen.getByText("Crea il link"));
+    await waitFor(() => expect(toastText()).toBeTruthy());
   });
 
-  it("132. the ✕ closes the panel without sending", () => {
+  it("the Codice mode shows a code to read out", async () => {
     useStore.setState({ sheetPaths: ["/a.txt"] });
-    render(<SendSheet />);
-    fireEvent.click(screen.getByText("✕"));
+    render(<App />);
+    fireEvent.click(await screen.findByText("Codice"));
+    fireEvent.click(screen.getByText("Genera il codice"));
+    expect(await screen.findByText("4821-crater-mango")).toBeTruthy();
+  });
+
+  it("mailbox options only appear once the send is a deposit", async () => {
+    harness.snapshot.contacts = [dto.contact({ name: "proj" })];
+    useStore.setState({ sheetPaths: ["/a.txt"] });
+    render(<App />);
+    await screen.findByText("proj");
+    // TTL and password protect a *deposit*; offering them on a live send would
+    // promise something that is not being applied.
+    expect(screen.queryByText("Scade dopo")).toBeNull();
+    fireEvent.click(screen.getByLabelText("Lascia in casella"));
+    expect(await screen.findByText("Scade dopo")).toBeTruthy();
+  });
+
+  it("a deposit send carries its ttl, cap and password to the daemon", async () => {
+    harness.snapshot.contacts = [dto.contact({ name: "proj" })];
+    useStore.setState({ sheetPaths: ["/a.txt"] });
+    render(<App />);
+    fireEvent.click(await screen.findByText("proj"));
+    fireEvent.click(screen.getByLabelText("Lascia in casella"));
+    fireEvent.change(await screen.findByPlaceholderText("nessuna"), {
+      target: { value: "segreto" },
+    });
+    fireEvent.click(screen.getByText("Deposita"));
+    await waitFor(() => expect(harness.recorder.depositTo).toHaveLength(1));
+    const [to, , ttl, max, password] = harness.recorder.depositTo[0];
+    expect(to).toBe("proj");
+    expect(ttl).toBe(7 * 24 * 3600);
+    expect(max).toBe(1);
+    expect(password).toBe("segreto");
+  });
+
+  it("a deposit hands back the arvm… ticket for hand-delivery", async () => {
+    harness.snapshot.contacts = [dto.contact({ name: "proj" })];
+    useStore.setState({ sheetPaths: ["/a.txt"] });
+    render(<App />);
+    fireEvent.click(await screen.findByText("proj"));
+    fireEvent.click(screen.getByLabelText("Lascia in casella"));
+    fireEvent.click(await screen.findByText("Deposita"));
+    expect(await screen.findByText("arvm-test")).toBeTruthy();
+  });
+
+  it("reopening the panel never inherits the last send's password", async () => {
+    harness.snapshot.contacts = [dto.contact({ name: "proj" })];
+    useStore.setState({ sheetPaths: ["/a.txt"] });
+    render(<App />);
+    fireEvent.click(await screen.findByText("proj"));
+    fireEvent.click(screen.getByLabelText("Lascia in casella"));
+    fireEvent.change(await screen.findByPlaceholderText("nessuna"), {
+      target: { value: "segreto" },
+    });
+    useStore.getState().closeSheet();
+    useStore.getState().openSheet(["/b.txt"]);
+    fireEvent.click(await screen.findByText("proj"));
+    fireEvent.click(screen.getByLabelText("Lascia in casella"));
+    // A password carried over would silently protect a different file for a
+    // different person.
+    expect(
+      (
+        (await screen.findByPlaceholderText("nessuna")) as HTMLInputElement
+      ).value
+    ).toBe("");
+  });
+
+  it("132. the ✕ closes the panel without sending", async () => {
+    useStore.setState({ sheetPaths: ["/a.txt"] });
+    render(<App />);
+    fireEvent.click(await screen.findByLabelText("Chiudi"));
     expect(useStore.getState().sheetPaths).toBeNull();
     expect(harness.recorder.sendTo).toEqual([]);
   });
 });
 
-describe("the incoming modal", () => {
-  it("133. Accetta uses the folder the user picked", async () => {
-    useStore.setState({ transfers: { oo1: offerRow() as never }, incomingOfferId: "o1" });
-    dialogOpen.mockResolvedValueOnce("/tmp/scelta");
-    render(<IncomingModal />);
-    fireEvent.click(screen.getByText(/salva in/i));
-    await waitFor(() => expect(dialogOpen).toHaveBeenCalled());
-    fireEvent.click(screen.getByText("Accetta"));
-    await waitFor(() => expect(harness.recorder.accept).toEqual([["o1", "/tmp/scelta"]]));
-  });
+// ---------------------------------------------------------------------------
 
-  it("134. Accetta without picking one uses the daemon's default", async () => {
-    useStore.setState({ transfers: { oo1: offerRow() as never }, incomingOfferId: "o1" });
-    render(<IncomingModal />);
-    fireEvent.click(screen.getByText("Accetta"));
-    await waitFor(() => expect(harness.recorder.accept).toEqual([["o1", null]]));
-  });
-
-  it("135. it shows the sender's note", () => {
-    useStore.setState({
-      transfers: { oo1: offerRow({ note: "ecco le foto di ieri" }) as never },
-      incomingOfferId: "o1",
-    });
-    render(<IncomingModal />);
-    expect(screen.getByText("ecco le foto di ieri")).toBeDefined();
-  });
-
-  it("136. Rifiuta from the modal rejects", async () => {
-    useStore.setState({ transfers: { oo1: offerRow() as never }, incomingOfferId: "o1" });
-    render(<IncomingModal />);
-    fireEvent.click(screen.getByText("Rifiuta"));
-    await waitFor(() => expect(harness.recorder.reject).toEqual(["o1"]));
-  });
-
-  it("137. it names the real download folder, not a guess", () => {
-    useStore.setState({ transfers: { oo1: offerRow() as never }, incomingOfferId: "o1" });
-    render(<IncomingModal />);
-    expect(screen.getByText(/Arvolo/)).toBeDefined();
-  });
-});
-
-describe("no dead ends to the CLI", () => {
-  it("156. the Link tab points at the panel, not at a command to type", async () => {
-    // It used to say "Revocalo dalla CLI con `arvolo deposits`" — a command that
-    // does not exist in the CLI at all. The advice was unfollowable twice over.
-    useStore.setState({ sheetPaths: ["/a.txt"] });
+describe("receiving from a pasted artefact", () => {
+  it("recognises a pairing code and sends it to the daemon", async () => {
     render(<App />);
-    fireEvent.click(screen.getByText("Link"));
-    fireEvent.click(screen.getByText("Crea link di download"));
-    await screen.findByDisplayValue("https://relay.test/dl/abc#key");
+    fireEvent.click(await screen.findByText("Ricevi…"));
+    fireEvent.change(await screen.findByPlaceholderText("4821-crater-mango"), {
+      target: { value: "4821-crater-mango" },
+    });
+    expect(
+      screen.getByText(/Codice di accoppiamento/)
+    ).toBeTruthy();
+    fireEvent.click(
+      within(document.querySelector(".sheet-foot") as HTMLElement).getByText(
+        "Ricevi"
+      )
+    );
+    await waitFor(() =>
+      expect(harness.recorder.recv[0]?.[0]).toBe("4821-crater-mango")
+    );
+  });
 
-    expect(screen.queryByText(/arvolo deposits/)).toBeNull();
-    fireEvent.click(screen.getByText("Link e depositi"));
-    await waitFor(() => expect(useStore.getState().depositsOpen).toBe(true));
-    expect(useStore.getState().sheetPaths).toBeNull();
+  it("offers a password field only where a password can exist", async () => {
+    render(<App />);
+    fireEvent.click(await screen.findByText("Ricevi…"));
+    const field = await screen.findByPlaceholderText("4821-crater-mango");
+    fireEvent.change(field, { target: { value: "4821-crater-mango" } });
+    // A pairing code has no password; suggesting otherwise teaches a falsehood.
+    expect(screen.queryByLabelText(/Password/)).toBeNull();
+    fireEvent.change(field, { target: { value: "arvm1234" } });
+    await waitFor(() =>
+      expect(screen.getByText(/Ticket di casella/)).toBeTruthy()
+    );
   });
 });
 
-describe("the error banner", () => {
-  it("138. it can be dismissed", async () => {
-    harness.fail = new Set(["acceptOffer"]);
-    await renderAppWithOffer();
-    fireEvent.click(screen.getByText("Accetta"));
-    const alert = await screen.findByRole("alert");
-    fireEvent.click(within(alert).getByLabelText("Chiudi"));
-    await waitFor(() => expect(useStore.getState().actionError).toBeNull());
+// ---------------------------------------------------------------------------
+
+describe("the address book", () => {
+  it("Invia from a person card opens the sheet already addressed to them", async () => {
+    harness.snapshot.contacts = [dto.contact({ name: "proj" })];
+    render(<App />);
+    useStore.getState().go("people");
+    fireEvent.click(
+      within((await screen.findByText("proj")).closest(".person") as HTMLElement)
+        .getByText("Invia")
+    );
+    // Choosing a person and then being asked to choose them again is the app
+    // forgetting what it was just told.
+    expect(useStore.getState().sheetTo).toBe("proj");
+    // The recipient is already chosen, so the only thing still missing is the
+    // payload — and the submit stays disabled until there is one.
+    const submit = within(
+      document.querySelector(".sheet-foot") as HTMLElement
+    ).getByText("Invia").closest("button") as HTMLButtonElement;
+    expect(submit.disabled).toBe(true);
+    useStore.getState().openSheet(["/a.txt"], "proj");
+    await waitFor(() => expect(submit.disabled).toBe(false));
+    fireEvent.click(submit);
+    await waitFor(() => expect(harness.recorder.sendTo[0]?.[0]).toBe("proj"));
   });
 
-  it("139. a later success clears it without a click", async () => {
-    harness.fail = new Set(["acceptOffer"]);
-    await renderAppWithOffer();
-    fireEvent.click(screen.getByText("Accetta"));
-    await waitFor(() => expect(useStore.getState().actionError).toBeTruthy());
+  it("117. a contact's fingerprint is reachable, and verifying is deliberate", async () => {
+    harness.snapshot.contacts = [
+      dto.contact({ name: "proj", verified: false }),
+    ];
+    render(<App />);
+    useStore.getState().go("people");
+    fireEvent.click(await screen.findByText("Dettagli"));
+    await screen.findByText("Impronta");
+    const button = screen.getByText("Segna come verificato");
+    // Reading the fingerprint and asserting you checked it are two acts.
+    expect((button.closest("button") as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(
+      screen.getByLabelText(/Ho confrontato l'impronta/, { selector: "input" })
+    );
+    fireEvent.click(button);
+    await waitFor(() =>
+      expect(harness.recorder.markVerified).toEqual(["proj"])
+    );
+  });
 
-    // The offer is still there precisely because the accept was refused: retry it.
-    harness.fail = new Set();
-    fireEvent.click(screen.getByText("Accetta"));
-    await waitFor(() => expect(useStore.getState().actionError).toBeNull());
+  it("trusting an unverified contact demands an explicit override", async () => {
+    harness.snapshot.contacts = [
+      dto.contact({ name: "proj", verified: false }),
+    ];
+    render(<App />);
+    useStore.getState().go("people");
+    fireEvent.click(await screen.findByLabelText("Azioni per proj"));
+    fireEvent.click(
+      within(await screen.findByRole("menu")).getByText("Scarica in automatico")
+    );
+    // Not sent yet: auto-downloading from an unconfirmed key is a MITM risk.
+    expect(harness.recorder.markTrusted).toEqual([]);
+    fireEvent.click(await screen.findByText("Forza comunque"));
+    await waitFor(() =>
+      expect(harness.recorder.markTrusted).toEqual([["proj", true]])
+    );
+  });
+
+  it("a verified contact is trusted without a warning", async () => {
+    harness.snapshot.contacts = [dto.contact({ name: "proj", verified: true })];
+    render(<App />);
+    useStore.getState().go("people");
+    fireEvent.click(await screen.findByLabelText("Azioni per proj"));
+    fireEvent.click(
+      within(await screen.findByRole("menu")).getByText("Scarica in automatico")
+    );
+    await waitFor(() =>
+      expect(harness.recorder.markTrusted).toEqual([["proj", false]])
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe("pairing", () => {
+  it("hosting a contact exchange starts a session and shows its code", async () => {
+    render(<App />);
+    useStore.getState().go("people");
+    fireEvent.click((await screen.findAllByText("Scambia contatti"))[0]);
+    await waitFor(() =>
+      expect(harness.recorder.startPairing[0]?.[0]).toBe("contact_host")
+    );
+    // The code arrives as an event, not as the call's return value.
+    useStore.getState().applyEvent({
+      type: "pairing_code",
+      session: "pair-1",
+      code: "4821-crater-mango",
+    });
+    expect(await screen.findByText("4821-crater-mango")).toBeTruthy();
+  });
+
+  it("closing the sheet cancels the session on the daemon", async () => {
+    render(<App />);
+    useStore.getState().go("people");
+    fireEvent.click((await screen.findAllByText("Scambia contatti"))[0]);
+    await waitFor(() => expect(useStore.getState().pairing?.session).toBe("pair-1"));
+    fireEvent.click(screen.getByLabelText("Chiudi"));
+    await waitFor(() =>
+      expect(harness.recorder.cancelPairing).toEqual(["pair-1"])
+    );
+  });
+
+  it("a cancelled exchange is not reported back as an error", async () => {
+    render(<App />);
+    useStore.getState().go("people");
+    fireEvent.click(await screen.findByText("Ho un codice"));
+    await screen.findByText("Scambia i contatti");
+    useStore.setState({
+      pairing: {
+        session: "pair-1",
+        kind: "contact_join",
+        code: "x",
+        phase: "waiting",
+        message: "",
+        needsRestart: false,
+      },
+    });
+    useStore.getState().applyEvent({
+      type: "pairing_failed",
+      session: "pair-1",
+      kind: "contact_join",
+      error: "pairing cancelled",
+      cancelled: true,
+    });
+    expect(await screen.findByText("Annullato.")).toBeTruthy();
+  });
+
+  it("a device join that replaced the identity demands a daemon restart", async () => {
+    render(<App />);
+    useStore.setState({
+      pairing: {
+        session: "pair-9",
+        kind: "device_join",
+        code: "x",
+        phase: "waiting",
+        message: "",
+        needsRestart: false,
+      },
+    });
+    useStore.getState().applyEvent({
+      type: "pairing_done",
+      session: "pair-9",
+      kind: "device_join",
+      summary: "Collegato.",
+      needs_restart: true,
+    });
+    expect(await screen.findByText("Riavvia e chiudi")).toBeTruthy();
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe("settings", () => {
+  it("a relay forced by the environment is shown but not editable", async () => {
+    harness.snapshot.config = {
+      ...harness.snapshot.config,
+      relay_source: "env",
+      relay: "https://forced.test",
+    };
+    render(<App />);
+    useStore.getState().go("settings");
+    const field = (await screen.findByLabelText("Relay")) as HTMLInputElement;
+    // Editing it could not win, so it must not look like it could.
+    expect(field.disabled).toBe(true);
+  });
+
+  it("clearing the display name sends a clear, not an empty string", async () => {
+    harness.snapshot.config = {
+      ...harness.snapshot.config,
+      display_name: "Luca",
+    };
+    render(<App />);
+    useStore.getState().go("settings");
+    const field = (await screen.findByLabelText(
+      "Nome che mostri"
+    )) as HTMLInputElement;
+    fireEvent.change(field, { target: { value: "" } });
+    fireEvent.click(
+      within(field.closest(".hstack-sm") as HTMLElement).getByText("Salva")
+    );
+    await waitFor(() =>
+      expect(harness.recorder.setConfig[0]).toEqual({ display_name: "clear" })
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe("the failure notice", () => {
+  it("138. it can be dismissed", async () => {
+    render(<App />);
+    useStore.setState({ actionError: "qualcosa è andato storto" });
+    fireEvent.click(await screen.findByLabelText("Chiudi"));
+    await waitFor(() => expect(toastText()).toBe(""));
+  });
+
+  it("an error never disappears on its own — it has to be read", async () => {
+    vi.useFakeTimers();
+    try {
+      render(<App />);
+      useStore.setState({ actionError: "boom" });
+      await vi.waitFor(() => expect(toastText()).toContain("boom"));
+      vi.advanceTimersByTime(30_000);
+      expect(toastText()).toContain("boom");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

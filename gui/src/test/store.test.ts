@@ -28,7 +28,6 @@ async function boot(expectConnected = true) {
     transfers: {},
     search: "",
     pauseAll: false,
-    openMenuKey: null,
     sheetPaths: null,
     incomingOfferId: null,
   });

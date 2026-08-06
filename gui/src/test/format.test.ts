@@ -102,7 +102,10 @@ describe("row wording", () => {
     for (const s of all) {
       const m = statusMeta(s);
       expect(m.text, s).toBeTruthy();
-      expect(m.color, s).toMatch(/^#/);
+      expect(
+        ["out", "in", "ok", "warn", "bad", "mut", "violet"],
+        s
+      ).toContain(m.tone);
     }
   });
 

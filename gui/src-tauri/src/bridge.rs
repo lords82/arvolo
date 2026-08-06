@@ -8,7 +8,10 @@
 use std::path::PathBuf;
 
 use arvolo_ipc::client::DaemonClient;
-use arvolo_ipc::protocol::{ContactDto, DepositDto, HistoryDto, OfferDto, StatusDto, TransferDto};
+use arvolo_ipc::protocol::{
+    ConfigDto, ConfigPatch, ContactDto, DepositDto, HistoryDto, OfferDto, PairKind, StatusDto,
+    SyncDto, TransferDto,
+};
 use serde::Serialize;
 
 /// A ticket-serve result handed back to the UI.
@@ -62,6 +65,74 @@ pub async fn list_contacts() -> Result<Vec<ContactDto>, String> {
 pub async fn send_to(to: String, paths: Vec<String>, note: String) -> Result<u64, String> {
     let mut c = client().await?;
     c.push(to, paths, note).await.or_else(err)
+}
+
+/// `send --deposit`: straight to the recipient's mailbox, with the options that
+/// only mean anything there. Returns the `arvm…` ticket so the sender can also
+/// hand it over themselves.
+#[tauri::command]
+pub async fn deposit_to(
+    to: String,
+    paths: Vec<String>,
+    note: String,
+    ttl: Option<u64>,
+    max: Option<u32>,
+    password: Option<String>,
+) -> Result<ServedDto, String> {
+    let mut c = client().await?;
+    match c.deposit(to, paths, note, ttl, max, password).await {
+        Ok((id, ticket)) => Ok(ServedDto { id, ticket }),
+        Err(e) => err(e),
+    }
+}
+
+#[tauri::command]
+pub async fn get_config() -> Result<ConfigDto, String> {
+    let mut c = client().await?;
+    c.get_config().await.or_else(err)
+}
+
+#[tauri::command]
+pub async fn set_config(patch: ConfigPatch) -> Result<ConfigDto, String> {
+    let mut c = client().await?;
+    c.set_config(patch).await.or_else(err)
+}
+
+#[tauri::command]
+pub async fn prune_names() -> Result<usize, String> {
+    let mut c = client().await?;
+    c.prune_names().await.or_else(err)
+}
+
+#[tauri::command]
+pub async fn sync_status() -> Result<SyncDto, String> {
+    let mut c = client().await?;
+    c.sync_status().await.or_else(err)
+}
+
+#[tauri::command]
+pub async fn sync_now() -> Result<SyncDto, String> {
+    let mut c = client().await?;
+    c.sync_now().await.or_else(err)
+}
+
+/// Begin a pairing exchange. Returns the session handle; the code and the outcome
+/// arrive on the event stream (`engine://event`) as `pairing_*`.
+#[tauri::command]
+pub async fn start_pairing(
+    kind: PairKind,
+    relay: Option<String>,
+    code: Option<String>,
+    name: Option<String>,
+) -> Result<String, String> {
+    let mut c = client().await?;
+    c.start_pairing(kind, relay, code, name).await.or_else(err)
+}
+
+#[tauri::command]
+pub async fn cancel_pairing(session: String) -> Result<(), String> {
+    let mut c = client().await?;
+    c.cancel_pairing(session).await.or_else(err)
 }
 
 #[tauri::command]
@@ -272,6 +343,27 @@ pub async fn revoke_deposit(id: String) -> Result<(), String> {
 pub async fn mark_verified(name: String) -> Result<(), String> {
     let mut c = client().await?;
     c.mark_verified(name).await.or_else(err)
+}
+
+/// Read a UTF-8 file the user picked in a dialog. Used for address-book import.
+///
+/// Two ten-line commands rather than the `fs` plugin: the plugin brings a scope
+/// language, a capability file and a permission set to grant blanket read/write
+/// under whole directories, and all this app ever touches is the single path a
+/// human just chose in a native picker. The narrower surface is the point.
+#[tauri::command]
+pub async fn read_text_file(path: String) -> Result<String, String> {
+    tokio::fs::read_to_string(&path)
+        .await
+        .map_err(|e| format!("{path}: {e}"))
+}
+
+/// Write a UTF-8 file the user picked in a save dialog (address-book export).
+#[tauri::command]
+pub async fn write_text_file(path: String, contents: String) -> Result<(), String> {
+    tokio::fs::write(&path, contents)
+        .await
+        .map_err(|e| format!("{path}: {e}"))
 }
 
 /// This GUI binary's version — the frontend compares it with the daemon's

@@ -8,11 +8,15 @@
 import { vi } from "vitest";
 import { normalizeEvent, type WireEvent } from "../events";
 import type {
+  ConfigDto,
+  ConfigPatch,
   ContactDto,
   DepositDto,
   EngineEvent,
   OfferDto,
+  PairKind,
   StatusDto,
+  SyncDto,
   TransferDto,
 } from "../types";
 
@@ -45,6 +49,12 @@ export interface Recorder {
   clearFinished: number;
   clearHistory: number;
   listHistory: number;
+  depositTo: [string, string[], number | null, number | null, string | null][];
+  setConfig: ConfigPatch[];
+  pruneNames: number;
+  syncNow: number;
+  startPairing: [PairKind, string | null, string | null][];
+  cancelPairing: string[];
 }
 
 export interface Harness {
@@ -62,6 +72,8 @@ export interface Harness {
     pending: OfferDto[];
     contacts: ContactDto[];
     deposits: DepositDto[];
+    config: ConfigDto;
+    sync: SyncDto;
   };
   /** Make the next call to these commands reject. */
   fail: Set<string>;
@@ -98,6 +110,12 @@ function freshRecorder(): Recorder {
     clearFinished: 0,
     clearHistory: 0,
     listHistory: 0,
+    depositTo: [],
+    setConfig: [],
+    pruneNames: 0,
+    syncNow: 0,
+    startPairing: [],
+    cancelPairing: [],
   };
 }
 
@@ -117,6 +135,30 @@ function freshSnapshot(): Harness["snapshot"] {
     pending: [],
     contacts: [],
     deposits: [],
+    config: {
+      relay: "https://relay.test",
+      relay_configured: "relay.test",
+      relay_source: "config",
+      download_dir: "/Users/ls/Arvolo",
+      download_dir_configured: "",
+      download_dir_from_env: false,
+      display_name: "",
+      sync: true,
+      seed: null,
+      swarm: "",
+      concurrency: null,
+      config_path: "/Users/ls/.config/arvolo/config.toml",
+      identity_path: "/Users/ls/.config/arvolo/identity.key",
+    },
+    sync: {
+      fingerprint: "able-otter-nine",
+      public_id: "if2xmnescalwohxlex5qylevzs2cypwdnjxe7sxb76wcphc7daha",
+      contacts: 0,
+      enabled: true,
+      last_sync: 0,
+      last_merged: 0,
+      last_error: "",
+    },
   };
 }
 
@@ -155,6 +197,46 @@ export function makeIpcMock() {
         return guard("sendTo", 1);
       },
       serveTicket: () => guard("serveTicket", { id: 1, ticket: "arvc-test" }),
+      depositTo: (
+        to: string,
+        paths: string[],
+        _note: string,
+        ttl: number | null,
+        max: number | null,
+        password: string | null
+      ) => {
+        harness.recorder.depositTo.push([to, paths, ttl, max, password]);
+        return guard("depositTo", { id: 2, ticket: "arvm-test" });
+      },
+      getConfig: () => guard("getConfig", harness.snapshot.config),
+      setConfig: (patch: ConfigPatch) => {
+        harness.recorder.setConfig.push(patch);
+        return guard("setConfig", harness.snapshot.config);
+      },
+      pruneNames: () => {
+        harness.recorder.pruneNames++;
+        return guard("pruneNames", 0);
+      },
+      syncStatus: () => guard("syncStatus", harness.snapshot.sync),
+      syncNow: () => {
+        harness.recorder.syncNow++;
+        return guard("syncNow", harness.snapshot.sync);
+      },
+      startPairing: (
+        kind: PairKind,
+        relay: string | null,
+        code: string | null,
+        _name: string | null
+      ) => {
+        harness.recorder.startPairing.push([kind, relay, code]);
+        return guard("startPairing", "pair-1");
+      },
+      cancelPairing: (session: string) => {
+        harness.recorder.cancelPairing.push(session);
+        return guard("cancelPairing", undefined);
+      },
+      readTextFile: () => guard("readTextFile", "[]"),
+      writeTextFile: () => guard("writeTextFile", undefined),
       serveCode: (paths: string[], _relay: string | null, keep: boolean) => {
         harness.recorder.serveCode.push([paths, keep]);
         return guard("serveCode", { id: 1, code: "4821-crater-mango" });

@@ -5,7 +5,7 @@
 
 import { describe, expect, it } from "vitest";
 import {
-  barColor,
+  barClass,
   extOf,
   extTint,
   fmtBytes,
@@ -21,6 +21,11 @@ import {
 import { normalizeEvent } from "../events";
 import type { Method, UIStatus, UITransfer } from "../types";
 
+/** The tones `format.ts` is allowed to return. They are class-name suffixes
+ *  resolved by `.tone-*` / `.tint-*` in theme.css — the assertions below check
+ *  membership rather than a hex value on purpose: the whole point of the token
+ *  indirection is that the actual colour differs between light and dark. */
+const TONES = ["out", "in", "ok", "warn", "bad", "mut", "violet"];
 const DAY = 24 * 3600 * 1000;
 
 function t(over: Partial<UITransfer> = {}): UITransfer {
@@ -111,10 +116,10 @@ describe("statusMeta", () => {
     "fallito",
     "annullato",
   ];
-  it.each(all)("statusMeta(%s) has a label and a colour", (status) => {
+  it.each(all)("statusMeta(%s) has a label and a tone", (status) => {
     const m = statusMeta(status);
     expect(m.text.length, "a status with no label renders a blank row").toBeGreaterThan(0);
-    expect(m.color).toMatch(/^#[0-9a-f]{6}$/i);
+    expect(TONES).toContain(m.tone);
   });
 
   it("no two statuses share a label — they must be distinguishable", () => {
@@ -134,13 +139,12 @@ describe("methodMeta", () => {
       const meta = methodMeta(m);
       expect(meta.label.length).toBeGreaterThan(0);
       expect(meta.glyph.length).toBeGreaterThan(0);
-      expect(meta.color).toMatch(/^#/);
-      expect(meta.bg).toMatch(/^#/);
+      expect(TONES).toContain(meta.tone);
     }
   );
 
   it("an unknown method falls back rather than rendering undefined", () => {
-    expect(methodMeta("nonsense" as Method).label).toBe("Cloud");
+    expect(methodMeta("nonsense" as Method).label).toBe("Mailbox");
   });
 
   it("each method reads differently — the chip is the whole signal", () => {
@@ -153,44 +157,56 @@ describe("methodMeta", () => {
 
 describe("extTint", () => {
   it.each(["ZIP", "MOV", "MP4", "MKV", "PDF", "KEY", "WAV", "JPG", "PNG", "TAR"])(
-    "extTint(%s) gives a background and a readable foreground",
+    "extTint(%s) is a known tone",
     (ext) => {
-      const [bg, fg] = extTint(ext);
-      expect(bg).toMatch(/^#[0-9a-f]{6}$/i);
-      expect(fg).toMatch(/^#[0-9a-f]{6}$/i);
-      expect(bg).not.toBe(fg); // invisible text
+      // The pairing of background and readable foreground now lives in the
+      // `.tint-*` rules, which is what lets it differ between light and dark.
+      // What this asserts is the only part TypeScript owns: a real tone.
+      expect(TONES).toContain(extTint(ext));
     }
   );
 
   it("an unknown extension still gets a tint, not undefined", () => {
-    const [bg, fg] = extTint("XYZZY");
-    expect(bg).toMatch(/^#/);
-    expect(fg).toMatch(/^#/);
+    expect(TONES).toContain(extTint("XYZZY"));
+  });
+
+  it("kinds that read differently do not collide", () => {
+    // A folder of mixed files should separate at a glance; if every extension
+    // mapped to the same tone the chip would carry no information at all.
+    expect(new Set(["ZIP", "MOV", "PDF", "JPG"].map(extTint)).size).toBe(4);
   });
 });
 
-describe("barColor", () => {
+describe("barClass", () => {
   it.each([
     ["out", "in corso"],
     ["out", "in stallo"],
     ["in", "in corso"],
     ["in", "in stallo"],
-  ] as const)("barColor(%s, %s) is a colour", (dir, status) => {
-    expect(barColor(t({ dir, status }))).toMatch(/^#[0-9a-f]{6}$/i);
+  ] as const)("barClass(%s, %s) names the bar and its direction", (dir, status) => {
+    const cls = barClass(t({ dir, status }));
+    expect(cls.split(" ")).toContain("prog");
+    expect(cls.split(" ")).toContain(dir);
   });
 
   it("a send and a receive never look alike — direction is the point", () => {
-    expect(barColor(t({ dir: "out" }))).not.toBe(barColor(t({ dir: "in" })));
+    expect(barClass(t({ dir: "out" }))).not.toBe(barClass(t({ dir: "in" })));
   });
 
   it.each(["out", "in"] as const)(
-    "a stalled %s bar is dimmer than a running one",
+    "a stalled %s bar is marked apart from a running one",
     (dir) => {
-      expect(barColor(t({ dir, status: "in stallo" }))).not.toBe(
-        barColor(t({ dir, status: "in corso" }))
-      );
+      expect(barClass(t({ dir, status: "in stallo" }))).toContain("stall");
+      expect(barClass(t({ dir, status: "in corso" }))).not.toContain("stall");
     }
   );
+
+  it("a finished bar reads as its outcome, not as its direction", () => {
+    // Once a transfer is over, which way it went stops being the useful fact.
+    expect(barClass(t({ dir: "out", status: "completato" }))).toContain("done");
+    expect(barClass(t({ dir: "in", status: "completato" }))).toContain("done");
+    expect(barClass(t({ dir: "out", status: "fallito" }))).toContain("bad");
+  });
 });
 
 describe("fmtRate / fmtEta", () => {

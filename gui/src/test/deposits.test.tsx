@@ -10,7 +10,7 @@
 // and the buttons.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { harness, makeIpcMock, resetHarness } from "./mocks";
 
 vi.mock("../ipc", () => makeIpcMock());
@@ -18,11 +18,15 @@ vi.mock("@tauri-apps/api/webview", () => ({
   getCurrentWebview: () => ({ onDragDropEvent: () => Promise.resolve(() => {}) }),
 }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: () => Promise.resolve(null) }));
-vi.mock("@tauri-apps/plugin-opener", () => ({ revealItemInDir: () => Promise.resolve() }));
+vi.mock("@tauri-apps/plugin-opener", () => ({
+  revealItemInDir: () => Promise.resolve(),
+  openUrl: () => Promise.resolve(),
+  openPath: () => Promise.resolve(),
+}));
 
 import { useStore } from "../store";
 import { App } from "../App";
-import { DepositsPanel } from "../components/DepositsPanel";
+import { DepositsView } from "../views/DepositsView";
 import type { DepositDto } from "../types";
 
 const DAY = 86400;
@@ -53,13 +57,11 @@ beforeEach(() => {
   resetHarness();
   useStore.setState({
     connected: true,
+    route: "deposits",
     deposits: [],
-    depositsOpen: false,
     depositsError: null,
     depositsLoading: false,
     actionError: null,
-    historyOpen: false,
-    contactsOpen: false,
   } as never);
 });
 afterEach(cleanup);
@@ -67,8 +69,8 @@ afterEach(cleanup);
 describe("the deposits list", () => {
   it("140. opening it asks the daemon and shows what is out there", async () => {
     harness.snapshot.deposits = [deposit()];
-    await s().openDeposits();
-    expect(s().depositsOpen).toBe(true);
+    await s().go("deposits");
+    expect(s().route).toBe("deposits");
     expect(s().deposits).toHaveLength(1);
     expect(s().deposits[0].link).toContain("/dl/");
   });
@@ -85,16 +87,16 @@ describe("the deposits list", () => {
     // An empty list here means "nothing is public". Saying that when we do not know
     // is the same lie the board once told about transfers.
     harness.fail = new Set(["listDeposits"]);
-    await s().openDeposits();
+    await s().go("deposits");
     expect(s().depositsError).toBeTruthy();
-    expect(s().depositsOpen, "the panel stays open to show the error").toBe(true);
+    expect(s().route, "the screen stays put to show the error").toBe("deposits");
   });
 
   it("143. closing it clears any error, so it does not greet you next time", async () => {
     harness.fail = new Set(["listDeposits"]);
-    await s().openDeposits();
-    s().closeDeposits();
-    expect(s().depositsOpen).toBe(false);
+    await s().go("deposits");
+    s().go("transfers");
+    expect(s().route).toBe("transfers");
     expect(s().depositsError).toBeNull();
   });
 });
@@ -102,14 +104,14 @@ describe("the deposits list", () => {
 describe("revoking", () => {
   it("144. it tells the daemon which deposit to withdraw", async () => {
     harness.snapshot.deposits = [deposit({ id: "abc" })];
-    await s().openDeposits();
+    await s().go("deposits");
     await s().revokeDeposit("abc");
     expect(harness.recorder.revokeDeposit).toEqual(["abc"]);
   });
 
   it("145. the row goes only once the daemon confirms", async () => {
     harness.snapshot.deposits = [deposit({ id: "abc" })];
-    await s().openDeposits();
+    await s().go("deposits");
     harness.snapshot.deposits = [];
     await s().revokeDeposit("abc");
     expect(s().deposits).toHaveLength(0);
@@ -119,7 +121,7 @@ describe("revoking", () => {
     // The dangerous case: telling the user a link is gone when the relay still
     // serves it. Whoever holds the URL can still take the file.
     harness.snapshot.deposits = [deposit({ id: "abc" })];
-    await s().openDeposits();
+    await s().go("deposits");
     harness.fail = new Set(["revokeDeposit"]);
     await expect(s().revokeDeposit("abc")).rejects.toThrow();
     expect(s().deposits, "the link must still be listed as live").toHaveLength(1);
@@ -130,49 +132,49 @@ describe("revoking", () => {
 describe("the panel", () => {
   it("147. it lists a link with its URL and controls", async () => {
     harness.snapshot.deposits = [deposit()];
-    await s().openDeposits();
-    render(<DepositsPanel />);
+    await s().go("deposits");
+    render(<DepositsView />);
     expect(await screen.findByText("relazione.pdf")).toBeDefined();
     expect(screen.getByText("https://relay.test/dl/abc#key")).toBeDefined();
-    expect(screen.getByText("Revoca")).toBeDefined();
+    expect(screen.getByText("Revoca", { selector: ".row button" })).toBeDefined();
   });
 
   it("148. Revoca asks first — it is irreversible and breaks the URL for everyone", async () => {
     harness.snapshot.deposits = [deposit({ id: "abc" })];
-    await s().openDeposits();
-    render(<DepositsPanel />);
-    fireEvent.click(await screen.findByText("Revoca"));
+    await s().go("deposits");
+    render(<DepositsView />);
+    fireEvent.click(await screen.findByText("Revoca", { selector: ".row button" }));
     // One click must not destroy anything: it offers the choice.
-    expect(await screen.findByText("Sì, revoca")).toBeDefined();
+    expect(await screen.findByText("Revoca", { selector: ".sheet-foot button" })).toBeDefined();
     expect(harness.recorder.revokeDeposit).toEqual([]);
   });
 
   it("148b. confirming actually withdraws it", async () => {
     harness.snapshot.deposits = [deposit({ id: "abc" })];
-    await s().openDeposits();
-    render(<DepositsPanel />);
-    fireEvent.click(await screen.findByText("Revoca"));
-    fireEvent.click(await screen.findByText("Sì, revoca"));
+    await s().go("deposits");
+    render(<DepositsView />);
+    fireEvent.click(await screen.findByText("Revoca", { selector: ".row button" }));
+    fireEvent.click(await screen.findByText("Revoca", { selector: ".sheet-foot button" }));
     await waitFor(() => expect(harness.recorder.revokeDeposit).toEqual(["abc"]));
   });
 
   it("148c. answering No leaves the link alone", async () => {
     harness.snapshot.deposits = [deposit({ id: "abc" })];
-    await s().openDeposits();
-    render(<DepositsPanel />);
-    fireEvent.click(await screen.findByText("Revoca"));
-    fireEvent.click(await screen.findByText("No"));
+    await s().go("deposits");
+    render(<DepositsView />);
+    fireEvent.click(await screen.findByText("Revoca", { selector: ".row button" }));
+    fireEvent.click(await screen.findByText("Annulla"));
     expect(harness.recorder.revokeDeposit).toEqual([]);
-    expect(await screen.findByText("Revoca")).toBeDefined();
+    expect(await screen.findByText("Revoca", { selector: ".row button" })).toBeDefined();
   });
 
   it("149. a refused Revoca shows the reason instead of doing nothing", async () => {
     harness.snapshot.deposits = [deposit({ id: "abc" })];
-    await s().openDeposits();
+    await s().go("deposits");
     harness.fail = new Set(["revokeDeposit"]);
-    render(<DepositsPanel />);
-    fireEvent.click(await screen.findByText("Revoca"));
-    fireEvent.click(await screen.findByText("Sì, revoca"));
+    render(<DepositsView />);
+    fireEvent.click(await screen.findByText("Revoca", { selector: ".row button" }));
+    fireEvent.click(await screen.findByText("Revoca", { selector: ".sheet-foot button" }));
     await waitFor(() =>
       expect(
         s().depositsError || s().actionError,
@@ -185,30 +187,30 @@ describe("the panel", () => {
     const writeText = vi.fn(() => Promise.resolve());
     Object.assign(navigator, { clipboard: { writeText } });
     harness.snapshot.deposits = [deposit()];
-    await s().openDeposits();
-    render(<DepositsPanel />);
-    fireEvent.click(await screen.findByText("Copia"));
+    await s().go("deposits");
+    render(<DepositsView />);
+    fireEvent.click(await screen.findByLabelText("Copia"));
     expect(writeText).toHaveBeenCalledWith("https://relay.test/dl/abc#key");
   });
 
   it("151. an expired deposit offers Elimina, not Revoca — there is nothing to take back", async () => {
     harness.snapshot.deposits = [deposit({ expired: true, expires: nowSecs() - DAY })];
-    await s().openDeposits();
-    render(<DepositsPanel />);
+    await s().go("deposits");
+    render(<DepositsView />);
     // Nothing is left on the relay to take back — only the local record to tidy.
-    expect(await screen.findByText("Elimina")).toBeDefined();
-    expect(screen.queryByText("Revoca")).toBeNull();
+    expect(await screen.findByText("Rimuovi")).toBeDefined();
+    expect(screen.queryByText("Revoca", { selector: ".row button" })).toBeNull();
   });
 
   it("152. a sealed deposit shows its recipient, and has no URL to copy", async () => {
     harness.snapshot.deposits = [
       deposit({ kind: "offline", link: "", recipient: "peer1", max_label: "1 download" }),
     ];
-    await s().openDeposits();
-    render(<DepositsPanel />);
+    await s().go("deposits");
+    render(<DepositsView />);
     expect(await screen.findByText("relazione.pdf")).toBeDefined();
     expect(screen.getByText(/sigillato per/i)).toBeDefined();
-    expect(screen.queryByText("Copia"), "a sealed deposit is not a public URL").toBeNull();
+    expect(screen.queryByLabelText("Copia"), "a sealed deposit is not a public URL").toBeNull();
   });
 
   it("152b. a relay that cannot be asked shows unknown, never a confident 'alive'", async () => {
@@ -216,63 +218,69 @@ describe("the panel", () => {
     // link was fetched. When the relay cannot confirm, saying "attivo" would be a
     // guess dressed as a fact — the same failure as a green, empty board.
     harness.snapshot.deposits = [deposit({ present: null, downloads: null })];
-    await s().openDeposits();
-    render(<DepositsPanel />);
+    await s().go("deposits");
+    render(<DepositsView />);
     expect(await screen.findByText("relazione.pdf")).toBeDefined();
     expect(screen.queryByText(/^attivo$/i), "unknown must not read as alive").toBeNull();
   });
 
   it("152c. a link the relay no longer holds is not offered as revocable", async () => {
     harness.snapshot.deposits = [deposit({ present: false })];
-    await s().openDeposits();
-    render(<DepositsPanel />);
+    await s().go("deposits");
+    render(<DepositsView />);
     expect(await screen.findByText("relazione.pdf")).toBeDefined();
     // The claim in this test's name, actually asserted: the relay has let it go, so
     // there is nothing to withdraw — only the local record to tidy away. Offering
     // "Revoca" would promise an action that cannot happen.
     expect(screen.getByText("Non più disponibile")).toBeDefined();
-    expect(screen.getByText("Elimina")).toBeDefined();
-    expect(screen.queryByText("Revoca")).toBeNull();
+    expect(screen.getByText("Rimuovi")).toBeDefined();
+    expect(screen.queryByText("Revoca", { selector: ".row button" })).toBeNull();
   });
 
   it("153. with nothing out there it says so plainly", async () => {
     harness.snapshot.deposits = [];
-    await s().openDeposits();
-    render(<DepositsPanel />);
+    await s().go("deposits");
+    render(<DepositsView />);
     expect(await screen.findByText(/nessun link o deposito/i)).toBeDefined();
   });
 
   it("154. Aggiorna refetches", async () => {
     harness.snapshot.deposits = [deposit()];
-    await s().openDeposits();
-    render(<DepositsPanel />);
+    await s().go("deposits");
+    render(<DepositsView />);
     const before = harness.recorder.listDeposits;
     fireEvent.click(screen.getByText("Aggiorna"));
     await waitFor(() => expect(harness.recorder.listDeposits).toBeGreaterThan(before));
   });
 
-  it("155. Chiudi closes it", async () => {
+  it("155. Aggiorna re-asks the relay rather than trusting a cached list", async () => {
+    // The screen is a place now, not a panel with a close button — leaving it is
+    // navigating away. What still matters is that the list can be re-read on
+    // demand: nothing pushes an update when a link is fetched.
     harness.snapshot.deposits = [deposit()];
-    await s().openDeposits();
-    render(<DepositsPanel />);
-    fireEvent.click(screen.getByLabelText("Chiudi"));
-    expect(s().depositsOpen).toBe(false);
+    await s().go("deposits");
+    render(<DepositsView />);
+    const before = harness.recorder.listDeposits;
+    fireEvent.click(screen.getByText("Aggiorna"));
+    await waitFor(() =>
+      expect(harness.recorder.listDeposits).toBe(before + 1)
+    );
   });
 
   it("157. a live link says how many times it was actually fetched", async () => {
     // Not the cap that was asked for at deposit time — the count the relay reports.
     // The local record cannot know this: it is written once and never updated.
     harness.snapshot.deposits = [deposit({ present: true, downloads: 3, max_downloads: 5 })];
-    await s().openDeposits();
-    render(<DepositsPanel />);
+    await s().go("deposits");
+    render(<DepositsView />);
     expect(await screen.findByText("Attivo")).toBeDefined();
     expect(screen.getByText(/3\/5 download/)).toBeDefined();
   });
 
   it("158. with nothing out there, it still does not send the user to a terminal", async () => {
     harness.snapshot.deposits = [];
-    await s().openDeposits();
-    render(<DepositsPanel />);
+    await s().go("deposits");
+    render(<DepositsView />);
     expect(await screen.findByText(/nessun link o deposito/i)).toBeDefined();
     expect(screen.queryByText(/CLI|terminale|arvolo /i)).toBeNull();
   });
@@ -290,8 +298,8 @@ describe("the panel", () => {
     harness.snapshot.deposits = [
       deposit({ kind: "offline", link: "", recipient: "k7x2", max_label: "1" }),
     ];
-    await s().openDeposits();
-    render(<DepositsPanel />);
+    await s().go("deposits");
+    render(<DepositsView />);
     expect(await screen.findByText(/sigillato per alice/)).toBeDefined();
   });
 
@@ -302,8 +310,8 @@ describe("the panel", () => {
     harness.snapshot.deposits = [
       deposit({ kind: "offline", link: "", recipient: "zz99aabbccdd", max_label: "1" }),
     ];
-    await s().openDeposits();
-    render(<DepositsPanel />);
+    await s().go("deposits");
+    render(<DepositsView />);
     const line = await screen.findByText(/sigillato per \S+/);
     expect(line.textContent).not.toMatch(/sigillato per\s*$/);
   });
@@ -312,8 +320,11 @@ describe("the panel", () => {
 describe("reaching the panel from the app", () => {
   it("159. the sidebar entry opens it and fetches what is out there", async () => {
     harness.snapshot.deposits = [deposit({ name: "vacanze.zip" })];
+    useStore.setState({ route: "transfers" });
     render(<App />);
-    fireEvent.click(screen.getByText("Depositi"));
+    fireEvent.click(
+      within(screen.getByRole("navigation")).getByText("Link e depositi")
+    );
     expect(await screen.findByText("vacanze.zip")).toBeDefined();
     expect(harness.recorder.listDeposits).toBeGreaterThan(0);
   });
@@ -322,10 +333,15 @@ describe("reaching the panel from the app", () => {
     // No engine event exists for a deposit, and a relay never reports a download
     // back, so what is in the store is only ever as fresh as the last fetch. If
     // opening trusted the cache, the panel would quietly show yesterday's truth.
-    useStore.setState({ deposits: [deposit({ name: "vecchio.zip" })] });
+    useStore.setState({
+      route: "transfers",
+      deposits: [deposit({ name: "vecchio.zip" })],
+    });
     harness.snapshot.deposits = [deposit({ name: "nuovo.zip" })];
     render(<App />);
-    fireEvent.click(screen.getByText("Depositi"));
+    fireEvent.click(
+      within(screen.getByRole("navigation")).getByText("Link e depositi")
+    );
     expect(await screen.findByText("nuovo.zip")).toBeDefined();
     expect(screen.queryByText("vecchio.zip")).toBeNull();
   });

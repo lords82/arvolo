@@ -4,12 +4,16 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { normalizeEvent, type WireEvent } from "./events";
 import type {
+  ConfigDto,
+  ConfigPatch,
   ContactDto,
   DepositDto,
   EngineEvent,
   HistoryDto,
   OfferDto,
+  PairKind,
   StatusDto,
+  SyncDto,
   TransferDto,
 } from "./types";
 
@@ -20,6 +24,24 @@ export const api = {
   listContacts: () => invoke<ContactDto[]>("list_contacts"),
   sendTo: (to: string, paths: string[], note: string) =>
     invoke<number>("send_to", { to, paths, note }),
+  /** `send --deposit`: skip the live attempt, leave it in their mailbox. Returns
+   *  the `arvm…` ticket too, so it can also be handed over by other means. */
+  depositTo: (
+    to: string,
+    paths: string[],
+    note: string,
+    ttl: number | null,
+    max: number | null,
+    password: string | null
+  ) =>
+    invoke<{ id: number; ticket: string }>("deposit_to", {
+      to,
+      paths,
+      note,
+      ttl,
+      max,
+      password,
+    }),
   serveTicket: (paths: string[], seedRelay: string | null) =>
     invoke<{ id: number; ticket: string }>("serve_ticket", {
       paths,
@@ -59,6 +81,28 @@ export const api = {
   restartDaemon: () => invoke<void>("restart_daemon"),
   listDeposits: () => invoke<DepositDto[]>("list_deposits"),
   revokeDeposit: (id: string) => invoke<void>("revoke_deposit", { id }),
+  getConfig: () => invoke<ConfigDto>("get_config"),
+  setConfig: (patch: ConfigPatch) => invoke<ConfigDto>("set_config", { patch }),
+  pruneNames: () => invoke<number>("prune_names"),
+  syncStatus: () => invoke<SyncDto>("sync_status"),
+  syncNow: () => invoke<SyncDto>("sync_now"),
+  /** Begin a pairing exchange; returns the session handle. The code to read out
+   *  and the outcome arrive as `pairing_*` engine events, not as a return value —
+   *  pairing waits on a human at another machine. */
+  startPairing: (
+    kind: PairKind,
+    relay: string | null,
+    code: string | null,
+    name: string | null
+  ) => invoke<string>("start_pairing", { kind, relay, code, name }),
+  cancelPairing: (session: string) =>
+    invoke<void>("cancel_pairing", { session }),
+  /** Read/write a single file the user picked in a native dialog — the whole of
+   *  the app's filesystem access from the frontend, used by address-book
+   *  import/export. */
+  readTextFile: (path: string) => invoke<string>("read_text_file", { path }),
+  writeTextFile: (path: string, contents: string) =>
+    invoke<void>("write_text_file", { path, contents }),
   guiVersion: () => invoke<string>("gui_version"),
 };
 

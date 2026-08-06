@@ -29,44 +29,52 @@ export function shortId(id: string): string {
   return `${id.slice(0, 7)}…${id.slice(-6)}`;
 }
 
+/** A semantic colour slot, not a colour.
+ *
+ *  These names are resolved to actual values by `.tone-*` / `.tint-*` in
+ *  theme.css, which means every one of them has a light *and* a dark reading.
+ *  This module used to return hex literals; that made the whole status
+ *  vocabulary unthemeable, because a `#16a34a` baked into a style attribute
+ *  cannot know which theme it landed in. */
+export type Tone = "out" | "in" | "ok" | "warn" | "bad" | "mut" | "violet";
+
 export interface StatusMeta {
-  color: string;
+  tone: Tone;
   text: string;
 }
 export function statusMeta(s: UIStatus): StatusMeta {
   switch (s) {
     case "in corso":
-      return { color: "#ea580c", text: "In corso" };
+      return { tone: "out", text: "In corso" };
     case "completato":
-      return { color: "#16a34a", text: "Completato" };
+      return { tone: "ok", text: "Completato" };
     case "deposited":
-      return { color: "#0369a1", text: "Depositato" };
+      return { tone: "in", text: "Depositato" };
     case "in attesa":
-      return { color: "#a8834a", text: "In attesa" };
+      return { tone: "warn", text: "In pausa" };
     case "in arrivo":
-      return { color: "#b45309", text: "Da confermare" };
+      return { tone: "warn", text: "Da confermare" };
     case "in stallo":
-      return { color: "#6b7280", text: "In attesa di ripresa" };
+      return { tone: "mut", text: "In attesa di ripresa" };
     case "fallito":
-      return { color: "#dc2626", text: "Fallito" };
+      return { tone: "bad", text: "Fallito" };
     case "in annullamento":
-      return { color: "#8a827a", text: "Annullamento…" };
+      return { tone: "mut", text: "Annullamento…" };
     case "annullato":
-      return { color: "#8a827a", text: "Annullato" };
+      return { tone: "mut", text: "Annullato" };
   }
 }
 
 export interface MethodMeta {
   glyph: string;
   label: string;
-  color: string;
-  bg: string;
+  tone: Tone;
 }
 const METHODS: Record<Method, MethodMeta> = {
-  p2p: { glyph: "⇄", label: "P2P", color: "#0369a1", bg: "#e9f3fb" },
-  cloud: { glyph: "☁", label: "Cloud", color: "#57534c", bg: "#f0ece7" },
-  link: { glyph: "◇", label: "Link", color: "#7c3aed", bg: "#f3edff" },
-  ticket: { glyph: "⛓", label: "Ticket", color: "#c2410c", bg: "#fff3e9" },
+  p2p: { glyph: "⇄", label: "Diretto", tone: "in" },
+  cloud: { glyph: "☁", label: "Mailbox", tone: "mut" },
+  link: { glyph: "◇", label: "Link", tone: "violet" },
+  ticket: { glyph: "⛓", label: "Ticket", tone: "out" },
 };
 export function methodMeta(m: Method): MethodMeta {
   // `METHODS[m]` alone walks the prototype chain: "toString"/"valueOf" would hit
@@ -75,31 +83,54 @@ export function methodMeta(m: Method): MethodMeta {
   return Object.prototype.hasOwnProperty.call(METHODS, m) ? METHODS[m] : METHODS.cloud;
 }
 
-const EXT_TINT: Record<string, [string, string]> = {
-  ZIP: ["#fff3e9", "#c2410c"],
-  MOV: ["#eef7f0", "#16a34a"],
-  MP4: ["#eef7f0", "#16a34a"],
-  MKV: ["#e9f3fb", "#0369a1"],
-  PDF: ["#fdecec", "#dc2626"],
-  KEY: ["#f3edff", "#7c3aed"],
-  WAV: ["#e9f3fb", "#0369a1"],
-  JPG: ["#fff7ed", "#c2410c"],
-  PNG: ["#fff7ed", "#c2410c"],
-  TAR: ["#f4f1ee", "#8a827a"],
+/** File-kind tint, as a tone. Grouped by what the file *is* rather than by
+ *  extension family, so a glance at a list separates media from documents from
+ *  archives without anyone having to learn a legend. */
+const EXT_TINT: Record<string, Tone> = {
+  ZIP: "out",
+  TAR: "mut",
+  GZ: "mut",
+  "7Z": "out",
+  RAR: "out",
+  MOV: "ok",
+  MP4: "ok",
+  MKV: "ok",
+  AVI: "ok",
+  MP3: "in",
+  WAV: "in",
+  FLAC: "in",
+  PDF: "bad",
+  DOC: "in",
+  DOCX: "in",
+  XLS: "ok",
+  XLSX: "ok",
+  KEY: "violet",
+  PPT: "out",
+  PPTX: "out",
+  JPG: "warn",
+  JPEG: "warn",
+  PNG: "warn",
+  HEIC: "warn",
+  GIF: "warn",
+  SVG: "violet",
 };
-const EXT_TINT_DEFAULT: [string, string] = ["#f4f1ee", "#8a827a"];
-export function extTint(ext: string): [string, string] {
+export function extTint(ext: string): Tone {
   // Own keys only — see `methodMeta` for why an inherited hit is not a match.
   return Object.prototype.hasOwnProperty.call(EXT_TINT, ext)
     ? EXT_TINT[ext]
-    : EXT_TINT_DEFAULT;
+    : "mut";
 }
 
-/** Colour of the progress bar for a transfer (attenuated when stalled). */
-export function barColor(t: UITransfer): string {
-  const stall = t.status === "in stallo";
-  if (t.dir === "out") return stall ? "#e8c4a8" : "#f97316";
-  return stall ? "#a9c6dd" : "#0369a1";
+/** Progress-bar modifier classes: direction, plus the state that overrides it.
+ *  A finished bar is green and a failed one red regardless of which way it went —
+ *  at that point the outcome is the only thing left worth encoding. */
+export function barClass(t: UITransfer): string {
+  const dir = t.dir === "out" ? "out" : "in";
+  if (t.status === "completato") return `prog ${dir} done`;
+  if (t.status === "fallito") return `prog ${dir} bad`;
+  if (t.status === "in stallo" || t.status === "in attesa")
+    return `prog ${dir} stall`;
+  return `prog ${dir}`;
 }
 
 export function pct(t: UITransfer): number {
@@ -185,7 +216,7 @@ export function fmtUntil(unixSecs: number, nowMs: number = Date.now()): string {
 }
 
 export interface DepositMeta {
-  color: string;
+  tone: Tone;
   /** The one-word state shown next to the name. */
   text: string;
   /** The line under it: why, or how many downloads. */
@@ -206,7 +237,7 @@ export interface DepositMeta {
 export function depositMeta(d: DepositDto, nowMs: number = Date.now()): DepositMeta {
   if (d.expired) {
     return {
-      color: "#8a827a",
+      tone: "mut",
       text: "Scaduto",
       detail: "il relay l'ha già lasciato andare",
       revocable: false,
@@ -214,7 +245,7 @@ export function depositMeta(d: DepositDto, nowMs: number = Date.now()): DepositM
   }
   if (d.present === false) {
     return {
-      color: "#8a827a",
+      tone: "mut",
       text: "Non più disponibile",
       detail:
         d.kind === "link"
@@ -229,7 +260,7 @@ export function depositMeta(d: DepositDto, nowMs: number = Date.now()): DepositM
     // Reachability is not the same as absence. We keep it revocable: the daemon
     // will find out for real when the user asks.
     return {
-      color: "#a8834a",
+      tone: "warn",
       text: "Stato sconosciuto",
       detail: `relay non raggiungibile · ${scade}`,
       revocable: true,
@@ -248,7 +279,7 @@ export function depositMeta(d: DepositDto, nowMs: number = Date.now()): DepositM
     parts.push(d.max_label === "unlimited" ? "nessun limite" : `max ${d.max_label}`);
   }
   parts.push(scade);
-  return { color: "#16a34a", text: "Attivo", detail: parts.join(" · "), revocable: true };
+  return { tone: "ok", text: "Attivo", detail: parts.join(" · "), revocable: true };
 }
 
 export interface Section {

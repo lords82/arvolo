@@ -1,32 +1,225 @@
-/* Arvolo GUI — global theme. Design tokens from the README; native-feel rules
-   (system fonts, OS scrollbars, no text selection except inputs/codes) adapted
-   from the mock's `.win` class. The window chrome is the real OS title bar. */
+/* Arvolo — design system.
+   ---------------------------------------------------------------------------
+   One stylesheet, three layers: tokens, base, components. Components in
+   `src/components/` carry class names from here and almost no inline style, so
+   a colour or a radius changes in one place and the whole app follows.
+
+   Two ideas run through the whole thing and are worth stating once:
+
+   1. DIRECTION IS A COLOUR. Outgoing is warm (amber), incoming is cool (blue).
+      Every progress bar, avatar ring, row accent and icon obeys it, so a glance
+      at the board tells you which way the bytes are going before you read a
+      word. Semantic colours (green/red/amber) are reserved for *outcomes* and
+      never used for direction, or the two vocabularies would collide.
+
+   2. TRUST IS TYPOGRAPHY. Public ids, fingerprints and pairing codes are the
+      security surface of this app; they are set in a monospace face, spaced,
+      selectable, and never truncated where a decision depends on them.
+
+   Both themes are first-class: the palette is defined twice, and `[data-theme]`
+   on <html> lets the user override the system preference. */
+
+/* ==========================================================================
+   1. TOKENS
+   ========================================================================== */
 
 :root {
-  /* Neutrals */
+  /* -- Warm neutral ramp. The canvas is deliberately off-white: a pure #fff
+        page under a colour-managed display reads as clinical, and this app is
+        meant to feel like a desk, not a console. */
   --canvas: #faf8f6;
-  --card: #ffffff;
+  --surface: #ffffff;
+  --surface-2: #f5f2ef;
+  --surface-3: #ebe7e2;
+  --surface-sunk: #f2efec;
+  --overlay-scrim: rgba(28, 24, 20, 0.34);
+
   --ink: #171514;
   --ink-sec: #57534c;
-  --ink-mut: #a8a29a;
-  --ink-weak: #c9c2ba;
-  --line: rgba(0, 0, 0, 0.06);
-  --line-strong: rgba(0, 0, 0, 0.1);
-  /* Direction */
-  --out: #f97316;
-  --out-stall: #e8c4a8;
-  --in: #0369a1;
-  --in-stall: #a9c6dd;
-  /* Semantics */
-  --green: #16a34a;
-  --red: #dc2626;
-  --amber: #b45309;
-  --teal: #0f766e;
-  --teal-bg: #e6f4ef;
-  --grey: #6b7280;
+  --ink-mut: #8b857c;
+  --ink-weak: #b5aea5;
+
+  --line: rgba(23, 21, 20, 0.08);
+  --line-strong: rgba(23, 21, 20, 0.14);
+  --line-hard: rgba(23, 21, 20, 0.24);
+
+  /* -- Direction. `-soft` is the tint a surface takes, `-line` its border,
+        `-stall` the desaturated form a paused or waiting row falls back to. */
+  --out: #ea6a12;
+  --out-strong: #c2540b;
+  --out-soft: #fdf0e5;
+  --out-line: rgba(234, 106, 18, 0.28);
+  --out-stall: #dcbda4;
+
+  --in: #0a6ba1;
+  --in-strong: #08557f;
+  --in-soft: #e8f2f9;
+  --in-line: rgba(10, 107, 161, 0.26);
+  --in-stall: #a6c2d6;
+
+  /* -- Outcomes. */
+  --green: #157f43;
+  --green-soft: #e6f4ec;
+  --red: #c22b2b;
+  --red-soft: #fbeaea;
+  --amber: #9a6100;
+  --amber-soft: #fdf2e0;
+  --teal: #0d6d66;
+  --teal-soft: #e3f2f0;
+  --violet: #6b4fbb;
+  --violet-soft: #efeafb;
+
+  /* -- Focus. A single ring colour everywhere; visible on every surface. */
+  --focus: #1a72c4;
+  --focus-ring: 0 0 0 2px var(--canvas), 0 0 0 4px var(--focus);
+
+  /* -- Elevation. Warm-tinted rather than neutral grey, so a floating panel
+        still belongs to the same room as the canvas behind it. */
+  --shadow-1: 0 1px 2px rgba(58, 46, 34, 0.06), 0 1px 1px rgba(58, 46, 34, 0.04);
+  --shadow-2: 0 2px 4px rgba(58, 46, 34, 0.06), 0 6px 16px rgba(58, 46, 34, 0.08);
+  --shadow-3: 0 8px 24px rgba(58, 46, 34, 0.12), 0 24px 60px rgba(58, 46, 34, 0.16);
+
+  /* -- Geometry. */
+  --r-xs: 5px;
+  --r-sm: 8px;
+  --r-md: 11px;
+  --r-lg: 15px;
+  --r-xl: 20px;
+  --r-pill: 999px;
+
+  /* -- Type. */
+  --font: -apple-system, BlinkMacSystemFont, "Segoe UI Variable", "Segoe UI",
+    Inter, Ubuntu, "Noto Sans", sans-serif;
+  --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Segoe UI Mono",
+    "Roboto Mono", monospace;
+
+  /* -- Motion. Every duration flows from these two, so "make it snappier" is
+        one edit and reduced-motion can zero them out wholesale. */
+  --t-fast: 110ms;
+  --t: 180ms;
+  --t-slow: 300ms;
+  --ease: cubic-bezier(0.32, 0.72, 0, 1);
+
+  /* -- Frame. */
+  --rail-w: 232px;
+  --header-h: 56px;
+
+  color-scheme: light;
 }
 
-* {
+/* Dark. Warm charcoal rather than neutral black, to stay the same room as the
+   light theme; the direction hues are lifted and desaturated so they carry on a
+   dark field without glowing. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --canvas: #16130f;
+    --surface: #1e1a16;
+    --surface-2: #262119;
+    --surface-3: #322b22;
+    --surface-sunk: #191510;
+    --overlay-scrim: rgba(0, 0, 0, 0.62);
+
+    --ink: #f5f1eb;
+    --ink-sec: #bdb4a8;
+    --ink-mut: #8e857a;
+    --ink-weak: #635c53;
+
+    --line: rgba(245, 241, 235, 0.09);
+    --line-strong: rgba(245, 241, 235, 0.16);
+    --line-hard: rgba(245, 241, 235, 0.28);
+
+    --out: #f79441;
+    --out-strong: #ffae66;
+    --out-soft: #3a2513;
+    --out-line: rgba(247, 148, 65, 0.34);
+    --out-stall: #7c5a3c;
+
+    --in: #4fa8dd;
+    --in-strong: #7cc3ee;
+    --in-soft: #12283a;
+    --in-line: rgba(79, 168, 221, 0.32);
+    --in-stall: #3d5b70;
+
+    --green: #56c27f;
+    --green-soft: #14301f;
+    --red: #f0736d;
+    --red-soft: #3a1919;
+    --amber: #e0a444;
+    --amber-soft: #35270f;
+    --teal: #4bbdb1;
+    --teal-soft: #10302d;
+    --violet: #a58ce8;
+    --violet-soft: #251d3c;
+
+    --focus: #6cb6f0;
+
+    --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --shadow-2: 0 2px 6px rgba(0, 0, 0, 0.4), 0 8px 22px rgba(0, 0, 0, 0.34);
+    --shadow-3: 0 10px 30px rgba(0, 0, 0, 0.5), 0 30px 70px rgba(0, 0, 0, 0.45);
+
+    color-scheme: dark;
+  }
+}
+
+/* Explicit override — the in-app theme switch stamps this on <html> and it has
+   to beat the media query in *both* directions, which is why the dark block is
+   scoped with `:not([data-theme="light"])` above and repeated here. */
+:root[data-theme="dark"] {
+  --canvas: #16130f;
+  --surface: #1e1a16;
+  --surface-2: #262119;
+  --surface-3: #322b22;
+  --surface-sunk: #191510;
+  --overlay-scrim: rgba(0, 0, 0, 0.62);
+
+  --ink: #f5f1eb;
+  --ink-sec: #bdb4a8;
+  --ink-mut: #8e857a;
+  --ink-weak: #635c53;
+
+  --line: rgba(245, 241, 235, 0.09);
+  --line-strong: rgba(245, 241, 235, 0.16);
+  --line-hard: rgba(245, 241, 235, 0.28);
+
+  --out: #f79441;
+  --out-strong: #ffae66;
+  --out-soft: #3a2513;
+  --out-line: rgba(247, 148, 65, 0.34);
+  --out-stall: #7c5a3c;
+
+  --in: #4fa8dd;
+  --in-strong: #7cc3ee;
+  --in-soft: #12283a;
+  --in-line: rgba(79, 168, 221, 0.32);
+  --in-stall: #3d5b70;
+
+  --green: #56c27f;
+  --green-soft: #14301f;
+  --red: #f0736d;
+  --red-soft: #3a1919;
+  --amber: #e0a444;
+  --amber-soft: #35270f;
+  --teal: #4bbdb1;
+  --teal-soft: #10302d;
+  --violet: #a58ce8;
+  --violet-soft: #251d3c;
+
+  --focus: #6cb6f0;
+
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-2: 0 2px 6px rgba(0, 0, 0, 0.4), 0 8px 22px rgba(0, 0, 0, 0.34);
+  --shadow-3: 0 10px 30px rgba(0, 0, 0, 0.5), 0 30px 70px rgba(0, 0, 0, 0.45);
+
+  color-scheme: dark;
+}
+
+/* ==========================================================================
+   2. BASE
+   ========================================================================== */
+
+*,
+*::before,
+*::after {
   box-sizing: border-box;
 }
 
@@ -38,20 +231,23 @@ body,
 }
 
 body {
-  /* System fonts for a native look on every platform. */
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Ubuntu",
-    "Noto Sans", sans-serif;
+  font-family: var(--font);
+  font-size: 13.5px;
+  line-height: 1.45;
   color: var(--ink);
   background: var(--canvas);
   -webkit-font-smoothing: antialiased;
-  /* No selection anywhere by default (feels native)… */
+  text-rendering: optimizeLegibility;
+  /* Chrome-less feel: nothing is selectable unless it is text the user might
+     genuinely need to copy (see the rule below). Dragging a label out of a
+     desktop app and getting a selection highlight is the tell of a web page. */
   -webkit-user-select: none;
   user-select: none;
   overflow: hidden;
 }
 
-/* …except in inputs and monospace codes/ids, which stay selectable. */
 input,
+textarea,
 .mono,
 .selectable {
   -webkit-user-select: text;
@@ -59,68 +255,1522 @@ input,
 }
 
 .mono {
-  font-family: ui-monospace, "SF Mono", "Segoe UI Mono", "Roboto Mono", monospace;
+  font-family: var(--mono);
+  font-variant-ligatures: none;
+}
+
+/* Sizes, counts, percentages and clocks: proportional digits make a progress
+   readout jitter as it counts. */
+.tnum {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
 }
 
 img {
   -webkit-user-drag: none;
-  user-drag: none;
   max-width: 100%;
 }
 
-button {
-  font-family: inherit;
+button,
+input,
+textarea,
+select {
+  font: inherit;
+  color: inherit;
 }
 
-/* OS-style scrollbars. */
+:focus {
+  outline: none;
+}
+:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-radius: var(--r-sm);
+}
+
 ::-webkit-scrollbar {
   width: 11px;
   height: 11px;
 }
 ::-webkit-scrollbar-thumb {
-  background: rgba(0, 0, 0, 0.16);
-  border-radius: 9px;
+  background: var(--line-hard);
+  border-radius: var(--r-pill);
   border: 3px solid transparent;
   background-clip: content-box;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(0, 0, 0, 0.28);
+  background: var(--ink-weak);
   background-clip: content-box;
 }
 ::-webkit-scrollbar-track {
   background: transparent;
 }
 
-/* Progress bar. */
-.prog {
-  height: 5px;
-  border-radius: 3px;
+::selection {
+  background: var(--out-soft);
+  color: var(--ink);
+}
+
+/* ==========================================================================
+   3. TYPOGRAPHY HELPERS
+   ========================================================================== */
+
+.t-title {
+  font-size: 19px;
+  font-weight: 640;
+  letter-spacing: -0.015em;
+  line-height: 1.2;
+}
+.t-head {
+  font-size: 15px;
+  font-weight: 620;
+  letter-spacing: -0.008em;
+}
+.t-body {
+  font-size: 13.5px;
+}
+.t-sm {
+  font-size: 12.5px;
+}
+.t-xs {
+  font-size: 11.5px;
+}
+/* Section labels. Uppercase at this size needs the tracking or it sets solid. */
+.t-label {
+  font-size: 10.5px;
+  font-weight: 680;
+  letter-spacing: 0.075em;
+  text-transform: uppercase;
+  color: var(--ink-mut);
+}
+.t-sec {
+  color: var(--ink-sec);
+}
+.t-mut {
+  color: var(--ink-mut);
+}
+.truncate {
   overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+/* ==========================================================================
+   4. APP FRAME
+   ========================================================================== */
+
+.app {
+  display: grid;
+  grid-template-columns: var(--rail-w) 1fr;
+  height: 100%;
+  background: var(--canvas);
+}
+
+/* -- Rail ------------------------------------------------------------------ */
+
+.rail {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 10px 8px;
+  background: var(--surface-sunk);
+  border-right: 1px solid var(--line);
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+/* The macOS traffic lights sit over the top-left of the window; the rail's
+   first row has to start below them or the identity chip is unclickable. */
+.rail-top {
+  height: 22px;
+  flex: none;
+}
+
+.rail-me {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 8px;
+  margin-bottom: 10px;
+  border: 1px solid transparent;
+  border-radius: var(--r-md);
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  transition: background var(--t-fast) var(--ease),
+    border-color var(--t-fast) var(--ease);
+}
+.rail-me:hover {
+  background: var(--surface);
+  border-color: var(--line);
+}
+
+.rail-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.rail-group + .rail-group {
+  margin-top: 14px;
+}
+.rail-group > .t-label {
+  padding: 0 10px 6px;
+}
+
+.rail-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--ink-sec);
+  font-size: 13px;
+  font-weight: 520;
+  cursor: pointer;
+  text-align: left;
+  transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
+}
+.rail-item:hover {
+  background: var(--surface-3);
+  color: var(--ink);
+}
+.rail-item[aria-current="page"] {
+  background: var(--surface);
+  color: var(--ink);
+  font-weight: 600;
+  box-shadow: var(--shadow-1);
+}
+.rail-item .ico {
+  flex: none;
+  width: 17px;
+  display: grid;
+  place-items: center;
+  color: var(--ink-mut);
+}
+.rail-item[aria-current="page"] .ico {
+  color: var(--ink-sec);
+}
+.rail-count {
+  margin-left: auto;
+  min-width: 19px;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: var(--r-pill);
+  background: var(--surface-3);
+  color: var(--ink-sec);
+  font-size: 11px;
+  font-weight: 650;
+  display: grid;
+  place-items: center;
+}
+.rail-count.hot {
+  background: var(--in);
+  color: #fff;
+}
+
+/* The two verbs. Bigger than a nav item, because they are what the app is for. */
+.rail-verb {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: var(--r-md);
+  border: 1px solid transparent;
+  font-size: 13.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: transform var(--t-fast) var(--ease),
+    box-shadow var(--t-fast) var(--ease), filter var(--t-fast) var(--ease);
+}
+.rail-verb:active {
+  transform: translateY(1px);
+}
+.rail-verb.send {
+  background: var(--out);
+  border-color: var(--out-strong);
+  color: #fff;
+  box-shadow: var(--shadow-1);
+}
+.rail-verb.send:hover {
+  filter: brightness(1.06);
+}
+.rail-verb.recv {
+  background: var(--surface);
+  border-color: var(--line-strong);
+  color: var(--ink);
+  box-shadow: var(--shadow-1);
+}
+.rail-verb.recv:hover {
+  background: var(--surface-2);
+}
+
+.rail-foot {
+  margin-top: auto;
+  padding-top: 12px;
+}
+
+/* -- Main ------------------------------------------------------------------ */
+
+.main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.header {
+  height: var(--header-h);
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 18px;
+  border-bottom: 1px solid var(--line);
+  background: var(--canvas);
+}
+.header h1 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 640;
+  letter-spacing: -0.01em;
+}
+.header .spacer {
+  flex: 1;
+}
+
+.view {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 18px 18px 40px;
+}
+.view-narrow {
+  max-width: 760px;
+  margin: 0 auto;
+}
+
+/* ==========================================================================
+   5. PRIMITIVES
+   ========================================================================== */
+
+/* -- Button ---------------------------------------------------------------- */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  height: 32px;
+  padding: 0 13px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 560;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background var(--t-fast) var(--ease),
+    border-color var(--t-fast) var(--ease), transform var(--t-fast) var(--ease),
+    filter var(--t-fast) var(--ease);
+}
+.btn:hover:not(:disabled) {
+  background: var(--surface-2);
+  border-color: var(--line-hard);
+}
+.btn:active:not(:disabled) {
+  transform: translateY(1px);
+}
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.btn-primary {
+  background: var(--out);
+  border-color: var(--out-strong);
+  color: #fff;
+  box-shadow: var(--shadow-1);
+}
+.btn-primary:hover:not(:disabled) {
+  background: var(--out);
+  filter: brightness(1.07);
+  border-color: var(--out-strong);
+}
+.btn-in {
+  background: var(--in);
+  border-color: var(--in);
+  color: #fff;
+  box-shadow: var(--shadow-1);
+}
+.btn-in:hover:not(:disabled) {
+  background: var(--in);
+  filter: brightness(1.1);
+}
+.btn-ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--ink-sec);
+}
+.btn-ghost:hover:not(:disabled) {
+  background: var(--surface-3);
+  border-color: transparent;
+  color: var(--ink);
+}
+.btn-danger {
+  color: var(--red);
+  border-color: var(--line-strong);
+  background: var(--surface);
+}
+.btn-danger:hover:not(:disabled) {
+  background: var(--red-soft);
+  border-color: var(--red);
+}
+.btn-lg {
+  height: 38px;
+  padding: 0 18px;
+  font-size: 14px;
+  border-radius: var(--r-md);
+}
+.btn-sm {
+  height: 27px;
+  padding: 0 10px;
+  font-size: 12px;
+  border-radius: var(--r-xs);
+}
+.btn-block {
+  width: 100%;
+}
+
+.icon-btn {
+  display: inline-grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--ink-mut);
+  cursor: pointer;
+  transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
+}
+.icon-btn:hover:not(:disabled) {
+  background: var(--surface-3);
+  color: var(--ink);
+}
+.icon-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* -- Fields ---------------------------------------------------------------- */
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.field > label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink-sec);
+}
+.field .hint {
+  font-size: 11.5px;
+  color: var(--ink-mut);
+  line-height: 1.4;
+}
+.field .err {
+  font-size: 11.5px;
+  color: var(--red);
+  line-height: 1.4;
+}
+
+.input,
+.textarea,
+.select {
+  width: 100%;
+  min-height: 32px;
+  padding: 6px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 13px;
+  transition: border-color var(--t-fast) var(--ease),
+    box-shadow var(--t-fast) var(--ease);
+}
+.input::placeholder,
+.textarea::placeholder {
+  color: var(--ink-weak);
+}
+.input:hover,
+.textarea:hover,
+.select:hover {
+  border-color: var(--line-hard);
+}
+.input:focus,
+.textarea:focus,
+.select:focus {
+  border-color: var(--focus);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--focus) 18%, transparent);
+}
+.textarea {
+  min-height: 66px;
+  resize: vertical;
+  line-height: 1.45;
+}
+.input.mono {
+  letter-spacing: 0.01em;
+}
+.input-lg {
+  min-height: 42px;
+  font-size: 15px;
+  padding: 8px 12px;
+  border-radius: var(--r-md);
+}
+
+/* Switch. Sized to be hit comfortably with a trackpad, not to be minimal. */
+.switch {
+  position: relative;
+  flex: none;
+  width: 38px;
+  height: 22px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--line-hard);
+  background: var(--surface-3);
+  cursor: pointer;
+  transition: background var(--t) var(--ease), border-color var(--t) var(--ease);
+}
+.switch::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--surface);
+  box-shadow: var(--shadow-1);
+  transition: transform var(--t) var(--ease);
+}
+.switch[aria-checked="true"] {
+  background: var(--green);
+  border-color: var(--green);
+}
+.switch[aria-checked="true"]::after {
+  transform: translateX(16px);
+}
+.switch:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.switch-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 11px 0;
+}
+.switch-row + .switch-row {
+  border-top: 1px solid var(--line);
+}
+.switch-row .grow {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Segmented control — the mode picker in the send sheet. */
+.segmented {
+  display: inline-flex;
+  padding: 3px;
+  gap: 2px;
+  border-radius: var(--r-md);
+  background: var(--surface-3);
+  border: 1px solid var(--line);
+}
+.segmented button {
+  flex: 1;
+  padding: 6px 12px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--ink-sec);
+  font-size: 12.5px;
+  font-weight: 570;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
+}
+.segmented button:hover {
+  color: var(--ink);
+}
+.segmented button[aria-selected="true"] {
+  background: var(--surface);
+  color: var(--ink);
+  box-shadow: var(--shadow-1);
+}
+.segmented-block {
+  display: flex;
+  width: 100%;
+}
+
+/* -- Badges & chips -------------------------------------------------------- */
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 19px;
+  padding: 0 7px;
+  border-radius: var(--r-pill);
+  font-size: 10.5px;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  background: var(--surface-3);
+  color: var(--ink-sec);
+}
+.badge.ok {
+  background: var(--green-soft);
+  color: var(--green);
+}
+.badge.warn {
+  background: var(--amber-soft);
+  color: var(--amber);
+}
+.badge.bad {
+  background: var(--red-soft);
+  color: var(--red);
+}
+.badge.info {
+  background: var(--in-soft);
+  color: var(--in);
+}
+.badge.out {
+  background: var(--out-soft);
+  color: var(--out-strong);
+}
+.badge.trust {
+  background: var(--teal-soft);
+  color: var(--teal);
+}
+.badge.dev {
+  background: var(--violet-soft);
+  color: var(--violet);
+}
+
+/* A live presence dot. The ring is what makes it read as "now" rather than as
+   a bullet — and it is the one thing on screen allowed to animate forever. */
+.dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: none;
+  background: var(--ink-weak);
+}
+.dot.on {
+  background: var(--green);
+  box-shadow: 0 0 0 0 color-mix(in srgb, var(--green) 55%, transparent);
+  animation: pulse 2.4s var(--ease) infinite;
+}
+.dot.off {
+  background: var(--ink-weak);
+}
+.dot.bad {
+  background: var(--red);
+}
+
+@keyframes pulse {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--green) 50%, transparent);
+  }
+  70% {
+    box-shadow: 0 0 0 6px transparent;
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+
+/* -- Avatar ---------------------------------------------------------------- */
+
+.avatar {
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-weight: 640;
+  flex: none;
+  color: #fff;
+  letter-spacing: -0.01em;
+  user-select: none;
+}
+.avatar.ring-out {
+  box-shadow: 0 0 0 2px var(--canvas), 0 0 0 4px var(--out);
+}
+.avatar.ring-in {
+  box-shadow: 0 0 0 2px var(--canvas), 0 0 0 4px var(--in);
+}
+
+/* -- Card & list ----------------------------------------------------------- */
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-1);
+}
+.card-pad {
+  padding: 16px;
+}
+.card + .card {
+  margin-top: 14px;
+}
+.card-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 13px 16px;
+  border-bottom: 1px solid var(--line);
+}
+.card-head .spacer {
+  flex: 1;
+}
+
+.rows > * + * {
+  border-top: 1px solid var(--line);
+}
+
+.section {
+  margin-bottom: 22px;
+}
+.section-head {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  margin-bottom: 9px;
+  padding: 0 2px;
+}
+.section-head .spacer {
+  flex: 1;
+}
+
+/* -- Transfer row ---------------------------------------------------------- */
+
+.row {
+  display: grid;
+  grid-template-columns: 38px 1fr auto;
+  align-items: center;
+  gap: 12px;
+  padding: 11px 14px;
+  background: var(--surface);
+  position: relative;
+  transition: background var(--t-fast) var(--ease);
+}
+.row:hover {
+  background: var(--surface-2);
+}
+.row:first-child {
+  border-top-left-radius: var(--r-lg);
+  border-top-right-radius: var(--r-lg);
+}
+.row:last-child {
+  border-bottom-left-radius: var(--r-lg);
+  border-bottom-right-radius: var(--r-lg);
+}
+/* The direction stripe: 3px of colour down the leading edge. Cheaper to read
+   than an icon and it survives being glanced at from across a desk. */
+.row::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: transparent;
+}
+.row.dir-out::before {
+  background: var(--out);
+}
+.row.dir-in::before {
+  background: var(--in);
+}
+.row.is-done::before {
+  opacity: 0.35;
+}
+.row-main {
+  min-width: 0;
+}
+.row-name {
+  font-size: 13.5px;
+  font-weight: 570;
+  letter-spacing: -0.005em;
+}
+.row-meta {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 2px;
+  font-size: 11.5px;
+  color: var(--ink-mut);
+}
+.row-meta .sep::before {
+  content: "·";
+}
+.row-actions {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  opacity: 0;
+  transition: opacity var(--t-fast) var(--ease);
+}
+.row:hover .row-actions,
+.row:focus-within .row-actions {
+  opacity: 1;
+}
+
+/* -- Progress -------------------------------------------------------------- */
+
+.prog {
+  height: 4px;
+  border-radius: var(--r-pill);
+  background: var(--surface-3);
+  overflow: hidden;
+  margin-top: 7px;
 }
 .prog > span {
   display: block;
   height: 100%;
-  border-radius: 3px;
+  border-radius: var(--r-pill);
+  transition: width var(--t-slow) var(--ease);
 }
-
-.avatar {
-  border-radius: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-weight: 600;
-  flex: none;
-  color: #fff;
+.prog.out > span {
+  background: var(--out);
 }
-
-/* A small fade-in for overlays. */
-@keyframes pop {
+.prog.in > span {
+  background: var(--in);
+}
+.prog.stall.out > span {
+  background: var(--out-stall);
+}
+.prog.stall.in > span {
+  background: var(--in-stall);
+}
+.prog.done > span {
+  background: var(--green);
+}
+.prog.bad > span {
+  background: var(--red);
+}
+/* Indeterminate: work is happening but nothing can say how much of it. */
+.prog.indet > span {
+  width: 32% !important;
+  animation: slide 1.5s var(--ease) infinite;
+}
+@keyframes slide {
   from {
-    opacity: 0;
-    transform: translateY(4px) scale(0.99);
+    transform: translateX(-110%);
   }
   to {
-    opacity: 1;
-    transform: none;
+    transform: translateX(340%);
+  }
+}
+
+.spinner {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid var(--line-hard);
+  border-top-color: var(--ink-sec);
+  animation: spin 0.7s linear infinite;
+  flex: none;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* -- Overlays -------------------------------------------------------------- */
+
+.scrim {
+  position: fixed;
+  inset: 0;
+  background: var(--overlay-scrim);
+  backdrop-filter: blur(3px);
+  z-index: 40;
+  animation: fade var(--t) var(--ease);
+}
+@keyframes fade {
+  from {
+    opacity: 0;
+  }
+}
+
+.sheet {
+  position: fixed;
+  z-index: 41;
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  box-shadow: var(--shadow-3);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+/* Centred dialog — decisions, confirmations, anything short. */
+.sheet.center {
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: min(560px, calc(100vw - 48px));
+  max-height: calc(100vh - 80px);
+  border-radius: var(--r-xl);
+  animation: rise var(--t) var(--ease);
+}
+/* Side sheet — composing something, where the board behind stays relevant. */
+.sheet.side {
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(480px, 92vw);
+  border-radius: 0;
+  border-right: 0;
+  border-top: 0;
+  border-bottom: 0;
+  animation: slide-in var(--t-slow) var(--ease);
+}
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translate(-50%, calc(-50% + 10px)) scale(0.985);
+  }
+}
+@keyframes slide-in {
+  from {
+    transform: translateX(100%);
+  }
+}
+
+.sheet-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 15px 18px;
+  border-bottom: 1px solid var(--line);
+}
+.sheet-head .spacer {
+  flex: 1;
+}
+.sheet-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.sheet-foot {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 13px 18px;
+  border-top: 1px solid var(--line);
+  background: var(--surface-2);
+}
+.sheet-foot .spacer {
+  flex: 1;
+}
+
+/* -- Menu ------------------------------------------------------------------ */
+
+.menu {
+  position: absolute;
+  z-index: 50;
+  min-width: 194px;
+  padding: 5px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+  box-shadow: var(--shadow-3);
+  animation: rise-sm var(--t-fast) var(--ease);
+}
+@keyframes rise-sm {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+}
+.menu button {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 7px 9px;
+  border: 0;
+  border-radius: var(--r-xs);
+  background: transparent;
+  color: var(--ink);
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+.menu button:hover:not(:disabled),
+.menu button:focus-visible {
+  background: var(--surface-3);
+}
+.menu button:disabled {
+  color: var(--ink-weak);
+  cursor: not-allowed;
+}
+.menu button.danger {
+  color: var(--red);
+}
+.menu button.danger:hover:not(:disabled) {
+  background: var(--red-soft);
+}
+.menu hr {
+  margin: 5px 4px;
+  border: 0;
+  border-top: 1px solid var(--line);
+}
+.menu .kbd {
+  margin-left: auto;
+}
+
+/* -- Toast ----------------------------------------------------------------- */
+
+.toasts {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 60;
+  display: flex;
+  flex-direction: column-reverse;
+  gap: 8px;
+  max-width: min(420px, calc(100vw - 32px));
+}
+.toast {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 11px 13px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+  box-shadow: var(--shadow-3);
+  animation: toast-in var(--t) var(--ease);
+}
+.toast.bad {
+  border-color: var(--red);
+  background: var(--red-soft);
+}
+.toast.ok {
+  border-color: var(--green);
+  background: var(--green-soft);
+}
+.toast .grow {
+  flex: 1;
+  min-width: 0;
+}
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
+  }
+}
+
+/* -- Banner ---------------------------------------------------------------- */
+
+.banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line);
+  font-size: 12.5px;
+  background: var(--amber-soft);
+  color: var(--ink);
+}
+.banner.bad {
+  background: var(--red-soft);
+}
+.banner .spacer {
+  flex: 1;
+}
+
+/* -- Empty state ----------------------------------------------------------- */
+
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  text-align: center;
+  padding: 54px 24px;
+  color: var(--ink-mut);
+}
+.empty .glyph {
+  width: 52px;
+  height: 52px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--r-lg);
+  background: var(--surface-3);
+  color: var(--ink-mut);
+  margin-bottom: 4px;
+}
+.empty h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 620;
+  color: var(--ink);
+}
+.empty p {
+  margin: 0;
+  max-width: 42ch;
+  line-height: 1.5;
+}
+
+/* -- Code / secret display ------------------------------------------------- */
+
+/* A pairing code or a ticket is the one thing on screen someone will read out
+   loud over a phone. It gets the largest type in the app, generous tracking,
+   and a surface of its own so there is no doubt where it starts and ends. */
+.code-hero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 22px 18px;
+  border-radius: var(--r-lg);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+}
+.code-hero .value {
+  font-family: var(--mono);
+  font-size: 26px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-align: center;
+  word-break: break-all;
+  -webkit-user-select: text;
+  user-select: text;
+  color: var(--ink);
+}
+.code-hero .value.sm {
+  font-size: 15px;
+}
+
+.copyfield {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 8px 8px 11px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--line-strong);
+  background: var(--surface-2);
+}
+.copyfield code {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  -webkit-user-select: text;
+  user-select: text;
+}
+.copyfield.wrap code {
+  white-space: normal;
+  word-break: break-all;
+}
+
+.qr {
+  padding: 12px;
+  border-radius: var(--r-md);
+  background: #fff;
+  border: 1px solid var(--line);
+  line-height: 0;
+}
+
+.fingerprint {
+  font-family: var(--mono);
+  font-size: 12px;
+  letter-spacing: 0.01em;
+  color: var(--ink-sec);
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 4px;
+  border-radius: var(--r-xs);
+  border: 1px solid var(--line-strong);
+  border-bottom-width: 2px;
+  background: var(--surface-2);
+  color: var(--ink-mut);
+  font-size: 10.5px;
+  font-family: var(--font);
+  font-weight: 600;
+}
+
+/* -- Drop zone ------------------------------------------------------------- */
+
+.dropzone {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 42px 24px;
+  border: 2px dashed var(--line-hard);
+  border-radius: var(--r-xl);
+  background: var(--surface);
+  color: var(--ink-sec);
+  cursor: pointer;
+  text-align: center;
+  transition: border-color var(--t) var(--ease), background var(--t) var(--ease),
+    transform var(--t) var(--ease);
+}
+.dropzone:hover {
+  border-color: var(--out);
+  background: var(--out-soft);
+}
+
+/* Full-window drag target. It has to sit above everything, including an open
+   sheet: a file dragged over the app is unambiguous, whatever else is showing. */
+.drop-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  display: grid;
+  place-items: center;
+  background: color-mix(in srgb, var(--out-soft) 88%, transparent);
+  backdrop-filter: blur(6px);
+  pointer-events: none;
+  animation: fade var(--t-fast) var(--ease);
+}
+.drop-overlay .inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 40px 56px;
+  border: 2px dashed var(--out);
+  border-radius: var(--r-xl);
+  background: var(--surface);
+  box-shadow: var(--shadow-3);
+  color: var(--ink);
+}
+
+/* -- Command palette ------------------------------------------------------- */
+
+.palette {
+  position: fixed;
+  z-index: 61;
+  top: 14vh;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(560px, calc(100vw - 48px));
+  max-height: 62vh;
+  border-radius: var(--r-xl);
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+  box-shadow: var(--shadow-3);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  animation: rise-p var(--t) var(--ease);
+}
+@keyframes rise-p {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(-8px) scale(0.985);
+  }
+}
+.palette input {
+  flex: none;
+  width: 100%;
+  padding: 15px 18px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+  font-size: 15px;
+}
+.palette input:focus {
+  box-shadow: none;
+}
+.palette .list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 6px;
+}
+.palette .opt {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 11px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--ink);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+.palette .opt[data-active="true"] {
+  background: var(--surface-3);
+}
+.palette .opt .ico {
+  width: 18px;
+  display: grid;
+  place-items: center;
+  color: var(--ink-mut);
+  flex: none;
+}
+.palette .opt .sub {
+  margin-left: auto;
+  font-size: 11.5px;
+  color: var(--ink-mut);
+}
+.palette .group-label {
+  padding: 9px 11px 4px;
+}
+
+/* -- Contact card ---------------------------------------------------------- */
+
+.people-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(232px, 1fr));
+  gap: 12px;
+}
+.person {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  border-radius: var(--r-lg);
+  border: 1px solid var(--line);
+  background: var(--surface);
+  box-shadow: var(--shadow-1);
+  transition: border-color var(--t-fast) var(--ease),
+    box-shadow var(--t-fast) var(--ease), transform var(--t-fast) var(--ease);
+}
+.person:hover {
+  border-color: var(--line-strong);
+  box-shadow: var(--shadow-2);
+}
+.person.blocked {
+  opacity: 0.62;
+}
+.person-top {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.person-acts {
+  display: flex;
+  gap: 6px;
+  margin-top: auto;
+}
+
+/* -- Tones ----------------------------------------------------------------- */
+
+/* The other half of `format.ts`'s `Tone`. Keeping the mapping here rather than
+   in the module is what lets a status colour differ between light and dark: a
+   hex returned from TypeScript and dropped into a style attribute cannot. */
+.tone-out {
+  color: var(--out-strong);
+}
+.tone-in {
+  color: var(--in);
+}
+.tone-ok {
+  color: var(--green);
+}
+.tone-warn {
+  color: var(--amber);
+}
+.tone-bad {
+  color: var(--red);
+}
+.tone-mut {
+  color: var(--ink-mut);
+}
+.tone-violet {
+  color: var(--violet);
+}
+
+/* Filled counterparts, for file-kind chips and the like. */
+.tint-out {
+  background: var(--out-soft);
+  color: var(--out-strong);
+}
+.tint-in {
+  background: var(--in-soft);
+  color: var(--in);
+}
+.tint-ok {
+  background: var(--green-soft);
+  color: var(--green);
+}
+.tint-warn {
+  background: var(--amber-soft);
+  color: var(--amber);
+}
+.tint-bad {
+  background: var(--red-soft);
+  color: var(--red);
+}
+.tint-mut {
+  background: var(--surface-3);
+  color: var(--ink-mut);
+}
+.tint-violet {
+  background: var(--violet-soft);
+  color: var(--violet);
+}
+
+/* The file-kind chip itself: a fixed square so a list of them makes a column. */
+.ext {
+  width: 36px;
+  height: 36px;
+  flex: none;
+  border-radius: var(--r-md);
+  display: grid;
+  place-items: center;
+  font-size: 9.5px;
+  font-weight: 720;
+  letter-spacing: 0.03em;
+}
+
+/* -- Utility --------------------------------------------------------------- */
+
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.stack-sm {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.hstack {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+.hstack-sm {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.wrap {
+  flex-wrap: wrap;
+}
+.grow {
+  flex: 1;
+  min-width: 0;
+}
+.right {
+  margin-left: auto;
+}
+.divider {
+  height: 1px;
+  background: var(--line);
+  border: 0;
+  margin: 0;
+}
+
+/* ==========================================================================
+   6. NARROW WINDOWS
+   ========================================================================== */
+
+/* Under ~860px the rail's labels stop earning their 232px and the board's two
+   columns have nowhere to go. The rail collapses to icons rather than
+   disappearing behind a hamburger: six destinations fit as a column of glyphs,
+   and a navigation you can see is worth more than one you have to summon.
+   The labels survive as `title` attributes on every rail item. */
+@media (max-width: 860px) {
+  :root {
+    --rail-w: 56px;
+  }
+  .rail {
+    padding: 10px 8px 8px;
+    align-items: center;
+  }
+  .rail-item,
+  .rail-verb,
+  .rail-me {
+    justify-content: center;
+    padding-left: 0;
+    padding-right: 0;
+  }
+  /* Everything but the glyph goes. `.rail-count` stays: an arrival waiting on a
+     decision has to be visible whatever the window size. */
+  .rail-item > .grow,
+  .rail-verb > span:not(.ico),
+  .rail-me > .grow,
+  .rail-foot .kbd,
+  .rail-group > .t-label {
+    display: none;
+  }
+  .rail-verb {
+    font-size: 0;
+  }
+  .rail-count {
+    position: absolute;
+    margin: 0;
+    transform: translate(14px, -12px);
+  }
+  .rail-item {
+    position: relative;
+  }
+  .header {
+    padding: 0 12px;
+  }
+}
+
+/* ==========================================================================
+   7. MOTION PREFERENCES
+   ========================================================================== */
+
+/* Everything above animates through the same two custom properties and a short
+   list of keyframes, so honouring the preference is a single block rather than
+   a per-component audit. The pulsing presence dot is stopped outright — a
+   perpetual animation is exactly what the preference is about. */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --t-fast: 0ms;
+    --t: 0ms;
+    --t-slow: 0ms;
+  }
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+  .dot.on {
+    animation: none;
+    box-shadow: none;
   }
 }

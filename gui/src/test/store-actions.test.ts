@@ -23,7 +23,6 @@ async function boot(expectConnected = true) {
     transfers: {},
     search: "",
     pauseAll: false,
-    openMenuKey: null,
     sheetPaths: null,
     incomingOfferId: null,
   });
@@ -114,22 +113,36 @@ describe("search", () => {
   });
 });
 
-describe("row menu", () => {
-  it("69. toggleMenu opens one row's menu and closes it again", async () => {
+describe("navigation", () => {
+  // Menu open/closed state used to live here as a single `openMenuKey`, so that
+  // two rows could never have a menu open at once. It moved into the `Menu`
+  // component, which owns its own state and closes on outside-click — the
+  // exclusivity is now a property of there being one mounted at a time.
+
+  it("69. arriving at a screen with no push event behind it refetches", async () => {
     await boot();
-    s().toggleMenu("t1");
-    expect(s().openMenuKey).toBe("t1");
-    s().toggleMenu("t1"); // same row again = close
-    expect(s().openMenuKey).toBeNull();
+    const before = harness.recorder.listHistory;
+    s().go("history");
+    await vi.waitFor(() =>
+      expect(harness.recorder.listHistory).toBe(before + 1)
+    );
   });
 
-  it("70. opening another row's menu replaces the first — never two at once", async () => {
+  it("70. only one screen is ever current", async () => {
     await boot();
-    s().toggleMenu("t1");
-    s().toggleMenu("t2");
-    expect(s().openMenuKey).toBe("t2");
-    s().toggleMenu(null);
-    expect(s().openMenuKey).toBeNull();
+    s().go("people");
+    expect(s().route).toBe("people");
+    s().go("deposits");
+    expect(s().route).toBe("deposits");
+  });
+
+  it("navigating away drops a stale error, so it cannot greet you on return", async () => {
+    await boot();
+    harness.fail = new Set(["listDeposits"]);
+    s().go("deposits");
+    await vi.waitFor(() => expect(s().depositsError).toBeTruthy());
+    s().go("transfers");
+    expect(s().depositsError).toBeNull();
   });
 });
 
@@ -140,13 +153,11 @@ describe("send panel", () => {
     expect(s().sheetPaths).toEqual(["/a.txt", "/b.txt"]);
   });
 
-  it("72. opening the panel dismisses a menu or modal underneath it", async () => {
+  it("72. opening the panel dismisses the dialog underneath it", async () => {
     await boot();
-    s().toggleMenu("t1");
     s().openIncoming("o1");
     s().openSheet(["/a.txt"]);
     // Two overlays at once is a UI that fights itself.
-    expect(s().openMenuKey).toBeNull();
     expect(s().incomingOfferId).toBeNull();
   });
 
@@ -159,12 +170,10 @@ describe("send panel", () => {
 });
 
 describe("incoming modal", () => {
-  it("74. openIncoming targets one offer and closes any open menu", async () => {
+  it("74. openIncoming targets exactly one offer", async () => {
     await boot();
-    s().toggleMenu("oo1");
     s().openIncoming("o1");
     expect(s().incomingOfferId).toBe("o1");
-    expect(s().openMenuKey).toBeNull();
   });
 
   it("75. closeIncoming dismisses it without deciding the offer", async () => {
@@ -251,13 +260,11 @@ describe("accept / reject", () => {
 });
 
 describe("pause / resume", () => {
-  it("83. pause closes the menu it was invoked from", async () => {
+  it("83. pause reaches the daemon", async () => {
     await boot();
     harness.emit({ started: { id: 1, direction: "send", name: "f", total_size: 1 } });
-    s().toggleMenu("t1");
     await s().pause(1);
     expect(harness.recorder.pause).toEqual([1]);
-    expect(s().openMenuKey).toBeNull();
   });
 
   it("84. a refused pause surfaces instead of pretending", async () => {
@@ -447,12 +454,9 @@ describe("clearFinished", () => {
     harness.emit({
       offer_received: { id: "o1", from: "p", name: "in", size: 1, note: "", sender_name: "" },
     });
-    s().toggleMenu("t1");
-
     await s().clearFinished();
 
     expect(row("t1")).toBeUndefined();
     expect(row("oo1"), "an undecided arrival is not history").toBeTruthy();
-    expect(s().openMenuKey).toBeNull();
   });
 });

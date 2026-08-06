@@ -11,7 +11,7 @@
 // against real captured daemon output (see events.test.ts and the Rust-side
 // `event_wire_format_is_stable`).
 
-import type { EngineEvent } from "./types";
+import type { EngineEvent, PairKind } from "./types";
 
 /** An engine event exactly as it arrives from the daemon. */
 export type WireEvent =
@@ -43,6 +43,23 @@ export type WireEvent =
   | { code_ready: { id: number; code: string } }
   | { code_paired: { id: number; done: number } }
   | { code_closed: { id: number; reason: string } }
+  | { pairing_code: { session: string; code: string } }
+  | {
+      pairing_done: {
+        session: string;
+        kind: PairKind;
+        summary: string;
+        needs_restart: boolean;
+      };
+    }
+  | {
+      pairing_failed: {
+        session: string;
+        kind: PairKind;
+        error: string;
+        cancelled: boolean;
+      };
+    }
   | "contacts_changed";
 
 /** Every variant the app knows how to act on. A daemon of a different build may
@@ -61,6 +78,9 @@ const KNOWN = new Set<EngineEvent["type"]>([
   "code_paired",
   "code_closed",
   "contacts_changed",
+  "pairing_code",
+  "pairing_done",
+  "pairing_failed",
 ]);
 
 /** Flatten a wire event into the `{ type, ...fields }` shape the store switches on.

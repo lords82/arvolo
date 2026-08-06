@@ -4,18 +4,84 @@
 import { create } from "zustand";
 import { api, onConnected, onEngineEvent } from "./ipc";
 import { shortId } from "./format";
+import { toast } from "./ui/Toasts";
 import type {
+  ConfigDto,
+  ConfigPatch,
   ContactDto,
   DepositDto,
   EngineEvent,
   HistoryDto,
   Method,
   OfferDto,
+  PairKind,
   StatusDto,
+  SyncDto,
   TransferDto,
   UIStatus,
   UITransfer,
 } from "./types";
+
+/** The six places the app can be. One at a time, always — the previous model
+ *  used three independent booleans and could describe two panels owning the main
+ *  pane at once, which is a state nothing could draw. */
+export type Route =
+  | "transfers"
+  | "people"
+  | "deposits"
+  | "history"
+  | "devices"
+  | "settings";
+
+export type ThemeChoice = "system" | "light" | "dark";
+
+/** Fire a store action from a click handler and drop its rejection.
+ *
+ *  Every action re-throws so that callers which *do* await can react — the send
+ *  sheet keeps itself open on a refusal, for one. A menu item has nothing to
+ *  react with: the failure has already been recorded and raised as a toast by
+ *  the time the promise settles, so the only thing left for the rejection to do
+ *  is become an unhandled one. `void p` is not enough for that; the catch is. */
+export function fire(p: Promise<unknown>): void {
+  void p.catch(() => {});
+}
+
+/** A pairing exchange in flight. It is not request/reply — it waits on a person
+ *  at another machine — so the UI tracks it as a little state machine fed by
+ *  `pairing_*` events rather than by an awaited promise. */
+export interface PairingState {
+  session: string | null;
+  kind: PairKind;
+  /** The code to read out (hosting) or that was typed in (joining). */
+  code: string;
+  phase: "starting" | "waiting" | "done" | "failed";
+  message: string;
+  /** Set when a device join replaced this daemon's identity: it has to restart
+   *  before anything else it reports can be believed. */
+  needsRestart: boolean;
+}
+
+const THEME_KEY = "arvolo.theme";
+
+/** Apply a theme choice to <html>. "system" removes the attribute entirely so the
+ *  `prefers-color-scheme` media query in theme.css takes over again — setting it
+ *  to some third value would leave both branches unmatched. */
+export function applyTheme(choice: ThemeChoice) {
+  const root = document.documentElement;
+  if (choice === "system") root.removeAttribute("data-theme");
+  else root.setAttribute("data-theme", choice);
+}
+
+function readTheme(): ThemeChoice {
+  try {
+    const v = localStorage.getItem(THEME_KEY);
+    if (v === "light" || v === "dark" || v === "system") return v;
+  } catch {
+    // Private-mode webviews can throw on localStorage access. A theme is not
+    // worth failing to boot over.
+  }
+  return "system";
+}
 
 function now(): number {
   return Date.now();
@@ -86,7 +152,6 @@ interface State {
    *  fetch. It is fetched when the panel opens, and the panel is the only place it
    *  is shown — precisely so it cannot sit on screen going quietly stale. */
   deposits: DepositDto[];
-  depositsOpen: boolean;
   depositsLoading: boolean;
   depositsError: string | null;
   /** Ids currently being withdrawn, so a row can show the click landed and cannot
@@ -96,18 +161,39 @@ interface State {
   /** The history log, fetched when its panel opens (like the deposits: there is
    *  no push event for it, so open-is-the-refresh keeps it honest). */
   history: HistoryDto[];
-  historyOpen: boolean;
   historyLoading: boolean;
   historyError: string | null;
 
+  /** Settings, fetched when the settings screen opens. Like the deposits and the
+   *  history there is no push event for it, so open-is-the-refresh. */
+  config: ConfigDto | null;
+  configLoading: boolean;
+  configError: string | null;
+
+  /** Multi-device summary, same fetch-on-open contract as `config`. */
+  sync: SyncDto | null;
+  syncLoading: boolean;
+  syncError: string | null;
+
+  /** The pairing exchange currently on screen, if any. */
+  pairing: PairingState | null;
+
   // UI state
+  route: Route;
+  theme: ThemeChoice;
   search: string;
   pauseAll: boolean;
-  openMenuKey: string | null;
+  paletteOpen: boolean;
   sheetPaths: string[] | null; // send sheet open when non-null
-  incomingOfferId: string | null; // incoming modal
-  receiveOpen: boolean; // paste-a-ticket modal
-  contactsOpen: boolean; // address book panel
+  /** Recipient the send sheet should open on, when it was opened *from* someone —
+   *  a person card, or "Invia a X" in the palette. Without this, choosing a
+   *  person and then having to choose them again is the app forgetting what the
+   *  user just told it. */
+  sheetTo: string | null;
+  incomingOfferId: string | null; // incoming offer dialog
+  receiveOpen: boolean; // paste-a-ticket sheet
+  /** The person whose detail sheet is open, by contact name. */
+  personOpen: string | null;
 
   // lifecycle
   init: () => Promise<() => void>;
@@ -123,15 +209,17 @@ interface State {
 
   // ui setters
   setSearch: (q: string) => void;
-  toggleMenu: (key: string | null) => void;
-  openSheet: (paths: string[]) => void;
+  /** Navigate. Routes whose data has no push event refetch on arrival. */
+  go: (r: Route) => void;
+  setTheme: (t: ThemeChoice) => void;
+  setPaletteOpen: (v: boolean) => void;
+  openSheet: (paths: string[], to?: string) => void;
   closeSheet: () => void;
   openIncoming: (offerId: string) => void;
   closeIncoming: () => void;
-  /** Open the deposits panel and fetch it. Opening *is* the refresh: there is no
-   *  event to keep it live, so a stale list must never be what greets the user. */
-  openDeposits: () => Promise<void>;
-  closeDeposits: () => void;
+  openPerson: (name: string | null) => void;
+  /** Fetch what is still on a relay. There is no event to keep it live, so a
+   *  stale list must never be what greets the user: `go("deposits")` refetches. */
   loadDeposits: () => Promise<void>;
   /** Withdraw a deposit from the relay and forget it. Irreversible: the link stops
    *  working for everyone who has it. */
@@ -139,16 +227,38 @@ interface State {
 
   openReceive: () => void;
   closeReceive: () => void;
-  openContacts: () => void;
-  closeContacts: () => void;
-  openHistory: () => Promise<void>;
-  closeHistory: () => void;
   loadHistory: () => Promise<void>;
   /** Forget the whole daemon-side history log. */
   clearHistory: () => Promise<void>;
 
+  loadConfig: () => Promise<void>;
+  /** Write settings back. The daemon answers with the state that resulted, so the
+   *  screen shows what was actually saved rather than what was typed. */
+  saveConfig: (patch: ConfigPatch) => Promise<void>;
+  loadSync: () => Promise<void>;
+  /** Run one address-book sync round now. */
+  syncNow: () => Promise<void>;
+  /** Drop advertised-name records for contacts that no longer exist. */
+  pruneNames: () => Promise<number>;
+
+  /** Begin a pairing exchange and park its state for the sheet to render. */
+  startPairing: (kind: PairKind, code?: string, name?: string) => Promise<void>;
+  /** Abandon the running exchange (also what closing the sheet must do). */
+  cancelPairing: () => Promise<void>;
+  clearPairing: () => void;
+
   // actions (forward to the daemon, then let events reconcile)
   send: (to: string, paths: string[], note: string) => Promise<number>;
+  /** `send --deposit`: skip the live attempt entirely. Returns the `arvm…`
+   *  ticket, which is the sender's copy for hand-delivery. */
+  deposit: (
+    to: string,
+    paths: string[],
+    note: string,
+    ttl: number | null,
+    max: number | null,
+    password: string | null
+  ) => Promise<{ id: number; ticket: string }>;
   ticket: (paths: string[]) => Promise<{ id: number; ticket: string }>;
   /** Host a short pairing code in the daemon (keep = serve every receiver). */
   code: (paths: string[], keep: boolean) => Promise<{ id: number; code: string }>;
@@ -292,20 +402,28 @@ export const useStore = create<State>((set, get) => {
     contacts: [],
     contactsById: {},
     transfers: {},
+    route: "transfers",
+    theme: readTheme(),
     search: "",
     pauseAll: false,
-    openMenuKey: null,
+    paletteOpen: false,
     sheetPaths: null,
+    sheetTo: null,
     incomingOfferId: null,
     receiveOpen: false,
-    contactsOpen: false,
+    personOpen: null,
+    config: null,
+    configLoading: false,
+    configError: null,
+    sync: null,
+    syncLoading: false,
+    syncError: null,
+    pairing: null,
     deposits: [],
-    depositsOpen: false,
     depositsLoading: false,
     depositsError: null,
     revoking: [],
     history: [],
-    historyOpen: false,
     historyLoading: false,
     historyError: null,
 
@@ -319,6 +437,9 @@ export const useStore = create<State>((set, get) => {
     isVerified: (id) => (id ? !!get().contactsById[id]?.verified : false),
 
     init: async () => {
+      // Before anything paints: the stored choice has to beat the media query on
+      // the very first frame, or a dark-theme user sees a white flash on launch.
+      applyTheme(get().theme);
       api
         .guiVersion()
         .then((v) => set({ guiVersion: v }))
@@ -499,43 +620,95 @@ export const useStore = create<State>((set, get) => {
           // `arvolo contacts …` run in another process.
           void get().refreshContacts();
           break;
+
+        // Pairing runs as a session, not a request/reply: these three events are
+        // the only way its progress reaches the UI. Each is ignored unless it
+        // names the session currently on screen, so a stale outcome from a sheet
+        // the user already closed cannot reopen it or overwrite a newer attempt.
+        case "pairing_code":
+          set((s) =>
+            s.pairing && s.pairing.session === ev.session
+              ? { pairing: { ...s.pairing, code: ev.code, phase: "waiting" } }
+              : {}
+          );
+          break;
+        case "pairing_done":
+          set((s) =>
+            s.pairing && s.pairing.session === ev.session
+              ? {
+                  pairing: {
+                    ...s.pairing,
+                    phase: "done",
+                    message: ev.summary,
+                    needsRestart: ev.needs_restart,
+                  },
+                }
+              : {}
+          );
+          void get().refreshContacts();
+          break;
+        case "pairing_failed":
+          set((s) =>
+            s.pairing && s.pairing.session === ev.session
+              ? {
+                  pairing: {
+                    ...s.pairing,
+                    phase: "failed",
+                    // A cancellation is the user's own doing; saying so keeps the
+                    // sheet from reporting their click back to them as an error.
+                    message: ev.cancelled ? "Annullato." : ev.error,
+                  },
+                }
+              : {}
+          );
+          break;
       }
     },
 
     setSearch: (q) => set({ search: q }),
-    toggleMenu: (key) =>
-      set((s) => ({ openMenuKey: s.openMenuKey === key ? null : key })),
-    openSheet: (paths) =>
-      set({ sheetPaths: paths, openMenuKey: null, incomingOfferId: null }),
-    closeSheet: () => set({ sheetPaths: null }),
-    openIncoming: (offerId) =>
-      set({ incomingOfferId: offerId, openMenuKey: null }),
-    closeIncoming: () => set({ incomingOfferId: null }),
-    openReceive: () => set({ receiveOpen: true, openMenuKey: null }),
-    closeReceive: () => set({ receiveOpen: false }),
-    // The three flags below are the app's *view*: at most one is on, and all off
-    // means the board. The setters keep the exclusivity so the sidebar can treat
-    // them as one selection — two panels claiming the main pane at once is a
-    // state the UI cannot draw.
-    openContacts: () =>
-      set({
-        contactsOpen: true,
-        historyOpen: false,
-        depositsOpen: false,
-        openMenuKey: null,
-      }),
-    closeContacts: () => set({ contactsOpen: false }),
 
-    openHistory: async () => {
+    // Arriving *is* the refresh for the three screens with no push event behind
+    // them. Doing it here rather than in each view keeps a stale panel from ever
+    // being what greets the user, however they navigated to it — rail, command
+    // palette or keyboard shortcut.
+    go: (r) => {
+      // Errors are cleared on the way *out* as well as refetched on the way in:
+      // a failure from a previous visit must not be what greets the user when
+      // they come back, before the fresh fetch has had a chance to succeed.
       set({
-        historyOpen: true,
-        contactsOpen: false,
-        depositsOpen: false,
-        openMenuKey: null,
+        route: r,
+        paletteOpen: false,
+        personOpen: null,
+        depositsError: null,
+        historyError: null,
+        configError: null,
+        syncError: null,
       });
-      await get().loadHistory();
+      if (r === "deposits") void get().loadDeposits();
+      if (r === "history") void get().loadHistory();
+      if (r === "devices") void get().loadSync();
+      if (r === "settings") void get().loadConfig();
     },
-    closeHistory: () => set({ historyOpen: false, historyError: null }),
+    setTheme: (t) => {
+      applyTheme(t);
+      try {
+        localStorage.setItem(THEME_KEY, t);
+      } catch {
+        // See `readTheme` — a webview that refuses storage still gets the theme,
+        // it just will not remember it next launch.
+      }
+      set({ theme: t });
+    },
+    setPaletteOpen: (v) => set({ paletteOpen: v }),
+    openSheet: (paths, to) =>
+      set({ sheetPaths: paths, sheetTo: to ?? null, incomingOfferId: null }),
+    closeSheet: () => set({ sheetPaths: null, sheetTo: null }),
+    openIncoming: (offerId) => set({ incomingOfferId: offerId }),
+    closeIncoming: () => set({ incomingOfferId: null }),
+    openPerson: (name) => set({ personOpen: name }),
+    openReceive: () => set({ receiveOpen: true }),
+    closeReceive: () => set({ receiveOpen: false }),
+
     loadHistory: async () => {
       set({ historyLoading: true });
       try {
@@ -554,17 +727,6 @@ export const useStore = create<State>((set, get) => {
       await act("Impossibile svuotare lo storico", () => api.clearHistory());
       set({ history: [] });
     },
-
-    openDeposits: async () => {
-      set({
-        depositsOpen: true,
-        historyOpen: false,
-        contactsOpen: false,
-        openMenuKey: null,
-      });
-      await get().loadDeposits();
-    },
-    closeDeposits: () => set({ depositsOpen: false, depositsError: null }),
 
     loadDeposits: async () => {
       set({ depositsLoading: true });
@@ -598,12 +760,135 @@ export const useStore = create<State>((set, get) => {
       }
     },
 
+    loadConfig: async () => {
+      set({ configLoading: true });
+      try {
+        const config = await api.getConfig();
+        set({ config, configError: null, configLoading: false });
+      } catch (e) {
+        set({
+          configLoading: false,
+          configError: `Non riesco a leggere le impostazioni dal daemon: ${String(e)}`,
+        });
+      }
+    },
+    saveConfig: async (patch) => {
+      // The daemon replies with the state its write produced, so what lands in
+      // the store is what is actually on disk — not the optimistic echo of a
+      // field, which would quietly disagree the moment a key was refused or
+      // normalized (a bare relay host becomes a full https URL, for one).
+      const config = await act("Impossibile salvare le impostazioni", () =>
+        api.setConfig(patch)
+      );
+      set({ config, configError: null });
+      // The display name is advertised inside every offer and is also shown in
+      // the rail, which reads it off `status`.
+      if (patch.display_name !== undefined) {
+        const status = await api.status().catch(() => null);
+        if (status) set({ status });
+      }
+    },
+
+    loadSync: async () => {
+      set({ syncLoading: true });
+      try {
+        const sync = await api.syncStatus();
+        set({ sync, syncError: null, syncLoading: false });
+      } catch (e) {
+        set({
+          syncLoading: false,
+          syncError: `Non riesco a leggere lo stato dei dispositivi: ${String(e)}`,
+        });
+      }
+    },
+    syncNow: async () => {
+      set({ syncLoading: true });
+      try {
+        const sync = await api.syncNow();
+        set({ sync, syncLoading: false, syncError: null });
+        // The round's own failure comes back inside the summary rather than as a
+        // rejection — the rest of the state is still worth showing.
+        if (sync.last_error) {
+          toast.bad("Sincronizzazione non riuscita", sync.last_error);
+        } else {
+          toast.ok(
+            "Rubrica sincronizzata",
+            sync.last_merged
+              ? `${sync.last_merged} aggiornamento/i dagli altri dispositivi.`
+              : "Nessun aggiornamento dagli altri dispositivi."
+          );
+          await get().refreshContacts();
+        }
+      } catch (e) {
+        set({ syncLoading: false });
+        toast.bad("Sincronizzazione non riuscita", String(e));
+      }
+    },
+    pruneNames: async () => {
+      const n = await act("Impossibile ripulire i nomi", () => api.pruneNames());
+      await get().refreshContacts();
+      return n;
+    },
+
+    startPairing: async (kind, code, name) => {
+      set({
+        pairing: {
+          session: null,
+          kind,
+          code: code ?? "",
+          phase: "starting",
+          message: "",
+          needsRestart: false,
+        },
+      });
+      try {
+        const session = await api.startPairing(
+          kind,
+          null,
+          code ?? null,
+          name ?? null
+        );
+        set((s) =>
+          s.pairing
+            ? { pairing: { ...s.pairing, session, phase: "waiting" } }
+            : {}
+        );
+      } catch (e) {
+        set((s) =>
+          s.pairing
+            ? {
+                pairing: { ...s.pairing, phase: "failed", message: String(e) },
+              }
+            : {}
+        );
+      }
+    },
+    cancelPairing: async () => {
+      const session = get().pairing?.session;
+      set({ pairing: null });
+      // Best-effort: the session finishing and the sheet closing race by nature,
+      // and the user's intent is satisfied either way. Surfacing "no such
+      // session" for closing a panel would be noise.
+      if (session) await api.cancelPairing(session).catch(() => {});
+    },
+    clearPairing: () => set({ pairing: null }),
+
     send: async (to, paths, note) => {
       const id = await act(`Invio a ${to} non riuscito`, () =>
         api.sendTo(to, paths, note)
       );
-      set({ sheetPaths: null });
+      set({ sheetPaths: null, sheetTo: null });
       return id;
+    },
+    deposit: async (to, paths, note, ttl, max, password) => {
+      // Unlike `send`, this does NOT close the send sheet. A deposit hands back
+      // an `arvm…` ticket — the sender's own copy, for when the inbox route is
+      // not wanted or is not working — and closing the panel on success would
+      // destroy it the instant it was produced. The panel closes when the user
+      // says so, exactly as it does for a code, a link or a ticket.
+      return act(`Deposito per ${to} non riuscito`, () =>
+        api.depositTo(to, paths, note, ttl, max, password)
+      );
     },
     ticket: async (paths) =>
       act("Creazione del ticket non riuscita", () => api.serveTicket(paths, null)),
@@ -635,11 +920,9 @@ export const useStore = create<State>((set, get) => {
     },
     pause: async (id) => {
       await act("Impossibile mettere in pausa", () => api.pause(id));
-      set({ openMenuKey: null });
     },
     resume: async (id) => {
       await act("Impossibile riprendere", () => api.resume(id));
-      set({ openMenuKey: null });
     },
     cancel: async (id) => {
       // Show the click landed. The daemon only flips the row once it has actually
@@ -655,7 +938,6 @@ export const useStore = create<State>((set, get) => {
             : {}
         );
       setStatus("in annullamento");
-      set({ openMenuKey: null });
       try {
         await act("Impossibile annullare", () => api.cancel(id));
       } catch (e) {
@@ -673,12 +955,11 @@ export const useStore = create<State>((set, get) => {
       if (t.id > 0) await act("Impossibile eliminare", () => api.remove(t.id));
       set((s) => {
         const { [key]: _drop, ...rest } = s.transfers;
-        return { transfers: rest, openMenuKey: null };
+        return { transfers: rest };
       });
     },
     markVerified: async (name) => {
       await act(`Impossibile verificare ${name}`, () => api.markVerified(name));
-      set({ openMenuKey: null });
       // Refresh contacts and re-stamp the verified badge on every row.
       await get().reload();
     },
@@ -740,7 +1021,7 @@ export const useStore = create<State>((set, get) => {
     moveItem: (key, delta) =>
       set((s) => {
         const me = s.transfers[key];
-        if (!me) return { openMenuKey: null };
+        if (!me) return {};
         // Neighbours = same direction, ordered exactly as the board renders
         // (rank descending). delta -1 = up (towards higher rank).
         const siblings = Object.values(s.transfers)
@@ -748,10 +1029,9 @@ export const useStore = create<State>((set, get) => {
           .sort((a, b) => b.rank - a.rank);
         const i = siblings.findIndex((t) => t.key === key);
         const j = i + delta;
-        if (i < 0 || j < 0 || j >= siblings.length) return { openMenuKey: null };
+        if (i < 0 || j < 0 || j >= siblings.length) return {};
         const other = siblings[j];
         return {
-          openMenuKey: null,
           transfers: {
             ...s.transfers,
             [me.key]: { ...me, rank: other.rank },
@@ -767,14 +1047,14 @@ export const useStore = create<State>((set, get) => {
             .filter((t) => t.status === "in corso")
             .map((t) => api.pause(t.id).catch(() => {}))
         );
-        set({ pauseAll: true, openMenuKey: null });
+        set({ pauseAll: true });
       } else {
         await Promise.all(
           rows
             .filter((t) => t.status === "in attesa")
             .map((t) => api.resume(t.id).catch(() => {}))
         );
-        set({ pauseAll: false, openMenuKey: null });
+        set({ pauseAll: false });
       }
     },
     dismissActionError: () => set({ actionError: null }),
@@ -792,7 +1072,7 @@ export const useStore = create<State>((set, get) => {
             t.status === "annullato";
           if (!finished) kept[k] = t;
         }
-        return { transfers: kept, openMenuKey: null };
+        return { transfers: kept };
       });
     },
   };

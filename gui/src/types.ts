@@ -114,6 +114,68 @@ export interface StatusDto {
   display_name: string;
 }
 
+/** The settings screen: what is in force, and what `config.toml` says. The two
+ *  differ whenever an env var or the built-in default is supplying the value, and
+ *  the UI has to be able to say which — an unchangeable value must not be
+ *  presented as an editable one. */
+export interface ConfigDto {
+  relay: string | null;
+  relay_configured: string;
+  /** "env" | "config" | "builtin" | "none" */
+  relay_source: string;
+  download_dir: string;
+  download_dir_configured: string;
+  download_dir_from_env: boolean;
+  display_name: string;
+  sync: boolean;
+  seed: boolean | null;
+  swarm: string;
+  concurrency: number | null;
+  config_path: string;
+  identity_path: string;
+}
+
+/** One field of a config patch: set it, or clear it back to the default. Mirrors
+ *  Rust's `Setting<T>` (externally tagged, so `{ set: v }` or `"clear"`). */
+export type Setting<T> = { set: T } | "clear";
+
+/** A settings edit. An absent key is left alone — which is why every field is
+ *  optional *and* its value is a `Setting`: "don't touch the relay" and "stop
+ *  overriding the relay" are different requests. */
+export interface ConfigPatch {
+  relay?: Setting<string>;
+  download_dir?: Setting<string>;
+  display_name?: Setting<string>;
+  sync?: Setting<boolean>;
+  seed?: Setting<boolean>;
+  swarm?: Setting<string>;
+  concurrency?: Setting<number>;
+}
+
+/** Multi-device state: one identity across machines, address books kept in step
+ *  through an encrypted cell on the relay inbox. */
+export interface SyncDto {
+  fingerprint: string;
+  public_id: string;
+  contacts: number;
+  enabled: boolean;
+  /** Unix seconds of the last successful round; 0 = not since this daemon
+   *  started. Deliberately not persisted by the daemon — a stamp from a previous
+   *  run says nothing about whether sync works now. */
+  last_sync: number;
+  last_merged: number;
+  last_error: string;
+}
+
+/** Which pairing. `contact_*` trades public ids between two people; `device_*`
+ *  hands this device's identity secret to another machine. They share a
+ *  mechanism and nothing else — see the Rust `PairKind`. */
+export type PairKind =
+  | "contact_host"
+  | "contact_join"
+  | "device_host"
+  | "device_join";
+
 /** The app-model event: `EventDto` flattened by `normalizeEvent`. This is NOT the
  *  wire shape — see `events.ts` for what the daemon actually sends. */
 export type EngineEvent =
@@ -148,7 +210,27 @@ export type EngineEvent =
   | { type: "code_closed"; id: number; reason: string }
   /** The address book moved (from this GUI, the CLI, or a sync). Carries nothing:
    *  refetch the contacts. */
-  | { type: "contacts_changed" };
+  | { type: "contacts_changed" }
+  /** A hosted pairing session has its code — what the other machine types. */
+  | { type: "pairing_code"; session: string; code: string }
+  /** A pairing session succeeded. `needs_restart` marks the one case a UI must
+   *  act on: a device join replaced the identity the daemon is running as. */
+  | {
+      type: "pairing_done";
+      session: string;
+      kind: PairKind;
+      summary: string;
+      needs_restart: boolean;
+    }
+  /** A pairing session ended without pairing. `cancelled` separates "the user
+   *  closed the sheet" from a real failure worth showing. */
+  | {
+      type: "pairing_failed";
+      session: string;
+      kind: PairKind;
+      error: string;
+      cancelled: boolean;
+    };
 
 // ---- UI model -------------------------------------------------------------
 

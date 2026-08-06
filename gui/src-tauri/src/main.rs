@@ -63,6 +63,16 @@ fn main() {
             bridge::restart_daemon,
             bridge::list_deposits,
             bridge::revoke_deposit,
+            bridge::deposit_to,
+            bridge::get_config,
+            bridge::set_config,
+            bridge::prune_names,
+            bridge::sync_status,
+            bridge::sync_now,
+            bridge::start_pairing,
+            bridge::cancel_pairing,
+            bridge::read_text_file,
+            bridge::write_text_file,
             bridge::gui_version,
         ])
         .setup(|app| {

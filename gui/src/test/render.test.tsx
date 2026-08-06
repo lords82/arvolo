@@ -15,15 +15,20 @@ vi.mock("@tauri-apps/api/webview", () => ({
     onDragDropEvent: () => Promise.resolve(() => {}),
   }),
 }));
-vi.mock("@tauri-apps/plugin-dialog", () => ({ open: () => Promise.resolve(null) }));
+vi.mock("@tauri-apps/plugin-dialog", () => ({
+  open: () => Promise.resolve(null),
+  save: () => Promise.resolve(null),
+}));
 vi.mock("@tauri-apps/plugin-opener", () => ({
   revealItemInDir: () => Promise.resolve(),
+  openUrl: () => Promise.resolve(),
+  openPath: () => Promise.resolve(),
 }));
 
 import { useStore } from "../store";
 import { App } from "../App";
-import { SendSheet } from "../components/SendSheet";
-import { Board } from "../components/Board";
+import { SendSheet } from "../overlays/SendSheet";
+import { TransfersView } from "../views/TransfersView";
 import { ErrorBoundary } from "../ErrorBoundary";
 
 function reset() {
@@ -45,9 +50,13 @@ function reset() {
     transfers: {},
     search: "",
     pauseAll: false,
-    openMenuKey: null,
     sheetPaths: null,
     incomingOfferId: null,
+    personOpen: null,
+    paletteOpen: false,
+    pairing: null,
+    route: "transfers",
+    receiveOpen: false,
   });
 }
 
@@ -70,7 +79,7 @@ describe("the window survives what the user does to it", () => {
         <SendSheet />
       </ErrorBoundary>
     );
-    expect(screen.queryByText("Invia")).toBeNull(); // closed
+    expect(screen.queryByText("Cosa mandi")).toBeNull(); // closed
 
     await act(async () => {
       useStore.getState().openSheet(["/Users/ls/Scrivania/relazione.pdf"]);
@@ -86,14 +95,15 @@ describe("the window survives what the user does to it", () => {
     // send sheet. If that render throws, the tree unmounts and the window goes white.
     useStore.getState().openSheet(["/Users/ls/Scrivania/relazione.pdf"]);
     render(<SendSheet />);
-    expect(screen.getByText("Invia")).toBeDefined();
+    expect(screen.getByText("Cosa mandi")).toBeDefined();
     expect(screen.getByText("relazione.pdf")).toBeDefined();
   });
 
   it("40. dropping several files at once still renders", () => {
     useStore.getState().openSheet(["/a/one.txt", "/a/two.txt", "/a/three.txt"]);
     render(<SendSheet />);
-    expect(screen.getByText("3 file")).toBeDefined();
+    expect(screen.getByText("one.txt")).toBeDefined();
+    expect(screen.getByText(/3 elementi/)).toBeDefined();
   });
 
   it("41. a path with no extension, spaces or unicode does not break the chip", () => {
@@ -102,10 +112,36 @@ describe("the window survives what the user does to it", () => {
     expect(screen.getByText("Relazione finale — 2026")).toBeDefined();
   });
 
-  it("42. the full app mounts with an empty board", () => {
+  it("42. the full app mounts with an empty board and says what to do", () => {
     render(<App />);
-    expect(screen.getByText("Inviati")).toBeDefined();
-    expect(screen.getByText("Ricevuti")).toBeDefined();
+    expect(screen.getByText(/Trascina qui i file da inviare/)).toBeDefined();
+  });
+
+  it("the board shows both directions once there is anything to show", () => {
+    useStore.setState({
+      transfers: {
+        t1: {
+          key: "t1",
+          id: 1,
+          dir: "out",
+          name: "x.bin",
+          size: 10,
+          transferred: 1,
+          status: "in corso",
+          encrypted: true,
+          verified: false,
+          method: "p2p",
+          swarmPeers: 0,
+          downloadPeers: 0,
+          files: 1,
+          firstSeen: Date.now(),
+          rank: 1,
+        },
+      },
+    });
+    render(<TransfersView />);
+    expect(screen.getByText("In uscita")).toBeDefined();
+    expect(screen.getByText("In arrivo")).toBeDefined();
   });
 
   it("43. the board renders a row of every status without throwing", () => {
@@ -141,7 +177,7 @@ describe("the window survives what the user does to it", () => {
       };
     });
     useStore.setState({ transfers });
-    render(<Board />);
+    render(<TransfersView />);
     expect(screen.getByText("f0.bin")).toBeDefined();
   });
 
@@ -168,9 +204,11 @@ describe("the window survives what the user does to it", () => {
         },
       },
     });
-    render(<Board />);
-    expect(screen.getByText("Accetta")).toBeDefined();
-    expect(screen.getByText("Rifiuta")).toBeDefined();
+    render(<TransfersView />);
+    // The row itself is the control: an arrival is a decision, so it opens the
+    // dialog where the sender's identity can actually be read.
+    expect(screen.getByText("arrivo.zip")).toBeDefined();
+    expect(screen.getByText("Rivedi")).toBeDefined();
   });
 
   it("45. the send panel lists saved contacts to send to", async () => {

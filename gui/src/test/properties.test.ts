@@ -12,7 +12,7 @@
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import {
-  barColor,
+  barClass,
   extOf,
   extTint,
   fmtBytes,
@@ -29,6 +29,11 @@ import {
 import { normalizeEvent } from "../events";
 import type { Method, UIStatus, UITransfer } from "../types";
 
+/** The tones `format.ts` is allowed to return. They are class-name suffixes
+ *  resolved by `.tone-*` / `.tint-*` in theme.css — the assertions below check
+ *  membership rather than a hex value on purpose: the whole point of the token
+ *  indirection is that the actual colour differs between light and dark. */
+const TONES = ["out", "in", "ok", "warn", "bad", "mut", "violet"];
 const ALL_STATUSES: UIStatus[] = [
   "in arrivo",
   "in corso",
@@ -134,18 +139,19 @@ describe("pct — over every pair", () => {
 });
 
 describe("statusMeta / methodMeta — exhaustive over their domains", () => {
-  it("every status maps to a label and a hex colour", () => {
+  it("every status maps to a label and a known tone", () => {
     // Not a sample: this *is* every possible input.
     for (const s of ALL_STATUSES) {
       expect(statusMeta(s).text).toBeTruthy();
-      expect(statusMeta(s).color).toMatch(/^#[0-9a-f]{6}$/i);
+      expect(TONES).toContain(statusMeta(s).tone);
     }
   });
 
   it("every method maps to a complete chip", () => {
     for (const m of ALL_METHODS) {
       const meta = methodMeta(m);
-      expect(meta.label && meta.glyph && meta.color && meta.bg).toBeTruthy();
+      expect(meta.label && meta.glyph).toBeTruthy();
+      expect(TONES).toContain(meta.tone);
     }
   });
 
@@ -160,9 +166,7 @@ describe("statusMeta / methodMeta — exhaustive over their domains", () => {
   it("no arbitrary string can make extTint return undefined", () => {
     fc.assert(
       fc.property(fc.string(), (junk) => {
-        const [bg, fg] = extTint(junk);
-        expect(bg).toMatch(/^#/);
-        expect(fg).toMatch(/^#/);
+        expect(TONES).toContain(extTint(junk));
       })
     );
   });
@@ -217,11 +221,15 @@ describe("shortId — over every id", () => {
   });
 });
 
-describe("barColor — every direction × status", () => {
-  it("is a hex colour for all 18 combinations", () => {
+describe("barClass — every direction × status", () => {
+  it("always names the bar and exactly one direction", () => {
     for (const dir of ["out", "in"] as const) {
       for (const status of ALL_STATUSES) {
-        expect(barColor({ ...({} as UITransfer), dir, status })).toMatch(/^#[0-9a-f]{6}$/i);
+        const parts = barClass({ ...({} as UITransfer), dir, status }).split(" ");
+        expect(parts).toContain("prog");
+        expect(parts).toContain(dir);
+        // Never both directions: the stripe and the bar have to agree.
+        expect(parts.includes("out") && parts.includes("in")).toBe(false);
       }
     }
   });
