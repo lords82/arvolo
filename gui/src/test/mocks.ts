@@ -13,6 +13,7 @@ import type {
   ContactDto,
   DepositDto,
   EngineEvent,
+  HistoryDto,
   OfferDto,
   PairKind,
   StatusDto,
@@ -72,6 +73,7 @@ export interface Harness {
     pending: OfferDto[];
     contacts: ContactDto[];
     deposits: DepositDto[];
+    history: HistoryDto[];
     config: ConfigDto;
     sync: SyncDto;
     /** Who the relay reports as online, by id. Absent = "could not ask". */
@@ -137,6 +139,7 @@ function freshSnapshot(): Harness["snapshot"] {
     pending: [],
     contacts: [],
     deposits: [],
+    history: [],
     config: {
       relay: "https://relay.test",
       relay_configured: "relay.test",
@@ -320,7 +323,7 @@ export function makeIpcMock() {
       },
       listHistory: () => {
         harness.recorder.listHistory++;
-        return guard("listHistory", []);
+        return guard("listHistory", harness.snapshot.history);
       },
       clearHistory: () => {
         harness.recorder.clearHistory++;
