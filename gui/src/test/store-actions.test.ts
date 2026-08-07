@@ -235,7 +235,7 @@ describe("accept / reject", () => {
       offer_received: { id: "o1", from: "p", name: "f", size: 1, note: "", sender_name: "" },
     });
     await s().accept("o1", null);
-    expect(harness.recorder.accept).toEqual([["o1", null]]);
+    expect(harness.recorder.accept).toEqual([["o1", null, null]]);
   });
 
   it("81. a refused accept keeps the offer — it is not silently lost", async () => {

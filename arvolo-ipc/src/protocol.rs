@@ -118,9 +118,17 @@ pub enum Request {
     /// Resume a paused `send --to` by id → [`Response::Ok`].
     Resume { id: u64 },
     /// Accept a parked offer, optionally to a specific path → [`Response::TransferId`].
+    ///
+    /// `password` is for the case where the offer points at a mailbox deposit
+    /// sealed with one (`send --deposit --password`). Such an offer is
+    /// indistinguishable from any other until the fetch fails, so a UI can send
+    /// the accept, read the refusal, ask, and send it again. `#[serde(default)]`
+    /// keeps the old two-field shape decodable.
     AcceptOffer {
         offer_id: String,
         out: Option<String>,
+        #[serde(default)]
+        password: Option<String>,
     },
     /// Reject a parked offer → [`Response::Ok`].
     RejectOffer { offer_id: String },

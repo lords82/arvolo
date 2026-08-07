@@ -5,13 +5,21 @@ A cross-platform desktop app for Arvolo that runs **alongside** the CLI. It does
 background **daemon** the CLI drives, over the local IPC socket. Closing the
 window leaves transfers running; the CLI and GUI share one engine and identity.
 
-Implements the **board `3a`** design from `../Arvolo.dc.html`: two columns
-(Inviati / Ricevuti) with sections, live search, pause-all + clear-finished, a
-5-tab send panel (Persone / ID·QR / Codice / Link / Ticket), a paste-anything
-**Ricevi** modal (`arvolo recv`), a full **Rubrica** (add/rename/remove,
-verify-with-fingerprint, trust, block, advertised-name approval, own display
-name), a **Storico** panel (`arvolo history`) and an incoming-offer modal with
-fingerprint verification and block-sender.
+The app is **six places and two verbs**: a rail carrying Invia / Ricevi above
+Trasferimenti, Persone, Link e depositi, Cronologia, I tuoi dispositivi and
+Impostazioni. `⌘K` reaches all of them, plus every contact. It covers the CLI's
+surface — see *Parity* below — and does so with a real light and dark theme.
+
+Two ideas run through the design and are worth knowing before reading the CSS:
+
+* **Direction is a colour.** Outgoing is amber, incoming is blue, on every
+  progress bar, row stripe and section header. A glance tells you which way the
+  bytes are going before you read a word. Semantic colours (green/red/amber) are
+  reserved for *outcomes*, so the two vocabularies never collide.
+* **Trust is typography.** Fingerprints, public ids and pairing codes are set in
+  mono, spaced, selectable, and never truncated where a decision depends on
+  them. A pairing code gets the largest type in the app, because somebody is
+  about to read it out loud.
 
 ## Architecture
 
@@ -32,11 +40,23 @@ React UI (Zustand store)  ──invoke()──▶  #[tauri::command] bridge ─�
     every engine event as `engine://event`, plus an `engine://connected`
     heartbeat and a native notification on each incoming offer.
 * **`src/`** — React + TypeScript frontend.
-  * `store.ts` — a single Zustand `TransferStore`, seeded from a daemon snapshot
+  * `store.ts` — a single Zustand store, seeded from a daemon snapshot
     (`list`/`list_pending`/`list_contacts`) then mutated **only** by pushed
-    events. No polling.
-  * `components/` — `Board` (+ `Column`, `TransferRow`, `RowMenu`), `SendSheet`,
-    `IncomingModal`; `App.tsx` is the shell (header, drop zone, control row).
+    events. No polling. The screens with no push event behind them — deposits,
+    history, settings, devices — refetch on arrival instead, because a stale
+    panel must never be what greets the user.
+  * `theme.css` — the design system: tokens, base, components. Both themes are
+    defined in full; `data-theme` on `<html>` overrides the system preference in
+    either direction.
+  * `ui/` — primitives (`Button`, `Field`, `Switch`, `Segmented`, `Sheet`,
+    `Menu`, `Toasts`) and the app's own pieces (`Avatar`, `CodeHero`,
+    `Fingerprint`, `Progress`) in `Bits.tsx`.
+  * `views/` — one file per place, plus `Rail`.
+  * `overlays/` — `SendSheet`, `ReceiveSheet`, `IncomingDialog`, `PairSheet`,
+    `CommandPalette`.
+  * `App.tsx` — the frame: banners, header, the current view, and the three
+    things that belong to the *window* rather than any screen (drag-and-drop,
+    the keyboard map, the daemon-health banners).
 
 The wire contract + client live in the shared **`arvolo-ipc`** crate (also used by
 the CLI), so both frontends speak the same protocol.
@@ -86,8 +106,14 @@ app can spawn the daemon on a clean machine.
 
 * **Tray**: closing the window hides it to the system tray ("Mostra Arvolo" /
   "Esci" in the tray menu); the daemon keeps running either way.
-* **Campanella arrivi** in the header: red badge = offers awaiting a decision;
-  click opens the oldest one.
+* **Arrivi in attesa** are announced by a banner on every screen but the board,
+  and by a count on the rail; a native notification fires even when the window
+  is closed to the tray.
+* **Scorciatoie**: `⌘K` command palette, `⌘N` invia, `⌘V` ricevi, `⌘,`
+  impostazioni, `/` cerca. All of them stand down while focus is in a text
+  field, so `⌘N` mid-note does not throw the note away.
+* **Tema**: chiaro, scuro o di sistema (Impostazioni → Aspetto, or the palette).
+  The choice is stored locally and applied before the first paint.
 * **Verifica identità** (Rubrica and the incoming modal) marks a *saved contact*
   verified **with the fingerprint on screen** — the click confirms an
   out-of-band comparison, it never marks blind (`MarkVerified` IPC).
@@ -102,23 +128,42 @@ app can spawn the daemon on a clean machine.
 * No right-click context menu; in release builds the reload/devtools shortcuts
   are swallowed too.
 
-## Known gaps vs. the CLI (deferred)
+## Parity with the CLI
 
-* **`arvolo contacts pair`** (SPAKE2 trade of public ids) and **`arvolo device
-  pair/join/sync`** (multi-device identity) — interactive rendezvous flows, a
-  separate epic.
-* **`arvolo contacts export/import`** — file-based book backup stays CLI-only.
-* **Resume of an interrupted send** by session id / re-supplied `arvc…` ticket —
-  the board resumes *paused* transfers; disk-session recovery stays CLI-only.
-* **Scansione QR** con fotocamera — the app *shows* QR codes (own code, pairing
-  code, ticket); scanning is deferred.
-* Chip **metodo** (P2P vs Cloud) is best-effort: `TransferDto` carries no method
-  flag, so it is inferred.
+Every verb has a home:
+
+| CLI | Where |
+|---|---|
+| `send --to` / `--deposit --ttl --max --password` | Invia → *A un contatto*, with *Lascia in casella* |
+| `code` (incl. multi-recipient) | Invia → *Codice* |
+| `link --ttl --max` | Invia → *Link* |
+| `ticket` | Invia → *Ticket* |
+| `recv` (code / `arvc…` / `arvm…` + password) | Ricevi |
+| `status`, `pause`, `resume`, `cancel`, `status clear` | Trasferimenti |
+| `contacts` add/list/rename/remove/verify/trust/block/prune | Persone |
+| `contacts pair` | Persone → *Scambia contatti* |
+| `contacts export` / `import` | Persone → *Esporta* / *Importa* |
+| `contacts list` presence probe | Persone → *Chi c'è* |
+| `history`, `history clear` | Cronologia |
+| `device pair` / `join` / `sync` / `status` | I tuoi dispositivi |
+| `me`, `me name`, relay + download dir config | Impostazioni |
+
+Pairing runs as a **session**, not a request/reply: the daemon answers with a
+handle and the code and outcome arrive as `pairing_*` events, because the
+exchange waits on a human at another machine. Closing the sheet cancels it —
+an unattended `device pair` would otherwise keep offering this device's
+identity secret for its whole window.
+
+### Still deferred
+
+* **Scansione QR** con fotocamera — the app *shows* QR codes (pairing codes,
+  tickets, links); scanning one is deferred.
+* **Resume of an interrupted send** by session id or re-supplied `arvc…` ticket.
+  The board resumes *paused* transfers; disk-session recovery stays CLI-only.
 * **Riprova** on a failed transfer and **Forza ripresa** on a stalled one are not
   offered: the engine has no retry for terminal failures (stalled sends already
   auto-retry), so the menu only shows actions that actually work.
-* **Link** invio: supports a single file (a folder is archived); multiple selected
-  files fall back to the first — use Ticket/Persone to send a group. `--password`
-  is not offered because the CLI doesn't support it on links either (the browser
-  page can't unwrap it); password-protected **deposits** are received fine (the
-  Ricevi modal asks when the ticket carries one).
+* **Link** publishes a single item — pick a folder to send a group. No password:
+  the CLI refuses it there too, because the browser page cannot unwrap one.
+  Password-protected *deposits* are both created and received fine.
+* `completions` has no GUI equivalent, and does not want one.

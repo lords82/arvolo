@@ -1173,6 +1173,44 @@ impl TransferManager {
     /// download dir, using the offer's name) transparently and ack it. Returns the
     /// receive transfer id.
     pub async fn accept_offer(&self, offer_id: &str, out: Option<PathBuf>) -> Result<u64> {
+        self.accept_offer_with_password(offer_id, out, None).await
+    }
+
+    /// Accept a parked offer, supplying the password it was sealed with.
+    ///
+    /// A mailbox deposit can carry an end-to-end password (`send --deposit
+    /// --password`), and the inbox offer that points at it looks exactly like any
+    /// other. Without a way to pass one, accepting such an offer could only ever
+    /// fail — the recipient would watch it land as
+    /// "password-protected — supply the password" with nowhere to supply it.
+    pub async fn accept_offer_with_password(
+        &self,
+        offer_id: &str,
+        out: Option<PathBuf>,
+        password: Option<String>,
+    ) -> Result<u64> {
+        // Check the password requirement *before* taking the offer out of the
+        // pending map. Accepting is destructive — the offer is consumed and
+        // acked off the relay inbox — so discovering the requirement afterwards,
+        // when the fetch refuses, would leave the recipient with a failed
+        // transfer, no offer to retry, and the password now useless. Refusing
+        // here leaves everything exactly as it was, which is what makes "ask,
+        // then accept again" possible at all.
+        if password.as_deref().map(str::is_empty).unwrap_or(true) {
+            let needs = self
+                .inner
+                .pending
+                .lock()
+                .unwrap()
+                .get(offer_id)
+                .map(|o| o.offer.ticket.clone())
+                .and_then(|t| crate::offline::OfflineTicket::decode(&t).ok())
+                .is_some_and(|t| t.has_password());
+            if needs {
+                anyhow::bail!("this deposit is password-protected — supply the password");
+            }
+        }
+
         let offer = self
             .inner
             .pending
@@ -1206,12 +1244,13 @@ impl TransferManager {
             let _ = sub.ack(offer_id).await;
         }
 
-        Ok(self.start_download(
+        Ok(self.start_download_with_password(
             offer.offer.ticket.clone(),
             out_path,
             Some(offer.sender.clone()),
             offer.offer.name.clone(),
             offer.offer.size,
+            password,
         ))
     }
 

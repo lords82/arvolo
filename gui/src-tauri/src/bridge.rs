@@ -166,9 +166,13 @@ pub async fn create_link(
 }
 
 #[tauri::command]
-pub async fn accept_offer(offer_id: String, out: Option<String>) -> Result<u64, String> {
+pub async fn accept_offer(
+    offer_id: String,
+    out: Option<String>,
+    password: Option<String>,
+) -> Result<u64, String> {
     let mut c = client().await?;
-    c.accept(offer_id, out.map(PathBuf::from))
+    c.accept_with_password(offer_id, out.map(PathBuf::from), password)
         .await
         .or_else(err)
 }

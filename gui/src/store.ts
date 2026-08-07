@@ -273,7 +273,14 @@ interface State {
   link: (path: string, ttl: number | null, max: number | null) => Promise<string>;
   /** Receive from a pasted arvc… ticket, pairing code or arvm… offline ticket. */
   receive: (ticket: string, out: string | null, password: string | null) => Promise<number>;
-  accept: (offerId: string, out: string | null) => Promise<void>;
+  /** Accept a parked offer. `password` is only needed when the offer points at a
+   *  mailbox deposit sealed with one — which nothing reveals until the fetch
+   *  fails, so the UI asks after the first refusal. */
+  accept: (
+    offerId: string,
+    out: string | null,
+    password?: string | null
+  ) => Promise<void>;
   reject: (offerId: string) => Promise<void>;
   pause: (id: number) => Promise<void>;
   resume: (id: number) => Promise<void>;
@@ -930,8 +937,10 @@ export const useStore = create<State>((set, get) => {
       return id;
     },
 
-    accept: async (offerId, out) => {
-      await act("Impossibile accettare il file", () => api.acceptOffer(offerId, out));
+    accept: async (offerId, out, password) => {
+      await act("Impossibile accettare il file", () =>
+        api.acceptOffer(offerId, out, password ?? null)
+      );
       set((s) => {
         const { [`o${offerId}`]: _drop, ...rest } = s.transfers;
         return { transfers: rest, incomingOfferId: null };

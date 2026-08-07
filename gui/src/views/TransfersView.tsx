@@ -39,6 +39,9 @@ function Row({ t }: { t: UITransfer }) {
 
   const st = statusMeta(t.status);
   const meta = metaLine(t);
+  // The swarm is the whole point of the P2P path, and a row that is pulling from
+  // three peers at once has no other way of saying so.
+  const peers = Math.max(t.swarmPeers, t.downloadPeers);
   const live =
     t.status === "in corso" ||
     t.status === "in attesa" ||
@@ -168,6 +171,14 @@ function Row({ t }: { t: UITransfer }) {
               <>
                 <span className="sep" />
                 <span className="truncate tnum">{meta}</span>
+              </>
+            )}
+            {peers > 0 && (
+              <>
+                <span className="sep" />
+                <span className="tnum" title="Trasferimento distribuito fra più peer">
+                  ⇄ {peers} peer
+                </span>
               </>
             )}
           </div>

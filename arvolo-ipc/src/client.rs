@@ -235,8 +235,29 @@ impl DaemonClient {
     }
 
     pub async fn accept(&mut self, offer_id: String, out: Option<PathBuf>) -> Result<u64> {
+        self.accept_with_password(offer_id, out, None).await
+    }
+
+    /// Accept an offer whose deposit was sealed with a password.
+    ///
+    /// Such an offer is indistinguishable from any other until the fetch fails,
+    /// so a UI sends the plain accept, reads the refusal, asks, and sends it
+    /// again with this.
+    pub async fn accept_with_password(
+        &mut self,
+        offer_id: String,
+        out: Option<PathBuf>,
+        password: Option<String>,
+    ) -> Result<u64> {
         let out = out.map(|p| p.to_string_lossy().into_owned());
-        match self.request(Request::AcceptOffer { offer_id, out }).await? {
+        match self
+            .request(Request::AcceptOffer {
+                offer_id,
+                out,
+                password,
+            })
+            .await?
+        {
             Response::TransferId(id) => Ok(id),
             other => unexpected(other),
         }

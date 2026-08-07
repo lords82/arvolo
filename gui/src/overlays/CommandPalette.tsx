@@ -39,6 +39,8 @@ export function CommandPalette() {
   const openPerson = useStore((s) => s.openPerson);
   const syncNow = useStore((s) => s.syncNow);
   const clearFinished = useStore((s) => s.clearFinished);
+  const togglePauseAll = useStore((s) => s.togglePauseAll);
+  const pauseAll = useStore((s) => s.pauseAll);
 
   const [q, setQ] = useState("");
   const [active, setActive] = useState(0);
@@ -98,6 +100,16 @@ export function CommandPalette() {
         keywords: "contatti dispositivi",
         group: "Azioni",
         run: () => fire(syncNow()),
+      },
+      {
+        key: "pause-all",
+        label: pauseAll
+          ? "Riprendi tutti i trasferimenti"
+          : "Metti in pausa tutti i trasferimenti",
+        icon: pauseAll ? <Icon.Play /> : <Icon.Pause />,
+        keywords: "pausa tutto ferma sospendi riprendi",
+        group: "Azioni",
+        run: () => fire(togglePauseAll()),
       },
       {
         key: "clear-finished",
@@ -164,6 +176,8 @@ export function CommandPalette() {
     openPerson,
     syncNow,
     clearFinished,
+    togglePauseAll,
+    pauseAll,
   ]);
 
   const shown = useMemo(() => {

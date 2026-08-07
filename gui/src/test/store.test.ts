@@ -327,7 +327,7 @@ describe("actions reach the daemon", () => {
       note: "",
       sender_name: "" } });
     await useStore.getState().accept("o1", "/tmp/dest");
-    expect(harness.recorder.accept).toEqual([["o1", "/tmp/dest"]]);
+    expect(harness.recorder.accept).toEqual([["o1", "/tmp/dest", null]]);
     expect(row("oo1")).toBeUndefined();
   });
 

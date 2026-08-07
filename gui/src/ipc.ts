@@ -54,8 +54,8 @@ export const api = {
     invoke<string>("create_link", { path, ttl, max }),
   recv: (ticket: string, out: string | null, password: string | null) =>
     invoke<number>("recv", { ticket, out, password }),
-  acceptOffer: (offerId: string, out: string | null) =>
-    invoke<number>("accept_offer", { offerId, out }),
+  acceptOffer: (offerId: string, out: string | null, password?: string | null) =>
+    invoke<number>("accept_offer", { offerId, out, password: password ?? null }),
   rejectOffer: (offerId: string) =>
     invoke<void>("reject_offer", { offerId }),
   pause: (id: number) => invoke<void>("pause", { id }),

@@ -27,7 +27,7 @@ export interface Recorder {
   remove: number[];
   pause: number[];
   resume: number[];
-  accept: [string, string | null][];
+  accept: [string, string | null, string | null][];
   reject: string[];
   markVerified: string[];
   sendTo: [string, string[], string][];
@@ -260,8 +260,20 @@ export function makeIpcMock() {
         harness.recorder.recv.push([ticket, out, password]);
         return guard("recv", 9);
       },
-      acceptOffer: (offerId: string, out: string | null) => {
-        harness.recorder.accept.push([offerId, out]);
+      acceptOffer: (
+        offerId: string,
+        out: string | null,
+        password?: string | null
+      ) => {
+        harness.recorder.accept.push([offerId, out, password ?? null]);
+        // A deposit sealed with a password refuses the plain accept and *keeps*
+        // the offer, so the UI can ask and try again. Mirrors the engine's
+        // pre-flight check.
+        if (harness.fail.has("acceptOffer:password") && !password) {
+          return Promise.reject(
+            new Error("this deposit is password-protected — supply the password")
+          );
+        }
         return guard("acceptOffer", 7);
       },
       rejectOffer: (offerId: string) => {

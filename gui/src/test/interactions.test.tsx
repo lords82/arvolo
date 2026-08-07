@@ -133,7 +133,7 @@ describe("an incoming offer", () => {
     fireEvent.click(screen.getByText("arrivo.zip"));
     fireEvent.click(await screen.findByText("Accetta e scarica"));
     await waitFor(() =>
-      expect(harness.recorder.accept).toEqual([["o1", null]])
+      expect(harness.recorder.accept).toEqual([["o1", null, null]])
     );
   });
 
@@ -182,6 +182,26 @@ describe("an incoming offer", () => {
     expect(screen.queryByText("Ti stanno mandando un file")).toBeNull();
   });
 
+  it("a password-protected deposit asks, keeps the offer, and retries", async () => {
+    // Nothing in an offer says it is protected — the fetch refusing is the only
+    // signal — so the field appears after the first attempt, not before it.
+    harness.fail = new Set(["acceptOffer:password"]);
+    await renderAppWithOffer();
+    fireEvent.click(screen.getByText("arrivo.zip"));
+    expect(screen.queryByLabelText("Password")).toBeNull();
+
+    fireEvent.click(await screen.findByText("Accetta e scarica"));
+    const field = await screen.findByLabelText("Password");
+    // The offer must survive the refusal, or there is nothing left to retry.
+    expect(useStore.getState().transfers["oo1"]).toBeTruthy();
+
+    fireEvent.change(field, { target: { value: "segreto" } });
+    fireEvent.click(screen.getByText("Accetta e scarica"));
+    await waitFor(() =>
+      expect(harness.recorder.accept.at(-1)).toEqual(["o1", null, "segreto"])
+    );
+  });
+
   it("135. it shows the sender's note", async () => {
     harness.snapshot.pending = [
       dto.offer({ id: "o1", from: "peer1", name: "arrivo.zip", note: "guarda qui" }),
@@ -220,7 +240,7 @@ describe("an incoming offer", () => {
     );
     fireEvent.click(screen.getByText("Accetta e scarica"));
     await waitFor(() =>
-      expect(harness.recorder.accept).toEqual([["o1", "/tmp/qui"]])
+      expect(harness.recorder.accept).toEqual([["o1", "/tmp/qui", null]])
     );
   });
 });

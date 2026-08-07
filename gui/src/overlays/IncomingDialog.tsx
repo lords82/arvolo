@@ -38,6 +38,12 @@ export function IncomingDialog() {
   const downloadDir = useStore((s) => s.status?.download_dir ?? "");
 
   const [out, setOut] = useState<string | null>(null);
+  const [password, setPassword] = useState("");
+  // A deposit sealed with a password looks exactly like any other offer until the
+  // fetch refuses it — nothing in the offer says so. So the field appears only
+  // once the daemon has actually asked for one, rather than on every arrival
+  // where it would read as "this might need a password" about everything.
+  const [needsPassword, setNeedsPassword] = useState(false);
   const [busy, setBusy] = useState<"accept" | "reject" | null>(null);
   const [saveAs, setSaveAs] = useState("");
   const [saving, setSaving] = useState(false);
@@ -57,10 +63,13 @@ export function IncomingDialog() {
   const doAccept = async () => {
     setBusy("accept");
     try {
-      await accept(offerId, out);
+      await accept(offerId, out, password || null);
       toast.ok("Download avviato", t.name);
-    } catch {
-      // reported by the store
+    } catch (e) {
+      // The store already reported it. The one refusal worth reacting to here is
+      // the missing password: it is recoverable, and the user has nowhere else
+      // to supply one.
+      if (/password/i.test(String(e))) setNeedsPassword(true);
     } finally {
       setBusy(null);
     }
@@ -185,6 +194,30 @@ export function IncomingDialog() {
           </div>
         )}
       </div>
+
+      {needsPassword && (
+        <Field
+          label="Password"
+          error={
+            password
+              ? null
+              : "Questo file è protetto: senza la password non si apre."
+          }
+          hint="Te l'avrà detta a parte chi te l'ha mandato — non viaggia con il file, e il relay non la conosce."
+        >
+          {({ id, describedBy }) => (
+            <TextInput
+              id={id}
+              data-autofocus
+              aria-describedby={describedBy}
+              type="password"
+              autoComplete="off"
+              value={password}
+              onChange={(e) => setPassword(e.currentTarget.value)}
+            />
+          )}
+        </Field>
+      )}
 
       {/* --- where ----------------------------------------------------- */}
       <Field

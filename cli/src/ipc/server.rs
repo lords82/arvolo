@@ -197,14 +197,29 @@ async fn dispatch(d: &Daemon, cmd: Request) -> Response {
             d.manager.reject_offer(&offer_id).await;
             Response::Ok
         }
-        Request::AcceptOffer { offer_id, out } => {
-            d.pending.lock().unwrap().remove(&offer_id);
+        Request::AcceptOffer {
+            offer_id,
+            out,
+            password,
+        } => {
             match d
                 .manager
-                .accept_offer(&offer_id, out.map(PathBuf::from))
+                .accept_offer_with_password(
+                    &offer_id,
+                    out.map(PathBuf::from),
+                    password.filter(|p| !p.is_empty()),
+                )
                 .await
             {
-                Ok(id) => Response::TransferId(id),
+                Ok(id) => {
+                    // Drop the daemon's own copy only once the engine has taken
+                    // the offer. Dropping it first made a *refused* accept — a
+                    // password-protected deposit with no password — erase the row
+                    // from `ListPending` while the engine still held it, leaving
+                    // nothing to retry against.
+                    d.pending.lock().unwrap().remove(&offer_id);
+                    Response::TransferId(id)
+                }
                 Err(e) => Response::Error(format!("{e:#}")),
             }
         }
