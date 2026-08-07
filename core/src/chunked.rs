@@ -474,6 +474,16 @@ pub struct ChunkSender {
     peers: PeerCount,
 }
 
+/// What the hashing pass produces: the chunk digests plus the sizes derived from
+/// them. A named struct rather than a 4-tuple only because the pass now returns
+/// across a `spawn_blocking` boundary, where the tuple was unreadable.
+struct Hashed {
+    total_size: u64,
+    total_chunks: u32,
+    chunks: Vec<Hash>,
+    index: HashMap<Hash, u32>,
+}
+
 impl ChunkSender {
     /// Serve `path` under a fresh random per-transfer content key and node id.
     pub async fn serve(path: &Path, relay: RelayChoice) -> Result<Self> {
@@ -498,15 +508,29 @@ impl ChunkSender {
     ) -> Result<Self> {
         // Compute the chunk hashes by streaming the file (bounded memory), WITHOUT
         // storing any ciphertext — chunks are regenerated on demand while serving.
-        let total_size = std::fs::metadata(path)
-            .with_context(|| format!("stat {}", path.display()))?
-            .len();
-        let total_chunks = (total_size as usize).div_ceil(CHUNK_SIZE as usize) as u32;
-        let mut chunks = Vec::new();
-        let mut index: HashMap<Hash, u32> = HashMap::new();
-        {
+        //
+        // On the blocking pool, not the async workers. This pass reads and
+        // encrypts the *whole* payload with no `.await` anywhere in it, so run
+        // directly on the runtime it pins a worker for its entire duration —
+        // tens of seconds for a gigabyte. A handful of large sends prepared at
+        // once therefore occupied every worker and the daemon stopped answering
+        // its control socket at all: `arvolo status` and the GUI both hung until
+        // the last one finished, which looks exactly like a crash and is not one.
+        let owned = path.to_path_buf();
+        let Hashed {
+            total_size,
+            total_chunks,
+            chunks,
+            index,
+        } = tokio::task::spawn_blocking(move || -> Result<Hashed> {
+            let total_size = std::fs::metadata(&owned)
+                .with_context(|| format!("stat {}", owned.display()))?
+                .len();
+            let total_chunks = (total_size as usize).div_ceil(CHUNK_SIZE as usize) as u32;
+            let mut chunks = Vec::new();
+            let mut index: HashMap<Hash, u32> = HashMap::new();
             let mut file =
-                std::fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
+                std::fs::File::open(&owned).with_context(|| format!("open {}", owned.display()))?;
             let mut buf = vec![0u8; CHUNK_SIZE as usize];
             let mut idx: u32 = 0;
             loop {
@@ -520,7 +544,15 @@ impl ChunkSender {
                 index.insert(hash, idx);
                 idx += 1;
             }
-        }
+            Ok(Hashed {
+                total_size,
+                total_chunks,
+                chunks,
+                index,
+            })
+        })
+        .await
+        .context("hash payload")??;
         let peers = PeerCount::default();
         let chunk_server = ChunkServer {
             backend: Arc::new(ChunkBackend::OnTheFly {
