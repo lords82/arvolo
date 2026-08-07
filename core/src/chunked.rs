@@ -324,6 +324,28 @@ impl ProtocolHandler for ChunkServer {
     }
 }
 
+/// Render an error together with its source chain.
+///
+/// quinn's `ReadError::ConnectionLost` Displays as the bare words "connection
+/// lost" and puts *why* — timed out, reset, closed by the peer, transport error
+/// — in its `source()`. A transfer tool that swallows that is a transfer tool
+/// nobody can debug: every network fault reads the same in the log and in the
+/// UI. Walk the chain so the reason survives.
+fn with_causes(e: impl std::error::Error) -> String {
+    let mut out = e.to_string();
+    let mut src = e.source();
+    while let Some(s) = src {
+        let text = s.to_string();
+        // Some layers repeat the parent's message verbatim; don't stutter.
+        if !out.ends_with(&text) {
+            out.push_str(": ");
+            out.push_str(&text);
+        }
+        src = s.source();
+    }
+    out
+}
+
 /// Fetch `ct[offset..]` of the chunk `hash` from one provider. Returns the full
 /// ciphertext length and the received tail bytes (unverified — the caller
 /// combines with any staged prefix and checks BLAKE3).
@@ -340,7 +362,7 @@ pub(crate) async fn fetch_chunk_wire(
         .recv
         .read_exact(&mut buf)
         .await
-        .map_err(|e| anyhow!("read chunk body: {e}"))?;
+        .map_err(|e| anyhow!("read chunk body: {}", with_causes(e)))?;
     Ok((stream.total_len, buf))
 }
 
@@ -911,7 +933,7 @@ impl ChunkReceiver {
             .recv
             .read_exact(&mut buf)
             .await
-            .map_err(|e| anyhow!("read chunk body: {e}"))?;
+            .map_err(|e| anyhow!("read chunk body: {}", with_causes(e)))?;
         if Hash::new(&buf) != hash {
             banned.lock().unwrap().insert(addr.id.to_string());
             anyhow::bail!("chunk {hash} failed integrity check");
