@@ -1480,7 +1480,7 @@ impl TransferManager {
                 finish(
                     &inner,
                     id,
-                    cancelled.is_cancelled() || stopped_incomplete,
+                    receive_ended_cancelled(&result),
                     result.map(|o| Some(o.into_path())),
                 );
                 if discard {
@@ -1596,6 +1596,26 @@ fn receive_pause_reason(
     }
 }
 
+/// Whether a settled receive should be recorded as **cancelled** rather than
+/// completed.
+///
+/// The outcome decides, not the cancellation token. Pause and cancel both fire
+/// that token, so one arriving in the instant the last chunk lands would
+/// otherwise mark a *finished* download `Cancelled` — and [`finish`] throws the
+/// output path away with it, so the row claimed the file was gone while it sat
+/// complete and verified in the download folder. Observed against a live
+/// transfer: 220 MB arrived byte-for-byte and the board said "annullato".
+fn receive_ended_cancelled(result: &Result<flow::RecvOutcome>) -> bool {
+    match result {
+        // Every byte is on disk. A cancel that arrived now simply lost the race.
+        Ok(o) if o.is_complete() => false,
+        // Stopped short: cancelled by the user, or ended without finishing.
+        Ok(_) => true,
+        // `finish` reports the error itself; this flag is not consulted.
+        Err(_) => false,
+    }
+}
+
 #[cfg(test)]
 mod clear_finished_tests {
     use super::*;
@@ -1698,6 +1718,32 @@ mod pause_download_tests {
             receive_pause_reason(&Err(anyhow::anyhow!("boom")), true, true),
             None
         );
+    }
+
+    /// The race this exists for: pause and cancel share one token, so a pause
+    /// pressed as the last chunk lands settles a *complete* download with the
+    /// token already fired. Recording that as cancelled loses the file twice
+    /// over — the row says it is gone, and `finish` discards the path so the UI
+    /// cannot even offer to open it. Reproduced against a real 220 MB transfer
+    /// whose bytes were verified on disk while the board read "annullato".
+    #[test]
+    fn a_cancel_that_lost_the_race_to_completion_is_not_a_cancel() {
+        let p = PathBuf::from("/tmp/x");
+        // The bug: complete outcome, token fired.
+        assert!(!receive_ended_cancelled(&Ok(RecvOutcome::Completed(
+            p.clone()
+        ))));
+        // A genuine cancel stopped short — still terminal.
+        assert!(receive_ended_cancelled(&Ok(RecvOutcome::Cancelled(
+            p.clone()
+        ))));
+        // Stopped short for any other reason is not a completion either.
+        assert!(receive_ended_cancelled(&Ok(RecvOutcome::Paused {
+            output: p.clone(),
+            reason: "disk full".into()
+        })));
+        // An error is reported as an error; the flag is not consulted.
+        assert!(!receive_ended_cancelled(&Err(anyhow::anyhow!("boom"))));
     }
 
     /// The paused marker and the resume record live and die together: `remove_download`
