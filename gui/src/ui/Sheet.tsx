@@ -20,7 +20,7 @@ import { Button, IconButton } from "./Primitives";
 const FOCUSABLE =
   'a[href],button:not([disabled]),textarea:not([disabled]),input:not([disabled]),select:not([disabled]),[tabindex]:not([tabindex="-1"])';
 
-function useModal(
+export function useModal(
   ref: React.RefObject<HTMLElement>,
   onClose: () => void,
   open: boolean
@@ -181,14 +181,16 @@ export function Confirm({
         </div>
         <div className="sheet-foot">
           <div className="spacer" />
-          <Button onClick={close} disabled={busy}>
+          {/* Focus lands on the way *out*, not on the irreversible choice: a
+              dialog that opens with Enter armed on "Revoca" turns a reflex into
+              a decision. */}
+          <Button onClick={close} disabled={busy} data-autofocus>
             {cancelLabel}
           </Button>
           <Button
             variant={danger ? "danger" : "primary"}
             onClick={onConfirm}
             busy={busy}
-            data-autofocus
           >
             {confirmLabel}
           </Button>

@@ -67,10 +67,22 @@ pub fn set_config_value(key: &str, value: Option<toml::Value>) -> Result<()> {
         t.strip_prefix(key)
             .is_some_and(|r| r.trim_start().starts_with('='))
     };
+    // A `[table]` header changes what an appended line would *mean*: everything
+    // after it belongs to that table, so `download_dir = "…"` appended at the end
+    // of a file that has one becomes `table.download_dir` — written successfully,
+    // read back as unset, and silently never applied.
+    let opens_table = |l: &str| {
+        let t = l.trim_start();
+        !t.starts_with('#') && t.starts_with('[')
+    };
 
     let mut out: Vec<String> = Vec::new();
     let mut replaced = false;
+    let mut saw_table = false;
     for line in existing.lines() {
+        if opens_table(line) {
+            saw_table = true;
+        }
         // Clearing keeps the old value visible behind the comment marker, so the
         // file still shows what it used to be — restoring it is uncommenting a line.
         if !replaced && assigns_key(line) {
@@ -92,12 +104,30 @@ pub fn set_config_value(key: &str, value: Option<toml::Value>) -> Result<()> {
     }
     // Nothing to comment out when the key was never there in the first place.
     if !replaced {
-        if let Some(l) = new_line {
-            out.push(l);
+        match new_line {
+            Some(_) if saw_table => anyhow::bail!(
+                "config.toml has a [table] section, so `{key}` cannot be appended safely — \
+                 add it by hand above the first section header"
+            ),
+            Some(l) => out.push(l),
+            None => {}
         }
     }
     let mut text = out.join("\n");
     text.push('\n');
+
+    // Never leave the file unparsable. It is edited line by line rather than
+    // reserialized (so its comments survive), which means an edit can collide
+    // with something a human wrote — a duplicate key being the easy one: TOML
+    // rejects the file outright and `load_config` swallows that into
+    // `Config::default()`, so *every* setting silently reverts to a built-in and
+    // the settings screen cheerfully agrees nothing was ever configured.
+    if let Err(e) = text.parse::<toml::Table>() {
+        anyhow::bail!(
+            "that edit would make config.toml unparsable ({e}) — it was left untouched. \
+             Check for a duplicate `{key}` further down the file."
+        );
+    }
 
     std::fs::create_dir_all(config_dir()).ok();
     std::fs::write(&path, text).context("write config.toml")
@@ -325,4 +355,107 @@ pub fn default_download_dir() -> Option<PathBuf> {
         .filter(|s| !s.trim().is_empty())
         .or_else(|| load_config().download_dir.filter(|s| !s.trim().is_empty()))
         .map(PathBuf::from)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Run `body` with `ARVOLO_CONFIG_DIR` pointed at a scratch dir.
+    ///
+    /// Takes the crate-wide [`crate::testlock::ENV`] rather than a private
+    /// mutex: the config dir is a *process-global* env var that every store in
+    /// this crate reads, so a private lock would only serialise these tests
+    /// against each other while still racing the book's.
+    fn with_config_dir(initial: &str, body: impl FnOnce(&std::path::Path)) {
+        let _guard = crate::testlock::ENV
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let prev = std::env::var("ARVOLO_CONFIG_DIR").ok();
+        std::env::set_var("ARVOLO_CONFIG_DIR", dir.path());
+        if !initial.is_empty() {
+            std::fs::write(dir.path().join("config.toml"), initial).unwrap();
+        }
+        body(dir.path());
+        match prev {
+            Some(p) => std::env::set_var("ARVOLO_CONFIG_DIR", p),
+            None => std::env::remove_var("ARVOLO_CONFIG_DIR"),
+        }
+    }
+
+    #[test]
+    fn setting_a_key_keeps_the_comments_around_it() {
+        with_config_dir("# a comment\n#relay = \"example\"\n#seed = true\n", |dir| {
+            set_config_value("relay", Some(toml::Value::String("r.test".into()))).unwrap();
+            let text = std::fs::read_to_string(dir.join("config.toml")).unwrap();
+            assert!(
+                text.contains("# a comment"),
+                "comments must survive an edit"
+            );
+            assert!(text.contains("relay = \"r.test\""));
+            assert!(text.contains("#seed = true"), "other keys are untouched");
+        });
+    }
+
+    /// Clearing comments the line out and keeps the old value visible behind the
+    /// marker, so restoring it is uncommenting a line rather than retyping one.
+    #[test]
+    fn clearing_a_key_comments_it_out_in_place() {
+        with_config_dir("relay = \"r.test\"\n", |dir| {
+            set_config_value("relay", None).unwrap();
+            let text = std::fs::read_to_string(dir.join("config.toml")).unwrap();
+            assert!(text.contains("#relay = \"r.test\""));
+            assert_eq!(load_config().relay, None);
+        });
+    }
+
+    /// The failure this guard exists for. A human writes the key twice — the
+    /// generated stub plus their own line further down — and the line editor
+    /// replaces only the first. TOML rejects duplicate keys, `load_config`
+    /// swallows that into `Config::default()`, and *every* setting silently
+    /// reverts to a built-in while the settings screen agrees nothing was ever
+    /// configured. Refusing loudly is the only honest outcome.
+    #[test]
+    fn an_edit_that_would_corrupt_the_file_is_refused_and_changes_nothing() {
+        let before = "#seed = true\nrelay = \"a\"\nseed = false\n";
+        with_config_dir(before, |dir| {
+            let err = set_config_value("seed", Some(toml::Value::Boolean(true)))
+                .expect_err("a duplicate key must not be written");
+            assert!(format!("{err:#}").contains("duplicate"));
+            assert_eq!(
+                std::fs::read_to_string(dir.join("config.toml")).unwrap(),
+                before,
+                "the file must be left exactly as it was"
+            );
+        });
+    }
+
+    /// Appending after a `[table]` header would file the key under that table:
+    /// written successfully, read back as unset, silently never applied.
+    #[test]
+    fn a_key_is_never_appended_into_a_table() {
+        let before = "relay = \"a\"\n\n[advanced]\nverbose = true\n";
+        with_config_dir(before, |dir| {
+            let err = set_config_value("download_dir", Some(toml::Value::String("/tmp".into())))
+                .expect_err("appending under a table must be refused");
+            assert!(format!("{err:#}").contains("[table]"));
+            assert_eq!(
+                std::fs::read_to_string(dir.join("config.toml")).unwrap(),
+                before
+            );
+        });
+    }
+
+    /// Replacing an *existing* key is still fine even when the file has tables —
+    /// the guard is only about where a new line would land.
+    #[test]
+    fn replacing_an_existing_key_still_works_with_tables_present() {
+        with_config_dir("relay = \"a\"\n\n[advanced]\nverbose = true\n", |dir| {
+            set_config_value("relay", Some(toml::Value::String("b".into()))).unwrap();
+            let text = std::fs::read_to_string(dir.join("config.toml")).unwrap();
+            assert!(text.contains("relay = \"b\""));
+            assert_eq!(load_config().relay.as_deref(), Some("b"));
+        });
+    }
 }

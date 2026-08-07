@@ -52,7 +52,7 @@ describe("sections", () => {
     const secs = sectionsFor(rows, "in", "");
     expect(secs.map((s) => s.title)).toEqual([
       "Da confermare",
-      "In corso e in attesa",
+      "In corso e in pausa",
       "Oggi",
       "Precedenti",
     ]);
@@ -61,7 +61,7 @@ describe("sections", () => {
   it("26. an empty section is dropped, not rendered blank", () => {
     const secs = sectionsFor([t({ status: "in corso" })], "out", "");
     expect(secs).toHaveLength(1);
-    expect(secs[0].title).toBe("In corso e in attesa");
+    expect(secs[0].title).toBe("In corso e in pausa");
   });
 
   it("27. a row only appears in its own column", () => {

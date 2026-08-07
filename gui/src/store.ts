@@ -63,6 +63,13 @@ export interface PairingState {
 
 const THEME_KEY = "arvolo.theme";
 
+/** Pairing events that arrived before their session handle did.
+ *
+ *  Kept outside the store because they are a transport detail, not state a
+ *  component should ever see: the daemon spawns the session before writing the
+ *  reply that names it, so the outcome can genuinely beat the handle. */
+const earlyPairingEvents: EngineEvent[] = [];
+
 /** Apply a theme choice to <html>. "system" removes the attribute entirely so the
  *  `prefers-color-scheme` media query in theme.css takes over again — setting it
  *  to some third value would leave both branches unmatched. */
@@ -643,42 +650,40 @@ export const useStore = create<State>((set, get) => {
         // names the session currently on screen, so a stale outcome from a sheet
         // the user already closed cannot reopen it or overwrite a newer attempt.
         case "pairing_code":
-          set((s) =>
-            s.pairing && s.pairing.session === ev.session
-              ? { pairing: { ...s.pairing, code: ev.code, phase: "waiting" } }
-              : {}
-          );
-          break;
         case "pairing_done":
-          set((s) =>
-            s.pairing && s.pairing.session === ev.session
-              ? {
-                  pairing: {
-                    ...s.pairing,
-                    phase: "done",
-                    message: ev.summary,
-                    needsRestart: ev.needs_restart,
-                  },
-                }
-              : {}
-          );
-          void get().refreshContacts();
+        case "pairing_failed": {
+          const p = get().pairing;
+          if (p && p.session === null) {
+            // The handle has not come back yet — hold it, don't drop it.
+            earlyPairingEvents.push(ev);
+            break;
+          }
+          if (!p || p.session !== ev.session) break;
+          if (ev.type === "pairing_code") {
+            set({ pairing: { ...p, code: ev.code, phase: "waiting" } });
+          } else if (ev.type === "pairing_done") {
+            set({
+              pairing: {
+                ...p,
+                phase: "done",
+                message: ev.summary,
+                needsRestart: ev.needs_restart,
+              },
+            });
+            void get().refreshContacts();
+          } else {
+            set({
+              pairing: {
+                ...p,
+                phase: "failed",
+                // A cancellation is the user's own doing; saying so keeps the
+                // sheet from reporting their click back to them as an error.
+                message: ev.cancelled ? "Annullato." : ev.error,
+              },
+            });
+          }
           break;
-        case "pairing_failed":
-          set((s) =>
-            s.pairing && s.pairing.session === ev.session
-              ? {
-                  pairing: {
-                    ...s.pairing,
-                    phase: "failed",
-                    // A cancellation is the user's own doing; saying so keeps the
-                    // sheet from reporting their click back to them as an error.
-                    message: ev.cancelled ? "Annullato." : ev.error,
-                  },
-                }
-              : {}
-          );
-          break;
+        }
       }
     },
 
@@ -741,7 +746,7 @@ export const useStore = create<State>((set, get) => {
       }
     },
     clearHistory: async () => {
-      await act("Impossibile svuotare lo storico", () => api.clearHistory());
+      await act("Impossibile svuotare la cronologia", () => api.clearHistory());
       set({ history: [] });
     },
 
@@ -847,7 +852,7 @@ export const useStore = create<State>((set, get) => {
           toast.ok(
             "Rubrica sincronizzata",
             sync.last_merged
-              ? `${sync.last_merged} aggiornamento/i dagli altri dispositivi.`
+              ? `${sync.last_merged} aggiornament${sync.last_merged === 1 ? "o" : "i"} dagli altri dispositivi.`
               : "Nessun aggiornamento dagli altri dispositivi."
           );
           await get().refreshContacts();
@@ -864,6 +869,14 @@ export const useStore = create<State>((set, get) => {
     },
 
     startPairing: async (kind, code, name) => {
+      // Starting a second exchange must retire the first. The hosting side has
+      // no deadline of its own — it waits until cancelled — so an orphaned
+      // session would keep its rendezvous slot, and in the device case would
+      // keep offering this machine's identity secret, with the handle needed to
+      // stop it no longer reachable from anywhere in the UI.
+      const running = get().pairing?.session;
+      if (running) await api.cancelPairing(running).catch(() => {});
+
       set({
         pairing: {
           session: null,
@@ -874,6 +887,12 @@ export const useStore = create<State>((set, get) => {
           needsRestart: false,
         },
       });
+      // Joining needs a code, and the code is what the user is about to type.
+      // Opening the sheet is the whole action here; contacting the daemon now
+      // would spawn a session that fails immediately ("a pairing code is
+      // required"), stamp a session id, and replace the input the user was
+      // meant to type into with a spinner.
+      if ((kind === "contact_join" || kind === "device_join") && !code) return;
       try {
         const session = await api.startPairing(
           kind,
@@ -886,6 +905,13 @@ export const useStore = create<State>((set, get) => {
             ? { pairing: { ...s.pairing, session, phase: "waiting" } }
             : {}
         );
+        // The daemon spawns the session and *then* writes its reply, so a
+        // fast-failing exchange (no relay configured, address book too large)
+        // can emit its outcome before this line ran — with the handle still
+        // null, the event handlers would have dropped it and the sheet would
+        // wait on a spinner for ever.
+        const early = earlyPairingEvents.splice(0);
+        for (const ev of early) get().applyEvent(ev);
       } catch (e) {
         set((s) =>
           s.pairing

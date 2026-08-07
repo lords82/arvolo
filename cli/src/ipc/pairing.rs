@@ -360,7 +360,14 @@ async fn device_host(
     });
 
     match sender {
-        code::CodeSender::V1(complete) => complete.run().await.context("device pairing")?,
+        // `PairComplete::run` polls with its own two-minute timeout and takes no
+        // cancellation token, so it has to be raced against ours. Without this,
+        // closing the sheet reported success while the code — and the identity
+        // secret behind it — stayed claimable for the rest of that window.
+        code::CodeSender::V1(complete) => tokio::select! {
+            _ = token.cancelled() => bail!("pairing cancelled — no device was linked"),
+            r = complete.run() => r.context("device pairing")?,
+        },
         code::CodeSender::V2(host) => {
             let opts = code::HostOpts {
                 max_sessions: Some(1),

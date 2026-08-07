@@ -52,7 +52,10 @@ function outcome(status: string): { text: string; tone: string; detail?: string 
   const [head, ...rest] = status.split(":");
   if (head === "failed")
     return { text: "Fallito", tone: "bad", detail: rest.join(":").trim() };
-  return { text: status, tone: "mut" };
+  // Anything the engine invents that this build has not learned yet: name the
+  // fact, and keep the raw string as the detail rather than putting English in
+  // the status slot.
+  return { text: "Esito sconosciuto", tone: "mut", detail: status };
 }
 
 function Row({ h }: { h: HistoryDto }) {

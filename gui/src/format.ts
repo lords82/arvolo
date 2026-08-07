@@ -55,7 +55,7 @@ export function statusMeta(s: UIStatus): StatusMeta {
     case "in arrivo":
       return { tone: "warn", text: "Da confermare" };
     case "in stallo":
-      return { tone: "mut", text: "In attesa di ripresa" };
+      return { tone: "mut", text: "In stallo" };
     case "fallito":
       return { tone: "bad", text: "Fallito" };
     case "in annullamento":
@@ -176,7 +176,7 @@ export function metaLine(t: UITransfer): string {
     case "in stallo":
       return t.reason ? t.reason : "riprende appena possibile";
     case "in arrivo":
-      return "tocca per i dettagli";
+      return "apri per i dettagli";
     case "deposited":
       return "in attesa che il destinatario lo ritiri";
     case "fallito":
@@ -209,7 +209,7 @@ const UNLIMITED = 4294967295;
 export function fmtUntil(unixSecs: number, nowMs: number = Date.now()): string {
   const secs = unixSecs - Math.floor(nowMs / 1000);
   if (secs <= 0) return "";
-  if (secs < 90) return `${secs} secondi`;
+  if (secs < 90) return secs === 1 ? "1 secondo" : `${secs} secondi`;
   if (secs < 90 * 60) return `${Math.round(secs / 60)} minuti`;
   if (secs < 48 * 3600) return `${Math.round(secs / 3600)} ore`;
   return `${Math.round(secs / 86400)} giorni`;
@@ -239,7 +239,9 @@ export function depositMeta(d: DepositDto, nowMs: number = Date.now()): DepositM
     return {
       tone: "mut",
       text: "Scaduto",
-      detail: "il relay l'ha già lasciato andare",
+      // `expired` is a deadline comparison against the local clock, not a report
+      // from the relay. Saying what we actually know.
+      detail: "la scadenza è passata",
       revocable: false,
     };
   }
@@ -255,7 +257,9 @@ export function depositMeta(d: DepositDto, nowMs: number = Date.now()): DepositM
     };
   }
   const until = fmtUntil(d.expires, nowMs);
-  const scade = until ? `scade tra ${until}` : "in scadenza";
+  // `fmtUntil` returns "" only once the deadline has *passed*, so the fallback
+  // must not read as "about to expire".
+  const scade = until ? `scade tra ${until}` : "scadenza appena passata";
   if (d.present === null) {
     // Reachability is not the same as absence. We keep it revocable: the daemon
     // will find out for real when the user asks.
@@ -326,7 +330,7 @@ export function sectionsFor(
   if (pending.length)
     secs.push({ key: "p", title: "Da confermare", items: pending });
   if (active.length)
-    secs.push({ key: "a", title: "In corso e in attesa", items: active });
+    secs.push({ key: "a", title: "In corso e in pausa", items: active });
   if (today.length) secs.push({ key: "t", title: "Oggi", items: today });
   if (earlier.length)
     secs.push({ key: "e", title: "Precedenti", items: earlier });

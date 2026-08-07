@@ -32,12 +32,15 @@
   --surface-2: #f5f2ef;
   --surface-3: #ebe7e2;
   --surface-sunk: #f2efec;
+  /* Progress-bar trough. Distinct from --surface-3 so a stalled bar, whose fill
+     is deliberately desaturated, is still visible against it. */
+  --track: #ddd8d2;
   --overlay-scrim: rgba(28, 24, 20, 0.34);
 
   --ink: #171514;
   --ink-sec: #57534c;
-  --ink-mut: #8b857c;
-  --ink-weak: #b5aea5;
+  --ink-mut: #6e6961;
+  --ink-weak: #8e887f;
 
   --line: rgba(23, 21, 20, 0.08);
   --line-strong: rgba(23, 21, 20, 0.14);
@@ -46,19 +49,26 @@
   /* -- Direction. `-soft` is the tint a surface takes, `-line` its border,
         `-stall` the desaturated form a paused or waiting row falls back to. */
   --out: #ea6a12;
-  --out-strong: #c2540b;
+  --out-strong: #a94806;
+  /* The colour a *filled* control takes, as opposed to the colour text takes.
+     They must be separate: a hue bright enough to read as ink on a dark canvas
+     is far too bright to sit under white ink, and reusing one for both is how
+     every primary button in this app came to be 2.3:1 in the dark theme. */
+  --out-fill: #b8500a;
+  --in-fill: #0a6ba1;
+  --on-fill: #ffffff;
   --out-soft: #fdf0e5;
   --out-line: rgba(234, 106, 18, 0.28);
-  --out-stall: #dcbda4;
+  --out-stall: #b98f62;
 
   --in: #0a6ba1;
   --in-strong: #08557f;
   --in-soft: #e8f2f9;
   --in-line: rgba(10, 107, 161, 0.26);
-  --in-stall: #a6c2d6;
+  --in-stall: #6b93ae;
 
   /* -- Outcomes. */
-  --green: #157f43;
+  --green: #12703b;
   --green-soft: #e6f4ec;
   --red: #c22b2b;
   --red-soft: #fbeaea;
@@ -117,12 +127,13 @@
     --surface-2: #262119;
     --surface-3: #322b22;
     --surface-sunk: #191510;
+    --track: #3d352b;
     --overlay-scrim: rgba(0, 0, 0, 0.62);
 
     --ink: #f5f1eb;
     --ink-sec: #bdb4a8;
-    --ink-mut: #8e857a;
-    --ink-weak: #635c53;
+    --ink-mut: #9d9487;
+    --ink-weak: #7b736a;
 
     --line: rgba(245, 241, 235, 0.09);
     --line-strong: rgba(245, 241, 235, 0.16);
@@ -132,13 +143,16 @@
     --out-strong: #ffae66;
     --out-soft: #3a2513;
     --out-line: rgba(247, 148, 65, 0.34);
-    --out-stall: #7c5a3c;
+    --out-stall: #a06c38;
+    /* Kept near the light theme value: white ink still has to sit on these. */
+    --out-fill: #c4560b;
+    --in-fill: #0d76b0;
 
     --in: #4fa8dd;
     --in-strong: #7cc3ee;
     --in-soft: #12283a;
     --in-line: rgba(79, 168, 221, 0.32);
-    --in-stall: #3d5b70;
+    --in-stall: #4a7b99;
 
     --green: #56c27f;
     --green-soft: #14301f;
@@ -170,12 +184,13 @@
   --surface-2: #262119;
   --surface-3: #322b22;
   --surface-sunk: #191510;
+  --track: #3d352b;
   --overlay-scrim: rgba(0, 0, 0, 0.62);
 
   --ink: #f5f1eb;
   --ink-sec: #bdb4a8;
-  --ink-mut: #8e857a;
-  --ink-weak: #635c53;
+  --ink-mut: #9d9487;
+  --ink-weak: #7b736a;
 
   --line: rgba(245, 241, 235, 0.09);
   --line-strong: rgba(245, 241, 235, 0.16);
@@ -185,13 +200,16 @@
   --out-strong: #ffae66;
   --out-soft: #3a2513;
   --out-line: rgba(247, 148, 65, 0.34);
-  --out-stall: #7c5a3c;
+  --out-stall: #a06c38;
+  /* Kept near the light theme value: white ink still has to sit on these. */
+  --out-fill: #c4560b;
+  --in-fill: #0d76b0;
 
   --in: #4fa8dd;
   --in-strong: #7cc3ee;
   --in-soft: #12283a;
   --in-line: rgba(79, 168, 221, 0.32);
-  --in-stall: #3d5b70;
+  --in-stall: #4a7b99;
 
   --green: #56c27f;
   --green-soft: #14301f;
@@ -249,7 +267,11 @@ body {
 input,
 textarea,
 .mono,
-.selectable {
+.selectable,
+.toast,
+.banner,
+.empty p,
+.field .err {
   -webkit-user-select: text;
   user-select: text;
 }
@@ -282,9 +304,13 @@ select {
 :focus {
   outline: none;
 }
+/* Deliberately `outline`, not `box-shadow`: every filled control in this file
+   sets its own box-shadow later and at equal-or-higher specificity, which used
+   to silently win and leave the app's entire primary-action set with no visible
+   focus at all. Nothing else here sets `outline`. */
 :focus-visible {
-  outline: none;
-  box-shadow: var(--focus-ring);
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
   border-radius: var(--r-sm);
 }
 
@@ -325,9 +351,6 @@ select {
   font-size: 15px;
   font-weight: 620;
   letter-spacing: -0.008em;
-}
-.t-body {
-  font-size: 13.5px;
 }
 .t-sm {
   font-size: 12.5px;
@@ -443,7 +466,9 @@ select {
   background: var(--surface);
   color: var(--ink);
   font-weight: 600;
-  box-shadow: var(--shadow-1);
+  /* The surface swap alone is ~1.2:1 — invisible in dark. The inset bar is the
+     channel that actually carries "you are here". */
+  box-shadow: var(--shadow-1), inset 2px 0 0 var(--out);
 }
 .rail-item .ico {
   flex: none;
@@ -469,8 +494,8 @@ select {
   place-items: center;
 }
 .rail-count.hot {
-  background: var(--in);
-  color: #fff;
+  background: var(--in-fill);
+  color: var(--on-fill);
 }
 
 /* The two verbs. Bigger than a nav item, because they are what the app is for. */
@@ -492,9 +517,9 @@ select {
   transform: translateY(1px);
 }
 .rail-verb.send {
-  background: var(--out);
-  border-color: var(--out-strong);
-  color: #fff;
+  background: var(--out-fill);
+  border-color: var(--out-fill);
+  color: var(--on-fill);
   box-shadow: var(--shadow-1);
 }
 .rail-verb.send:hover {
@@ -536,6 +561,10 @@ select {
 }
 .header h1 {
   margin: 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 15px;
   font-weight: 640;
   letter-spacing: -0.01em;
@@ -593,25 +622,25 @@ select {
 }
 
 .btn-primary {
-  background: var(--out);
-  border-color: var(--out-strong);
-  color: #fff;
+  background: var(--out-fill);
+  border-color: var(--out-fill);
+  color: var(--on-fill);
   box-shadow: var(--shadow-1);
 }
 .btn-primary:hover:not(:disabled) {
-  background: var(--out);
-  filter: brightness(1.07);
-  border-color: var(--out-strong);
+  background: var(--out-fill);
+  filter: brightness(1.12);
+  border-color: var(--out-fill);
 }
 .btn-in {
-  background: var(--in);
-  border-color: var(--in);
-  color: #fff;
+  background: var(--in-fill);
+  border-color: var(--in-fill);
+  color: var(--on-fill);
   box-shadow: var(--shadow-1);
 }
 .btn-in:hover:not(:disabled) {
-  background: var(--in);
-  filter: brightness(1.1);
+  background: var(--in-fill);
+  filter: brightness(1.14);
 }
 .btn-ghost {
   background: transparent;
@@ -744,7 +773,9 @@ select {
   height: 22px;
   border-radius: var(--r-pill);
   border: 1px solid var(--line-hard);
-  background: var(--surface-3);
+  /* An off switch has to be distinguishable from the card it sits on, which
+     --surface-3 was not (1.2:1). */
+  background: var(--ink-weak);
   cursor: pointer;
   transition: background var(--t) var(--ease), border-color var(--t) var(--ease);
 }
@@ -811,10 +842,11 @@ select {
 .segmented button:hover {
   color: var(--ink);
 }
-.segmented button[aria-selected="true"] {
+.segmented button[aria-checked="true"] {
   background: var(--surface);
   color: var(--ink);
-  box-shadow: var(--shadow-1);
+  font-weight: 650;
+  box-shadow: var(--shadow-1), inset 0 0 0 1px var(--line-hard);
 }
 .segmented-block {
   display: flex;
@@ -902,6 +934,7 @@ select {
 /* -- Avatar ---------------------------------------------------------------- */
 
 .avatar {
+  color: var(--on-fill);
   border-radius: 50%;
   display: grid;
   place-items: center;
@@ -1015,6 +1048,8 @@ select {
 .row-meta {
   display: flex;
   align-items: center;
+  min-width: 0;
+  overflow: hidden;
   gap: 7px;
   margin-top: 2px;
   font-size: 11.5px;
@@ -1040,7 +1075,7 @@ select {
 .prog {
   height: 4px;
   border-radius: var(--r-pill);
-  background: var(--surface-3);
+  background: var(--track);
   overflow: hidden;
   margin-top: 7px;
 }
@@ -1192,7 +1227,12 @@ select {
 /* -- Menu ------------------------------------------------------------------ */
 
 .menu {
-  position: absolute;
+  /* `fixed`, because Menu.tsx computes top/left from getBoundingClientRect() —
+     viewport coordinates. Under `absolute` the row menu resolved against
+     `.row` (which is position:relative for its direction stripe) and rendered
+     far below the trigger, clipped by the scrolling view. The body never
+     scrolls, so fixed and viewport coordinates agree. */
+  position: fixed;
   z-index: 50;
   min-width: 194px;
   padding: 5px;
@@ -1291,7 +1331,8 @@ select {
 
 .banner {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
+  overflow-wrap: anywhere;
   gap: 10px;
   padding: 10px 14px;
   border-bottom: 1px solid var(--line);
@@ -1514,6 +1555,7 @@ select {
 }
 .palette input:focus {
   box-shadow: none;
+  outline-offset: -3px;
 }
 .palette .list {
   flex: 1;
@@ -1536,6 +1578,8 @@ select {
 }
 .palette .opt[data-active="true"] {
   background: var(--surface-3);
+  /* Which entry Enter will run has to be unmistakable, not a 1.2:1 tint. */
+  box-shadow: inset 3px 0 0 var(--focus);
 }
 .palette .opt .ico {
   width: 18px;
@@ -1688,9 +1732,6 @@ select {
 .grow {
   flex: 1;
   min-width: 0;
-}
-.right {
-  margin-left: auto;
 }
 .divider {
   height: 1px;

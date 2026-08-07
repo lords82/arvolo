@@ -203,7 +203,7 @@ export function SettingsView() {
           hint={
             relayLocked
               ? "In questo momento lo decide la variabile d'ambiente ARVOLO_RELAY: quello che scrivi qui non avrebbe effetto finché è impostata."
-              : `In uso adesso: ${config.relay ?? "nessuno"} — ${SOURCE_LABEL[config.relay_source] ?? config.relay_source}. Un nome nudo diventa https://; per un relay in chiaro scrivi lo schema per esteso, tipo http://relay.local:6282.`
+              : `In uso adesso: ${config.relay ?? "nessuno"} — ${SOURCE_LABEL[config.relay_source] ?? config.relay_source}. Un indirizzo senza schema diventa https://; per un relay in chiaro scrivi lo schema per esteso, tipo http://relay.local:6282.`
           }
         >
           {({ id, describedBy }) => (
@@ -295,7 +295,10 @@ export function SettingsView() {
           checked={config.seed ?? true}
           onChange={async (v) => {
             await save({ seed: { set: v } });
-            toast.info("Impostazione salvata", "Attiva al prossimo avvio del daemon.");
+            toast.info(
+              "Impostazione salvata",
+              "Ha effetto al prossimo avvio del daemon."
+            );
           }}
         />
       </div>
@@ -327,7 +330,7 @@ export function SettingsView() {
 
         <Field
           label="Chiave d'identità"
-          hint="Il tuo segreto. Non condividerlo: chi lo possiede è te. Per usare Arvolo su un'altra tua macchina c'è il collegamento dispositivi, che lo trasferisce cifrato."
+          hint="Il tuo segreto. Non condividerlo: chi lo possiede diventa te. Per usare Arvolo su un'altra tua macchina c'è il collegamento dispositivi, che lo trasferisce cifrato."
         >
           {() => (
             <TextInput readOnly value={config.identity_path} className="mono" />
@@ -349,7 +352,7 @@ export function SettingsView() {
       <Confirm
         open={confirmRestart}
         title="Riavviare il daemon?"
-        body="I trasferimenti in corso si fermano e riprendono da dove erano: quelli ripristinabili tengono la parte già scaricata. Serve per applicare relay e cartelle appena cambiati."
+        body="I trasferimenti in corso si fermano: quelli ripristinabili riprendono da dove erano, gli altri vanno rifatti da capo. Serve per applicare relay e cartelle appena cambiati."
         confirmLabel="Riavvia"
         onCancel={() => setConfirmRestart(false)}
         onConfirm={async () => {

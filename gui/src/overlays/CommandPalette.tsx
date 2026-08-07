@@ -10,8 +10,9 @@
 // surprising results, and a palette that offers the wrong thing confidently is
 // worse than one that offers nothing.
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { fire, useStore, type Route } from "../store";
+import { useModal } from "../ui/Sheet";
 import { Icon } from "../ui/Icons";
 import { Avatar } from "../ui/Bits";
 
@@ -46,6 +47,12 @@ export function CommandPalette() {
   const [active, setActive] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  const paletteRef = useRef<HTMLDivElement>(null);
+
+  // It calls itself aria-modal; it has to actually be one. Without this, Tab
+  // walked out into the rail behind it and Escape only worked while focus was
+  // still in the input.
+  useModal(paletteRef, () => setOpen(false), open);
 
   const entries = useMemo<Entry[]>(() => {
     const nav = (route: Route, label: string, icon: JSX.Element, kw?: string): Entry => ({
@@ -135,7 +142,7 @@ export function CommandPalette() {
               : "Passa al tema scuro",
         icon: theme === "dark" ? <Icon.Sun /> : <Icon.Moon />,
         keywords: "tema scuro chiaro dark light aspetto",
-        group: "Vai a",
+        group: "Azioni",
         run: () =>
           setTheme(theme === "dark" ? "light" : theme === "light" ? "system" : "dark"),
       },
@@ -224,6 +231,7 @@ export function CommandPalette() {
     <>
       <div className="scrim" onClick={() => setOpen(false)} />
       <div
+        ref={paletteRef}
         className="palette"
         role="dialog"
         aria-modal="true"
@@ -265,13 +273,18 @@ export function CommandPalette() {
             const header = e.group !== lastGroup ? e.group : null;
             lastGroup = e.group;
             return (
-              <div key={e.key}>
-                {header && <div className="t-label group-label">{header}</div>}
+              <Fragment key={e.key}>
+                {header && (
+                  <div className="t-label group-label" role="presentation">
+                    {header}
+                  </div>
+                )}
                 <button
                   id={`pal-${e.key}`}
                   role="option"
                   aria-selected={i === active}
                   className="opt"
+                  tabIndex={-1}
                   data-active={i === active}
                   onMouseEnter={() => setActive(i)}
                   onClick={() => pick(i)}
@@ -280,7 +293,7 @@ export function CommandPalette() {
                   <span className="truncate">{e.label}</span>
                   {e.hint && <span className="sub truncate">{e.hint}</span>}
                 </button>
-              </div>
+              </Fragment>
             );
           })}
         </div>

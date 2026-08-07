@@ -142,7 +142,7 @@ describe("an incoming offer", () => {
     harness.fail = new Set(["acceptOffer"]);
     fireEvent.click(screen.getByText("arrivo.zip"));
     fireEvent.click(await screen.findByText("Accetta e scarica"));
-    await waitFor(() => expect(toastText()).toMatch(/rifiut|Non è andata/i));
+    await waitFor(() => expect(toastText()).toMatch(/rifiut|Non ha funzionato/i));
   });
 
   it("104. a refused accept keeps the row, so it can be retried", async () => {
@@ -198,7 +198,9 @@ describe("an incoming offer", () => {
     fireEvent.change(field, { target: { value: "segreto" } });
     fireEvent.click(screen.getByText("Accetta e scarica"));
     await waitFor(() =>
-      expect(harness.recorder.accept.at(-1)).toEqual(["o1", null, "segreto"])
+      expect(
+        harness.recorder.accept[harness.recorder.accept.length - 1]
+      ).toEqual(["o1", null, "segreto"])
     );
   });
 
@@ -544,7 +546,7 @@ describe("receiving from a pasted artefact", () => {
       target: { value: "4821-crater-mango" },
     });
     expect(
-      screen.getByText(/Codice di accoppiamento/)
+      screen.getByText(/Codice di invio/)
     ).toBeTruthy();
     fireEvent.click(
       within(document.querySelector(".sheet-foot") as HTMLElement).getByText(
@@ -590,7 +592,7 @@ describe("the address book", () => {
     harness.snapshot.presence = { p1: true };
     render(<App />);
     useStore.getState().go("people");
-    expect(await screen.findByLabelText("Online")).toBeTruthy();
+    expect(await screen.findByLabelText("Collegato")).toBeTruthy();
   });
 
   it("Invia from a person card opens the sheet already addressed to them", async () => {
@@ -644,7 +646,7 @@ describe("the address book", () => {
     useStore.getState().go("people");
     fireEvent.click(await screen.findByLabelText("Azioni per proj"));
     fireEvent.click(
-      within(await screen.findByRole("menu")).getByText("Scarica in automatico")
+      within(await screen.findByRole("menu")).getByText(/Segna come fidato/)
     );
     // Not sent yet: auto-downloading from an unconfirmed key is a MITM risk.
     expect(harness.recorder.markTrusted).toEqual([]);
@@ -660,7 +662,7 @@ describe("the address book", () => {
     useStore.getState().go("people");
     fireEvent.click(await screen.findByLabelText("Azioni per proj"));
     fireEvent.click(
-      within(await screen.findByRole("menu")).getByText("Scarica in automatico")
+      within(await screen.findByRole("menu")).getByText(/Segna come fidato/)
     );
     await waitFor(() =>
       expect(harness.recorder.markTrusted).toEqual([["proj", false]])
@@ -687,6 +689,67 @@ describe("pairing", () => {
     expect(await screen.findByText("4821-crater-mango")).toBeTruthy();
   });
 
+  it("joining opens the code input without contacting the daemon first", async () => {
+    render(<App />);
+    useStore.getState().go("people");
+    fireEvent.click(await screen.findByText("Ho un codice"));
+    // Starting a session now would spawn one that fails instantly ("a pairing
+    // code is required") and replace the very input the user is meant to type
+    // into with a spinner.
+    expect(harness.recorder.startPairing).toEqual([]);
+    const field = await screen.findByPlaceholderText("4821-crater-mango");
+    fireEvent.change(field, { target: { value: "4821-crater-mango" } });
+    fireEvent.click(screen.getByText("Collega"));
+    await waitFor(() =>
+      expect(harness.recorder.startPairing[0]).toEqual([
+        "contact_join",
+        null,
+        "4821-crater-mango",
+      ])
+    );
+  });
+
+  it("starting a second exchange retires the first", async () => {
+    render(<App />);
+    useStore.getState().go("people");
+    fireEvent.click((await screen.findAllByText("Scambia contatti"))[0]);
+    await waitFor(() => expect(useStore.getState().pairing?.session).toBe("pair-1"));
+    // The hosting side waits until cancelled, so an orphaned session would keep
+    // its rendezvous slot with no handle left anywhere to stop it.
+    await useStore.getState().startPairing("device_host");
+    expect(harness.recorder.cancelPairing).toContain("pair-1");
+  });
+
+  it("an outcome that beats its own session handle is not lost", async () => {
+    // The daemon spawns the session and *then* writes the reply naming it, so a
+    // fast failure can genuinely arrive first.
+    render(<App />);
+    useStore.setState({
+      pairing: {
+        session: null,
+        kind: "device_host",
+        code: "",
+        phase: "starting",
+        message: "",
+        needsRestart: false,
+      },
+    });
+    useStore.getState().applyEvent({
+      type: "pairing_failed",
+      session: "pair-1",
+      kind: "device_host",
+      error: "nessun relay configurato",
+      cancelled: false,
+    });
+    // Held, not dropped: the sheet would otherwise spin for ever.
+    expect(useStore.getState().pairing?.phase).toBe("starting");
+    await useStore.getState().startPairing("device_host");
+    await waitFor(() =>
+      expect(useStore.getState().pairing?.phase).toBe("failed")
+    );
+    expect(useStore.getState().pairing?.message).toBe("nessun relay configurato");
+  });
+
   it("closing the sheet cancels the session on the daemon", async () => {
     render(<App />);
     useStore.getState().go("people");
@@ -702,7 +765,7 @@ describe("pairing", () => {
     render(<App />);
     useStore.getState().go("people");
     fireEvent.click(await screen.findByText("Ho un codice"));
-    await screen.findByText("Scambia i contatti");
+    await screen.findByText("Codice");
     useStore.setState({
       pairing: {
         session: "pair-1",

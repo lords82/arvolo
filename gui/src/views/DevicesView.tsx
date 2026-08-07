@@ -21,10 +21,14 @@ import { toast } from "../ui/Toasts";
 function ago(unixSecs: number): string {
   if (!unixSecs) return "";
   const secs = Math.max(0, Math.floor(Date.now() / 1000) - unixSecs);
+  // Every branch can land on exactly 1 — a daily sync hits the last one square
+  // on — so none of them may hardcode the plural.
+  const n = (v: number, one: string, many: string) =>
+    `${v} ${v === 1 ? one : many} fa`;
   if (secs < 60) return "pochi secondi fa";
-  if (secs < 3600) return `${Math.round(secs / 60)} minuti fa`;
-  if (secs < 86400) return `${Math.round(secs / 3600)} ore fa`;
-  return `${Math.round(secs / 86400)} giorni fa`;
+  if (secs < 3600) return n(Math.round(secs / 60), "minuto", "minuti");
+  if (secs < 86400) return n(Math.round(secs / 3600), "ora", "ore");
+  return n(Math.round(secs / 86400), "giorno", "giorni");
 }
 
 export function DevicesView() {
@@ -178,7 +182,9 @@ export function DevicesView() {
             await saveConfig({ sync: { set: v } });
             await loadConfig();
             toast.info(
-              v ? "Sincronizzazione automatica attiva" : "Sincronizzazione automatica spenta",
+              v
+                ? "Sincronizzazione automatica attiva"
+                : "Sincronizzazione automatica disattivata",
               "Ha effetto al prossimo avvio del daemon."
             );
           }}

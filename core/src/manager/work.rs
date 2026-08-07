@@ -459,6 +459,11 @@ pub(super) struct DepositOutcome {
     /// need it (the inbox offer carries its own copy) — this is the sender's, to
     /// hand over out-of-band when the inbox route isn't wanted or isn't working.
     pub(super) ticket: String,
+    /// The download cap actually asked of the relay. Carried rather than assumed:
+    /// the receipt written from this outcome is what "Link e depositi" reads to
+    /// tell the user how many pickups a sealed file still has, and hardcoding the
+    /// burn-after-read default there made an explicit `--max 5` read back as 1.
+    pub(super) max: u32,
 }
 
 /// A sealed mailbox deposit is burn-after-read: it is sealed to one recipient, so
@@ -486,13 +491,14 @@ pub(super) async fn deposit_offline_and_offer(
 ) -> std::result::Result<DepositOutcome, flow::DepositError> {
     let size = std::fs::metadata(payload).map(|m| m.len()).unwrap_or(0);
     let ttl = opts.ttl.unwrap_or(OFFLINE_TTL_SECS);
+    let max = opts.max.unwrap_or(OFFLINE_MAX_DOWNLOADS);
     let deposited = flow::deposit_offline(
         payload,
         recipient,
         &inner.me,
         relay,
         ttl,
-        opts.max.unwrap_or(OFFLINE_MAX_DOWNLOADS),
+        max,
         opts.password.as_deref(),
     )
     .await?;
@@ -523,6 +529,7 @@ pub(super) async fn deposit_offline_and_offer(
         offer_id: posted.id,
         poster_token: posted.poster_token,
         ticket,
+        max,
     })
 }
 
@@ -700,6 +707,7 @@ pub(super) fn spawn_offline_confirm(
         revoke_token,
         offer_id,
         poster_token,
+        max,
         // The sender's hand-delivery ticket is returned to the caller, not filed
         // with the deposit: the record exists to *withdraw* the blob, and a ticket
         // is a capability to fetch it.
@@ -729,7 +737,7 @@ pub(super) fn spawn_offline_confirm(
             name: name.clone(),
             size,
             expires,
-            max: OFFLINE_MAX_DOWNLOADS,
+            max,
             recipient: recipient.clone(),
             offer_id: offer_id.clone(),
             poster_token: poster_token.clone(),

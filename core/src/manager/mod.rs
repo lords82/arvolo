@@ -531,11 +531,15 @@ impl TransferManager {
             .clone()
             .context("a relay is required to deposit to a contact's mailbox")?;
         let size = std::fs::metadata(&payload).map(|m| m.len()).unwrap_or(0);
-        let (id, _cancel) =
+        let (id, cancel) =
             self.register(Direction::Send, Some(recipient.clone()), name.clone(), size);
 
         let ttl = opts.ttl.unwrap_or(OFFLINE_TTL_SECS);
-        match deposit_offline_and_offer(
+        // Selected against the row's own token, or `cancel(id)` would fire a
+        // token nothing awaits: the upload would run to completion and the row
+        // would flip to Deposited — blob on the relay, offer in the recipient's
+        // inbox — after the user had been shown "annullamento in corso".
+        let deposit = deposit_offline_and_offer(
             &self.inner,
             &relay,
             recipient,
@@ -543,9 +547,15 @@ impl TransferManager {
             &name,
             &note,
             &opts,
-        )
-        .await
-        {
+        );
+        let outcome = tokio::select! {
+            _ = cancel.cancelled() => {
+                finish(&self.inner, id, true, Ok(None));
+                anyhow::bail!("deposit cancelled");
+            }
+            r = deposit => r,
+        };
+        match outcome {
             Ok(out) => {
                 let ticket = out.ticket.clone();
                 spawn_offline_confirm(&self.inner, id, relay, out, unix_now().saturating_add(ttl));
@@ -743,6 +753,15 @@ impl TransferManager {
                 // Restoring a deposit re-watches it; it never re-hands the ticket
                 // out, and the record deliberately doesn't keep one.
                 ticket: String::new(),
+                // The durable record predates per-deposit caps and cannot carry
+                // one: postcard is non-self-describing, so adding a field would
+                // make every already-written record unparsable and silently
+                // forget the deposits it was tracking (see the note in
+                // `records.rs`). The cap only feeds the local receipt's label,
+                // and the deposits panel prefers the relay's own reported cap
+                // when it has it — so a restored row shows the default here
+                // rather than losing a live deposit across an upgrade.
+                max: OFFLINE_MAX_DOWNLOADS,
             },
             rec.expires,
         );

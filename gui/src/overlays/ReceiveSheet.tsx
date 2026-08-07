@@ -29,14 +29,17 @@ export function shapeOf(raw: string): Shape {
   if (!s) return "empty";
   if (s.startsWith("arvc")) return "chunk";
   if (s.startsWith("arvm")) return "mailbox";
-  if (/^\d{3,6}-[a-z]+-[a-z]+(@.+)?$/i.test(s)) return "code";
+  // 1–6 digits: the nameplate is `rng.random_range(0..10_000)`, so `7-fox-oak`
+  // is a perfectly ordinary code. Demanding three digits met one code in a
+  // hundred with "non riconosco questa forma".
+  if (/^\d{1,6}-[a-z]+-[a-z]+(@.+)?$/i.test(s)) return "code";
   return "unknown";
 }
 
 const EXPLAIN: Record<Shape, string> = {
   empty:
-    "Incolla un codice di accoppiamento (tipo 4821-crater-mango) oppure un ticket arvc… / arvm….",
-  code: "Codice di accoppiamento: mi collego a chi lo sta mostrando adesso.",
+    "Incolla un codice di invio (tipo 4821-crater-mango) oppure un ticket arvc… / arvm…. Per scambiare i contatti con qualcuno usa invece Persone → Ho un codice.",
+  code: "Codice di invio: mi collego a chi lo sta mostrando adesso e scarico quello che manda.",
   chunk: "Ticket peer-to-peer: scarico direttamente dal mittente.",
   mailbox: "Ticket di casella: recupero il file depositato sul relay.",
   unknown:

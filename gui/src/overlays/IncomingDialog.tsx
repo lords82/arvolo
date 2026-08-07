@@ -64,7 +64,7 @@ export function IncomingDialog() {
     setBusy("accept");
     try {
       await accept(offerId, out, password || null);
-      toast.ok("Download avviato", t.name);
+      toast.ok("Ricezione avviata", t.name);
     } catch (e) {
       // The store already reported it. The one refusal worth reacting to here is
       // the missing password: it is recoverable, and the user has nowhere else
@@ -104,7 +104,10 @@ export function IncomingDialog() {
             Rifiuta
           </Button>
           <div className="spacer" />
-          <Button onClick={close} disabled={busy !== null}>
+          {/* Focus deliberately lands here and not on Accetta: this is the one
+              screen in the app where a security decision is made, and it must
+              not be one keypress away from a reflex. */}
+          <Button onClick={close} disabled={busy !== null} data-autofocus>
             Decido dopo
           </Button>
           <Button
@@ -112,7 +115,6 @@ export function IncomingDialog() {
             onClick={doAccept}
             busy={busy === "accept"}
             disabled={busy !== null}
-            data-autofocus
           >
             <Icon.Receive size={14} />
             Accetta e scarica
@@ -160,12 +162,16 @@ export function IncomingDialog() {
         <div className="divider" style={{ margin: "12px 0" }} />
 
         <div className="stack-sm">
-          <div className="t-label">Impronta della chiave</div>
-          <Fingerprint value={t.peerId ? fingerprintOf(contact, t.peerId) : ""} />
+          <div className="t-label">
+            {known ? "Impronta della chiave" : "Id pubblico del mittente"}
+          </div>
+          <Fingerprint value={known ? contact!.fingerprint : (t.peerId ?? "")} />
           <div className="hint">
             {known && contact!.verified
-              ? "Hai già confermato questa impronta fuori banda. È lo stesso interlocutore di sempre."
-              : "Confrontala a voce con chi ti sta mandando il file. È l'unico modo per essere certi che sia davvero lui — un nome non lo dimostra."}
+              ? "Hai già confrontato questa impronta fuori banda: è la stessa chiave che hai verificato."
+              : known
+                ? "Confrontala a voce con chi ti sta mandando il file. È l'unico modo per essere certi che sia davvero lui — un nome non lo dimostra."
+                : "Questa non è un'impronta: è l'id grezzo di qualcuno che non hai in rubrica. Salvalo qui sotto e vedrai le parole da confrontare a voce con lui."}
           </div>
         </div>
       </div>
@@ -198,12 +204,7 @@ export function IncomingDialog() {
       {needsPassword && (
         <Field
           label="Password"
-          error={
-            password
-              ? null
-              : "Questo file è protetto: senza la password non si apre."
-          }
-          hint="Te l'avrà detta a parte chi te l'ha mandato — non viaggia con il file, e il relay non la conosce."
+          hint="Questo file è protetto: senza la password non si apre. Te l'avrà detta a parte chi te l'ha mandato — non viaggia con il file, e il relay non la conosce."
         >
           {({ id, describedBy }) => (
             <TextInput
@@ -305,12 +306,3 @@ export function IncomingDialog() {
   );
 }
 
-/** The contact's stored fingerprint when we have one, else nothing — the id
- *  itself is not a fingerprint and showing it in that slot would invite the two
- *  to be compared as if they were the same thing. */
-function fingerprintOf(
-  contact: { fingerprint: string } | undefined,
-  id: string
-): string {
-  return contact?.fingerprint || id;
-}

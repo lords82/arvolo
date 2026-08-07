@@ -44,13 +44,13 @@ const MODES: { value: Mode; label: string }[] = [
  *  that is the only thing that actually decides which mode is right. */
 const BLURB: Record<Mode, string> = {
   contact:
-    "Va dritto a chi hai in rubrica. Se è online passa diretto da dispositivo a dispositivo; se non lo è resta nella sua casella sul relay finché non lo ritira.",
+    "Va dritto a chi hai in rubrica. Se è collegato passa diretto da dispositivo a dispositivo; se non lo è resta nella sua casella sul relay finché non lo ritira.",
   code:
     "Un codice corto da leggere a voce o inquadrare. Chi lo riceve lo incolla in Arvolo — non serve che sia già in rubrica, ma dovete essere entrambi collegati adesso.",
   link:
     "Un indirizzo che si apre in qualsiasi browser: chi lo riceve non ha bisogno di Arvolo né di un account. Il file viene decifrato nel browser, la chiave viaggia nel frammento dell'URL e al relay non arriva mai.",
   ticket:
-    "Un ticket arvc… puramente peer-to-peer, senza relay. Per chi vuole il canale più diretto possibile e sa già cosa farsene.",
+    "Un ticket arvc… peer-to-peer: non passa né dalla casella né dal relay Arvolo. Per bucare il NAT può servire un relay di collegamento, che vede solo traffico cifrato.",
 };
 
 const TTL_CHOICES = [
@@ -260,7 +260,7 @@ export function SendSheet() {
           kind: "link",
           value: url,
           detail:
-            "Chiunque abbia questo indirizzo può scaricare il file finché non scade o non revochi il link da «Link e depositi».",
+            "Chiunque abbia questo indirizzo può scaricare il file finché non scade, non esaurisce i download consentiti o non lo revochi da «Link e depositi».",
         });
       } else {
         const r = await ticket(files);
@@ -268,7 +268,7 @@ export function SendSheet() {
           kind: "ticket",
           value: r.ticket,
           detail:
-            "Ticket peer-to-peer: resta valido finché questa app è in esecuzione e l'invio non viene annullato.",
+            "Ticket peer-to-peer: resta valido finché il daemon è in esecuzione e l'invio non viene annullato.",
         });
       }
     } catch {
@@ -437,8 +437,8 @@ export function SendSheet() {
               <div className="grow">
                 <div style={{ fontWeight: 570 }}>Vale per più persone</div>
                 <div className="hint">
-                  Di norma il codice serve un destinatario e si ritira. Attivalo
-                  per lasciarlo aperto finché non annulli l'invio.
+                  Di norma il codice vale per un solo destinatario e poi si
+                  ritira. Attivalo per lasciarlo aperto finché non annulli l'invio.
                 </div>
               </div>
               <Switch
@@ -457,7 +457,7 @@ export function SendSheet() {
                     Lascia in casella, non aspettare
                   </div>
                   <div className="hint">
-                    Deposita subito sul relay anche se è online: tu chiudi e te ne
+                    Deposita subito sul relay anche se è collegato: tu chiudi e te ne
                     dimentichi. Sblocca scadenza, numero di ritiri e password.
                   </div>
                 </div>
@@ -579,7 +579,7 @@ export function SendSheet() {
           {mode === "ticket" && (
             <div className="hstack-sm">
               <Badge kind="info">
-                <Icon.Lock size={10} /> Nessun relay coinvolto
+                <Icon.Lock size={10} /> Nessun relay Arvolo
               </Badge>
             </div>
           )}

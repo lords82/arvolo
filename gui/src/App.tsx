@@ -207,7 +207,7 @@ export function App() {
   // simply looks broken. Errors never auto-dismiss (see Toasts).
   useEffect(() => {
     if (!actionError) return;
-    toast.bad("Non è andata", actionError);
+    toast.bad("Non ha funzionato", actionError);
     dismissActionError();
   }, [actionError, dismissActionError]);
 

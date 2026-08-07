@@ -454,7 +454,17 @@ impl EventStream {
             if line.trim().is_empty() {
                 continue;
             }
-            match serde_json::from_str::<ServerMessage>(line.trim())? {
+            // A daemon newer than this client can send a variant we have never
+            // heard of. Skipping it keeps the stream alive; propagating the
+            // parse error tore the subscription down, which the GUI's event pump
+            // reports as "daemon non raggiungibile" and then reconnects into,
+            // flapping once per unknown event. The reverse direction is already
+            // handled in the daemon's `handle_conn`.
+            let parsed = match serde_json::from_str::<ServerMessage>(line.trim()) {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            match parsed {
                 ServerMessage::Event(ev) => return Ok(Some(ev)),
                 ServerMessage::Reply { .. } => continue,
             }

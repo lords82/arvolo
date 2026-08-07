@@ -26,8 +26,8 @@ import { toast } from "../ui/Toasts";
 import type { PairKind } from "../types";
 
 const TITLE: Record<PairKind, string> = {
-  contact_host: "Scambia i contatti",
-  contact_join: "Scambia i contatti",
+  contact_host: "Scambia contatti",
+  contact_join: "Scambia contatti",
   device_host: "Collega un altro tuo dispositivo",
   device_join: "Collega questo dispositivo",
 };
@@ -36,7 +36,7 @@ const SUB: Record<PairKind, string> = {
   contact_host: "Mostragli il codice: vi salvate a vicenda, già verificati.",
   contact_join: "Inserisci il codice che ti ha letto.",
   device_host: "Condivide la tua identità con la macchina nuova.",
-  device_join: "Sostituisce l'identità di questo dispositivo con la tua.",
+  device_join: "Sostituisce l'identità di questo dispositivo con quella condivisa.",
 };
 
 export function PairSheet() {
@@ -79,7 +79,7 @@ export function PairSheet() {
     if (pairing.needsRestart) {
       await restartDaemon();
       toast.info(
-        "Riavvio del daemon",
+        "Daemon in riavvio",
         "Sta ripartendo con l'identità condivisa: qualche secondo e torna tutto."
       );
     }
@@ -190,8 +190,8 @@ export function PairSheet() {
                 value={pairing.code}
                 caption={
                   isDevice
-                    ? "Sull'altro dispositivo: Dispositivi → Collega questo dispositivo."
-                    : "Leggiglielo. Lui apre Persone → Scambia contatti e lo inserisce."
+                    ? "Sull'altro dispositivo: I tuoi dispositivi → Ho un codice."
+                    : "Leggiglielo. Lui apre Persone → Ho un codice e lo inserisce."
                 }
               />
               <div className="hstack-sm">

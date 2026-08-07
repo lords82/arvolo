@@ -42,10 +42,15 @@ function Row({ t }: { t: UITransfer }) {
   // The swarm is the whole point of the P2P path, and a row that is pulling from
   // three peers at once has no other way of saying so.
   const peers = Math.max(t.swarmPeers, t.downloadPeers);
+  // `deposited` counts as live here: the blob is on the relay awaiting pickup
+  // and can still be withdrawn. Leaving it out made every "Revoca il deposito"
+  // string in this file unreachable, so the board offered no way to take one
+  // back at all.
   const live =
     t.status === "in corso" ||
     t.status === "in attesa" ||
     t.status === "in stallo" ||
+    t.status === "deposited" ||
     t.status === "in annullamento";
   const done =
     t.status === "completato" ||
@@ -96,20 +101,20 @@ function Row({ t }: { t: UITransfer }) {
   if (live) {
     items.push({
       key: "cancel",
-      label: t.status === "deposited" ? "Ritira dal relay" : "Annulla",
+      label: t.status === "deposited" ? "Revoca il deposito" : "Annulla",
       icon: <Icon.Stop size={13} />,
       danger: true,
       separated: true,
       onSelect: () => setConfirmCancel(true),
     });
   }
-  if (done || t.status === "deposited") {
+  if (done) {
     items.push({
       key: "remove",
       label: "Togli dalla lista",
       icon: <Icon.Trash size={13} />,
       danger: true,
-      separated: !live,
+      separated: true,
       onSelect: () => fire(removeRow(t.key)),
     });
   }
@@ -223,13 +228,15 @@ function Row({ t }: { t: UITransfer }) {
 
       <Confirm
         open={confirmCancel}
-        title={t.status === "deposited" ? "Ritirare il deposito?" : "Annullare?"}
+        title={t.status === "deposited" ? "Revocare il deposito?" : "Annullare?"}
         body={
           t.status === "deposited"
             ? `Il file viene rimosso dal relay e l'offerta ritirata dalla casella di ${t.peer ?? "destinazione"}. Non potrà più scaricarlo.`
-            : `«${t.name}» si ferma qui. Un invio già in corso riparte da capo se lo rifai.`
+            : `«${t.name}» si ferma qui. Quello che è già passato viene buttato: se lo rifai, riparte da capo.`
         }
-        confirmLabel={t.status === "deposited" ? "Ritira" : "Annulla il trasferimento"}
+        confirmLabel={
+          t.status === "deposited" ? "Revoca" : "Annulla il trasferimento"
+        }
         cancelLabel="Lascia stare"
         danger
         onCancel={() => setConfirmCancel(false)}
@@ -342,7 +349,7 @@ export function TransfersView() {
     <div
       style={{
         display: "grid",
-        gridTemplateColumns: "repeat(auto-fit, minmax(360px, 1fr))",
+        gridTemplateColumns: "repeat(auto-fit, minmax(min(360px, 100%), 1fr))",
         gap: 24,
         alignItems: "start",
       }}

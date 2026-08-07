@@ -56,8 +56,8 @@ function PresenceDot({ id }: { id: string }) {
   return (
     <span
       className={`dot ${online ? "on" : "off"}`}
-      title={online ? "Online adesso" : "Non collegato"}
-      aria-label={online ? "Online" : "Non collegato"}
+      title={online ? "Collegato adesso" : "Non collegato"}
+      aria-label={online ? "Collegato" : "Non collegato"}
     />
   );
 }
@@ -99,13 +99,13 @@ function PersonCard({ c }: { c: ContactDto }) {
     c.trusted
       ? {
           key: "untrust",
-          label: "Non scaricare più in automatico",
+          label: "Non è più fidato: chiedi ogni volta",
           icon: <Icon.Star size={13} />,
           onSelect: () => fire(markUntrusted(c.name)),
         }
       : {
           key: "trust",
-          label: "Scarica in automatico",
+          label: "Segna come fidato: scarica in automatico",
           icon: <Icon.Star size={13} />,
           onSelect: () => {
             if (c.verified) fire(markTrusted(c.name, false));
@@ -330,7 +330,7 @@ function AddPersonSheet({
       </Field>
       <Field
         label="Id pubblico"
-        hint="Glielo dà «arvolo me», oppure la schermata Impostazioni della sua app."
+        hint="Lo trova con «arvolo me», oppure nella schermata Impostazioni della sua app."
       >
         {({ id: fid, describedBy }) => (
           <TextInput
@@ -553,7 +553,7 @@ export function PeopleView() {
     try {
       await api.writeTextFile(path, JSON.stringify(rows, null, 2));
       toast.ok(
-        `Esportati ${rows.length} contatti`,
+        rows.length === 1 ? "Esportato 1 contatto" : `Esportati ${rows.length} contatti`,
         "Il file contiene solo id pubblici: nessun segreto."
       );
     } catch (e) {
@@ -597,7 +597,7 @@ export function PeopleView() {
         }
       }
       toast.ok(
-        `Importati ${added} contatti`,
+        added === 1 ? "Importato 1 contatto" : `Importati ${added} contatti`,
         `${skipped ? `${skipped} saltati. ` : ""}Tutti non verificati: i contrassegni non si importano, perché quelle impronte non le hai controllate tu.`
       );
     } catch (e) {
@@ -645,10 +645,14 @@ export function PeopleView() {
               onSelect: async () => {
                 const n = await pruneNames();
                 toast.ok(
+                  n === 0
+                    ? "Niente da ripulire"
+                    : n === 1
+                      ? "Rimosso 1 record"
+                      : `Rimossi ${n} record`,
                   n
-                    ? `Rimossi ${n} record`
-                    : "Niente da ripulire",
-                  "Sono nomi annunciati da contatti che non hai più."
+                    ? "Erano nomi annunciati da contatti che non hai più."
+                    : undefined
                 );
               },
             },

@@ -91,14 +91,14 @@ function DepositRow({ d }: { d: DepositDto }) {
 
       <Confirm
         open={confirm}
-        title={m.revocable ? "Revocare?" : "Rimuovere il promemoria?"}
+        title={m.revocable ? "Revocare?" : "Rimuovere la riga?"}
         body={
           m.revocable ? (
             isLink ? (
               <>
                 Il link smette di funzionare <strong>per tutti</strong> quelli a
-                cui l'hai dato, immediatamente e senza possibilità di ripensarci.
-                Il file resta sul tuo disco.
+                cui l'hai dato, e chi l'ha già scaricato tiene la sua copia. Il
+                file resta sul tuo disco.
               </>
             ) : (
               <>
@@ -137,7 +137,7 @@ export function DepositsView() {
     <div className="stack">
       <div className="hstack">
         <div className="grow t-sm t-sec">
-          Quello che hai lasciato su un relay e puoi ancora ritirare. Lo stato
+          Quello che hai lasciato su un relay e puoi ancora revocare. Lo stato
           viene chiesto al relay ogni volta che apri questa schermata — non c'è
           modo di saperlo altrimenti.
         </div>

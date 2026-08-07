@@ -107,7 +107,7 @@ export function Rail() {
       </div>
 
       <div className="rail-group">
-        <div className="t-label">Raccolte</div>
+        <div className="t-label">Sezioni</div>
         {PLACES.map((p) => {
           const c = counts[p.route];
           return (
