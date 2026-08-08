@@ -56,6 +56,7 @@ export interface Recorder {
   syncNow: number;
   startPairing: [PairKind, string | null, string | null][];
   cancelPairing: string[];
+  restartDaemon: number;
 }
 
 export interface Harness {
@@ -120,6 +121,7 @@ function freshRecorder(): Recorder {
     syncNow: 0,
     startPairing: [],
     cancelPairing: [],
+    restartDaemon: 0,
   };
 }
 
@@ -349,7 +351,10 @@ export function makeIpcMock() {
         harness.recorder.setMyName.push(name);
         return guard("setMyName", undefined);
       },
-      restartDaemon: () => guard("restartDaemon", undefined),
+      restartDaemon: () => {
+        harness.recorder.restartDaemon++;
+        return guard("restartDaemon", undefined);
+      },
       listDeposits: () => {
         harness.recorder.listDeposits++;
         return guard("listDeposits", harness.snapshot.deposits);

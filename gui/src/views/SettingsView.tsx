@@ -95,26 +95,35 @@ export function SettingsView() {
 
   const relayLocked = config.relay_source === "env";
 
-  const saveName = async () => {
+  // Both of these hang off an `onClick`, which does not await what it calls, and
+  // `saveConfig` rethrows after filing the failure in `actionError`. Left as
+  // async handlers the refusal escaped as an unhandled rejection — reported
+  // nowhere the user can see, and blamed on whatever ran next. Same reasoning as
+  // the confirm callbacks further down.
+  const saveName = () => {
     setBusy(true);
-    try {
-      await save({ display_name: name.trim() ? { set: name.trim() } : "clear" });
-      setDirty((d) => ({ ...d, name: false }));
-      toast.ok(t("settings.nameSaved"), t("settings.nameSavedDetail"));
-    } finally {
-      setBusy(false);
-    }
+    fire(
+      save({ display_name: name.trim() ? { set: name.trim() } : "clear" })
+        .then(() => {
+          // Only on success: a field still marked clean after a refused write
+          // would disable Save and strand the edit.
+          setDirty((d) => ({ ...d, name: false }));
+          toast.ok(t("settings.nameSaved"), t("settings.nameSavedDetail"));
+        })
+        .finally(() => setBusy(false))
+    );
   };
 
-  const saveRelay = async () => {
+  const saveRelay = () => {
     setBusy(true);
-    try {
-      await save({ relay: relay.trim() ? { set: relay.trim() } : "clear" });
-      setDirty((d) => ({ ...d, relay: false }));
-      toast.info(t("settings.relaySaved"), t("settings.relaySavedDetail"));
-    } finally {
-      setBusy(false);
-    }
+    fire(
+      save({ relay: relay.trim() ? { set: relay.trim() } : "clear" })
+        .then(() => {
+          setDirty((d) => ({ ...d, relay: false }));
+          toast.info(t("settings.relaySaved"), t("settings.relaySavedDetail"));
+        })
+        .finally(() => setBusy(false))
+    );
   };
 
   return (
