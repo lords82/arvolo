@@ -7,6 +7,7 @@
 
 import { useEffect } from "react";
 import { create } from "zustand";
+import { useT } from "../i18n";
 import { Icon } from "./Icons";
 import { IconButton } from "./Primitives";
 
@@ -17,7 +18,8 @@ export interface Toast {
   kind: ToastKind;
   title: string;
   detail?: string;
-  /** An optional single action, e.g. "Riprova" or "Apri cartella". */
+  /** An optional single action, e.g. "Retry" or "Open the folder". Already
+   *  translated by the caller: a toast is raised, not rendered, from the store. */
   action?: { label: string; run: () => void };
 }
 
@@ -51,57 +53,62 @@ export const toast = {
 
 const AUTO_DISMISS_MS = 4200;
 
-function ToastRow({ t }: { t: Toast }) {
+function ToastRow({ t: item }: { t: Toast }) {
+  const t = useT();
   const dismiss = useToasts((s) => s.dismiss);
   useEffect(() => {
-    if (t.kind === "bad") return; // see the note at the top of this file
-    const h = window.setTimeout(() => dismiss(t.id), AUTO_DISMISS_MS);
+    if (item.kind === "bad") return; // see the note at the top of this file
+    const h = window.setTimeout(() => dismiss(item.id), AUTO_DISMISS_MS);
     return () => window.clearTimeout(h);
-  }, [t.id, t.kind, dismiss]);
+  }, [item.id, item.kind, dismiss]);
 
   return (
     <div
-      className={`toast ${t.kind === "bad" ? "bad" : t.kind === "ok" ? "ok" : ""}`}
-      role={t.kind === "bad" ? "alert" : "status"}
+      className={`toast ${item.kind === "bad" ? "bad" : item.kind === "ok" ? "ok" : ""}`}
+      role={item.kind === "bad" ? "alert" : "status"}
     >
       <span
         className={
-          t.kind === "bad" ? "tone-bad" : t.kind === "ok" ? "tone-ok" : "tone-in"
+          item.kind === "bad"
+            ? "tone-bad"
+            : item.kind === "ok"
+              ? "tone-ok"
+              : "tone-in"
         }
         style={{ marginTop: 1 }}
       >
-        {t.kind === "bad" ? (
+        {item.kind === "bad" ? (
           <Icon.Alert />
-        ) : t.kind === "ok" ? (
+        ) : item.kind === "ok" ? (
           <Icon.Check />
         ) : (
           <Icon.Info />
         )}
       </span>
       <div className="grow">
-        <div style={{ fontWeight: 570 }}>{t.title}</div>
-        {t.detail && (
+        <div style={{ fontWeight: 570 }}>{item.title}</div>
+        {item.detail && (
           <div
             className="t-sm t-sec"
             style={{ marginTop: 2, wordBreak: "break-word" }}
           >
-            {t.detail}
+            {item.detail}
           </div>
         )}
-        {t.action && (
+        {item.action && (
           <button
             className="btn btn-sm"
             style={{ marginTop: 8 }}
             onClick={() => {
-              dismiss(t.id);
-              t.action!.run();
+              dismiss(item.id);
+              item.action!.run();
             }}
           >
-            {t.action.label}
+            {item.action.label}
           </button>
         )}
       </div>
-      <IconButton label="Chiudi" onClick={() => dismiss(t.id)}>
+      <IconButton label={t("common.close")} onClick={() => dismiss(item.id)}>
         <Icon.Close size={13} />
       </IconButton>
     </div>

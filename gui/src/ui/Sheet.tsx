@@ -14,6 +14,7 @@ import {
   useRef,
   type ReactNode,
 } from "react";
+import { useT } from "../i18n";
 import { Icon } from "./Icons";
 import { Button, IconButton } from "./Primitives";
 
@@ -99,6 +100,7 @@ export function Sheet({
   footer,
   headerAction,
 }: SheetProps) {
+  const t = useT();
   const ref = useRef<HTMLDivElement>(null);
   useModal(ref, onClose, open);
   if (!open) return null;
@@ -119,7 +121,7 @@ export function Sheet({
             {subtitle && <div className="hint">{subtitle}</div>}
           </div>
           {headerAction}
-          <IconButton label="Chiudi" onClick={onClose}>
+          <IconButton label={t("common.close")} onClick={onClose}>
             <Icon.Close />
           </IconButton>
         </div>
@@ -134,7 +136,7 @@ interface ConfirmProps {
   open: boolean;
   title: string;
   /** The consequence, in plain words. A confirm that only restates the verb
-   *  ("Vuoi eliminare?") tells the user nothing they didn't already know. */
+   *  ("Delete this?") tells the user nothing they didn't already know. */
   body: ReactNode;
   confirmLabel?: string;
   cancelLabel?: string;
@@ -148,13 +150,14 @@ export function Confirm({
   open,
   title,
   body,
-  confirmLabel = "Conferma",
-  cancelLabel = "Annulla",
+  confirmLabel,
+  cancelLabel,
   danger,
   busy,
   onConfirm,
   onCancel,
 }: ConfirmProps) {
+  const t = useT();
   const ref = useRef<HTMLDivElement>(null);
   const close = useCallback(() => {
     if (!busy) onCancel();
@@ -185,14 +188,14 @@ export function Confirm({
               dialog that opens with Enter armed on "Revoca" turns a reflex into
               a decision. */}
           <Button onClick={close} disabled={busy} data-autofocus>
-            {cancelLabel}
+            {cancelLabel ?? t("common.cancel")}
           </Button>
           <Button
             variant={danger ? "danger" : "primary"}
             onClick={onConfirm}
             busy={busy}
           >
-            {confirmLabel}
+            {confirmLabel ?? t("common.confirm")}
           </Button>
         </div>
       </div>

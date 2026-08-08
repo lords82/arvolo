@@ -8,7 +8,8 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { fire, useStore, type Route } from "./store";
+import { fire, TITLE_KEY, useStore, type Route } from "./store";
+import { useT } from "./i18n";
 import { Icon } from "./ui/Icons";
 import { Button, IconButton, modKey, TextInput } from "./ui/Primitives";
 import { ToastHost, toast } from "./ui/Toasts";
@@ -25,21 +26,13 @@ import { IncomingDialog } from "./overlays/IncomingDialog";
 import { PairSheet } from "./overlays/PairSheet";
 import { CommandPalette } from "./overlays/CommandPalette";
 
-const TITLES: Record<Route, string> = {
-  transfers: "Trasferimenti",
-  people: "Persone",
-  deposits: "Link e depositi",
-  history: "Cronologia",
-  devices: "I tuoi dispositivi",
-  settings: "Impostazioni",
-};
-
 /** Only the board is searchable in place; the other screens carry their own
  *  filter controls, and a header field that silently did nothing on four of six
  *  screens would be worse than no field. */
 const SEARCHABLE: Route[] = ["transfers"];
 
 export function App() {
+  const t = useT();
   const init = useStore((s) => s.init);
   const connected = useStore((s) => s.connected);
   const status = useStore((s) => s.status);
@@ -65,16 +58,16 @@ export function App() {
   // Select the stable map, derive the array with useMemo — a selector returning
   // a fresh array every call makes useSyncExternalStore loop forever.
   const pendingOffers = useMemo(
-    () => Object.values(transfers).filter((t) => t.status === "in arrivo"),
+    () => Object.values(transfers).filter((t) => t.status === "incoming"),
     [transfers]
   );
   const finishedCount = useMemo(
     () =>
       Object.values(transfers).filter(
         (t) =>
-          t.status === "completato" ||
-          t.status === "annullato" ||
-          t.status === "fallito"
+          t.status === "completed" ||
+          t.status === "cancelled" ||
+          t.status === "failed"
       ).length,
     [transfers]
   );
@@ -207,9 +200,9 @@ export function App() {
   // simply looks broken. Errors never auto-dismiss (see Toasts).
   useEffect(() => {
     if (!actionError) return;
-    toast.bad("Non ha funzionato", actionError);
+    toast.bad(t("app.actionFailed"), actionError);
     dismissActionError();
-  }, [actionError, dismissActionError]);
+  }, [actionError, dismissActionError, t]);
 
   const View =
     route === "transfers"
@@ -233,12 +226,9 @@ export function App() {
         {!connected && (
           <div className="banner bad" role="status">
             <Icon.Alert size={14} className="tone-bad" />
-            <span className="grow">
-              Non riesco a parlare con il daemon. I trasferimenti in corso
-              proseguono, ma questa finestra non li vede.
-            </span>
+            <span className="grow">{t("app.disconnected")}</span>
             <Button size="sm" onClick={() => fire(reload())}>
-              Riprova
+              {t("common.retry")}
             </Button>
           </div>
         )}
@@ -246,11 +236,14 @@ export function App() {
           <div className="banner" role="status">
             <Icon.Alert size={14} className="tone-warn" />
             <span className="grow">
-              Il daemon in esecuzione è la versione {status?.version || "precedente"},
-              l'app è la {guiVersion}. Riavvialo per allinearli.
+              {t(
+                "app.versionMismatch",
+                status?.version || t("app.versionUnknown"),
+                guiVersion
+              )}
             </span>
             <Button size="sm" onClick={() => fire(restartDaemon())}>
-              Riavvia
+              {t("app.restart")}
             </Button>
           </div>
         )}
@@ -265,8 +258,8 @@ export function App() {
             <Icon.Receive size={14} className="tone-in" />
             <span className="grow">
               {pendingOffers.length === 1
-                ? "Qualcuno vuole mandarti un file."
-                : `${pendingOffers.length} file in attesa della tua conferma.`}
+                ? t("app.offerWaiting")
+                : t("app.offersWaiting", pendingOffers.length)}
             </span>
             <Button
               size="sm"
@@ -277,14 +270,14 @@ export function App() {
                   : go("transfers")
               }
             >
-              Vedi
+              {t("app.seeOffers")}
             </Button>
           </div>
         )}
 
         {/* --- header --------------------------------------------------- */}
         <header className="header">
-          <h1>{TITLES[route]}</h1>
+          <h1>{t(TITLE_KEY[route])}</h1>
           <div className="spacer" />
 
           {SEARCHABLE.includes(route) && (
@@ -293,8 +286,8 @@ export function App() {
                 id="app-search"
                 value={search}
                 onChange={(e) => setSearch(e.currentTarget.value)}
-                placeholder="Filtra per nome o persona…"
-                aria-label="Filtra i trasferimenti"
+                placeholder={t("app.searchPlaceholder")}
+                aria-label={t("app.searchLabel")}
               />
             </div>
           )}
@@ -302,12 +295,12 @@ export function App() {
           {route === "transfers" && finishedCount > 0 && (
             <Button size="sm" onClick={() => fire(clearFinished())}>
               <Icon.Trash size={13} />
-              Pulisci ({finishedCount})
+              {t("app.clearFinished", finishedCount)}
             </Button>
           )}
 
           <IconButton
-            label={`Cerca ed esegui (${modKey}K)`}
+            label={t("app.palette", modKey)}
             onClick={() => setPaletteOpen(true)}
           >
             <Icon.Search size={15} />
@@ -316,10 +309,10 @@ export function App() {
             size="sm"
             variant="primary"
             onClick={() => openSheet([])}
-            title={`Invia (${modKey}N)`}
+            title={t("app.sendShortcut", modKey)}
           >
             <Icon.Send size={13} />
-            Invia
+            {t("app.send")}
           </Button>
         </header>
 
@@ -341,10 +334,8 @@ export function App() {
         <div className="drop-overlay">
           <div className="inner">
             <Icon.Send size={34} className="tone-out" />
-            <div className="t-title">Lascia qui per inviare</div>
-            <div className="t-sm t-mut">
-              Poi scegli a chi: un contatto, un codice, un link.
-            </div>
+            <div className="t-title">{t("app.dropTitle")}</div>
+            <div className="t-sm t-mut">{t("app.dropHint")}</div>
           </div>
         </div>
       )}

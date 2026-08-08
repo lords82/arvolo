@@ -36,7 +36,7 @@ function t(over: Partial<UITransfer> = {}): UITransfer {
     name: "file.txt",
     size: 1000,
     transferred: 0,
-    status: "in corso",
+    status: "active",
     encrypted: true,
     verified: false,
     method: "p2p",
@@ -106,15 +106,15 @@ describe("pct", () => {
 
 describe("statusMeta", () => {
   const all: UIStatus[] = [
-    "in arrivo",
-    "in corso",
-    "in attesa",
-    "in stallo",
-    "in annullamento",
+    "incoming",
+    "active",
+    "paused",
+    "stalled",
+    "cancelling",
     "deposited",
-    "completato",
-    "fallito",
-    "annullato",
+    "completed",
+    "failed",
+    "cancelled",
   ];
   it.each(all)("statusMeta(%s) has a label and a tone", (status) => {
     const m = statusMeta(status);
@@ -128,7 +128,7 @@ describe("statusMeta", () => {
   });
 
   it("'deposited' does not claim the file was delivered", () => {
-    expect(statusMeta("deposited").text).not.toMatch(/consegnat|completat/i);
+    expect(statusMeta("deposited").text).not.toMatch(/handed over|complete/i);
   });
 });
 
@@ -179,10 +179,10 @@ describe("extTint", () => {
 
 describe("barClass", () => {
   it.each([
-    ["out", "in corso"],
-    ["out", "in stallo"],
-    ["in", "in corso"],
-    ["in", "in stallo"],
+    ["out", "active"],
+    ["out", "stalled"],
+    ["in", "active"],
+    ["in", "stalled"],
   ] as const)("barClass(%s, %s) names the bar and its direction", (dir, status) => {
     const cls = barClass(t({ dir, status }));
     expect(cls.split(" ")).toContain("prog");
@@ -196,16 +196,16 @@ describe("barClass", () => {
   it.each(["out", "in"] as const)(
     "a stalled %s bar is marked apart from a running one",
     (dir) => {
-      expect(barClass(t({ dir, status: "in stallo" }))).toContain("stall");
-      expect(barClass(t({ dir, status: "in corso" }))).not.toContain("stall");
+      expect(barClass(t({ dir, status: "stalled" }))).toContain("stall");
+      expect(barClass(t({ dir, status: "active" }))).not.toContain("stall");
     }
   );
 
   it("a finished bar reads as its outcome, not as its direction", () => {
     // Once a transfer is over, which way it went stops being the useful fact.
-    expect(barClass(t({ dir: "out", status: "completato" }))).toContain("done");
-    expect(barClass(t({ dir: "in", status: "completato" }))).toContain("done");
-    expect(barClass(t({ dir: "out", status: "fallito" }))).toContain("bad");
+    expect(barClass(t({ dir: "out", status: "completed" }))).toContain("done");
+    expect(barClass(t({ dir: "in", status: "completed" }))).toContain("done");
+    expect(barClass(t({ dir: "out", status: "failed" }))).toContain("bad");
   });
 });
 
@@ -267,19 +267,19 @@ describe("isToday", () => {
 
 describe("metaLine", () => {
   it.each<[UIStatus, RegExp]>([
-    ["in corso", /%/],
-    ["in attesa", /pausa/i],
-    ["in stallo", /riprende|relay/i],
-    ["in arrivo", /dettagli/i],
-    ["deposited", /ritir/i],
-    ["fallito", /fallit|boom/i],
+    ["active", /%/],
+    ["paused", /paused/i],
+    ["stalled", /resume|relay/i],
+    ["incoming", /details/i],
+    ["deposited", /collect/i],
+    ["failed", /fallit|boom/i],
   ])("metaLine for %s says something useful", (status, want) => {
-    expect(metaLine(t({ status, reason: status === "fallito" ? "boom" : undefined }))).toMatch(
+    expect(metaLine(t({ status, reason: status === "failed" ? "boom" : undefined }))).toMatch(
       want
     );
   });
 
-  it.each<UIStatus>(["completato", "annullato"])(
+  it.each<UIStatus>(["completed", "cancelled"])(
     "a concluded row (%s) adds no noise",
     (status) => {
       expect(metaLine(t({ status }))).toBe("");

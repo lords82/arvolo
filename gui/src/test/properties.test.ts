@@ -35,15 +35,15 @@ import type { Method, UIStatus, UITransfer } from "../types";
  *  indirection is that the actual colour differs between light and dark. */
 const TONES = ["out", "in", "ok", "warn", "bad", "mut", "violet"];
 const ALL_STATUSES: UIStatus[] = [
-  "in arrivo",
-  "in corso",
-  "in attesa",
-  "in stallo",
-  "in annullamento",
+  "incoming",
+  "active",
+  "paused",
+  "stalled",
+  "cancelling",
   "deposited",
-  "completato",
-  "fallito",
-  "annullato",
+  "completed",
+  "failed",
+  "cancelled",
 ];
 const ALL_METHODS: Method[] = ["p2p", "cloud", "link", "ticket"];
 
@@ -246,7 +246,7 @@ describe("metaLine — over every transfer", () => {
 
   it("a concluded transfer stays quiet, whatever else it carries", () => {
     fc.assert(
-      fc.property(anyTransfer({ status: "completato" }), (t) => {
+      fc.property(anyTransfer({ status: "completed" }), (t) => {
         expect(metaLine(t)).toBe("");
       })
     );

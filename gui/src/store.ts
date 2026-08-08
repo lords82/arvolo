@@ -4,6 +4,7 @@
 import { create } from "zustand";
 import { api, onConnected, onEngineEvent } from "./ipc";
 import { shortId } from "./format";
+import { t } from "./i18n";
 import { toast } from "./ui/Toasts";
 import type {
   ConfigDto,
@@ -33,7 +34,23 @@ export type Route =
   | "devices"
   | "settings";
 
+/** What each place is called, as a dictionary key rather than as words. The rail,
+ *  the header and the command palette all name the same six places; a second
+ *  list of literals would be a second list to keep in step. */
+export const TITLE_KEY = {
+  transfers: "title.transfers",
+  people: "title.people",
+  deposits: "title.deposits",
+  history: "title.history",
+  devices: "title.devices",
+  settings: "title.settings",
+} as const satisfies Record<Route, string>;
+
 export type ThemeChoice = "system" | "light" | "dark";
+
+/** The four ways a send can reach someone. Lives here rather than in the send
+ *  sheet because callers elsewhere preselect one — see `sheetMode`. */
+export type SendMode = "contact" | "code" | "link" | "ticket";
 
 /** Fire a store action from a click handler and drop its rejection.
  *
@@ -96,7 +113,7 @@ function now(): number {
 
 /** Strictly increasing list position. `Date.now()` is not usable here: two rows
  *  created in the same millisecond would tie, leaving their order ambiguous and
- *  making "Sposta su/giù" swap two equal ranks — a move that changes nothing. */
+ *  making "Move up/down" swap two equal ranks — a move that changes nothing. */
 let rankSeq = 0;
 function nextRank(): number {
   return ++rankSeq;
@@ -108,26 +125,26 @@ const progSamples = new Map<number, { t: number; bytes: number }>();
 
 /** Exponentially-smoothed bytes/sec from consecutive progress events. */
 function sampleRate(id: number, bytes: number, prevRate?: number): number | undefined {
-  const t = now();
+  const at = now();
   const last = progSamples.get(id);
-  progSamples.set(id, { t, bytes });
-  if (!last || t <= last.t || bytes < last.bytes) return prevRate;
-  const inst = ((bytes - last.bytes) * 1000) / (t - last.t);
+  progSamples.set(id, { t: at, bytes });
+  if (!last || at <= last.t || bytes < last.bytes) return prevRate;
+  const inst = ((bytes - last.bytes) * 1000) / (at - last.t);
   return prevRate ? 0.7 * prevRate + 0.3 * inst : inst;
 }
 
 /** Split a daemon status string into a UI status + optional reason. */
 function toUIStatus(raw: string): { status: UIStatus; reason?: string } {
-  if (raw === "active") return { status: "in corso" };
-  if (raw === "completed") return { status: "completato" };
+  if (raw === "active") return { status: "active" };
+  if (raw === "completed") return { status: "completed" };
   if (raw === "deposited") return { status: "deposited" };
-  if (raw === "cancelled") return { status: "annullato" };
+  if (raw === "cancelled") return { status: "cancelled" };
   const [head, ...rest] = raw.split(":");
   const reason = rest.join(":").trim() || undefined;
-  if (head === "waiting") return { status: "in stallo", reason };
-  if (head === "paused") return { status: "in attesa", reason };
-  if (head === "failed") return { status: "fallito", reason };
-  return { status: "in corso" };
+  if (head === "waiting") return { status: "stalled", reason };
+  if (head === "paused") return { status: "paused", reason };
+  if (head === "failed") return { status: "failed", reason };
+  return { status: "active" };
 }
 
 function methodFor(dto: TransferDto): Method {
@@ -144,7 +161,7 @@ interface State {
   contactsById: Record<string, ContactDto>;
   transfers: Record<string, UITransfer>;
   /** Why the last snapshot could not be read, if it could not. Silence here is how
-   *  the board came to show "Connesso · 0 invii" while the daemon held two live
+   *  the board came to show "Connected · 0 sends" while the daemon held two live
    *  sends: a swallowed error is indistinguishable from an empty list. */
   loadError: string | null;
   /** Why the user's last action failed, if it did. Every action is fired from an
@@ -205,6 +222,11 @@ interface State {
    *  person and then having to choose them again is the app forgetting what the
    *  user just told it. */
   sheetTo: string | null;
+  /** Which way of sending the sheet should open on, when the section it was
+   *  opened from already implies one — "Crea un link" under Link e depositi can
+   *  only mean a link. Left null where the section implies nothing (the rail's
+   *  Invia, a drop on the window), and the sheet starts on a contact. */
+  sheetMode: SendMode | null;
   incomingOfferId: string | null; // incoming offer dialog
   receiveOpen: boolean; // paste-a-ticket sheet
   /** The person whose detail sheet is open, by contact name. */
@@ -226,9 +248,9 @@ interface State {
   setSearch: (q: string) => void;
   /** Navigate. Routes whose data has no push event refetch on arrival. */
   go: (r: Route) => void;
-  setTheme: (t: ThemeChoice) => void;
+  setTheme: (choice: ThemeChoice) => void;
   setPaletteOpen: (v: boolean) => void;
-  openSheet: (paths: string[], to?: string) => void;
+  openSheet: (paths: string[], to?: string, mode?: SendMode) => void;
   closeSheet: () => void;
   openIncoming: (offerId: string) => void;
   closeIncoming: () => void;
@@ -310,7 +332,7 @@ interface State {
   setMyName: (name: string) => Promise<void>;
   /** Stop the stale daemon; the event pump respawns a fresh one. */
   restartDaemon: () => Promise<void>;
-  /** "Sposta su/giù": swap the row's rank with its neighbour (same direction). */
+  /** "Move up/down": swap the row's rank with its neighbour (same direction). */
   moveItem: (key: string, delta: 1 | -1) => void;
   togglePauseAll: () => Promise<void>;
   /** Drop every finished row, daemon-side first — a local-only clear would just
@@ -373,7 +395,7 @@ export const useStore = create<State>((set, get) => {
     name: o.name,
     size: o.size,
     transferred: 0,
-    status: "in arrivo",
+    status: "incoming",
     peer: get().peerLabel(o.from, o.sender_name || undefined),
     peerId: o.from,
     note: o.note || undefined,
@@ -390,7 +412,7 @@ export const useStore = create<State>((set, get) => {
 
   /** Merge a partial change into an existing transfer row (creating a stub if the
    *  row is unknown — e.g. an event arrived before its snapshot). */
-  const patch = (id: number, fn: (t: UITransfer) => UITransfer) =>
+  const patch = (id: number, fn: (tx: UITransfer) => UITransfer) =>
     set((s) => {
       const key = `t${id}`;
       const existing =
@@ -402,7 +424,7 @@ export const useStore = create<State>((set, get) => {
           name: "…",
           size: 0,
           transferred: 0,
-          status: "in corso",
+          status: "active",
           encrypted: true,
           verified: false,
           method: "p2p",
@@ -431,6 +453,7 @@ export const useStore = create<State>((set, get) => {
     paletteOpen: false,
     sheetPaths: null,
     sheetTo: null,
+    sheetMode: null,
     incomingOfferId: null,
     receiveOpen: false,
     personOpen: null,
@@ -452,7 +475,7 @@ export const useStore = create<State>((set, get) => {
     historyError: null,
 
     peerLabel: (id, fallbackName) => {
-      if (!id) return fallbackName || "sconosciuto";
+      if (!id) return fallbackName || t("store.unknownPeer");
       const c = get().contactsById[id];
       if (c) return c.name;
       if (fallbackName) return fallbackName;
@@ -528,7 +551,7 @@ export const useStore = create<State>((set, get) => {
       } catch (e) {
         set({
           connected: false,
-          loadError: `Non riesco a leggere i trasferimenti dal daemon: ${String(e)}`,
+          loadError: t("store.loadTransfers", String(e)),
         });
       }
     },
@@ -554,13 +577,13 @@ export const useStore = create<State>((set, get) => {
             // ("no such pending offer"), which is precisely how Accetta came to do
             // nothing at all.
             const kept: Record<string, UITransfer> = {};
-            for (const [k, t] of Object.entries(s.transfers)) {
+            for (const [k, tx] of Object.entries(s.transfers)) {
               const stale =
-                t.status === "in arrivo" &&
-                t.peerId === ev.from &&
-                t.name === ev.name &&
-                t.offerId !== ev.id;
-              if (!stale) kept[k] = t;
+                tx.status === "incoming" &&
+                tx.peerId === ev.from &&
+                tx.name === ev.name &&
+                tx.offerId !== ev.id;
+              if (!stale) kept[k] = tx;
             }
             return {
               transfers: {
@@ -581,63 +604,63 @@ export const useStore = create<State>((set, get) => {
           });
           break;
         case "started":
-          patch(ev.id, (t) => ({
-            ...t,
+          patch(ev.id, (tx) => ({
+            ...tx,
             dir: ev.direction === "send" ? "out" : "in",
             name: ev.name,
             size: ev.total_size,
-            status: "in corso",
+            status: "active",
           }));
           break;
         case "progress":
-          patch(ev.id, (t) => ({
-            ...t,
+          patch(ev.id, (tx) => ({
+            ...tx,
             transferred: ev.transferred,
-            size: ev.total_size || t.size,
-            rate: sampleRate(ev.id, ev.transferred, t.rate),
-            // Bytes are moving, so the row is active — flip it back from "in attesa"
-            // (paused) or "in stallo" (waiting) on resume. Only a *terminal* status
+            size: ev.total_size || tx.size,
+            rate: sampleRate(ev.id, ev.transferred, tx.rate),
+            // Bytes are moving, so the row is live — flip it back from "paused"
+            // or "stalled" (the daemon's "waiting") on resume. Only a *terminal* status
             // is left alone: a late straggler event must not un-finish a done row.
             status:
-              t.status === "completato" ||
-              t.status === "annullato" ||
-              t.status === "fallito"
-                ? t.status
-                : "in corso",
+              tx.status === "completed" ||
+              tx.status === "cancelled" ||
+              tx.status === "failed"
+                ? tx.status
+                : "active",
           }));
           break;
         case "completed":
-          patch(ev.id, (t) => ({
-            ...t,
-            status: "completato",
-            transferred: t.size || t.transferred,
-            path: ev.path ?? t.path,
+          patch(ev.id, (tx) => ({
+            ...tx,
+            status: "completed",
+            transferred: tx.size || tx.transferred,
+            path: ev.path ?? tx.path,
           }));
           break;
         case "deposited":
-          patch(ev.id, (t) => ({ ...t, status: "deposited" }));
+          patch(ev.id, (tx) => ({ ...tx, status: "deposited" }));
           break;
         case "waiting":
-          patch(ev.id, (t) => ({ ...t, status: "in stallo", reason: ev.reason }));
+          patch(ev.id, (tx) => ({ ...tx, status: "stalled", reason: ev.reason }));
           break;
         case "paused":
-          patch(ev.id, (t) => ({ ...t, status: "in attesa", reason: ev.reason }));
+          patch(ev.id, (tx) => ({ ...tx, status: "paused", reason: ev.reason }));
           break;
         case "failed":
-          patch(ev.id, (t) => ({ ...t, status: "fallito", reason: ev.error }));
+          patch(ev.id, (tx) => ({ ...tx, status: "failed", reason: ev.error }));
           break;
         case "cancelled":
-          patch(ev.id, (t) => ({ ...t, status: "annullato" }));
+          patch(ev.id, (tx) => ({ ...tx, status: "cancelled" }));
           break;
         case "code_ready":
-          patch(ev.id, (t) => ({ ...t, code: ev.code }));
+          patch(ev.id, (tx) => ({ ...tx, code: ev.code }));
           break;
         case "code_paired":
           // Someone holds the ticket now; the code may retire (one-shot) or stay
           // (keep) — the daemon says which with `code_closed`, so nothing to do.
           break;
         case "code_closed":
-          patch(ev.id, (t) => ({ ...t, code: undefined }));
+          patch(ev.id, (tx) => ({ ...tx, code: undefined }));
           break;
         case "contacts_changed":
           // Fired by the daemon whoever wrote the book — typically an
@@ -678,7 +701,7 @@ export const useStore = create<State>((set, get) => {
                 phase: "failed",
                 // A cancellation is the user's own doing; saying so keeps the
                 // sheet from reporting their click back to them as an error.
-                message: ev.cancelled ? "Annullato." : ev.error,
+                message: ev.cancelled ? t("pair.cancelled") : ev.error,
               },
             });
           }
@@ -711,20 +734,26 @@ export const useStore = create<State>((set, get) => {
       if (r === "devices") void get().loadSync();
       if (r === "settings") void get().loadConfig();
     },
-    setTheme: (t) => {
-      applyTheme(t);
+    setTheme: (choice) => {
+      applyTheme(choice);
       try {
-        localStorage.setItem(THEME_KEY, t);
+        localStorage.setItem(THEME_KEY, choice);
       } catch {
         // See `readTheme` — a webview that refuses storage still gets the theme,
         // it just will not remember it next launch.
       }
-      set({ theme: t });
+      set({ theme: choice });
     },
     setPaletteOpen: (v) => set({ paletteOpen: v }),
-    openSheet: (paths, to) =>
-      set({ sheetPaths: paths, sheetTo: to ?? null, incomingOfferId: null }),
-    closeSheet: () => set({ sheetPaths: null, sheetTo: null }),
+    openSheet: (paths, to, mode) =>
+      set({
+        sheetPaths: paths,
+        sheetTo: to ?? null,
+        sheetMode: mode ?? null,
+        incomingOfferId: null,
+      }),
+    closeSheet: () =>
+      set({ sheetPaths: null, sheetTo: null, sheetMode: null }),
     openIncoming: (offerId) => set({ incomingOfferId: offerId }),
     closeIncoming: () => set({ incomingOfferId: null }),
     openPerson: (name) => set({ personOpen: name }),
@@ -738,15 +767,15 @@ export const useStore = create<State>((set, get) => {
         set({ history, historyError: null, historyLoading: false });
       } catch (e) {
         // Keep what we last had and say why it may be stale — an empty panel
-        // under a green "Connesso" would read as "nothing ever happened".
+        // under a green "Connected" would read as "nothing ever happened".
         set({
           historyLoading: false,
-          historyError: `Non riesco a leggere lo storico dal daemon: ${String(e)}`,
+          historyError: t("store.loadHistory", String(e)),
         });
       }
     },
     clearHistory: async () => {
-      await act("Impossibile svuotare la cronologia", () => api.clearHistory());
+      await act(t("store.errClearHistory"), () => api.clearHistory());
       set({ history: [] });
     },
 
@@ -759,11 +788,11 @@ export const useStore = create<State>((set, get) => {
         set({ deposits, depositsError: null, depositsLoading: false });
       } catch (e) {
         // Keep whatever we last had, and say why it may be wrong. An empty panel
-        // under a green "Connesso" would read as "you have no links" — the same lie
+        // under a green "Connected" would read as "you have no links" — the same lie
         // the board's `loadError` exists to prevent.
         set({
           depositsLoading: false,
-          depositsError: `Non riesco a leggere i link dal daemon: ${String(e)}`,
+          depositsError: t("store.loadDeposits", String(e)),
         });
       }
     },
@@ -775,7 +804,7 @@ export const useStore = create<State>((set, get) => {
         // Drop the row only once the daemon confirms the relay let go. Removing it
         // optimistically would show a link as gone while it still serves the file —
         // the worst possible direction to be wrong in for a revoke.
-        await act("Impossibile revocare il link", () => api.revokeDeposit(id));
+        await act(t("store.errRevokeLink"), () => api.revokeDeposit(id));
         set((s) => ({ deposits: s.deposits.filter((d) => d.id !== id) }));
       } finally {
         set((s) => ({ revoking: s.revoking.filter((r) => r !== id) }));
@@ -785,6 +814,11 @@ export const useStore = create<State>((set, get) => {
     loadPresence: async () => {
       const ids = get().contacts.map((c) => c.id);
       if (!ids.length) return;
+      // Now that this is polled, the callers overlap: returning to the window
+      // fires both `focus` and `visibilitychange`, and the timer keeps ticking
+      // underneath. One answer is being fetched — asking twice more would only
+      // make the relay repeat itself.
+      if (get().presenceLoading) return;
       set({ presenceLoading: true });
       try {
         const rows = await api.presence(ids);
@@ -806,7 +840,7 @@ export const useStore = create<State>((set, get) => {
       } catch (e) {
         set({
           configLoading: false,
-          configError: `Non riesco a leggere le impostazioni dal daemon: ${String(e)}`,
+          configError: t("store.loadConfig", String(e)),
         });
       }
     },
@@ -815,7 +849,7 @@ export const useStore = create<State>((set, get) => {
       // the store is what is actually on disk — not the optimistic echo of a
       // field, which would quietly disagree the moment a key was refused or
       // normalized (a bare relay host becomes a full https URL, for one).
-      const config = await act("Impossibile salvare le impostazioni", () =>
+      const config = await act(t("store.errSaveConfig"), () =>
         api.setConfig(patch)
       );
       set({ config, configError: null });
@@ -835,7 +869,7 @@ export const useStore = create<State>((set, get) => {
       } catch (e) {
         set({
           syncLoading: false,
-          syncError: `Non riesco a leggere lo stato dei dispositivi: ${String(e)}`,
+          syncError: t("store.loadSync", String(e)),
         });
       }
     },
@@ -847,23 +881,23 @@ export const useStore = create<State>((set, get) => {
         // The round's own failure comes back inside the summary rather than as a
         // rejection — the rest of the state is still worth showing.
         if (sync.last_error) {
-          toast.bad("Sincronizzazione non riuscita", sync.last_error);
+          toast.bad(t("store.syncFailed"), sync.last_error);
         } else {
           toast.ok(
-            "Rubrica sincronizzata",
+            t("store.syncOk"),
             sync.last_merged
-              ? `${sync.last_merged} aggiornament${sync.last_merged === 1 ? "o" : "i"} dagli altri dispositivi.`
-              : "Nessun aggiornamento dagli altri dispositivi."
+              ? t("store.syncMerged", sync.last_merged)
+              : t("store.syncNone")
           );
           await get().refreshContacts();
         }
       } catch (e) {
         set({ syncLoading: false });
-        toast.bad("Sincronizzazione non riuscita", String(e));
+        toast.bad(t("store.syncFailed"), String(e));
       }
     },
     pruneNames: async () => {
-      const n = await act("Impossibile ripulire i nomi", () => api.pruneNames());
+      const n = await act(t("store.errPruneNames"), () => api.pruneNames());
       await get().refreshContacts();
       return n;
     },
@@ -933,10 +967,10 @@ export const useStore = create<State>((set, get) => {
     clearPairing: () => set({ pairing: null }),
 
     send: async (to, paths, note) => {
-      const id = await act(`Invio a ${to} non riuscito`, () =>
+      const id = await act(t("store.errSend", to), () =>
         api.sendTo(to, paths, note)
       );
-      set({ sheetPaths: null, sheetTo: null });
+      set({ sheetPaths: null, sheetTo: null, sheetMode: null });
       return id;
     },
     deposit: async (to, paths, note, ttl, max, password) => {
@@ -945,18 +979,18 @@ export const useStore = create<State>((set, get) => {
       // not wanted or is not working — and closing the panel on success would
       // destroy it the instant it was produced. The panel closes when the user
       // says so, exactly as it does for a code, a link or a ticket.
-      return act(`Deposito per ${to} non riuscito`, () =>
+      return act(t("store.errDeposit", to), () =>
         api.depositTo(to, paths, note, ttl, max, password)
       );
     },
     ticket: async (paths) =>
-      act("Creazione del ticket non riuscita", () => api.serveTicket(paths, null)),
+      act(t("store.errTicket"), () => api.serveTicket(paths, null)),
     code: async (paths, keep) =>
-      act("Creazione del codice non riuscita", () => api.serveCode(paths, null, keep)),
+      act(t("store.errCode"), () => api.serveCode(paths, null, keep)),
     link: async (path, ttl, max) =>
-      act("Creazione del link non riuscita", () => api.createLink(path, ttl, max)),
+      act(t("store.errLink"), () => api.createLink(path, ttl, max)),
     receive: async (ticket, out, password) => {
-      const id = await act("Ricezione non riuscita", () =>
+      const id = await act(t("store.errReceive"), () =>
         api.recv(ticket, out, password)
       );
       set({ receiveOpen: false });
@@ -964,7 +998,7 @@ export const useStore = create<State>((set, get) => {
     },
 
     accept: async (offerId, out, password) => {
-      await act("Impossibile accettare il file", () =>
+      await act(t("store.errAccept"), () =>
         api.acceptOffer(offerId, out, password ?? null)
       );
       set((s) => {
@@ -973,17 +1007,17 @@ export const useStore = create<State>((set, get) => {
       });
     },
     reject: async (offerId) => {
-      await act("Impossibile rifiutare il file", () => api.rejectOffer(offerId));
+      await act(t("store.errReject"), () => api.rejectOffer(offerId));
       set((s) => {
         const { [`o${offerId}`]: _drop, ...rest } = s.transfers;
         return { transfers: rest, incomingOfferId: null };
       });
     },
     pause: async (id) => {
-      await act("Impossibile mettere in pausa", () => api.pause(id));
+      await act(t("store.errPause"), () => api.pause(id));
     },
     resume: async (id) => {
-      await act("Impossibile riprendere", () => api.resume(id));
+      await act(t("store.errResume"), () => api.resume(id));
     },
     cancel: async (id) => {
       // Show the click landed. The daemon only flips the row once it has actually
@@ -998,9 +1032,9 @@ export const useStore = create<State>((set, get) => {
             ? { transfers: { ...s.transfers, [key]: { ...s.transfers[key], status } } }
             : {}
         );
-      setStatus("in annullamento");
+      setStatus("cancelling");
       try {
-        await act("Impossibile annullare", () => api.cancel(id));
+        await act(t("store.errCancel"), () => api.cancel(id));
       } catch (e) {
         // The daemon refused: put the row back as it was rather than leave it
         // stuck pretending to cancel.
@@ -1009,73 +1043,73 @@ export const useStore = create<State>((set, get) => {
       }
     },
     removeRow: async (key) => {
-      const t = get().transfers[key];
-      if (!t) return;
+      const tx = get().transfers[key];
+      if (!tx) return;
       // Only drop the row locally once the daemon confirms it dropped it too —
       // swallowing a refusal would show an empty list while the transfer lives on.
-      if (t.id > 0) await act("Impossibile eliminare", () => api.remove(t.id));
+      if (tx.id > 0) await act(t("store.errRemove"), () => api.remove(tx.id));
       set((s) => {
         const { [key]: _drop, ...rest } = s.transfers;
         return { transfers: rest };
       });
     },
     markVerified: async (name) => {
-      await act(`Impossibile verificare ${name}`, () => api.markVerified(name));
+      await act(t("store.errVerify", name), () => api.markVerified(name));
       // Refresh contacts and re-stamp the verified badge on every row.
       await get().reload();
     },
     markUnverified: async (name) => {
-      await act(`Impossibile togliere la verifica a ${name}`, () =>
+      await act(t("store.errUnverify", name), () =>
         api.markUnverified(name)
       );
       await get().reload();
     },
     markTrusted: async (who, force) => {
-      await act(`Impossibile fidarsi di ${who}`, () => api.markTrusted(who, force));
+      await act(t("store.errTrust", who), () => api.markTrusted(who, force));
       await get().refreshContacts();
     },
     markUntrusted: async (who) => {
-      await act(`Impossibile togliere la fiducia a ${who}`, () =>
+      await act(t("store.errUntrust", who), () =>
         api.markUntrusted(who)
       );
       await get().refreshContacts();
     },
     blockContact: async (who) => {
-      await act(`Impossibile bloccare ${who}`, () => api.blockContact(who));
+      await act(t("store.errBlock", who), () => api.blockContact(who));
       await get().refreshContacts();
     },
     unblockContact: async (who) => {
-      await act(`Impossibile sbloccare ${who}`, () => api.unblockContact(who));
+      await act(t("store.errUnblock", who), () => api.unblockContact(who));
       await get().refreshContacts();
     },
     acceptName: async (who) => {
-      await act(`Impossibile approvare il nome di ${who}`, () =>
+      await act(t("store.errAcceptName", who), () =>
         api.acceptName(who)
       );
       await get().refreshContacts();
     },
     addContact: async (name, id) => {
-      await act(`Impossibile salvare ${name}`, () => api.addContact(name, id));
+      await act(t("store.errAddContact", name), () => api.addContact(name, id));
       await get().refreshContacts();
     },
     removeContact: async (name) => {
-      await act(`Impossibile rimuovere ${name}`, () => api.removeContact(name));
+      await act(t("store.errRemoveContact", name), () => api.removeContact(name));
       await get().refreshContacts();
     },
     renameContact: async (old, newName) => {
-      await act(`Impossibile rinominare ${old}`, () =>
+      await act(t("store.errRenameContact", old), () =>
         api.renameContact(old, newName)
       );
       await get().refreshContacts();
     },
     setMyName: async (name) => {
-      await act("Impossibile impostare il nome", () => api.setMyName(name));
+      await act(t("store.errSetMyName"), () => api.setMyName(name));
       // The name lives in StatusDto — refetch so the header shows the new one.
       const status = await api.status().catch(() => null);
       if (status) set({ status });
     },
     restartDaemon: async () => {
-      await act("Impossibile riavviare il daemon", () => api.restartDaemon());
+      await act(t("store.errRestartDaemon"), () => api.restartDaemon());
       // The event pump notices the drop and respawns; the connected heartbeat
       // and the seed-retry loop take it from there.
     },
@@ -1086,9 +1120,9 @@ export const useStore = create<State>((set, get) => {
         // Neighbours = same direction, ordered exactly as the board renders
         // (rank descending). delta -1 = up (towards higher rank).
         const siblings = Object.values(s.transfers)
-          .filter((t) => t.dir === me.dir)
+          .filter((tx) => tx.dir === me.dir)
           .sort((a, b) => b.rank - a.rank);
-        const i = siblings.findIndex((t) => t.key === key);
+        const i = siblings.findIndex((tx) => tx.key === key);
         const j = i + delta;
         if (i < 0 || j < 0 || j >= siblings.length) return {};
         const other = siblings[j];
@@ -1105,15 +1139,15 @@ export const useStore = create<State>((set, get) => {
       if (!get().pauseAll) {
         await Promise.all(
           rows
-            .filter((t) => t.status === "in corso")
-            .map((t) => api.pause(t.id).catch(() => {}))
+            .filter((tx) => tx.status === "active")
+            .map((tx) => api.pause(tx.id).catch(() => {}))
         );
         set({ pauseAll: true });
       } else {
         await Promise.all(
           rows
-            .filter((t) => t.status === "in attesa")
-            .map((t) => api.resume(t.id).catch(() => {}))
+            .filter((tx) => tx.status === "paused")
+            .map((tx) => api.resume(tx.id).catch(() => {}))
         );
         set({ pauseAll: false });
       }
@@ -1123,15 +1157,15 @@ export const useStore = create<State>((set, get) => {
       // Daemon first: a local-only clear would just see every row come back with
       // the next snapshot. Its ClearFinished applies the same definition of
       // "finished" (a deposit awaiting pickup is NOT finished — still cancellable).
-      await act("Impossibile pulire i completati", () => api.clearFinished());
+      await act(t("store.errClearFinished"), () => api.clearFinished());
       set((s) => {
         const kept: Record<string, UITransfer> = {};
-        for (const [k, t] of Object.entries(s.transfers)) {
+        for (const [k, tx] of Object.entries(s.transfers)) {
           const finished =
-            t.status === "completato" ||
-            t.status === "fallito" ||
-            t.status === "annullato";
-          if (!finished) kept[k] = t;
+            tx.status === "completed" ||
+            tx.status === "failed" ||
+            tx.status === "cancelled";
+          if (!finished) kept[k] = tx;
         }
         return { transfers: kept };
       });

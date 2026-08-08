@@ -12,6 +12,7 @@
 import { useEffect, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { useStore } from "../store";
+import { useT } from "../i18n";
 import { Icon } from "../ui/Icons";
 import { Button, Field, TextInput, Textarea } from "../ui/Primitives";
 import { Sheet } from "../ui/Sheet";
@@ -31,22 +32,21 @@ export function shapeOf(raw: string): Shape {
   if (s.startsWith("arvm")) return "mailbox";
   // 1–6 digits: the nameplate is `rng.random_range(0..10_000)`, so `7-fox-oak`
   // is a perfectly ordinary code. Demanding three digits met one code in a
-  // hundred with "non riconosco questa forma".
+  // hundred with "I don't recognise this shape".
   if (/^\d{1,6}-[a-z]+-[a-z]+(@.+)?$/i.test(s)) return "code";
   return "unknown";
 }
 
-const EXPLAIN: Record<Shape, string> = {
-  empty:
-    "Incolla un codice di invio (tipo 4821-crater-mango) oppure un ticket arvc… / arvm…. Per scambiare i contatti con qualcuno usa invece Persone → Ho un codice.",
-  code: "Codice di invio: mi collego a chi lo sta mostrando adesso e scarico quello che manda.",
-  chunk: "Ticket peer-to-peer: scarico direttamente dal mittente.",
-  mailbox: "Ticket di casella: recupero il file depositato sul relay.",
-  unknown:
-    "Non riconosco questa forma. La provo lo stesso — il daemon è più preciso di me — ma controlla di averla copiata per intero.",
-};
+const EXPLAIN = {
+  empty: "receive.explainEmpty",
+  code: "receive.explainCode",
+  chunk: "receive.explainChunk",
+  mailbox: "receive.explainMailbox",
+  unknown: "receive.explainUnknown",
+} as const satisfies Record<Shape, string>;
 
 export function ReceiveSheet() {
+  const t = useT();
   const open = useStore((s) => s.receiveOpen);
   const close = useStore((s) => s.closeReceive);
   const receive = useStore((s) => s.receive);
@@ -74,7 +74,7 @@ export function ReceiveSheet() {
     setBusy(true);
     try {
       await receive(value.trim(), out, password || null);
-      toast.ok("Ricezione avviata", "La trovi fra i trasferimenti in arrivo.");
+      toast.ok(t("receive.started"), t("receive.startedDetail"));
     } catch {
       // The store's `act` already reported it.
     } finally {
@@ -86,13 +86,13 @@ export function ReceiveSheet() {
     <Sheet
       open={open}
       onClose={close}
-      title="Ricevi"
-      subtitle="Incolla quello che ti hanno dato."
+      title={t("receive.title")}
+      subtitle={t("receive.subtitle")}
       footer={
         <>
           <div className="spacer" />
           <Button onClick={close} disabled={busy}>
-            Annulla
+            {t("common.cancel")}
           </Button>
           <Button
             variant="in"
@@ -101,12 +101,12 @@ export function ReceiveSheet() {
             disabled={!value.trim() || busy}
           >
             <Icon.Receive size={14} />
-            Ricevi
+            {t("receive.submit")}
           </Button>
         </>
       }
     >
-      <Field label="Codice o ticket" hint={EXPLAIN[shape]}>
+      <Field label={t("receive.fieldLabel")} hint={t(EXPLAIN[shape])}>
         {({ id, describedBy }) => (
           <Textarea
             id={id}
@@ -126,8 +126,8 @@ export function ReceiveSheet() {
 
       {mayNeedPassword && (
         <Field
-          label="Password (solo se protetto)"
-          hint="Chi te l'ha mandato te l'avrà detta a parte. Senza, un deposito protetto non si apre."
+          label={t("receive.passwordLabel")}
+          hint={t("receive.passwordHint")}
         >
           {({ id, describedBy }) => (
             <TextInput
@@ -137,15 +137,15 @@ export function ReceiveSheet() {
               autoComplete="off"
               value={password}
               onChange={(e) => setPassword(e.currentTarget.value)}
-              placeholder="nessuna"
+              placeholder={t("receive.passwordPlaceholder")}
             />
           )}
         </Field>
       )}
 
       <Field
-        label="Dove salvarlo"
-        hint={out ? undefined : `Cartella predefinita: ${downloadDir || "…"}`}
+        label={t("receive.whereLabel")}
+        hint={out ? undefined : t("receive.whereHint", downloadDir || "…")}
       >
         {() => (
           <div className="hstack-sm">
@@ -153,7 +153,7 @@ export function ReceiveSheet() {
               readOnly
               value={out ?? ""}
               placeholder={downloadDir}
-              aria-label="Cartella di destinazione"
+              aria-label={t("receive.whereAria")}
             />
             <Button
               size="sm"
@@ -162,11 +162,11 @@ export function ReceiveSheet() {
                 if (typeof picked === "string") setOut(picked);
               }}
             >
-              <Icon.Folder size={13} /> Scegli…
+              <Icon.Folder size={13} /> {t("receive.choose")}
             </Button>
             {out && (
               <Button size="sm" variant="ghost" onClick={() => setOut(null)}>
-                Predefinita
+                {t("receive.useDefault")}
               </Button>
             )}
           </div>

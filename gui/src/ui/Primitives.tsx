@@ -15,6 +15,7 @@ import {
   type ReactNode,
   type TextareaHTMLAttributes,
 } from "react";
+import { useT } from "../i18n";
 import { Icon } from "./Icons";
 
 // ---- Button ---------------------------------------------------------------
@@ -287,21 +288,22 @@ export function TrustBadges({
   trusted?: boolean;
   blocked?: boolean;
 }) {
+  const t = useT();
   return (
     <>
       {blocked && (
-        <Badge kind="bad" title="Le sue offerte vengono scartate all'arrivo">
-          <Icon.Ban size={10} /> Bloccato
+        <Badge kind="bad" title={t("trust.blockedTitle")}>
+          <Icon.Ban size={10} /> {t("trust.blocked")}
         </Badge>
       )}
       {verified && (
-        <Badge kind="ok" title="Impronta confermata fuori banda">
-          <Icon.Shield size={10} /> Verificato
+        <Badge kind="ok" title={t("trust.verifiedTitle")}>
+          <Icon.Shield size={10} /> {t("trust.verified")}
         </Badge>
       )}
       {trusted && (
-        <Badge kind="trust" title="I suoi file si scaricano senza chiedere">
-          <Icon.Star size={10} /> Fidato
+        <Badge kind="trust" title={t("trust.trustedTitle")}>
+          <Icon.Star size={10} /> {t("trust.trusted")}
         </Badge>
       )}
     </>

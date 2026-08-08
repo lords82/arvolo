@@ -20,6 +20,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { save as saveDialog, open as openDialog } from "@tauri-apps/plugin-dialog";
 import { fire, useStore } from "../store";
 import { api } from "../ipc";
+import { useT } from "../i18n";
 import { Icon } from "../ui/Icons";
 import {
   Badge,
@@ -38,31 +39,42 @@ import type { ContactDto } from "../types";
 
 type Filter = "all" | "verified" | "trusted" | "blocked";
 
+/** How often the dots are re-asked while the address book is on screen.
+ *  Presence is the one thing on this board the engine never pushes, so it is
+ *  also the one thing that has to be polled. A minute is short enough that a
+ *  dot is not lying for long, and long enough that leaving the window open all
+ *  afternoon is not a standing load on the relay. */
+const PRESENCE_REFRESH_MS = 60_000;
+
 // ---------------------------------------------------------------------------
 
 /** Reachability, said honestly. Three states, because there are three: here,
  *  away, and *not asked* — the relay may simply not have answered. */
 function PresenceDot({ id }: { id: string }) {
+  const t = useT();
   const online = useStore((s) => s.presence[id]);
   if (online === undefined || online === null) {
     return (
       <span
         className="dot"
-        title="Non lo so: il relay non ha risposto"
-        aria-label="Presenza sconosciuta"
+        title={t("people.presenceUnknownTitle")}
+        aria-label={t("people.presenceUnknownLabel")}
       />
     );
   }
   return (
     <span
       className={`dot ${online ? "on" : "off"}`}
-      title={online ? "Collegato adesso" : "Non collegato"}
-      aria-label={online ? "Collegato" : "Non collegato"}
+      title={
+        online ? t("people.presenceOnTitle") : t("people.presenceOffTitle")
+      }
+      aria-label={online ? t("people.presenceOn") : t("people.presenceOff")}
     />
   );
 }
 
 function PersonCard({ c }: { c: ContactDto }) {
+  const t = useT();
   const openSheet = useStore((s) => s.openSheet);
   const openPerson = useStore((s) => s.openPerson);
   const markUnverified = useStore((s) => s.markUnverified);
@@ -79,33 +91,33 @@ function PersonCard({ c }: { c: ContactDto }) {
   const items: MenuItem[] = [
     {
       key: "detail",
-      label: "Dettagli e impronta",
+      label: t("people.menuDetails"),
       icon: <Icon.Info size={13} />,
       onSelect: () => openPerson(c.name),
     },
     c.verified
       ? {
           key: "unverify",
-          label: "Togli la verifica",
+          label: t("people.menuUnverify"),
           icon: <Icon.Shield size={13} />,
           onSelect: () => fire(markUnverified(c.name)),
         }
       : {
           key: "verify",
-          label: "Segna come verificato…",
+          label: t("people.menuVerify"),
           icon: <Icon.Shield size={13} />,
           onSelect: () => openPerson(c.name),
         },
     c.trusted
       ? {
           key: "untrust",
-          label: "Non è più fidato: chiedi ogni volta",
+          label: t("people.menuUntrust"),
           icon: <Icon.Star size={13} />,
           onSelect: () => fire(markUntrusted(c.name)),
         }
       : {
           key: "trust",
-          label: "Segna come fidato: scarica in automatico",
+          label: t("people.menuTrust"),
           icon: <Icon.Star size={13} />,
           onSelect: () => {
             if (c.verified) fire(markTrusted(c.name, false));
@@ -115,14 +127,14 @@ function PersonCard({ c }: { c: ContactDto }) {
     c.blocked
       ? {
           key: "unblock",
-          label: "Sblocca",
+          label: t("people.menuUnblock"),
           icon: <Icon.Ban size={13} />,
           separated: true,
           onSelect: () => fire(unblockContact(c.name)),
         }
       : {
           key: "block",
-          label: "Blocca",
+          label: t("people.menuBlock"),
           icon: <Icon.Ban size={13} />,
           danger: true,
           separated: true,
@@ -130,7 +142,7 @@ function PersonCard({ c }: { c: ContactDto }) {
         },
     {
       key: "remove",
-      label: "Rimuovi dalla rubrica",
+      label: t("people.menuRemove"),
       icon: <Icon.Trash size={13} />,
       danger: true,
       onSelect: () => setConfirmRemove(true),
@@ -151,11 +163,11 @@ function PersonCard({ c }: { c: ContactDto }) {
             </div>
             <div className="t-xs t-mut truncate">
               {c.display_name && c.display_name !== c.name
-                ? `si presenta come “${c.display_name}”`
+                ? t("people.goesBy", c.display_name)
                 : " "}
             </div>
           </div>
-          <MenuButton items={items} label={`Azioni per ${c.name}`}>
+          <MenuButton items={items} label={t("people.rowActions", c.name)}>
             <Icon.More size={15} />
           </MenuButton>
         </div>
@@ -167,8 +179,8 @@ function PersonCard({ c }: { c: ContactDto }) {
             blocked={c.blocked}
           />
           {!c.verified && !c.blocked && (
-            <Badge kind="warn" title="L'impronta non è mai stata confrontata">
-              Non verificato
+            <Badge kind="warn" title={t("people.notVerifiedTitle")}>
+              {t("people.notVerified")}
             </Badge>
           )}
         </div>
@@ -178,10 +190,10 @@ function PersonCard({ c }: { c: ContactDto }) {
             className="card card-pad t-xs"
             style={{ borderColor: "var(--amber)", padding: 10 }}
           >
-            Vuole farsi chiamare “{c.pending_name}”.
+            {t("people.wantsToBeCalled", c.pending_name)}
             <div className="hstack-sm" style={{ marginTop: 7 }}>
               <Button size="sm" onClick={() => fire(acceptName(c.name))}>
-                Approva
+                {t("people.approve")}
               </Button>
             </div>
           </div>
@@ -207,21 +219,21 @@ function PersonCard({ c }: { c: ContactDto }) {
             size="sm"
             variant="primary"
             disabled={c.blocked}
-            onClick={() => openSheet([], c.name)}
+            onClick={() => openSheet([], c.name, "contact")}
           >
-            <Icon.Send size={13} /> Invia
+            <Icon.Send size={13} /> {t("people.send")}
           </Button>
           <Button size="sm" onClick={() => openPerson(c.name)}>
-            Dettagli
+            {t("people.details")}
           </Button>
         </div>
       </div>
 
       <Confirm
         open={confirmRemove}
-        title={`Rimuovere ${c.name}?`}
-        body="Sparisce dalla rubrica insieme ai suoi contrassegni di verifica e fiducia. I trasferimenti già fatti restano nella cronologia."
-        confirmLabel="Rimuovi"
+        title={t("people.confirmRemoveTitle", c.name)}
+        body={t("people.confirmRemoveBody")}
+        confirmLabel={t("common.remove")}
         danger
         onCancel={() => setConfirmRemove(false)}
         onConfirm={() => {
@@ -232,24 +244,20 @@ function PersonCard({ c }: { c: ContactDto }) {
 
       <Confirm
         open={confirmForce}
-        title="Scaricare in automatico da una chiave non verificata?"
+        title={t("people.confirmForceTitle")}
         body={
           <>
-            I file di <strong>{c.name}</strong> verrebbero scaricati senza
-            chiederti niente, ma non hai mai confrontato la sua impronta di
-            persona. Se qualcuno si fosse messo in mezzo quando l'hai aggiunto,
-            staresti scaricando in automatico da lui.
+            {t("people.confirmForceBody", c.name)}
             <div style={{ marginTop: 10 }}>
               <Fingerprint value={c.fingerprint} />
             </div>
             <div style={{ marginTop: 10 }}>
-              La strada giusta è confrontare l'impronta e poi segnarlo come
-              verificato.
+              {t("people.confirmForceFooter")}
             </div>
           </>
         }
-        confirmLabel="Forza comunque"
-        cancelLabel="Verifico prima"
+        confirmLabel={t("people.confirmForceLabel")}
+        cancelLabel={t("people.confirmForceCancel")}
         danger
         onCancel={() => setConfirmForce(false)}
         onConfirm={() => {
@@ -270,6 +278,7 @@ function AddPersonSheet({
   open: boolean;
   onClose: () => void;
 }) {
+  const t = useT();
   const addContact = useStore((s) => s.addContact);
   const [name, setName] = useState("");
   const [id, setId] = useState("");
@@ -279,10 +288,7 @@ function AddPersonSheet({
     setBusy(true);
     try {
       await addContact(name.trim(), id.trim());
-      toast.ok(
-        `Salvato ${name.trim()}`,
-        "Resta non verificato finché non confronti l'impronta."
-      );
+      toast.ok(t("people.addSaved", name.trim()), t("people.addSavedDetail"));
       setName("");
       setId("");
       onClose();
@@ -298,13 +304,13 @@ function AddPersonSheet({
       open={open}
       onClose={onClose}
       placement="center"
-      title="Aggiungi per id"
-      subtitle="La strada lunga: serve il suo id pubblico per intero."
+      title={t("people.addTitle")}
+      subtitle={t("people.addSubtitle")}
       footer={
         <>
           <div className="spacer" />
           <Button onClick={onClose} disabled={busy}>
-            Annulla
+            {t("common.cancel")}
           </Button>
           <Button
             variant="primary"
@@ -312,25 +318,25 @@ function AddPersonSheet({
             disabled={!name.trim() || !id.trim() || busy}
             onClick={submit}
           >
-            Salva
+            {t("common.save")}
           </Button>
         </>
       }
     >
-      <Field label="Come lo chiami">
+      <Field label={t("people.addNameLabel")}>
         {({ id: fid }) => (
           <TextInput
             id={fid}
             data-autofocus
             value={name}
             onChange={(e) => setName(e.currentTarget.value)}
-            placeholder="es. Giulia"
+            placeholder={t("people.addNamePlaceholder")}
           />
         )}
       </Field>
       <Field
-        label="Id pubblico"
-        hint="Lo trova con «arvolo me», oppure nella schermata Impostazioni della sua app."
+        label={t("people.addIdLabel")}
+        hint={t("people.addIdHint")}
       >
         {({ id: fid, describedBy }) => (
           <TextInput
@@ -345,11 +351,7 @@ function AddPersonSheet({
           />
         )}
       </Field>
-      <div className="card card-pad t-sm t-sec">
-        Molto più semplice: <strong>Scambia contatti</strong>. Vi leggete un
-        codice corto e vi ritrovate entrambi salvati e già verificati, senza
-        copiare cinquanta caratteri.
-      </div>
+      <div className="card card-pad t-sm t-sec">{t("people.addTip")}</div>
     </Sheet>
   );
 }
@@ -361,6 +363,7 @@ function AddPersonSheet({
  *  fingerprint and confirming are two separate acts, so marking someone verified
  *  can never be a side effect of glancing at their card. */
 function PersonSheet() {
+  const t = useT();
   const name = useStore((s) => s.personOpen);
   const close = useStore((s) => s.openPerson);
   const contacts = useStore((s) => s.contacts);
@@ -383,7 +386,9 @@ function PersonSheet() {
         close(null);
       }}
       title={c.name}
-      subtitle={c.display_name ? `si presenta come “${c.display_name}”` : undefined}
+      subtitle={
+        c.display_name ? t("people.goesBy", c.display_name) : undefined
+      }
     >
       <div className="hstack">
         <Avatar name={c.display_name || c.name} id={c.id} size={48} />
@@ -397,8 +402,8 @@ function PersonSheet() {
       </div>
 
       <Field
-        label="Impronta"
-        hint="Le stesse parole devono comparire sulla sua schermata. Confrontatele a voce o di persona — non via chat sullo stesso canale da cui vi siete scambiati l'id."
+        label={t("person.fingerprint")}
+        hint={t("person.fingerprintHint")}
       >
         {() => (
           <div
@@ -410,7 +415,7 @@ function PersonSheet() {
         )}
       </Field>
 
-      <Field label="Id pubblico">
+      <Field label={t("person.publicId")}>
         {() => <CopyField value={c.id} wrap />}
       </Field>
 
@@ -418,14 +423,12 @@ function PersonSheet() {
         <div className="card card-pad stack-sm">
           <div className="hstack-sm">
             <Icon.Shield className="tone-ok" />
-            <strong>Verificato</strong>
+            <strong>{t("person.verified")}</strong>
           </div>
-          <div className="t-sm t-sec">
-            Hai confermato questa impronta fuori banda.
-          </div>
+          <div className="t-sm t-sec">{t("person.verifiedBody")}</div>
           <div>
             <Button size="sm" onClick={() => fire(markUnverified(c.name))}>
-              Togli la verifica
+              {t("person.unverify")}
             </Button>
           </div>
         </div>
@@ -434,20 +437,15 @@ function PersonSheet() {
           className="card card-pad stack-sm"
           style={{ borderColor: "var(--amber)" }}
         >
-          <strong>Non ancora verificato</strong>
-          <div className="t-sm t-sec">
-            Finché non confronti l'impronta, l'unica cosa che sai è che qualcuno
-            ti ha dato quell'id.
-          </div>
+          <strong>{t("person.notVerifiedYet")}</strong>
+          <div className="t-sm t-sec">{t("person.notVerifiedBody")}</div>
           <label className="hstack" style={{ cursor: "pointer" }}>
             <input
               type="checkbox"
               checked={checked}
               onChange={(e) => setChecked(e.currentTarget.checked)}
             />
-            <span className="t-sm">
-              Ho confrontato l'impronta con {c.name} fuori da questa app.
-            </span>
+            <span className="t-sm">{t("person.compared", c.name)}</span>
           </label>
           <div>
             <Button
@@ -459,13 +457,13 @@ function PersonSheet() {
                 fire(markVerified(c.name));
               }}
             >
-              <Icon.Shield size={13} /> Segna come verificato
+              <Icon.Shield size={13} /> {t("person.markVerified")}
             </Button>
           </div>
         </div>
       )}
 
-      <Field label="Rinomina" hint="Il nome è tuo: la chiave e i contrassegni restano.">
+      <Field label={t("person.rename")} hint={t("person.renameHint")}>
         {({ id }) => (
           <div className="hstack-sm">
             <TextInput
@@ -484,7 +482,7 @@ function PersonSheet() {
                 close(to);
               }}
             >
-              Rinomina
+              {t("person.rename")}
             </Button>
           </div>
         )}
@@ -496,6 +494,7 @@ function PersonSheet() {
 // ---------------------------------------------------------------------------
 
 export function PeopleView() {
+  const t = useT();
   const contacts = useStore((s) => s.contacts);
   const startPairing = useStore((s) => s.startPairing);
   const addContact = useStore((s) => s.addContact);
@@ -503,13 +502,33 @@ export function PeopleView() {
   const loadPresence = useStore((s) => s.loadPresence);
   const presenceLoading = useStore((s) => s.presenceLoading);
 
-  // Probe when the set of contacts changes, not when the screen is navigated to.
-  // Navigation and the address book landing are two different moments — the
-  // snapshot is still in flight on a fresh launch — and probing at the first one
-  // asks the relay about an empty list.
+  // Presence is a photograph, and people come and go while the window sits
+  // open, so one probe on arrival is not enough: a dot left alone goes quietly
+  // wrong and nothing in the UI admits it. Hence a probe on arrival *and* on a
+  // timer, plus one the moment the window comes back — that is the instant the
+  // reading is both most stale and most likely to be read.
+  //
+  // The dependency is the id list, not the route: navigation and the address
+  // book landing are two different moments — the snapshot is still in flight on
+  // a fresh launch — and probing at the first one asks the relay about an empty
+  // list. Mounting re-runs this anyway, so opening the screen still refreshes.
   const ids = contacts.map((c) => c.id).join(",");
   useEffect(() => {
-    if (ids) fire(loadPresence());
+    if (!ids) return;
+    // A hidden window asks for nothing: nobody is reading the dots, and the
+    // answer would be stale again by the time it is.
+    const probe = () => {
+      if (!document.hidden) fire(loadPresence());
+    };
+    probe();
+    const timer = window.setInterval(probe, PRESENCE_REFRESH_MS);
+    document.addEventListener("visibilitychange", probe);
+    window.addEventListener("focus", probe);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", probe);
+      window.removeEventListener("focus", probe);
+    };
   }, [ids, loadPresence]);
 
   const [filter, setFilter] = useState<Filter>("all");
@@ -546,18 +565,20 @@ export function PeopleView() {
       trusted: c.trusted,
     }));
     const path = await saveDialog({
-      defaultPath: "arvolo-contatti.json",
+      defaultPath: t("people.exportFilename"),
       filters: [{ name: "JSON", extensions: ["json"] }],
     });
     if (!path) return;
     try {
       await api.writeTextFile(path, JSON.stringify(rows, null, 2));
       toast.ok(
-        rows.length === 1 ? "Esportato 1 contatto" : `Esportati ${rows.length} contatti`,
-        "Il file contiene solo id pubblici: nessun segreto."
+        rows.length === 1
+          ? t("people.exportedOne")
+          : t("people.exportedMany", rows.length),
+        t("people.exportDetail")
       );
     } catch (e) {
-      toast.bad("Esportazione non riuscita", String(e));
+      toast.bad(t("people.exportFailed"), String(e));
     }
   };
 
@@ -573,7 +594,7 @@ export function PeopleView() {
     try {
       const text = await api.readTextFile(path);
       const rows = JSON.parse(text);
-      if (!Array.isArray(rows)) throw new Error("il file non è una lista");
+      if (!Array.isArray(rows)) throw new Error(t("people.importNotAList"));
 
       const existing = new Set(contacts.map((c) => c.name));
       let added = 0;
@@ -597,11 +618,13 @@ export function PeopleView() {
         }
       }
       toast.ok(
-        added === 1 ? "Importato 1 contatto" : `Importati ${added} contatti`,
-        `${skipped ? `${skipped} saltati. ` : ""}Tutti non verificati: i contrassegni non si importano, perché quelle impronte non le hai controllate tu.`
+        added === 1
+          ? t("people.importedOne")
+          : t("people.importedMany", added),
+        t("people.importDetail", skipped)
       );
     } catch (e) {
-      toast.bad("Importazione non riuscita", String(e));
+      toast.bad(t("people.importFailed"), String(e));
     } finally {
       busyRef.current = false;
       setImporting(false);
@@ -612,47 +635,45 @@ export function PeopleView() {
     <div className="stack">
       <div className="hstack wrap">
         <Button variant="primary" onClick={() => fire(startPairing("contact_host"))}>
-          <Icon.Qr size={14} /> Scambia contatti
+          <Icon.Qr size={14} /> {t("people.swap")}
         </Button>
         <Button onClick={() => fire(startPairing("contact_join"))}>
-          Ho un codice
+          {t("people.haveCode")}
         </Button>
         <Button onClick={() => setAddOpen(true)}>
-          <Icon.Plus size={13} /> Per id
+          <Icon.Plus size={13} /> {t("people.byId")}
         </Button>
         <div className="spacer grow" />
         <Button size="sm" onClick={doExport} disabled={!contacts.length}>
-          Esporta
+          {t("people.export")}
         </Button>
         <Button size="sm" onClick={doImport} busy={importing}>
-          Importa
+          {t("people.import")}
         </Button>
         <Button
           size="sm"
           onClick={() => fire(loadPresence())}
           busy={presenceLoading}
-          title="Chiedi al relay chi è collegato adesso"
+          title={t("people.whoIsOnlineTitle")}
         >
-          <Icon.Relay size={13} /> Chi c'è
+          <Icon.Relay size={13} /> {t("people.whoIsOnline")}
         </Button>
         <MenuButton
-          label="Altre azioni sulla rubrica"
+          label={t("people.moreActions")}
           items={[
             {
               key: "prune",
-              label: "Ripulisci i nomi orfani",
+              label: t("people.prune"),
               icon: <Icon.Trash size={13} />,
               onSelect: async () => {
                 const n = await pruneNames();
                 toast.ok(
                   n === 0
-                    ? "Niente da ripulire"
+                    ? t("people.pruneNone")
                     : n === 1
-                      ? "Rimosso 1 record"
-                      : `Rimossi ${n} record`,
-                  n
-                    ? "Erano nomi annunciati da contatti che non hai più."
-                    : undefined
+                      ? t("people.pruneOne")
+                      : t("people.pruneMany", n),
+                  n ? t("people.pruneDetail") : undefined
                 );
               },
             },
@@ -664,16 +685,18 @@ export function PeopleView() {
 
       <div className="hstack wrap">
         <Segmented
-          label="Filtro rubrica"
+          label={t("people.filterLabel")}
           value={filter}
           onChange={setFilter}
           options={[
-            { value: "all", label: "Tutti" },
-            { value: "verified", label: "Verificati" },
-            { value: "trusted", label: "Fidati" },
+            { value: "all", label: t("people.filterAll") },
+            { value: "verified", label: t("people.filterVerified") },
+            { value: "trusted", label: t("people.filterTrusted") },
             {
               value: "blocked",
-              label: blockedCount ? `Bloccati (${blockedCount})` : "Bloccati",
+              label: blockedCount
+                ? t("people.filterBlockedN", blockedCount)
+                : t("people.filterBlocked"),
             },
           ]}
         />
@@ -681,8 +704,8 @@ export function PeopleView() {
           <TextInput
             value={q}
             onChange={(e) => setQ(e.currentTarget.value)}
-            placeholder="Cerca per nome o id…"
-            aria-label="Cerca in rubrica"
+            placeholder={t("people.searchPlaceholder")}
+            aria-label={t("people.searchLabel")}
           />
         </div>
       </div>
@@ -693,8 +716,8 @@ export function PeopleView() {
             icon={<Icon.People size={22} />}
             title={
               contacts.length === 0
-                ? "Nessuno in rubrica"
-                : "Nessun contatto corrisponde"
+                ? t("people.emptyNone")
+                : t("people.emptyNoMatch")
             }
             action={
               contacts.length === 0 ? (
@@ -702,14 +725,14 @@ export function PeopleView() {
                   variant="primary"
                   onClick={() => fire(startPairing("contact_host"))}
                 >
-                  <Icon.Qr size={14} /> Scambia contatti
+                  <Icon.Qr size={14} /> {t("people.swap")}
                 </Button>
               ) : undefined
             }
           >
             {contacts.length === 0
-              ? "Il modo più rapido per aggiungere qualcuno è leggergli un codice corto: vi salvate a vicenda e siete già verificati, senza copiare id a mano."
-              : "Prova a cambiare filtro o ricerca."}
+              ? t("people.emptyNoneBody")
+              : t("people.emptyNoMatchBody")}
           </Empty>
         </div>
       ) : (

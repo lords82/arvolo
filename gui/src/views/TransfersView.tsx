@@ -20,6 +20,7 @@ import {
   statusMeta,
   type Section,
 } from "../format";
+import { useT } from "../i18n";
 import type { UITransfer } from "../types";
 import { Icon } from "../ui/Icons";
 import { Button, Empty, IconButton } from "../ui/Primitives";
@@ -28,7 +29,10 @@ import { MenuButton, type MenuItem } from "../ui/Menu";
 import { Confirm } from "../ui/Sheet";
 import { toast } from "../ui/Toasts";
 
-function Row({ t }: { t: UITransfer }) {
+// `t` is the translator everywhere in this app, so the transfer this row draws
+// is `tx`. The prop keeps its name — the callers read better as `t={row}`.
+function Row({ t: tx }: { t: UITransfer }) {
+  const t = useT();
   const pause = useStore((s) => s.pause);
   const resume = useStore((s) => s.resume);
   const cancel = useStore((s) => s.cancel);
@@ -37,54 +41,54 @@ function Row({ t }: { t: UITransfer }) {
   const moveItem = useStore((s) => s.moveItem);
   const [confirmCancel, setConfirmCancel] = useState(false);
 
-  const st = statusMeta(t.status);
-  const meta = metaLine(t);
+  const st = statusMeta(tx.status);
+  const meta = metaLine(tx);
   // The swarm is the whole point of the P2P path, and a row that is pulling from
   // three peers at once has no other way of saying so.
-  const peers = Math.max(t.swarmPeers, t.downloadPeers);
+  const peers = Math.max(tx.swarmPeers, tx.downloadPeers);
   // `deposited` counts as live here: the blob is on the relay awaiting pickup
-  // and can still be withdrawn. Leaving it out made every "Revoca il deposito"
+  // and can still be withdrawn. Leaving it out made every "withdraw the deposit"
   // string in this file unreachable, so the board offered no way to take one
   // back at all.
   const live =
-    t.status === "in corso" ||
-    t.status === "in attesa" ||
-    t.status === "in stallo" ||
-    t.status === "deposited" ||
-    t.status === "in annullamento";
+    tx.status === "active" ||
+    tx.status === "paused" ||
+    tx.status === "stalled" ||
+    tx.status === "deposited" ||
+    tx.status === "cancelling";
   const done =
-    t.status === "completato" ||
-    t.status === "annullato" ||
-    t.status === "fallito";
+    tx.status === "completed" ||
+    tx.status === "cancelled" ||
+    tx.status === "failed";
 
   const items: MenuItem[] = [];
-  if (t.status === "in corso") {
+  if (tx.status === "active") {
     items.push({
       key: "pause",
-      label: "Metti in pausa",
+      label: t("transfers.pause"),
       icon: <Icon.Pause size={13} />,
-      onSelect: () => fire(pause(t.id)),
+      onSelect: () => fire(pause(tx.id)),
     });
   }
-  if (t.status === "in attesa" || t.status === "in stallo") {
+  if (tx.status === "paused" || tx.status === "stalled") {
     items.push({
       key: "resume",
-      label: "Riprendi",
+      label: t("transfers.resume"),
       icon: <Icon.Play size={13} />,
-      onSelect: () => fire(resume(t.id)),
+      onSelect: () => fire(resume(tx.id)),
     });
   }
-  if (t.path) {
+  if (tx.path) {
     items.push({
       key: "open",
-      label: "Apri la cartella",
+      label: t("transfers.openFolder"),
       icon: <Icon.Folder size={13} />,
       // `revealItemInDir` rather than opening the path: it shows the file
       // *selected* in the file manager, which is what someone who just received
       // something actually wants — opening its folder loses it among the rest.
       onSelect: () => {
-        revealItemInDir(t.path!).catch((e: unknown) =>
-          toast.bad("Non riesco ad aprire la cartella", String(e))
+        revealItemInDir(tx.path!).catch((e: unknown) =>
+          toast.bad(t("transfers.openFolderFailed"), String(e))
         );
       },
     });
@@ -92,16 +96,23 @@ function Row({ t }: { t: UITransfer }) {
   items.push(
     {
       key: "up",
-      label: "Sposta su",
-      onSelect: () => moveItem(t.key, -1),
+      label: t("transfers.moveUp"),
+      onSelect: () => moveItem(tx.key, -1),
       separated: items.length > 0,
     },
-    { key: "down", label: "Sposta giù", onSelect: () => moveItem(t.key, 1) }
+    {
+      key: "down",
+      label: t("transfers.moveDown"),
+      onSelect: () => moveItem(tx.key, 1),
+    }
   );
   if (live) {
     items.push({
       key: "cancel",
-      label: t.status === "deposited" ? "Revoca il deposito" : "Annulla",
+      label:
+        tx.status === "deposited"
+          ? t("transfers.revokeDeposit")
+          : t("transfers.cancel"),
       icon: <Icon.Stop size={13} />,
       danger: true,
       separated: true,
@@ -111,23 +122,23 @@ function Row({ t }: { t: UITransfer }) {
   if (done) {
     items.push({
       key: "remove",
-      label: "Togli dalla lista",
+      label: t("transfers.removeRow"),
       icon: <Icon.Trash size={13} />,
       danger: true,
       separated: true,
-      onSelect: () => fire(removeRow(t.key)),
+      onSelect: () => fire(removeRow(tx.key)),
     });
   }
 
   // A parked offer is a decision, not a status: the whole row opens the dialog.
-  const isOffer = t.status === "in arrivo";
+  const isOffer = tx.status === "incoming";
 
   return (
     <>
       <div
-        className={`row dir-${t.dir} ${done ? "is-done" : ""}`}
+        className={`row dir-${tx.dir} ${done ? "is-done" : ""}`}
         style={isOffer ? { cursor: "pointer" } : undefined}
-        onClick={isOffer ? () => openIncoming(t.offerId!) : undefined}
+        onClick={isOffer ? () => openIncoming(tx.offerId!) : undefined}
         role={isOffer ? "button" : undefined}
         tabIndex={isOffer ? 0 : undefined}
         onKeyDown={
@@ -135,41 +146,42 @@ function Row({ t }: { t: UITransfer }) {
             ? (e) => {
                 if (e.key === "Enter" || e.key === " ") {
                   e.preventDefault();
-                  openIncoming(t.offerId!);
+                  openIncoming(tx.offerId!);
                 }
               }
             : undefined
         }
       >
-        <ExtChip name={t.name} />
+        <ExtChip name={tx.name} />
 
         <div className="row-main">
-          <div className="row-name truncate" title={t.name}>
-            {t.name}
+          <div className="row-name truncate" title={tx.name}>
+            {tx.name}
           </div>
           <div className="row-meta">
             <span className={`tone-${st.tone}`} style={{ fontWeight: 600 }}>
               {st.text}
             </span>
-            {t.peer && (
+            {tx.peer && (
               <>
                 <span className="sep" />
-                <span className="truncate" title={t.peerId}>
-                  {t.dir === "out" ? "a" : "da"} {t.peer}
+                <span className="truncate" title={tx.peerId}>
+                  {tx.dir === "out" ? t("common.to") : t("common.from")}{" "}
+                  {tx.peer}
                 </span>
               </>
             )}
-            {t.verified && (
+            {tx.verified && (
               <Icon.Shield
                 size={11}
                 className="tone-ok"
-                label="Identità verificata"
+                label={t("transfers.verifiedIdentity")}
               />
             )}
-            {t.size > 0 && (
+            {tx.size > 0 && (
               <>
                 <span className="sep" />
-                <span className="tnum">{fmtBytes(t.size)}</span>
+                <span className="tnum">{fmtBytes(tx.size)}</span>
               </>
             )}
             {meta && (
@@ -181,18 +193,18 @@ function Row({ t }: { t: UITransfer }) {
             {peers > 0 && (
               <>
                 <span className="sep" />
-                <span className="tnum" title="Trasferimento distribuito fra più peer">
-                  ⇄ {peers} peer
+                <span className="tnum" title={t("transfers.swarm")}>
+                  ⇄ {t("transfers.peers", peers)}
                 </span>
               </>
             )}
           </div>
-          {(live || t.status === "completato") && <Progress t={t} />}
-          {t.code && (
+          {(live || tx.status === "completed") && <Progress t={tx} />}
+          {tx.code && (
             <div className="hstack-sm" style={{ marginTop: 6 }}>
               <Icon.Qr size={12} className="t-mut" />
-              <code className="mono t-xs">{t.code}</code>
-              <span className="t-xs t-mut">codice attivo</span>
+              <code className="mono t-xs">{tx.code}</code>
+              <span className="t-xs t-mut">{t("transfers.liveCode")}</span>
             </div>
           )}
         </div>
@@ -202,23 +214,32 @@ function Row({ t }: { t: UITransfer }) {
             <Button
               size="sm"
               variant="in"
-              onClick={() => openIncoming(t.offerId!)}
+              onClick={() => openIncoming(tx.offerId!)}
             >
-              Rivedi
+              {t("transfers.review")}
             </Button>
           ) : (
             <>
-              {t.status === "in corso" && (
-                <IconButton label="Metti in pausa" onClick={() => fire(pause(t.id))}>
+              {tx.status === "active" && (
+                <IconButton
+                  label={t("transfers.pause")}
+                  onClick={() => fire(pause(tx.id))}
+                >
                   <Icon.Pause size={14} />
                 </IconButton>
               )}
-              {(t.status === "in attesa" || t.status === "in stallo") && (
-                <IconButton label="Riprendi" onClick={() => fire(resume(t.id))}>
+              {(tx.status === "paused" || tx.status === "stalled") && (
+                <IconButton
+                  label={t("transfers.resume")}
+                  onClick={() => fire(resume(tx.id))}
+                >
                   <Icon.Play size={14} />
                 </IconButton>
               )}
-              <MenuButton items={items} label={`Azioni per ${t.name}`}>
+              <MenuButton
+                items={items}
+                label={t("transfers.rowActions", tx.name)}
+              >
                 <Icon.More size={15} />
               </MenuButton>
             </>
@@ -228,21 +249,30 @@ function Row({ t }: { t: UITransfer }) {
 
       <Confirm
         open={confirmCancel}
-        title={t.status === "deposited" ? "Revocare il deposito?" : "Annullare?"}
+        title={
+          tx.status === "deposited"
+            ? t("transfers.confirmRevokeTitle")
+            : t("transfers.confirmCancelTitle")
+        }
         body={
-          t.status === "deposited"
-            ? `Il file viene rimosso dal relay e l'offerta ritirata dalla casella di ${t.peer ?? "destinazione"}. Non potrà più scaricarlo.`
-            : `«${t.name}» si ferma qui. Quello che è già passato viene buttato: se lo rifai, riparte da capo.`
+          tx.status === "deposited"
+            ? t(
+                "transfers.confirmRevokeBody",
+                tx.peer ?? t("transfers.confirmRevokePeer")
+              )
+            : t("transfers.confirmCancelBody", tx.name)
         }
         confirmLabel={
-          t.status === "deposited" ? "Revoca" : "Annulla il trasferimento"
+          tx.status === "deposited"
+            ? t("transfers.confirmRevokeLabel")
+            : t("transfers.confirmCancelLabel")
         }
-        cancelLabel="Lascia stare"
+        cancelLabel={t("transfers.keepGoing")}
         danger
         onCancel={() => setConfirmCancel(false)}
         onConfirm={() => {
           setConfirmCancel(false);
-          fire(cancel(t.id));
+          fire(cancel(tx.id));
         }}
       />
     </>
@@ -258,6 +288,7 @@ function Column({
   sections: Section[];
   title: string;
 }) {
+  const t = useT();
   const openSheet = useStore((s) => s.openSheet);
   const openReceive = useStore((s) => s.openReceive);
   const total = sections.reduce((n, s) => n + s.items.length, 0);
@@ -276,17 +307,23 @@ function Column({
         <div className="card">
           <Empty
             icon={dir === "out" ? <Icon.Send size={22} /> : <Icon.Receive size={22} />}
-            title={dir === "out" ? "Niente in uscita" : "Niente in arrivo"}
+            title={
+              dir === "out"
+                ? t("transfers.emptyOutTitle")
+                : t("transfers.emptyInTitle")
+            }
           >
             {dir === "out"
-              ? "Trascina un file nella finestra, o usa Invia."
-              : "Qui compaiono i file che qualcuno ti manda."}
+              ? t("transfers.emptyOutBody")
+              : t("transfers.emptyInBody")}
             <div style={{ marginTop: 10 }}>
               <Button
                 size="sm"
                 onClick={() => (dir === "out" ? openSheet([]) : openReceive())}
               >
-                {dir === "out" ? "Invia qualcosa" : "Incolla un codice"}
+                {dir === "out"
+                  ? t("transfers.emptyOutAction")
+                  : t("transfers.emptyInAction")}
               </Button>
             </div>
           </Empty>
@@ -302,8 +339,8 @@ function Column({
               {sec.items
                 .slice()
                 .sort((a, b) => b.rank - a.rank)
-                .map((t) => (
-                  <Row key={t.key} t={t} />
+                .map((row) => (
+                  <Row key={row.key} t={row} />
                 ))}
             </div>
           </div>
@@ -314,13 +351,17 @@ function Column({
 }
 
 export function TransfersView() {
+  const t = useT();
   const transfers = useStore((s) => s.transfers);
   const search = useStore((s) => s.search);
   const openSheet = useStore((s) => s.openSheet);
 
   const rows = useMemo(() => Object.values(transfers), [transfers]);
-  const out = useMemo(() => sectionsFor(rows, "out", search), [rows, search]);
-  const inc = useMemo(() => sectionsFor(rows, "in", search), [rows, search]);
+  // `t` is in the dependency list because `sectionsFor` names its sections: the
+  // memo has to be thrown away when the language changes, or the board would
+  // keep the previous language's headings until a row moved.
+  const out = useMemo(() => sectionsFor(rows, "out", search), [rows, search, t]);
+  const inc = useMemo(() => sectionsFor(rows, "in", search), [rows, search, t]);
 
   // A first-run window with nothing in it should say what to do, not show two
   // empty columns. Past that the columns carry their own empty states, which are
@@ -330,15 +371,13 @@ export function TransfersView() {
       <div className="view-narrow" style={{ paddingTop: 30 }}>
         <button className="dropzone" onClick={() => openSheet([])}>
           <Icon.Send size={30} className="tone-out" />
-          <div className="t-head">Trascina qui i file da inviare</div>
+          <div className="t-head">{t("transfers.firstRunTitle")}</div>
           <div className="t-sm t-mut" style={{ maxWidth: "44ch" }}>
-            Oppure scegli un contatto, genera un codice da leggere al volo, o
-            crea un link che si apre in qualsiasi browser. Tutto è cifrato
-            end-to-end: il relay vede solo byte illeggibili.
+            {t("transfers.firstRunBody")}
           </div>
           <span className="btn btn-primary" style={{ marginTop: 6 }}>
             <Icon.Send size={14} />
-            Invia qualcosa
+            {t("transfers.firstRunAction")}
           </span>
         </button>
       </div>
@@ -354,8 +393,8 @@ export function TransfersView() {
         alignItems: "start",
       }}
     >
-      <Column dir="out" sections={out} title="In uscita" />
-      <Column dir="in" sections={inc} title="In arrivo" />
+      <Column dir="out" sections={out} title={t("transfers.outgoing")} />
+      <Column dir="in" sections={inc} title={t("transfers.incoming")} />
     </div>
   );
 }

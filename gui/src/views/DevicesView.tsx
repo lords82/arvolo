@@ -9,10 +9,11 @@
 //
 // There is no device *list*, and that is not an omission: the relay is
 // zero-knowledge and nothing enumerates which machines hold the identity. Saying
-// "3 dispositivi collegati" would be an invention. The fingerprint is what you
+// "3 devices linked" would be an invention. The fingerprint is what you
 // compare, on each machine, to know they match.
 
 import { fire, useStore } from "../store";
+import { t as translate, useT } from "../i18n";
 import { Icon } from "../ui/Icons";
 import { Badge, Button, Empty, SwitchRow } from "../ui/Primitives";
 import { CopyField, Fingerprint } from "../ui/Bits";
@@ -22,16 +23,16 @@ function ago(unixSecs: number): string {
   if (!unixSecs) return "";
   const secs = Math.max(0, Math.floor(Date.now() / 1000) - unixSecs);
   // Every branch can land on exactly 1 — a daily sync hits the last one square
-  // on — so none of them may hardcode the plural.
-  const n = (v: number, one: string, many: string) =>
-    `${v} ${v === 1 ? one : many} fa`;
-  if (secs < 60) return "pochi secondi fa";
-  if (secs < 3600) return n(Math.round(secs / 60), "minuto", "minuti");
-  if (secs < 86400) return n(Math.round(secs / 3600), "ora", "ore");
-  return n(Math.round(secs / 86400), "giorno", "giorni");
+  // on — so none of them may hardcode the plural. Each dictionary decides for
+  // itself where the singular is, which is not the same rule in every language.
+  if (secs < 60) return translate("ago.moments");
+  if (secs < 3600) return translate("ago.minutes", Math.round(secs / 60));
+  if (secs < 86400) return translate("ago.hours", Math.round(secs / 3600));
+  return translate("ago.days", Math.round(secs / 86400));
 }
 
 export function DevicesView() {
+  const t = useT();
   const sync = useStore((s) => s.sync);
   const loading = useStore((s) => s.syncLoading);
   const error = useStore((s) => s.syncError);
@@ -48,7 +49,7 @@ export function DevicesView() {
         {error}
         <div style={{ marginTop: 10 }}>
           <Button size="sm" onClick={() => fire(reload())}>
-            Riprova
+            {t("common.retry")}
           </Button>
         </div>
       </div>
@@ -58,7 +59,7 @@ export function DevicesView() {
   if (!sync) {
     return (
       <div className="card">
-        <Empty icon={<Icon.Devices size={22} />} title="Carico…" />
+        <Empty icon={<Icon.Devices size={22} />} title={t("common.loading")} />
       </div>
     );
   }
@@ -72,60 +73,49 @@ export function DevicesView() {
             <Icon.Users size={20} />
           </span>
           <div className="grow">
-            <div className="t-head">La tua identità condivisa</div>
-            <div className="hint">
-              Ogni dispositivo collegato usa questa. Per il resto del mondo sei
-              una persona sola, ovunque tu apra Arvolo.
-            </div>
+            <div className="t-head">{t("devices.identityTitle")}</div>
+            <div className="hint">{t("devices.identityHint")}</div>
           </div>
         </div>
 
         <div className="stack-sm">
-          <div className="t-label">Impronta</div>
+          <div className="t-label">{t("devices.fingerprint")}</div>
           <div
             className="card card-pad"
             style={{ background: "var(--surface-2)" }}
           >
             <Fingerprint value={sync.fingerprint} />
           </div>
-          <div className="hint">
-            Deve essere identica su tutti i tuoi dispositivi. Se su una macchina
-            leggi parole diverse, quella non è collegata: è un'altra identità.
-          </div>
+          <div className="hint">{t("devices.fingerprintHint")}</div>
         </div>
 
         <div className="stack-sm">
-          <div className="t-label">Id pubblico</div>
+          <div className="t-label">{t("devices.publicId")}</div>
           <CopyField value={sync.public_id} wrap />
         </div>
       </div>
 
       {/* ---- pairing -------------------------------------------------- */}
       <div className="card card-pad stack">
-        <div className="t-head">Collega un dispositivo</div>
-        <div className="t-sm t-sec">
-          Il collegamento va fatto da entrambe le parti: su questa macchina
-          mostri un codice, sull'altra lo inserisci. È un'operazione delicata —
-          quello che passa è la tua identità segreta, non un semplice invito.
-        </div>
+        <div className="t-head">{t("devices.pairTitle")}</div>
+        <div className="t-sm t-sec">{t("devices.pairBody")}</div>
         <div className="hstack wrap">
           <Button
             variant="primary"
             onClick={() => fire(startPairing("device_host"))}
           >
-            <Icon.Qr size={14} /> Mostra un codice
+            <Icon.Qr size={14} /> {t("devices.showCode")}
           </Button>
           <Button onClick={() => fire(startPairing("device_join"))}>
-            <Icon.Key size={14} /> Ho un codice
+            <Icon.Key size={14} /> {t("devices.haveCode")}
           </Button>
         </div>
         <div
           className="card card-pad t-xs"
           style={{ borderColor: "var(--amber)", background: "var(--amber-soft)" }}
         >
-          <strong>Su una macchina che non è tua, mai.</strong> Chi inserisce il
-          codice diventa te a tutti gli effetti: stessa casella, stessa rubrica,
-          stessa capacità di aprire ciò che ti viene mandato.
+          <strong>{t("devices.pairWarnLead")}</strong>{" "}
+          {t("devices.pairWarnRest")}
         </div>
       </div>
 
@@ -133,27 +123,23 @@ export function DevicesView() {
       <div className="card card-pad stack">
         <div className="hstack">
           <div className="grow">
-            <div className="t-head">Rubrica in sincronia</div>
-            <div className="hint">
-              I contatti viaggiano fra i tuoi dispositivi dentro una cella
-              cifrata sulla tua casella. Il relay conserva byte che non sa
-              leggere.
-            </div>
+            <div className="t-head">{t("devices.syncTitle")}</div>
+            <div className="hint">{t("devices.syncHint")}</div>
           </div>
           <Badge kind={sync.enabled ? "ok" : "neutral"}>
-            {sync.enabled ? "Attiva" : "Disattivata"}
+            {sync.enabled ? t("devices.syncOn") : t("devices.syncOff")}
           </Badge>
         </div>
 
         <div className="hstack wrap">
           <span className="t-sm t-sec">
-            {sync.contacts} contatt{sync.contacts === 1 ? "o" : "i"} in rubrica
+            {t("devices.contactCount", sync.contacts)}
           </span>
           <span className="t-sm t-mut">·</span>
           <span className="t-sm t-sec">
             {sync.last_sync
-              ? `ultima sincronizzazione ${ago(sync.last_sync)}`
-              : "non ancora sincronizzata da quando il daemon è partito"}
+              ? t("devices.lastSync", ago(sync.last_sync))
+              : t("devices.neverSynced")}
           </span>
         </div>
 
@@ -162,30 +148,28 @@ export function DevicesView() {
             className="card card-pad t-sm"
             style={{ borderColor: "var(--red)" }}
           >
-            L'ultimo giro non è riuscito: {sync.last_error}
+            {t("devices.lastError", sync.last_error)}
           </div>
         )}
 
         <div className="hstack">
           <Button onClick={() => fire(syncNow())} busy={loading}>
-            <Icon.Refresh size={14} /> Sincronizza adesso
+            <Icon.Refresh size={14} /> {t("devices.syncNow")}
           </Button>
         </div>
 
         <div className="divider" />
 
         <SwitchRow
-          title="Sincronizza da sola"
-          desc="Il daemon fa un giro ogni pochi minuti. Se la disattivi, la rubrica si allinea solo quando premi il pulsante qui sopra."
+          title={t("devices.autoTitle")}
+          desc={t("devices.autoDesc")}
           checked={config ? config.sync : sync.enabled}
           onChange={async (v) => {
             await saveConfig({ sync: { set: v } });
             await loadConfig();
             toast.info(
-              v
-                ? "Sincronizzazione automatica attiva"
-                : "Sincronizzazione automatica disattivata",
-              "Ha effetto al prossimo avvio del daemon."
+              v ? t("devices.autoOn") : t("devices.autoOff"),
+              t("devices.autoDetail")
             );
           }}
         />

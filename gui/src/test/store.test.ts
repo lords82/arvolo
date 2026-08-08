@@ -60,7 +60,7 @@ describe("snapshot seeding", () => {
 
     expect(useStore.getState().connected).toBe(true);
     expect(row("t3").name).toBe("a.txt");
-    expect(row("oo9").status).toBe("in arrivo");
+    expect(row("oo9").status).toBe("incoming");
     expect(useStore.getState().contacts).toHaveLength(1);
   });
 
@@ -110,7 +110,7 @@ describe("the board never lies about what the daemon holds", () => {
   it("50. a snapshot that fails says so — it does not report an empty daemon", async () => {
     harness.fail = new Set(["listTransfers"]);
     await boot(false);
-    expect(useStore.getState().loadError).toMatch(/non riesco a leggere/i);
+    expect(useStore.getState().loadError).toMatch(/can't read the transfers/i);
     expect(useStore.getState().connected).toBe(false);
   });
 
@@ -190,7 +190,7 @@ describe("engine events → rows", () => {
       dir: "out",
       name: "x.bin",
       size: 200,
-      status: "in corso",
+      status: "active",
     });
   });
 
@@ -206,7 +206,7 @@ describe("engine events → rows", () => {
     harness.emit({ started: { id: 1, direction: "recv", name: "in.bin", total_size: 80 } });
     harness.emit({ completed: { id: 1, path: "/Users/ls/Arvolo/in.bin" } });
     expect(row("t1")).toMatchObject({
-      status: "completato",
+      status: "completed",
       transferred: 80,
       path: "/Users/ls/Arvolo/in.bin",
     });
@@ -223,7 +223,7 @@ describe("engine events → rows", () => {
     await boot();
     harness.emit({ started: { id: 1, direction: "send", name: "m.bin", total_size: 10 } });
     harness.emit({ waiting: { id: 1, reason: "relay unavailable" } });
-    expect(row("t1")).toMatchObject({ status: "in stallo", reason: "relay unavailable" });
+    expect(row("t1")).toMatchObject({ status: "stalled", reason: "relay unavailable" });
   });
 
   it("9. `paused` and `failed` and `cancelled` land on their statuses", async () => {
@@ -234,9 +234,9 @@ describe("engine events → rows", () => {
     harness.emit({ paused: { id: 1, reason: "by user" } });
     harness.emit({ failed: { id: 2, error: "boom" } });
     harness.emit({ cancelled: { id: 3 } });
-    expect(row("t1")).toMatchObject({ status: "in attesa", reason: "by user" });
-    expect(row("t2")).toMatchObject({ status: "fallito", reason: "boom" });
-    expect(row("t3").status).toBe("annullato");
+    expect(row("t1")).toMatchObject({ status: "paused", reason: "by user" });
+    expect(row("t2")).toMatchObject({ status: "failed", reason: "boom" });
+    expect(row("t3").status).toBe("cancelled");
   });
 
   it("10. `offer_received` shows the sender's note and name", async () => {
@@ -248,7 +248,7 @@ describe("engine events → rows", () => {
       note: "le foto di ieri",
       sender_name: "Marta" } });
     expect(row("oo1")).toMatchObject({
-      status: "in arrivo",
+      status: "incoming",
       dir: "in",
       note: "le foto di ieri",
       senderName: "Marta",
@@ -274,7 +274,7 @@ describe("engine events → rows", () => {
     harness.emit(offer("old1"));
     harness.emit(offer("new2"));
 
-    expect(rows().filter((t) => t.status === "in arrivo")).toHaveLength(1);
+    expect(rows().filter((t) => t.status === "incoming")).toHaveLength(1);
     expect(row("oold1"), "the dead id must not linger").toBeUndefined();
     expect(row("onew2").offerId).toBe("new2");
   });
@@ -286,7 +286,7 @@ describe("engine events → rows", () => {
     });
     harness.emit(offer("a", "uno.txt"));
     harness.emit(offer("b", "due.txt"));
-    expect(rows().filter((t) => t.status === "in arrivo")).toHaveLength(2);
+    expect(rows().filter((t) => t.status === "incoming")).toHaveLength(2);
   });
 
   it("11d. the same file from a different sender is its own offer", async () => {
@@ -297,7 +297,7 @@ describe("engine events → rows", () => {
     harness.emit({
       offer_received: { id: "b", from: "peer2", name: "x.txt", size: 1, note: "", sender_name: "" },
     });
-    expect(rows().filter((t) => t.status === "in arrivo")).toHaveLength(2);
+    expect(rows().filter((t) => t.status === "incoming")).toHaveLength(2);
   });
 
   it("11. an event for an unknown id still produces a row (no lost sends)", async () => {
@@ -356,12 +356,12 @@ describe("actions reach the daemon", () => {
     harness.emit({ deposited: { id: 1 } });
 
     const done = useStore.getState().cancel(1);
-    expect(row("t1").status).toBe("in annullamento"); // optimistic, immediately
+    expect(row("t1").status).toBe("cancelling"); // optimistic, immediately
     await done;
     expect(harness.recorder.cancel).toEqual([1]);
 
     harness.emit({ cancelled: { id: 1 } });
-    expect(row("t1").status).toBe("annullato");
+    expect(row("t1").status).toBe("cancelled");
   });
 
   it("17. a refused cancel puts the row back — it must not pretend", async () => {

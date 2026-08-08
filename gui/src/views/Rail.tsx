@@ -9,27 +9,31 @@
 // under your name is the thing they check. Putting it in the frame rather than
 // three clicks into a settings screen is the point.
 
-import { useStore, type Route } from "../store";
+import { TITLE_KEY, useStore, type Route } from "../store";
+import { useT } from "../i18n";
 import { Icon } from "../ui/Icons";
 import { Avatar } from "../ui/Bits";
 import { Kbd, modKey } from "../ui/Primitives";
 
 interface Place {
   route: Route;
-  label: string;
   icon: JSX.Element;
 }
 
+/** Order, not names: the label of each place is `TITLE_KEY[route]`, the same one
+ *  the header and the palette use, so the six places cannot come to be called
+ *  three different things. */
 const PLACES: Place[] = [
-  { route: "transfers", label: "Trasferimenti", icon: <Icon.Transfers /> },
-  { route: "people", label: "Persone", icon: <Icon.People /> },
-  { route: "deposits", label: "Link e depositi", icon: <Icon.Link /> },
-  { route: "history", label: "Cronologia", icon: <Icon.History /> },
-  { route: "devices", label: "I tuoi dispositivi", icon: <Icon.Devices /> },
-  { route: "settings", label: "Impostazioni", icon: <Icon.Settings /> },
+  { route: "transfers", icon: <Icon.Transfers /> },
+  { route: "people", icon: <Icon.People /> },
+  { route: "deposits", icon: <Icon.Link /> },
+  { route: "history", icon: <Icon.History /> },
+  { route: "devices", icon: <Icon.Devices /> },
+  { route: "settings", icon: <Icon.Settings /> },
 ];
 
 export function Rail() {
+  const t = useT();
   const route = useStore((s) => s.route);
   const go = useStore((s) => s.go);
   const status = useStore((s) => s.status);
@@ -41,12 +45,12 @@ export function Rail() {
   const setPaletteOpen = useStore((s) => s.setPaletteOpen);
 
   const rows = Object.values(transfers);
-  const pending = rows.filter((t) => t.status === "in arrivo").length;
+  const pending = rows.filter((t) => t.status === "incoming").length;
   const active = rows.filter(
-    (t) => t.status === "in corso" || t.status === "in stallo"
+    (t) => t.status === "active" || t.status === "stalled"
   ).length;
 
-  const myName = status?.display_name || "Io";
+  const myName = status?.display_name || t("rail.meFallback");
 
   const counts: Partial<Record<Route, { n: number; hot?: boolean }>> = {
     transfers: pending
@@ -58,13 +62,13 @@ export function Rail() {
   };
 
   return (
-    <nav className="rail" aria-label="Navigazione principale">
+    <nav className="rail" aria-label={t("rail.nav")}>
       <div className="rail-top" />
 
       <button
         className="rail-me"
         onClick={() => go("settings")}
-        title="La tua identità e le impostazioni"
+        title={t("rail.meTitle")}
       >
         <Avatar name={myName} id={status?.public_id} size={30} />
         <span className="grow truncate">
@@ -78,12 +82,12 @@ export function Rail() {
             className="truncate mono"
             style={{ display: "block", fontSize: 10.5, color: "var(--ink-mut)" }}
           >
-            {status?.fingerprint || "identità non ancora letta"}
+            {status?.fingerprint || t("rail.noIdentity")}
           </span>
         </span>
         <span
           className={`dot ${connected ? "on" : "bad"}`}
-          title={connected ? "Daemon connesso" : "Daemon non raggiungibile"}
+          title={connected ? t("rail.daemonUp") : t("rail.daemonDown")}
         />
       </button>
 
@@ -91,35 +95,40 @@ export function Rail() {
         <button
           className="rail-verb send"
           onClick={() => openSheet([])}
-          title="Invia…"
+          title={t("rail.send")}
         >
           <span className="ico">
             <Icon.Send />
           </span>
-          <span>Invia…</span>
+          <span>{t("rail.send")}</span>
         </button>
-        <button className="rail-verb recv" onClick={openReceive} title="Ricevi…">
+        <button
+          className="rail-verb recv"
+          onClick={openReceive}
+          title={t("rail.receive")}
+        >
           <span className="ico">
             <Icon.Receive />
           </span>
-          <span>Ricevi…</span>
+          <span>{t("rail.receive")}</span>
         </button>
       </div>
 
       <div className="rail-group">
-        <div className="t-label">Sezioni</div>
+        <div className="t-label">{t("rail.sections")}</div>
         {PLACES.map((p) => {
           const c = counts[p.route];
+          const label = t(TITLE_KEY[p.route]);
           return (
             <button
               key={p.route}
               className="rail-item"
               aria-current={route === p.route ? "page" : undefined}
               onClick={() => go(p.route)}
-              title={p.label}
+              title={label}
             >
               <span className="ico">{p.icon}</span>
-              <span className="grow truncate">{p.label}</span>
+              <span className="grow truncate">{label}</span>
               {c && c.n > 0 && (
                 <span className={`rail-count tnum ${c.hot ? "hot" : ""}`}>
                   {c.n}
@@ -134,12 +143,12 @@ export function Rail() {
         <button
           className="rail-item"
           onClick={() => setPaletteOpen(true)}
-          title={`Cerca ed esegui (${modKey}K)`}
+          title={t("app.palette", modKey)}
         >
           <span className="ico">
             <Icon.Search />
           </span>
-          <span className="grow truncate">Cerca ed esegui</span>
+          <span className="grow truncate">{t("rail.palette")}</span>
           <Kbd>mod</Kbd>
           <Kbd>K</Kbd>
         </button>

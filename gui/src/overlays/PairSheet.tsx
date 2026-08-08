@@ -18,6 +18,7 @@
 
 import { useEffect, useState } from "react";
 import { useStore } from "../store";
+import { useT } from "../i18n";
 import { Icon } from "../ui/Icons";
 import { Button, Field, TextInput } from "../ui/Primitives";
 import { CodeHero } from "../ui/Bits";
@@ -25,21 +26,22 @@ import { Sheet } from "../ui/Sheet";
 import { toast } from "../ui/Toasts";
 import type { PairKind } from "../types";
 
-const TITLE: Record<PairKind, string> = {
-  contact_host: "Scambia contatti",
-  contact_join: "Scambia contatti",
-  device_host: "Collega un altro tuo dispositivo",
-  device_join: "Collega questo dispositivo",
-};
+const TITLE = {
+  contact_host: "pair.titleContact",
+  contact_join: "pair.titleContact",
+  device_host: "pair.titleDeviceHost",
+  device_join: "pair.titleDeviceJoin",
+} as const satisfies Record<PairKind, string>;
 
-const SUB: Record<PairKind, string> = {
-  contact_host: "Mostragli il codice: vi salvate a vicenda, già verificati.",
-  contact_join: "Inserisci il codice che ti ha letto.",
-  device_host: "Condivide la tua identità con la macchina nuova.",
-  device_join: "Sostituisce l'identità di questo dispositivo con quella condivisa.",
-};
+const SUB = {
+  contact_host: "pair.subContactHost",
+  contact_join: "pair.subContactJoin",
+  device_host: "pair.subDeviceHost",
+  device_join: "pair.subDeviceJoin",
+} as const satisfies Record<PairKind, string>;
 
 export function PairSheet() {
+  const t = useT();
   const pairing = useStore((s) => s.pairing);
   const start = useStore((s) => s.startPairing);
   const cancel = useStore((s) => s.cancelPairing);
@@ -78,10 +80,7 @@ export function PairSheet() {
   const finish = async () => {
     if (pairing.needsRestart) {
       await restartDaemon();
-      toast.info(
-        "Daemon in riavvio",
-        "Sta ripartendo con l'identità condivisa: qualche secondo e torna tutto."
-      );
+      toast.info(t("pair.restarting"), t("pair.restartingDetail"));
     }
     clear();
     void loadSync();
@@ -92,43 +91,45 @@ export function PairSheet() {
       open
       onClose={close}
       placement="center"
-      title={TITLE[kind]}
-      subtitle={SUB[kind]}
+      title={t(TITLE[kind])}
+      subtitle={t(SUB[kind])}
       footer={
         phase === "done" ? (
           <>
             <div className="spacer" />
             <Button variant="primary" onClick={finish} data-autofocus>
-              {pairing.needsRestart ? "Riavvia e chiudi" : "Fatto"}
+              {pairing.needsRestart
+                ? t("pair.restartAndClose")
+                : t("common.done")}
             </Button>
           </>
         ) : phase === "failed" ? (
           <>
             <div className="spacer" />
-            <Button onClick={clear}>Chiudi</Button>
+            <Button onClick={clear}>{t("common.close")}</Button>
             <Button
               variant="primary"
               onClick={() => void start(kind, joining ? code : undefined, name || undefined)}
             >
-              Riprova
+              {t("common.retry")}
             </Button>
           </>
         ) : notYetStarted ? (
           <>
             <div className="spacer" />
-            <Button onClick={close}>Annulla</Button>
+            <Button onClick={close}>{t("common.cancel")}</Button>
             <Button
               variant="primary"
               disabled={!code.trim() || (kind === "device_join" && !understood)}
               onClick={() => void start(kind, code.trim(), name.trim() || undefined)}
             >
-              Collega
+              {t("pair.link")}
             </Button>
           </>
         ) : (
           <>
             <div className="spacer" />
-            <Button onClick={close}>Annulla</Button>
+            <Button onClick={close}>{t("common.cancel")}</Button>
           </>
         )
       }
@@ -140,7 +141,7 @@ export function PairSheet() {
             <span className="tone-ok">
               <Icon.Check size={22} />
             </span>
-            <span className="t-head">Fatto</span>
+            <span className="t-head">{t("pair.done")}</span>
           </div>
           <div className="t-sm t-sec">{pairing.message}</div>
           {pairing.needsRestart && (
@@ -148,8 +149,7 @@ export function PairSheet() {
               className="card card-pad t-sm"
               style={{ borderColor: "var(--amber)" }}
             >
-              Il daemon sta ancora girando con l'identità precedente. Va riavviato
-              perché il cambio abbia effetto — ci pensa il pulsante qui sotto.
+              {t("pair.needsRestart")}
             </div>
           )}
         </div>
@@ -161,7 +161,7 @@ export function PairSheet() {
             <span className="tone-bad">
               <Icon.Alert size={20} />
             </span>
-            <span className="t-head">Non ha funzionato</span>
+            <span className="t-head">{t("pair.failed")}</span>
           </div>
           <div className="t-sm t-sec" style={{ wordBreak: "break-word" }}>
             {pairing.message}
@@ -177,10 +177,8 @@ export function PairSheet() {
               className="card card-pad t-sm"
               style={{ borderColor: "var(--amber)" }}
             >
-              <strong>Questo condivide la tua identità segreta.</strong> Chi
-              inserisce il codice diventa te: stesso id pubblico, stessa casella,
-              stessa rubrica. Usalo solo su una macchina tua. Il codice vale per
-              un solo dispositivo e scade appena viene usato.
+              <strong>{t("pair.deviceWarnLead")}</strong>{" "}
+              {t("pair.deviceWarnRest")}
             </div>
           )}
 
@@ -190,30 +188,23 @@ export function PairSheet() {
                 value={pairing.code}
                 caption={
                   isDevice
-                    ? "Sull'altro dispositivo: I tuoi dispositivi → Ho un codice."
-                    : "Leggiglielo. Lui apre Persone → Ho un codice e lo inserisce."
+                    ? t("pair.captionDevice")
+                    : t("pair.captionContact")
                 }
               />
               <div className="hstack-sm">
                 <span className="spinner" />
-                <span className="t-sm t-mut">
-                  In attesa dell'altra parte… puoi chiudere per annullare.
-                </span>
+                <span className="t-sm t-mut">{t("pair.waitingOther")}</span>
               </div>
             </>
           ) : (
             <div className="hstack">
               <span className="spinner" />
-              <span className="t-sm t-mut">Preparo il codice…</span>
+              <span className="t-sm t-mut">{t("pair.preparingCode")}</span>
             </div>
           )}
 
-          {!isDevice && (
-            <div className="hint">
-              Vengono scambiati solo gli id pubblici. La tua identità segreta e la
-              tua rubrica non escono da qui.
-            </div>
-          )}
+          {!isDevice && <div className="hint">{t("pair.contactNote")}</div>}
         </div>
       )}
 
@@ -225,18 +216,16 @@ export function PairSheet() {
               className="card card-pad t-sm"
               style={{ borderColor: "var(--red)" }}
             >
-              <strong>Attenzione: è un'operazione irreversibile.</strong>{" "}
-              L'identità attuale di questo dispositivo viene sostituita da quella
-              condivisa. Tutto ciò che è ancora sigillato per la vecchia identità
-              non sarà più apribile qui.
+              <strong>{t("pair.joinWarnLead")}</strong>{" "}
+              {t("pair.joinWarnRest")}
             </div>
           )}
 
           {notYetStarted ? (
             <>
               <Field
-                label="Codice"
-                hint="Quello mostrato sull'altra macchina, tipo 4821-crater-mango."
+                label={t("pair.codeLabel")}
+                hint={t("pair.codeHint")}
               >
                 {({ id, describedBy }) => (
                   <TextInput
@@ -257,8 +246,8 @@ export function PairSheet() {
 
               {kind === "contact_join" && (
                 <Field
-                  label="Come lo chiami (facoltativo)"
-                  hint="Se lo lasci vuoto lo salvo con un nome ricavato dalla sua impronta, e poi lo rinomini quando vuoi."
+                  label={t("pair.nameLabel")}
+                  hint={t("pair.nameHint")}
                 >
                   {({ id, describedBy }) => (
                     <TextInput
@@ -266,7 +255,7 @@ export function PairSheet() {
                       aria-describedby={describedBy}
                       value={name}
                       onChange={(e) => setName(e.currentTarget.value)}
-                      placeholder="es. Giulia"
+                      placeholder={t("people.addNamePlaceholder")}
                     />
                   )}
                 </Field>
@@ -279,18 +268,14 @@ export function PairSheet() {
                     checked={understood}
                     onChange={(e) => setUnderstood(e.currentTarget.checked)}
                   />
-                  <span className="t-sm">
-                    Ho capito: questo dispositivo perde la sua identità attuale.
-                  </span>
+                  <span className="t-sm">{t("pair.understood")}</span>
                 </label>
               )}
             </>
           ) : (
             <div className="hstack">
               <span className="spinner" />
-              <span className="t-sm t-mut">
-                In attesa dell'altra macchina…
-              </span>
+              <span className="t-sm t-mut">{t("pair.waitingMachine")}</span>
             </div>
           )}
         </div>

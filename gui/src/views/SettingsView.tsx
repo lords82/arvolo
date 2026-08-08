@@ -16,6 +16,13 @@ import { useEffect, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { openPath } from "@tauri-apps/plugin-opener";
 import { useStore, type ThemeChoice } from "../store";
+import {
+  langNames,
+  setLangChoice,
+  useLangChoice,
+  useT,
+  type LangChoice,
+} from "../i18n";
 import { Icon } from "../ui/Icons";
 import {
   Badge,
@@ -30,14 +37,16 @@ import { CopyField, Fingerprint } from "../ui/Bits";
 import { Confirm } from "../ui/Sheet";
 import { toast } from "../ui/Toasts";
 
-const SOURCE_LABEL: Record<string, string> = {
-  env: "imposto dalla variabile ARVOLO_RELAY",
-  config: "salvato nelle impostazioni",
-  builtin: "predefinito, incluso nell'app",
-  none: "nessuno",
-};
+const SOURCE_KEY = {
+  env: "settings.sourceEnv",
+  config: "settings.sourceConfig",
+  builtin: "settings.sourceBuiltin",
+  none: "settings.sourceNone",
+} as const;
 
 export function SettingsView() {
+  const t = useT();
+  const lang = useLangChoice();
   const config = useStore((s) => s.config);
   const loading = useStore((s) => s.configLoading);
   const error = useStore((s) => s.configError);
@@ -70,7 +79,7 @@ export function SettingsView() {
         {error}
         <div style={{ marginTop: 10 }}>
           <Button size="sm" onClick={() => void reload()}>
-            Riprova
+            {t("common.retry")}
           </Button>
         </div>
       </div>
@@ -79,7 +88,7 @@ export function SettingsView() {
   if (!config) {
     return (
       <div className="card">
-        <Empty icon={<Icon.Settings size={22} />} title="Carico…" />
+        <Empty icon={<Icon.Settings size={22} />} title={t("common.loading")} />
       </div>
     );
   }
@@ -91,10 +100,7 @@ export function SettingsView() {
     try {
       await save({ display_name: name.trim() ? { set: name.trim() } : "clear" });
       setDirty((d) => ({ ...d, name: false }));
-      toast.ok(
-        "Nome aggiornato",
-        "Viaggia dentro ogni offerta che mandi, da subito."
-      );
+      toast.ok(t("settings.nameSaved"), t("settings.nameSavedDetail"));
     } finally {
       setBusy(false);
     }
@@ -105,10 +111,7 @@ export function SettingsView() {
     try {
       await save({ relay: relay.trim() ? { set: relay.trim() } : "clear" });
       setDirty((d) => ({ ...d, relay: false }));
-      toast.info(
-        "Relay salvato",
-        "Il daemon lo userà al prossimo avvio: riavvialo qui sotto per applicarlo subito."
-      );
+      toast.info(t("settings.relaySaved"), t("settings.relaySavedDetail"));
     } finally {
       setBusy(false);
     }
@@ -118,11 +121,11 @@ export function SettingsView() {
     <div className="view-narrow stack">
       {/* ---- identity ------------------------------------------------- */}
       <div className="card card-pad stack">
-        <div className="t-head">Chi sei</div>
+        <div className="t-head">{t("settings.whoYouAre")}</div>
 
         <Field
-          label="Nome che mostri"
-          hint="Viaggia dentro ogni offerta sigillata che mandi. È un'etichetta che scegli tu: chi la riceve la vede fra virgolette, perché niente la garantisce. L'unica cosa che ti identifica davvero è l'impronta qui sotto."
+          label={t("settings.nameLabel")}
+          hint={t("settings.nameHint")}
         >
           {({ id, describedBy }) => (
             <div className="hstack-sm">
@@ -135,7 +138,7 @@ export function SettingsView() {
                   setName(e.currentTarget.value);
                   setDirty((d) => ({ ...d, name: true }));
                 }}
-                placeholder="nessuno"
+                placeholder={t("settings.namePlaceholder")}
               />
               <Button
                 size="sm"
@@ -143,15 +146,15 @@ export function SettingsView() {
                 busy={busy && dirty.name}
                 onClick={saveName}
               >
-                Salva
+                {t("common.save")}
               </Button>
             </div>
           )}
         </Field>
 
         <Field
-          label="La tua impronta"
-          hint="Le parole che gli altri confrontano per essere certi che sei tu. Leggile a voce quando qualcuno ti aggiunge."
+          label={t("settings.fingerprintLabel")}
+          hint={t("settings.fingerprintHint")}
         >
           {() => (
             <div
@@ -163,25 +166,43 @@ export function SettingsView() {
           )}
         </Field>
 
-        <Field label="Il tuo id pubblico">
+        <Field label={t("settings.publicIdLabel")}>
           {() => <CopyField value={status?.public_id ?? ""} wrap />}
         </Field>
       </div>
 
-      {/* ---- aspetto -------------------------------------------------- */}
+      {/* ---- appearance ----------------------------------------------- */}
       <div className="card card-pad stack">
-        <div className="t-head">Aspetto</div>
-        <Field label="Tema">
+        <div className="t-head">{t("settings.appearance")}</div>
+        <Field label={t("settings.theme")}>
           {() => (
             <Segmented
               block
-              label="Tema"
+              label={t("settings.theme")}
               value={theme}
               onChange={(v) => setTheme(v as ThemeChoice)}
               options={[
-                { value: "system", label: "Sistema" },
-                { value: "light", label: "Chiaro" },
-                { value: "dark", label: "Scuro" },
+                { value: "system", label: t("settings.themeSystem") },
+                { value: "light", label: t("settings.themeLight") },
+                { value: "dark", label: t("settings.themeDark") },
+              ]}
+            />
+          )}
+        </Field>
+        {/* The language names are endonyms and stay put whatever the current
+            language is: somebody hunting for German is looking for "Deutsch".
+            Only "System" is translated, because it is a sentence about the
+            machine rather than the name of a language. */}
+        <Field label={t("settings.language")} hint={t("settings.languageHint")}>
+          {() => (
+            <Segmented
+              block
+              label={t("settings.language")}
+              value={lang}
+              onChange={(v) => setLangChoice(v as LangChoice)}
+              options={[
+                { value: "system", label: t("settings.languageAuto") },
+                ...langNames(),
               ]}
             />
           )}
@@ -191,19 +212,27 @@ export function SettingsView() {
       {/* ---- rete ----------------------------------------------------- */}
       <div className="card card-pad stack">
         <div className="hstack">
-          <div className="grow t-head">Rete</div>
+          <div className="grow t-head">{t("settings.network")}</div>
           <Badge kind={config.relay ? "ok" : "warn"}>
             <Icon.Relay size={10} />
-            {config.relay ? "Relay attivo" : "Nessun relay"}
+            {config.relay ? t("settings.relayOn") : t("settings.relayOff")}
           </Badge>
         </div>
 
         <Field
-          label="Relay"
+          label={t("settings.relayLabel")}
           hint={
             relayLocked
-              ? "In questo momento lo decide la variabile d'ambiente ARVOLO_RELAY: quello che scrivi qui non avrebbe effetto finché è impostata."
-              : `In uso adesso: ${config.relay ?? "nessuno"} — ${SOURCE_LABEL[config.relay_source] ?? config.relay_source}. Un indirizzo senza schema diventa https://; per un relay in chiaro scrivi lo schema per esteso, tipo http://relay.local:6282.`
+              ? t("settings.relayLocked")
+              : t(
+                  "settings.relayHint",
+                  config.relay ?? t("settings.relayNone"),
+                  // An unrecognised provenance is shown raw rather than dropped:
+                  // a newer daemon may well name one this build has not learnt.
+                  config.relay_source in SOURCE_KEY
+                    ? t(SOURCE_KEY[config.relay_source as keyof typeof SOURCE_KEY])
+                    : config.relay_source
+                )
           }
         >
           {({ id, describedBy }) => (
@@ -219,35 +248,32 @@ export function SettingsView() {
                   setRelay(e.currentTarget.value);
                   setDirty((d) => ({ ...d, relay: true }));
                 }}
-                placeholder={config.relay ?? "relay.esempio.it"}
+                placeholder={config.relay ?? t("settings.relayPlaceholder")}
               />
               <Button
                 size="sm"
                 disabled={!dirty.relay || relayLocked || busy}
                 onClick={saveRelay}
               >
-                Salva
+                {t("common.save")}
               </Button>
             </div>
           )}
         </Field>
 
-        <div className="hint">
-          Il relay smista i codici, la casella e i link. Non vede mai i tuoi
-          file in chiaro: quello che conserva è cifrato con chiavi che non ha.
-        </div>
+        <div className="hint">{t("settings.relayNote")}</div>
       </div>
 
-      {/* ---- file ----------------------------------------------------- */}
+      {/* ---- files ---------------------------------------------------- */}
       <div className="card card-pad stack">
-        <div className="t-head">File</div>
+        <div className="t-head">{t("settings.files")}</div>
 
         <Field
-          label="Dove finiscono i file ricevuti"
+          label={t("settings.downloadDirLabel")}
           hint={
             config.download_dir_from_env
-              ? "Deciso dalla variabile ARVOLO_DOWNLOAD_DIR."
-              : "Vale per quello che accetti senza scegliere una cartella al volo."
+              ? t("settings.downloadDirEnv")
+              : t("settings.downloadDirHint")
           }
         >
           {({ id, describedBy }) => (
@@ -266,22 +292,22 @@ export function SettingsView() {
                   if (typeof picked !== "string") return;
                   await save({ download_dir: { set: picked } });
                   toast.info(
-                    "Cartella aggiornata",
-                    "Il daemon la userà al prossimo avvio."
+                    t("settings.dirUpdated"),
+                    t("settings.dirUpdatedDetail")
                   );
                 }}
               >
-                <Icon.Folder size={13} /> Cambia
+                <Icon.Folder size={13} /> {t("settings.change")}
               </Button>
               <Button
                 size="sm"
                 onClick={() =>
                   openPath(config.download_dir).catch((e: unknown) =>
-                    toast.bad("Non riesco ad aprirla", String(e))
+                    toast.bad(t("settings.cannotOpen"), String(e))
                   )
                 }
               >
-                Apri
+                {t("common.open")}
               </Button>
             </div>
           )}
@@ -290,26 +316,23 @@ export function SettingsView() {
         <div className="divider" />
 
         <SwitchRow
-          title="Continua a condividere ciò che hai scaricato"
-          desc="Lasciando attivo il seeding aiuti chi sta scaricando lo stesso file. Puoi spegnerlo se preferisci non restare nello swarm."
+          title={t("settings.seedTitle")}
+          desc={t("settings.seedDesc")}
           checked={config.seed ?? true}
           onChange={async (v) => {
             await save({ seed: { set: v } });
-            toast.info(
-              "Impostazione salvata",
-              "Ha effetto al prossimo avvio del daemon."
-            );
+            toast.info(t("settings.saved"), t("settings.savedDetail"));
           }}
         />
       </div>
 
-      {/* ---- avanzate ------------------------------------------------- */}
+      {/* ---- advanced ------------------------------------------------- */}
       <div className="card card-pad stack">
-        <div className="t-head">Avanzate</div>
+        <div className="t-head">{t("settings.advanced")}</div>
 
         <Field
-          label="File di configurazione"
-          hint="Tutto ciò che non compare qui — cartella temporanea, relay NAT, livello di log — si imposta a mano in questo file, che è commentato riga per riga."
+          label={t("settings.configFileLabel")}
+          hint={t("settings.configFileHint")}
         >
           {() => (
             <div className="hstack-sm">
@@ -318,19 +341,19 @@ export function SettingsView() {
                 size="sm"
                 onClick={() =>
                   openPath(config.config_path).catch((e: unknown) =>
-                    toast.bad("Non riesco ad aprirlo", String(e))
+                    toast.bad(t("settings.cannotOpen"), String(e))
                   )
                 }
               >
-                <Icon.External size={13} /> Apri
+                <Icon.External size={13} /> {t("common.open")}
               </Button>
             </div>
           )}
         </Field>
 
         <Field
-          label="Chiave d'identità"
-          hint="Il tuo segreto. Non condividerlo: chi lo possiede diventa te. Per usare Arvolo su un'altra tua macchina c'è il collegamento dispositivi, che lo trasferisce cifrato."
+          label={t("settings.identityKeyLabel")}
+          hint={t("settings.identityKeyHint")}
         >
           {() => (
             <TextInput readOnly value={config.identity_path} className="mono" />
@@ -341,28 +364,28 @@ export function SettingsView() {
 
         <div className="hstack wrap">
           <span className="t-sm t-sec grow">
-            Daemon {status?.version || "?"} · interfaccia {guiVersion || "?"}
+            {t("settings.versions", status?.version || "?", guiVersion || "?")}
           </span>
           <Button size="sm" onClick={() => setConfirmRestart(true)}>
-            <Icon.Refresh size={13} /> Riavvia il daemon
+            <Icon.Refresh size={13} /> {t("settings.restartDaemon")}
           </Button>
         </div>
       </div>
 
       <Confirm
         open={confirmRestart}
-        title="Riavviare il daemon?"
-        body="I trasferimenti in corso si fermano: quelli ripristinabili riprendono da dove erano, gli altri vanno rifatti da capo. Serve per applicare relay e cartelle appena cambiati."
-        confirmLabel="Riavvia"
+        title={t("settings.confirmRestartTitle")}
+        body={t("settings.confirmRestartBody")}
+        confirmLabel={t("app.restart")}
         onCancel={() => setConfirmRestart(false)}
         onConfirm={async () => {
           setConfirmRestart(false);
           await restartDaemon();
-          toast.info("Daemon in riavvio", "Torna su da solo in qualche secondo.");
+          toast.info(t("settings.restarting"), t("settings.restartingDetail"));
         }}
       />
 
-      {loading && <div className="t-xs t-mut">Aggiorno…</div>}
+      {loading && <div className="t-xs t-mut">{t("settings.refreshing")}</div>}
     </div>
   );
 }

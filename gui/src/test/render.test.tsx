@@ -79,13 +79,13 @@ describe("the window survives what the user does to it", () => {
         <SendSheet />
       </ErrorBoundary>
     );
-    expect(screen.queryByText("Cosa mandi")).toBeNull(); // closed
+    expect(screen.queryByText("What you are sending")).toBeNull(); // closed
 
     await act(async () => {
       useStore.getState().openSheet(["/Users/ls/Scrivania/relazione.pdf"]);
     });
 
-    expect(screen.queryByText(/si è rotto/i), "the tree must not crash").toBeNull();
+    expect(screen.queryByText(/broke in the interface/i), "the tree must not crash").toBeNull();
     expect(screen.getByText("relazione.pdf")).toBeDefined();
     spy.mockRestore();
   });
@@ -95,7 +95,7 @@ describe("the window survives what the user does to it", () => {
     // send sheet. If that render throws, the tree unmounts and the window goes white.
     useStore.getState().openSheet(["/Users/ls/Scrivania/relazione.pdf"]);
     render(<SendSheet />);
-    expect(screen.getByText("Cosa mandi")).toBeDefined();
+    expect(screen.getByText("What you are sending")).toBeDefined();
     expect(screen.getByText("relazione.pdf")).toBeDefined();
   });
 
@@ -103,7 +103,7 @@ describe("the window survives what the user does to it", () => {
     useStore.getState().openSheet(["/a/one.txt", "/a/two.txt", "/a/three.txt"]);
     render(<SendSheet />);
     expect(screen.getByText("one.txt")).toBeDefined();
-    expect(screen.getByText(/3 elementi/)).toBeDefined();
+    expect(screen.getByText(/3 items/)).toBeDefined();
   });
 
   it("41. a path with no extension, spaces or unicode does not break the chip", () => {
@@ -114,7 +114,7 @@ describe("the window survives what the user does to it", () => {
 
   it("42. the full app mounts with an empty board and says what to do", () => {
     render(<App />);
-    expect(screen.getByText(/Trascina qui i file da inviare/)).toBeDefined();
+    expect(screen.getByText(/Drag the files you want to send here/)).toBeDefined();
   });
 
   it("the board shows both directions once there is anything to show", () => {
@@ -127,7 +127,7 @@ describe("the window survives what the user does to it", () => {
           name: "x.bin",
           size: 10,
           transferred: 1,
-          status: "in corso",
+          status: "active",
           encrypted: true,
           verified: false,
           method: "p2p",
@@ -140,20 +140,20 @@ describe("the window survives what the user does to it", () => {
       },
     });
     render(<TransfersView />);
-    expect(screen.getByText("In uscita")).toBeDefined();
-    expect(screen.getByText("In arrivo")).toBeDefined();
+    expect(screen.getByText("Outgoing")).toBeDefined();
+    expect(screen.getByText("Incoming")).toBeDefined();
   });
 
   it("43. the board renders a row of every status without throwing", () => {
     const statuses = [
-      "in corso",
-      "in attesa",
-      "in stallo",
-      "in annullamento",
+      "active",
+      "paused",
+      "stalled",
+      "cancelling",
       "deposited",
-      "completato",
-      "fallito",
-      "annullato",
+      "completed",
+      "failed",
+      "cancelled",
     ] as const;
     const transfers: Record<string, any> = {};
     statuses.forEach((status, i) => {
@@ -192,7 +192,7 @@ describe("the window survives what the user does to it", () => {
           name: "arrivo.zip",
           size: 10,
           transferred: 0,
-          status: "in arrivo",
+          status: "incoming",
           encrypted: true,
           verified: false,
           method: "cloud",
@@ -208,7 +208,7 @@ describe("the window survives what the user does to it", () => {
     // The row itself is the control: an arrival is a decision, so it opens the
     // dialog where the sender's identity can actually be read.
     expect(screen.getByText("arrivo.zip")).toBeDefined();
-    expect(screen.getByText("Rivedi")).toBeDefined();
+    expect(screen.getByText("Review")).toBeDefined();
   });
 
   it("45. the send panel lists saved contacts to send to", async () => {
@@ -240,7 +240,7 @@ describe("the window survives what the user does to it", () => {
     // release build has no devtools to ask. Whatever throws, the user must at least
     // see it — and be told their transfers are still running in the daemon.
     const Boom = () => {
-      throw new Error("boom: qualcosa è andato storto");
+      throw new Error("boom: something went wrong");
     };
     const spy = vi.spyOn(console, "error").mockImplementation(() => {});
     render(
@@ -248,9 +248,9 @@ describe("the window survives what the user does to it", () => {
         <Boom />
       </ErrorBoundary>
     );
-    expect(screen.getByText(/si è rotto/i)).toBeDefined();
-    expect(screen.getByText(/boom: qualcosa è andato storto/)).toBeDefined();
-    expect(screen.getByText("Riprova")).toBeDefined();
+    expect(screen.getByText(/broke in the interface/i)).toBeDefined();
+    expect(screen.getByText(/boom: something went wrong/)).toBeDefined();
+    expect(screen.getByText("Retry")).toBeDefined();
     spy.mockRestore();
   });
 });

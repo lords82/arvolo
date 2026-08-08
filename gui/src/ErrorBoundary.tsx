@@ -1,4 +1,5 @@
 import { Component, type ErrorInfo, type ReactNode } from "react";
+import { t } from "./i18n";
 
 /** A render that throws unmounts the whole tree and leaves an empty window — the
  *  worst failure this app has, because it looks like a freeze and says nothing, and
@@ -37,12 +38,9 @@ export class ErrorBoundary extends Component<
         }}
       >
         <div style={{ fontSize: 32 }}>⚠</div>
-        <div style={{ fontSize: 15, fontWeight: 700 }}>
-          Qualcosa si è rotto nell'interfaccia
-        </div>
+        <div style={{ fontSize: 15, fontWeight: 700 }}>{t("crash.title")}</div>
         <div style={{ fontSize: 12.5, color: "#57534c", maxWidth: 460, lineHeight: 1.5 }}>
-          I trasferimenti non si fermano: continuano nel daemon in background. Puoi
-          riprendere da dove eri.
+          {t("crash.body")}
         </div>
         <pre
           className="mono selectable"
@@ -75,7 +73,7 @@ export class ErrorBoundary extends Component<
             cursor: "pointer",
           }}
         >
-          Riprova
+          {t("common.retry")}
         </button>
       </div>
     );

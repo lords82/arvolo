@@ -3,17 +3,18 @@
 export type Direction = "out" | "in";
 export type Method = "p2p" | "cloud" | "link" | "ticket";
 
-/** UI lifecycle state (Italian labels come from the mock's state machine). */
+/** UI lifecycle state. These are internal identifiers, never rendered: the words
+ *  the user reads come from `statusMeta` in format.ts, in their own language. */
 export type UIStatus =
-  | "in arrivo" // a parked offer awaiting accept/reject
-  | "in corso" // actively transferring
-  | "in attesa" // manually paused
-  | "in stallo" // auto-held, retrying when possible (daemon "waiting")
+  | "incoming" // a parked offer awaiting accept/reject
+  | "active" // actively transferring
+  | "paused" // manually paused
+  | "stalled" // auto-held, retrying when possible (daemon "waiting")
   | "deposited" // handed to the relay mailbox
-  | "completato"
-  | "fallito"
-  | "in annullamento" // cancel sent, waiting for the daemon to confirm it
-  | "annullato";
+  | "completed"
+  | "failed"
+  | "cancelling" // cancel sent, waiting for the daemon to confirm it
+  | "cancelled";
 
 // ---- daemon DTOs (mirror the Rust wire types) ----------------------------
 

@@ -20,6 +20,7 @@ import { useMemo, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { useStore } from "../store";
 import { fmtBytes } from "../format";
+import { useT } from "../i18n";
 import { Icon } from "../ui/Icons";
 import { Badge, Button, Field, TextInput, TrustBadges } from "../ui/Primitives";
 import { Avatar, ExtChip, Fingerprint } from "../ui/Bits";
@@ -27,6 +28,7 @@ import { Sheet } from "../ui/Sheet";
 import { toast } from "../ui/Toasts";
 
 export function IncomingDialog() {
+  const t = useT();
   const offerId = useStore((s) => s.incomingOfferId);
   const close = useStore((s) => s.closeIncoming);
   const transfers = useStore((s) => s.transfers);
@@ -48,23 +50,24 @@ export function IncomingDialog() {
   const [saveAs, setSaveAs] = useState("");
   const [saving, setSaving] = useState(false);
 
-  const t = offerId ? transfers[`o${offerId}`] : undefined;
+  const tx = offerId ? transfers[`o${offerId}`] : undefined;
   const contact = useMemo(
-    () => (t?.peerId ? contactsById[t.peerId] : undefined),
-    [t?.peerId, contactsById]
+    () => (tx?.peerId ? contactsById[tx.peerId] : undefined),
+    [tx?.peerId, contactsById]
   );
 
-  if (!t || !offerId) return null;
+  if (!tx || !offerId) return null;
 
   const known = !!contact;
-  const claimed = t.senderName?.trim();
-  const label = contact?.name ?? (claimed ? `“${claimed}”` : "Mittente sconosciuto");
+  const claimed = tx.senderName?.trim();
+  const label =
+    contact?.name ?? (claimed ? `“${claimed}”` : t("incoming.unknownSender"));
 
   const doAccept = async () => {
     setBusy("accept");
     try {
       await accept(offerId, out, password || null);
-      toast.ok("Ricezione avviata", t.name);
+      toast.ok(t("incoming.started"), tx.name);
     } catch (e) {
       // The store already reported it. The one refusal worth reacting to here is
       // the missing password: it is recoverable, and the user has nowhere else
@@ -91,8 +94,8 @@ export function IncomingDialog() {
       open
       onClose={close}
       placement="center"
-      title="Ti stanno mandando un file"
-      subtitle="Accetta solo se sai da chi arriva."
+      title={t("incoming.title")}
+      subtitle={t("incoming.subtitle")}
       footer={
         <>
           <Button
@@ -101,14 +104,14 @@ export function IncomingDialog() {
             busy={busy === "reject"}
             disabled={busy !== null}
           >
-            Rifiuta
+            {t("incoming.reject")}
           </Button>
           <div className="spacer" />
-          {/* Focus deliberately lands here and not on Accetta: this is the one
+          {/* Focus deliberately lands here and not on Accept: this is the one
               screen in the app where a security decision is made, and it must
               not be one keypress away from a reflex. */}
           <Button onClick={close} disabled={busy !== null} data-autofocus>
-            Decido dopo
+            {t("incoming.later")}
           </Button>
           <Button
             variant="in"
@@ -117,7 +120,7 @@ export function IncomingDialog() {
             disabled={busy !== null}
           >
             <Icon.Receive size={14} />
-            Accetta e scarica
+            {t("incoming.accept")}
           </Button>
         </>
       }
@@ -134,7 +137,7 @@ export function IncomingDialog() {
         }}
       >
         <div className="hstack">
-          <Avatar name={label} id={t.peerId} size={40} ring="in" />
+          <Avatar name={label} id={tx.peerId} size={40} ring="in" />
           <div className="grow">
             <div className="hstack-sm wrap">
               <span className="t-head truncate">{label}</span>
@@ -146,14 +149,13 @@ export function IncomingDialog() {
                 />
               ) : (
                 <Badge kind="warn">
-                  <Icon.Alert size={10} /> Non in rubrica
+                  <Icon.Alert size={10} /> {t("incoming.notInBook")}
                 </Badge>
               )}
             </div>
             {known && claimed && claimed !== contact!.name && (
               <div className="t-xs t-mut" style={{ marginTop: 2 }}>
-                si presenta come “{claimed}” — è un nome che sceglie da sé,
-                niente lo garantisce
+                {t("incoming.claimedName", claimed)}
               </div>
             )}
           </div>
@@ -163,15 +165,15 @@ export function IncomingDialog() {
 
         <div className="stack-sm">
           <div className="t-label">
-            {known ? "Impronta della chiave" : "Id pubblico del mittente"}
+            {known ? t("incoming.keyFingerprint") : t("incoming.senderId")}
           </div>
-          <Fingerprint value={known ? contact!.fingerprint : (t.peerId ?? "")} />
+          <Fingerprint value={known ? contact!.fingerprint : (tx.peerId ?? "")} />
           <div className="hint">
             {known && contact!.verified
-              ? "Hai già confrontato questa impronta fuori banda: è la stessa chiave che hai verificato."
+              ? t("incoming.hintVerified")
               : known
-                ? "Confrontala a voce con chi ti sta mandando il file. È l'unico modo per essere certi che sia davvero lui — un nome non lo dimostra."
-                : "Questa non è un'impronta: è l'id grezzo di qualcuno che non hai in rubrica. Salvalo qui sotto e vedrai le parole da confrontare a voce con lui."}
+                ? t("incoming.hintKnown")
+                : t("incoming.hintUnknown")}
           </div>
         </div>
       </div>
@@ -179,23 +181,23 @@ export function IncomingDialog() {
       {/* --- what ------------------------------------------------------ */}
       <div className="card rows">
         <div className="row" style={{ gridTemplateColumns: "38px 1fr auto" }}>
-          <ExtChip name={t.name} />
+          <ExtChip name={tx.name} />
           <div className="row-main">
-            <div className="row-name truncate" title={t.name}>
-              {t.name}
+            <div className="row-name truncate" title={tx.name}>
+              {tx.name}
             </div>
             <div className="row-meta">
-              <span className="tnum">{fmtBytes(t.size)}</span>
+              <span className="tnum">{fmtBytes(tx.size)}</span>
             </div>
           </div>
         </div>
-        {t.note && (
+        {tx.note && (
           <div style={{ padding: "11px 14px" }}>
             <div className="t-label" style={{ marginBottom: 4 }}>
-              Messaggio allegato
+              {t("incoming.attachedNote")}
             </div>
             <div className="t-sm selectable" style={{ whiteSpace: "pre-wrap" }}>
-              {t.note}
+              {tx.note}
             </div>
           </div>
         )}
@@ -203,8 +205,8 @@ export function IncomingDialog() {
 
       {needsPassword && (
         <Field
-          label="Password"
-          hint="Questo file è protetto: senza la password non si apre. Te l'avrà detta a parte chi te l'ha mandato — non viaggia con il file, e il relay non la conosce."
+          label={t("incoming.passwordLabel")}
+          hint={t("incoming.passwordHint")}
         >
           {({ id, describedBy }) => (
             <TextInput
@@ -222,8 +224,8 @@ export function IncomingDialog() {
 
       {/* --- where ----------------------------------------------------- */}
       <Field
-        label="Dove salvarlo"
-        hint={out ? undefined : `Cartella predefinita: ${downloadDir || "…"}`}
+        label={t("receive.whereLabel")}
+        hint={out ? undefined : t("receive.whereHint", downloadDir || "…")}
       >
         {() => (
           <div className="hstack-sm">
@@ -231,7 +233,7 @@ export function IncomingDialog() {
               readOnly
               value={out ?? ""}
               placeholder={downloadDir}
-              aria-label="Cartella di destinazione"
+              aria-label={t("receive.whereAria")}
             />
             <Button
               size="sm"
@@ -240,7 +242,7 @@ export function IncomingDialog() {
                 if (typeof picked === "string") setOut(picked);
               }}
             >
-              <Icon.Folder size={13} /> Scegli…
+              <Icon.Folder size={13} /> {t("receive.choose")}
             </Button>
           </div>
         )}
@@ -249,13 +251,13 @@ export function IncomingDialog() {
       {/* --- act on the sender ----------------------------------------- */}
       {!known && (
         <div className="card card-pad stack-sm">
-          <div className="t-label">Se lo conosci</div>
+          <div className="t-label">{t("incoming.ifYouKnowThem")}</div>
           <div className="hstack-sm">
             <TextInput
               value={saveAs}
               onChange={(e) => setSaveAs(e.currentTarget.value)}
-              placeholder="Salvalo in rubrica come…"
-              aria-label="Nome da dare al contatto"
+              placeholder={t("incoming.saveAsPlaceholder")}
+              aria-label={t("incoming.saveAsLabel")}
             />
             <Button
               size="sm"
@@ -264,10 +266,10 @@ export function IncomingDialog() {
               onClick={async () => {
                 setSaving(true);
                 try {
-                  await addContact(saveAs.trim(), t.peerId!);
+                  await addContact(saveAs.trim(), tx.peerId!);
                   toast.ok(
-                    `Salvato come ${saveAs.trim()}`,
-                    "Resta non verificato: conferma l'impronta a voce e poi segnalo da Persone."
+                    t("incoming.savedAs", saveAs.trim()),
+                    t("incoming.savedAsDetail")
                   );
                   setSaveAs("");
                 } catch {
@@ -277,27 +279,21 @@ export function IncomingDialog() {
                 }
               }}
             >
-              Salva
+              {t("common.save")}
             </Button>
           </div>
-          <div className="hint">
-            Salvarlo non lo verifica. Diventa verificato solo quando confronti
-            l'impronta di persona o a voce.
-          </div>
+          <div className="hint">{t("incoming.saveNote")}</div>
           <div>
             <Button
               size="sm"
               variant="danger"
               onClick={async () => {
-                await blockContact(t.peerId!);
+                await blockContact(tx.peerId!);
                 await reject(offerId);
-                toast.ok(
-                  "Bloccato",
-                  "Le sue offerte verranno scartate all'arrivo, senza avvisarti."
-                );
+                toast.ok(t("incoming.blocked"), t("incoming.blockedDetail"));
               }}
             >
-              <Icon.Ban size={13} /> Blocca e rifiuta
+              <Icon.Ban size={13} /> {t("incoming.blockAndReject")}
             </Button>
           </div>
         </div>

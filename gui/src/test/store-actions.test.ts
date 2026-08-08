@@ -82,7 +82,7 @@ describe("peerLabel / isVerified", () => {
     await boot();
     expect(s().peerLabel("unknownkey", "Marta")).toBe("Marta");
     expect(s().peerLabel("if2xmnescalwohxlex5qylevzs2cypwdnjxe7sxb76wcphc7daha")).toContain("…");
-    expect(s().peerLabel(null)).toBe("sconosciuto");
+    expect(s().peerLabel(null)).toBe("unknown");
   });
 
   it("66. verified is only true for a contact actually marked verified", async () => {
@@ -373,15 +373,15 @@ describe("a failed action is never silent", () => {
     });
     harness.fail = new Set(["acceptOffer"]);
     await expect(s().accept("o1", null)).rejects.toThrow();
-    expect(s().actionError).toMatch(/accettare/i);
+    expect(s().actionError).toMatch(/accept the file/i);
   });
 
   it.each([
-    ["cancel", () => s().cancel(1), /annullare/i],
-    ["pause", () => s().pause(1), /pausa/i],
-    ["resume", () => s().resume(1), /riprendere/i],
-    ["reject", () => s().reject("o1"), /rifiutare/i],
-    ["markVerified", () => s().markVerified("proj"), /verificare/i],
+    ["cancel", () => s().cancel(1), /cancel it/i],
+    ["pause", () => s().pause(1), /pause it/i],
+    ["resume", () => s().resume(1), /resume it/i],
+    ["reject", () => s().reject("o1"), /reject the file/i],
+    ["markVerified", () => s().markVerified("proj"), /verify/i],
     ["link", () => s().link("/a", null, null), /link/i],
     ["ticket", () => s().ticket(["/a"]), /ticket/i],
   ])("97. a refused %s reports itself", async (cmd, run, want) => {
@@ -425,7 +425,7 @@ describe("a failed action is never silent", () => {
 describe("history is grouped by when it happened, not when we noticed", () => {
   it("100. a transfer from days ago is dated by the engine, not by this session", async () => {
     // `firstSeen` used to be stamped when the GUI first saw a row, so every restart
-    // refiled the whole history under "Oggi".
+    // refiled the whole history under "Today".
     const threeDaysAgo = Math.floor(Date.now() / 1000) - 3 * 86400;
     harness.snapshot.transfers = [dto.transfer({ id: 1, created: threeDaysAgo })];
     await boot();

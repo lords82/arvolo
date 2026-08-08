@@ -1473,6 +1473,10 @@ select {
 /* -- Drop zone ------------------------------------------------------------- */
 
 .dropzone {
+  /* `width` is not redundant: WebKit shrink-to-fits a `button` even when it is
+     block-level, so without this the box sits against the left edge of the
+     column instead of filling it. */
+  width: 100%;
   display: flex;
   flex-direction: column;
   align-items: center;

@@ -3,7 +3,7 @@
 // This is the feature that answers "se creo un link voglio vederlo da qualche parte
 // e poterlo annullare dalla GUI". It handles the one thing in the app with a
 // consequence outside this machine — a public URL anyone holding it can fetch — so
-// its failure paths matter more than most: a Revoca that silently does nothing
+// its failure paths matter more than most: a Withdraw that silently does nothing
 // leaves a file downloadable while telling the user it is gone.
 //
 // Both layers, because this session proved they are not the same test: the store,
@@ -136,16 +136,16 @@ describe("the panel", () => {
     render(<DepositsView />);
     expect(await screen.findByText("relazione.pdf")).toBeDefined();
     expect(screen.getByText("https://relay.test/dl/abc#key")).toBeDefined();
-    expect(screen.getByText("Revoca", { selector: ".row button" })).toBeDefined();
+    expect(screen.getByText("Withdraw", { selector: ".row button" })).toBeDefined();
   });
 
-  it("148. Revoca asks first — it is irreversible and breaks the URL for everyone", async () => {
+  it("148. Withdraw asks first — it is irreversible and breaks the URL for everyone", async () => {
     harness.snapshot.deposits = [deposit({ id: "abc" })];
     await s().go("deposits");
     render(<DepositsView />);
-    fireEvent.click(await screen.findByText("Revoca", { selector: ".row button" }));
+    fireEvent.click(await screen.findByText("Withdraw", { selector: ".row button" }));
     // One click must not destroy anything: it offers the choice.
-    expect(await screen.findByText("Revoca", { selector: ".sheet-foot button" })).toBeDefined();
+    expect(await screen.findByText("Withdraw", { selector: ".sheet-foot button" })).toBeDefined();
     expect(harness.recorder.revokeDeposit).toEqual([]);
   });
 
@@ -153,8 +153,8 @@ describe("the panel", () => {
     harness.snapshot.deposits = [deposit({ id: "abc" })];
     await s().go("deposits");
     render(<DepositsView />);
-    fireEvent.click(await screen.findByText("Revoca", { selector: ".row button" }));
-    fireEvent.click(await screen.findByText("Revoca", { selector: ".sheet-foot button" }));
+    fireEvent.click(await screen.findByText("Withdraw", { selector: ".row button" }));
+    fireEvent.click(await screen.findByText("Withdraw", { selector: ".sheet-foot button" }));
     await waitFor(() => expect(harness.recorder.revokeDeposit).toEqual(["abc"]));
   });
 
@@ -162,19 +162,19 @@ describe("the panel", () => {
     harness.snapshot.deposits = [deposit({ id: "abc" })];
     await s().go("deposits");
     render(<DepositsView />);
-    fireEvent.click(await screen.findByText("Revoca", { selector: ".row button" }));
-    fireEvent.click(await screen.findByText("Annulla"));
+    fireEvent.click(await screen.findByText("Withdraw", { selector: ".row button" }));
+    fireEvent.click(await screen.findByText("Cancel"));
     expect(harness.recorder.revokeDeposit).toEqual([]);
-    expect(await screen.findByText("Revoca", { selector: ".row button" })).toBeDefined();
+    expect(await screen.findByText("Withdraw", { selector: ".row button" })).toBeDefined();
   });
 
-  it("149. a refused Revoca shows the reason instead of doing nothing", async () => {
+  it("149. a refused Withdraw shows the reason instead of doing nothing", async () => {
     harness.snapshot.deposits = [deposit({ id: "abc" })];
     await s().go("deposits");
     harness.fail = new Set(["revokeDeposit"]);
     render(<DepositsView />);
-    fireEvent.click(await screen.findByText("Revoca", { selector: ".row button" }));
-    fireEvent.click(await screen.findByText("Revoca", { selector: ".sheet-foot button" }));
+    fireEvent.click(await screen.findByText("Withdraw", { selector: ".row button" }));
+    fireEvent.click(await screen.findByText("Withdraw", { selector: ".sheet-foot button" }));
     await waitFor(() =>
       expect(
         s().depositsError || s().actionError,
@@ -183,23 +183,23 @@ describe("the panel", () => {
     );
   });
 
-  it("150. Copia puts the link on the clipboard", async () => {
+  it("150. Copy puts the link on the clipboard", async () => {
     const writeText = vi.fn(() => Promise.resolve());
     Object.assign(navigator, { clipboard: { writeText } });
     harness.snapshot.deposits = [deposit()];
     await s().go("deposits");
     render(<DepositsView />);
-    fireEvent.click(await screen.findByLabelText("Copia"));
+    fireEvent.click(await screen.findByLabelText("Copy"));
     expect(writeText).toHaveBeenCalledWith("https://relay.test/dl/abc#key");
   });
 
-  it("151. an expired deposit offers Elimina, not Revoca — there is nothing to take back", async () => {
+  it("151. an expired deposit offers Elimina, not Withdraw — there is nothing to take back", async () => {
     harness.snapshot.deposits = [deposit({ expired: true, expires: nowSecs() - DAY })];
     await s().go("deposits");
     render(<DepositsView />);
     // Nothing is left on the relay to take back — only the local record to tidy.
-    expect(await screen.findByText("Rimuovi")).toBeDefined();
-    expect(screen.queryByText("Revoca", { selector: ".row button" })).toBeNull();
+    expect(await screen.findByText("Remove")).toBeDefined();
+    expect(screen.queryByText("Withdraw", { selector: ".row button" })).toBeNull();
   });
 
   it("152. a sealed deposit shows its recipient, and has no URL to copy", async () => {
@@ -209,8 +209,8 @@ describe("the panel", () => {
     await s().go("deposits");
     render(<DepositsView />);
     expect(await screen.findByText("relazione.pdf")).toBeDefined();
-    expect(screen.getByText(/sigillato per/i)).toBeDefined();
-    expect(screen.queryByLabelText("Copia"), "a sealed deposit is not a public URL").toBeNull();
+    expect(screen.getByText(/sealed for/i)).toBeDefined();
+    expect(screen.queryByLabelText("Copy"), "a sealed deposit is not a public URL").toBeNull();
   });
 
   it("152b. a relay that cannot be asked shows unknown, never a confident 'alive'", async () => {
@@ -231,29 +231,29 @@ describe("the panel", () => {
     expect(await screen.findByText("relazione.pdf")).toBeDefined();
     // The claim in this test's name, actually asserted: the relay has let it go, so
     // there is nothing to withdraw — only the local record to tidy away. Offering
-    // "Revoca" would promise an action that cannot happen.
-    expect(screen.getByText("Non più disponibile")).toBeDefined();
-    expect(screen.getByText("Rimuovi")).toBeDefined();
-    expect(screen.queryByText("Revoca", { selector: ".row button" })).toBeNull();
+    // "Withdraw" would promise an action that cannot happen.
+    expect(screen.getByText("No longer available")).toBeDefined();
+    expect(screen.getByText("Remove")).toBeDefined();
+    expect(screen.queryByText("Withdraw", { selector: ".row button" })).toBeNull();
   });
 
   it("153. with nothing out there it says so plainly", async () => {
     harness.snapshot.deposits = [];
     await s().go("deposits");
     render(<DepositsView />);
-    expect(await screen.findByText(/nessun link o deposito/i)).toBeDefined();
+    expect(await screen.findByText(/no live link or deposit/i)).toBeDefined();
   });
 
-  it("154. Aggiorna refetches", async () => {
+  it("154. Refresh refetches", async () => {
     harness.snapshot.deposits = [deposit()];
     await s().go("deposits");
     render(<DepositsView />);
     const before = harness.recorder.listDeposits;
-    fireEvent.click(screen.getByText("Aggiorna"));
+    fireEvent.click(screen.getByText("Refresh"));
     await waitFor(() => expect(harness.recorder.listDeposits).toBeGreaterThan(before));
   });
 
-  it("155. Aggiorna re-asks the relay rather than trusting a cached list", async () => {
+  it("155. Refresh re-asks the relay rather than trusting a cached list", async () => {
     // The screen is a place now, not a panel with a close button — leaving it is
     // navigating away. What still matters is that the list can be re-read on
     // demand: nothing pushes an update when a link is fetched.
@@ -261,7 +261,7 @@ describe("the panel", () => {
     await s().go("deposits");
     render(<DepositsView />);
     const before = harness.recorder.listDeposits;
-    fireEvent.click(screen.getByText("Aggiorna"));
+    fireEvent.click(screen.getByText("Refresh"));
     await waitFor(() =>
       expect(harness.recorder.listDeposits).toBe(before + 1)
     );
@@ -273,7 +273,7 @@ describe("the panel", () => {
     harness.snapshot.deposits = [deposit({ present: true, downloads: 3, max_downloads: 5 })];
     await s().go("deposits");
     render(<DepositsView />);
-    expect(await screen.findByText("Attivo")).toBeDefined();
+    expect(await screen.findByText("Live")).toBeDefined();
     expect(screen.getByText(/3\/5 download/)).toBeDefined();
   });
 
@@ -281,7 +281,7 @@ describe("the panel", () => {
     harness.snapshot.deposits = [];
     await s().go("deposits");
     render(<DepositsView />);
-    expect(await screen.findByText(/nessun link o deposito/i)).toBeDefined();
+    expect(await screen.findByText(/no live link or deposit/i)).toBeDefined();
     expect(screen.queryByText(/CLI|terminale|arvolo /i)).toBeNull();
   });
 
@@ -300,7 +300,7 @@ describe("the panel", () => {
     ];
     await s().go("deposits");
     render(<DepositsView />);
-    expect(await screen.findByText(/sigillato per alice/)).toBeDefined();
+    expect(await screen.findByText(/sealed for alice/)).toBeDefined();
   });
 
   it("160. a sealed deposit for someone not in the book still says who", async () => {
@@ -312,7 +312,7 @@ describe("the panel", () => {
     ];
     await s().go("deposits");
     render(<DepositsView />);
-    const line = await screen.findByText(/sigillato per \S+/);
+    const line = await screen.findByText(/sealed for \S+/);
     expect(line.textContent).not.toMatch(/sigillato per\s*$/);
   });
 });
@@ -323,7 +323,7 @@ describe("reaching the panel from the app", () => {
     useStore.setState({ route: "transfers" });
     render(<App />);
     fireEvent.click(
-      within(screen.getByRole("navigation")).getByText("Link e depositi")
+      within(screen.getByRole("navigation")).getByText("Links and deposits")
     );
     expect(await screen.findByText("vacanze.zip")).toBeDefined();
     expect(harness.recorder.listDeposits).toBeGreaterThan(0);
@@ -340,7 +340,7 @@ describe("reaching the panel from the app", () => {
     harness.snapshot.deposits = [deposit({ name: "nuovo.zip" })];
     render(<App />);
     fireEvent.click(
-      within(screen.getByRole("navigation")).getByText("Link e depositi")
+      within(screen.getByRole("navigation")).getByText("Links and deposits")
     );
     expect(await screen.findByText("nuovo.zip")).toBeDefined();
     expect(screen.queryByText("vecchio.zip")).toBeNull();

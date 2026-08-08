@@ -15,6 +15,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { useStore } from "../store";
+import type { SendMode } from "../store";
+import { useT } from "../i18n";
 import { Icon } from "../ui/Icons";
 import {
   Badge,
@@ -31,34 +33,34 @@ import { Sheet } from "../ui/Sheet";
 import { toast } from "../ui/Toasts";
 import type { ContactDto } from "../types";
 
-type Mode = "contact" | "code" | "link" | "ticket";
+/** Re-exported name for the store's `SendMode`, so the switch below and the
+ *  callers that preselect it can never drift apart. */
+type Mode = SendMode;
 
-const MODES: { value: Mode; label: string }[] = [
-  { value: "contact", label: "A un contatto" },
-  { value: "code", label: "Codice" },
-  { value: "link", label: "Link" },
-  { value: "ticket", label: "Ticket" },
-];
+const MODE_KEY = {
+  contact: "send.modeContact",
+  code: "send.modeCode",
+  link: "send.modeLink",
+  ticket: "send.modeTicket",
+} as const satisfies Record<Mode, string>;
+
+const MODE_ORDER: Mode[] = ["contact", "code", "link", "ticket"];
 
 /** The blurb under the mode switch. Each says what the recipient needs, because
  *  that is the only thing that actually decides which mode is right. */
-const BLURB: Record<Mode, string> = {
-  contact:
-    "Va dritto a chi hai in rubrica. Se è collegato passa diretto da dispositivo a dispositivo; se non lo è resta nella sua casella sul relay finché non lo ritira.",
-  code:
-    "Un codice corto da leggere a voce o inquadrare. Chi lo riceve lo incolla in Arvolo — non serve che sia già in rubrica, ma dovete essere entrambi collegati adesso.",
-  link:
-    "Un indirizzo che si apre in qualsiasi browser: chi lo riceve non ha bisogno di Arvolo né di un account. Il file viene decifrato nel browser, la chiave viaggia nel frammento dell'URL e al relay non arriva mai.",
-  ticket:
-    "Un ticket arvc… peer-to-peer: non passa né dalla casella né dal relay Arvolo. Per bucare il NAT può servire un relay di collegamento, che vede solo traffico cifrato.",
-};
+const BLURB = {
+  contact: "send.blurbContact",
+  code: "send.blurbCode",
+  link: "send.blurbLink",
+  ticket: "send.blurbTicket",
+} as const satisfies Record<Mode, string>;
 
 const TTL_CHOICES = [
-  { secs: 3600, label: "1 ora" },
-  { secs: 24 * 3600, label: "1 giorno" },
-  { secs: 7 * 24 * 3600, label: "7 giorni" },
-  { secs: 30 * 24 * 3600, label: "30 giorni" },
-];
+  { secs: 3600, key: "send.ttl1h" },
+  { secs: 24 * 3600, key: "send.ttl1d" },
+  { secs: 7 * 24 * 3600, key: "send.ttl7d" },
+  { secs: 30 * 24 * 3600, key: "send.ttl30d" },
+] as const;
 
 interface Result {
   kind: "code" | "link" | "ticket" | "deposit" | "sent";
@@ -79,6 +81,7 @@ function ContactPicker({
   value: string;
   onChange: (name: string) => void;
 }) {
+  const t = useT();
   const [q, setQ] = useState("");
   const shown = useMemo(() => {
     const needle = q.trim().toLowerCase();
@@ -94,31 +97,27 @@ function ContactPicker({
 
   if (!contacts.length) {
     return (
-      <div className="card card-pad t-sm t-sec">
-        Non hai ancora nessuno in rubrica. Aggiungi qualcuno da{" "}
-        <strong>Persone</strong> — il modo più rapido è lo scambio con codice,
-        che vi salva a vicenda già verificati.
-      </div>
+      <div className="card card-pad t-sm t-sec">{t("send.pickerEmpty")}</div>
     );
   }
 
   return (
     <div className="stack-sm">
       <TextInput
-        placeholder="Cerca un contatto…"
+        placeholder={t("send.pickerSearch")}
         value={q}
         onChange={(e) => setQ(e.currentTarget.value)}
-        aria-label="Cerca un contatto"
+        aria-label={t("send.pickerSearch")}
       />
       <div
         className="card rows"
         style={{ maxHeight: 232, overflowY: "auto" }}
         role="radiogroup"
-        aria-label="Destinatario"
+        aria-label={t("send.pickerRecipient")}
       >
         {shown.length === 0 && (
           <div className="t-sm t-mut" style={{ padding: 14 }}>
-            Nessun contatto corrisponde a «{q}».
+            {t("send.pickerNoMatch", q)}
           </div>
         )}
         {shown.map((c) => (
@@ -157,8 +156,10 @@ function ContactPicker({
 }
 
 export function SendSheet() {
+  const t = useT();
   const paths = useStore((s) => s.sheetPaths);
   const presetTo = useStore((s) => s.sheetTo);
+  const presetMode = useStore((s) => s.sheetMode);
   const close = useStore((s) => s.closeSheet);
   const contacts = useStore((s) => s.contacts);
   const send = useStore((s) => s.send);
@@ -189,6 +190,8 @@ export function SendSheet() {
     if (!open) return;
     setFiles(paths ?? []);
     setTo(presetTo ?? "");
+    // Opened from a section that already means one way of sending — honour it.
+    setMode(presetMode ?? "contact");
     setResult(null);
     setBusy(false);
     setNote("");
@@ -197,7 +200,7 @@ export function SendSheet() {
     setKeepCode(false);
     setMaxDl("1");
     setTtl(7 * 24 * 3600);
-  }, [open, paths, presetTo]);
+  }, [open, paths, presetTo, presetMode]);
 
   const pick = async (directory: boolean) => {
     const picked = await openDialog({ multiple: true, directory });
@@ -230,14 +233,11 @@ export function SendSheet() {
           setResult({
             kind: "deposit",
             value: r.ticket,
-            detail: `Depositato per ${to}. Il ticket qui sotto è la tua copia: serve solo se vuoi consegnarlo tu, per esempio se ${to} non riceve l'offerta.`,
+            detail: t("send.depositResult", to),
           });
         } else {
           await send(to, files, note);
-          toast.ok(
-            `In consegna a ${to}`,
-            "Se è online passa diretto, altrimenti resta nella sua casella."
-          );
+          toast.ok(t("send.onItsWay", to), t("send.onItsWayDetail"));
           close();
         }
       } else if (mode === "code") {
@@ -246,8 +246,8 @@ export function SendSheet() {
           kind: "code",
           value: r.code,
           detail: keepCode
-            ? "Il codice resta valido per più destinatari finché non annulli l'invio."
-            : "Il codice vale per un solo destinatario e poi si ritira da solo.",
+            ? t("send.codeKeepDetail")
+            : t("send.codeOnceDetail"),
         });
       } else if (mode === "link") {
         const max = maxDl.trim() === "" ? null : Number(maxDl);
@@ -259,16 +259,14 @@ export function SendSheet() {
         setResult({
           kind: "link",
           value: url,
-          detail:
-            "Chiunque abbia questo indirizzo può scaricare il file finché non scade, non esaurisce i download consentiti o non lo revochi da «Link e depositi».",
+          detail: t("send.linkDetail"),
         });
       } else {
         const r = await ticket(files);
         setResult({
           kind: "ticket",
           value: r.ticket,
-          detail:
-            "Ticket peer-to-peer: resta valido finché il daemon è in esecuzione e l'invio non viene annullato.",
+          detail: t("send.ticketDetail"),
         });
       }
     } catch {
@@ -281,26 +279,22 @@ export function SendSheet() {
   const totalNote =
     files.length === 0
       ? null
-      : `${files.length} element${files.length === 1 ? "o" : "i"}${
-          files.length > 1 ? " · verranno impacchettati in un archivio" : ""
-        }`;
+      : files.length === 1
+        ? t("send.countOne")
+        : t("send.countMany", files.length);
 
   return (
     <Sheet
       open={open}
       onClose={close}
-      title={result ? "Pronto" : "Invia"}
-      subtitle={
-        result
-          ? "Consegna quello che vedi qui sotto."
-          : "Cifrato end-to-end, sempre."
-      }
+      title={result ? t("send.titleReady") : t("send.title")}
+      subtitle={result ? t("send.subtitleReady") : t("send.subtitle")}
       footer={
         result ? (
           <>
             <div className="spacer" />
             <Button variant="primary" onClick={close}>
-              Fatto
+              {t("common.done")}
             </Button>
           </>
         ) : (
@@ -308,7 +302,7 @@ export function SendSheet() {
             <span className="t-xs t-mut truncate">{totalNote}</span>
             <div className="spacer" />
             <Button onClick={close} disabled={busy}>
-              Annulla
+              {t("common.cancel")}
             </Button>
             <Button
               variant="primary"
@@ -319,13 +313,13 @@ export function SendSheet() {
               <Icon.Send size={14} />
               {mode === "contact"
                 ? asDeposit
-                  ? "Deposita"
-                  : "Invia"
+                  ? t("send.submitDeposit")
+                  : t("send.submitSend")
                 : mode === "code"
-                  ? "Genera il codice"
+                  ? t("send.submitCode")
                   : mode === "link"
-                    ? "Crea il link"
-                    : "Crea il ticket"}
+                    ? t("send.submitLink")
+                    : t("send.submitTicket")}
             </Button>
           </>
         )
@@ -341,19 +335,15 @@ export function SendSheet() {
             />
           )}
           {result.kind === "link" && (
-            <div className="t-sm t-sec">
-              Il link contiene la chiave dopo il <code className="mono">#</code>:
-              i browser non inviano quella parte al server, quindi il relay
-              conserva solo byte che non sa leggere.
-            </div>
+            <div className="t-sm t-sec">{t("send.linkKeyNote")}</div>
           )}
         </div>
       ) : (
         <div className="stack">
           {/* --- files ------------------------------------------------- */}
           <Field
-            label="Cosa mandi"
-            hint="Puoi anche trascinare file e cartelle nella finestra."
+            label={t("send.filesLabel")}
+            hint={t("send.filesHint")}
           >
             {() => (
               <div className="stack-sm">
@@ -371,7 +361,7 @@ export function SendSheet() {
                         </span>
                         <button
                           className="icon-btn"
-                          aria-label={`Togli ${basename(p)}`}
+                          aria-label={t("send.filesRemove", basename(p))}
                           onClick={() =>
                             setFiles((f) => f.filter((x) => x !== p))
                           }
@@ -384,10 +374,10 @@ export function SendSheet() {
                 )}
                 <div className="hstack-sm">
                   <Button size="sm" onClick={() => pick(false)}>
-                    <Icon.Plus size={13} /> File…
+                    <Icon.Plus size={13} /> {t("send.pickFiles")}
                   </Button>
                   <Button size="sm" onClick={() => pick(true)}>
-                    <Icon.Folder size={13} /> Cartella…
+                    <Icon.Folder size={13} /> {t("send.pickFolder")}
                   </Button>
                 </div>
               </div>
@@ -395,17 +385,20 @@ export function SendSheet() {
           </Field>
 
           {/* --- mode -------------------------------------------------- */}
-          <Field label="A chi va">
+          <Field label={t("send.whoLabel")}>
             {() => (
               <div className="stack-sm">
                 <Segmented
                   block
-                  label="Modo di invio"
+                  label={t("send.modeLabel")}
                   value={mode}
                   onChange={setMode}
-                  options={MODES}
+                  options={MODE_ORDER.map((m) => ({
+                    value: m,
+                    label: t(MODE_KEY[m]),
+                  }))}
                 />
-                <div className="hint">{BLURB[mode]}</div>
+                <div className="hint">{t(BLURB[mode])}</div>
               </div>
             )}
           </Field>
@@ -416,8 +409,8 @@ export function SendSheet() {
 
           {(mode === "contact" || mode === "code") && (
             <Field
-              label="Due righe per chi riceve (facoltativo)"
-              hint="Viaggia dentro l'offerta sigillata: il relay non la vede."
+              label={t("send.noteLabel")}
+              hint={t("send.noteHint")}
             >
               {({ id, describedBy }) => (
                 <Textarea
@@ -426,7 +419,7 @@ export function SendSheet() {
                   value={note}
                   maxLength={280}
                   onChange={(e) => setNote(e.currentTarget.value)}
-                  placeholder="Ecco i file di cui parlavamo."
+                  placeholder={t("send.notePlaceholder")}
                 />
               )}
             </Field>
@@ -435,16 +428,13 @@ export function SendSheet() {
           {mode === "code" && (
             <div className="switch-row">
               <div className="grow">
-                <div style={{ fontWeight: 570 }}>Vale per più persone</div>
-                <div className="hint">
-                  Di norma il codice vale per un solo destinatario e poi si
-                  ritira. Attivalo per lasciarlo aperto finché non annulli l'invio.
-                </div>
+                <div style={{ fontWeight: 570 }}>{t("send.keepCodeTitle")}</div>
+                <div className="hint">{t("send.keepCodeDesc")}</div>
               </div>
               <Switch
                 checked={keepCode}
                 onChange={setKeepCode}
-                label="Codice valido per più persone"
+                label={t("send.keepCodeLabel")}
               />
             </div>
           )}
@@ -454,17 +444,14 @@ export function SendSheet() {
               <div className="switch-row">
                 <div className="grow">
                   <div style={{ fontWeight: 570 }}>
-                    Lascia in casella, non aspettare
+                    {t("send.depositTitle")}
                   </div>
-                  <div className="hint">
-                    Deposita subito sul relay anche se è collegato: tu chiudi e te ne
-                    dimentichi. Sblocca scadenza, numero di ritiri e password.
-                  </div>
+                  <div className="hint">{t("send.depositDesc")}</div>
                 </div>
                 <Switch
                   checked={asDeposit}
                   onChange={setAsDeposit}
-                  label="Lascia in casella"
+                  label={t("send.depositLabel")}
                 />
               </div>
 
@@ -478,23 +465,23 @@ export function SendSheet() {
                     border: "1px solid var(--line)",
                   }}
                 >
-                  <Field label="Scade dopo">
+                  <Field label={t("send.expiresAfter")}>
                     {() => (
                       <Segmented
                         block
-                        label="Scadenza del deposito"
+                        label={t("send.depositTtlLabel")}
                         value={String(ttl)}
                         onChange={(v) => setTtl(Number(v))}
                         options={TTL_CHOICES.map((c) => ({
                           value: String(c.secs),
-                          label: c.label,
+                          label: t(c.key),
                         }))}
                       />
                     )}
                   </Field>
                   <Field
-                    label="Ritiri consentiti"
-                    hint="Di norma uno solo: appena lo scarica, il relay lo cancella."
+                    label={t("send.maxPickupsLabel")}
+                    hint={t("send.maxPickupsHint")}
                   >
                     {({ id, describedBy }) => (
                       <TextInput
@@ -508,8 +495,8 @@ export function SendSheet() {
                     )}
                   </Field>
                   <Field
-                    label="Password (facoltativa)"
-                    hint="Cifra il deposito anche per il destinatario: senza questa password non si apre. Il relay non la conosce e non può recuperarla — se la perdi, il file è perso."
+                    label={t("send.passwordLabel")}
+                    hint={t("send.passwordHint")}
                   >
                     {({ id, describedBy }) => (
                       <TextInput
@@ -519,7 +506,7 @@ export function SendSheet() {
                         autoComplete="new-password"
                         value={password}
                         onChange={(e) => setPassword(e.currentTarget.value)}
-                        placeholder="nessuna"
+                        placeholder={t("send.passwordPlaceholder")}
                       />
                     )}
                   </Field>
@@ -532,27 +519,26 @@ export function SendSheet() {
             <div className="stack">
               {linkTooMany && (
                 <div className="card card-pad t-sm" style={{ borderColor: "var(--amber)" }}>
-                  Un link pubblica un solo elemento. Scegline uno, oppure metti
-                  tutto in una cartella e seleziona quella.
+                  {t("send.linkTooMany")}
                 </div>
               )}
-              <Field label="Scade dopo">
+              <Field label={t("send.expiresAfter")}>
                 {() => (
                   <Segmented
                     block
-                    label="Scadenza del link"
+                    label={t("send.linkTtlLabel")}
                     value={String(ttl)}
                     onChange={(v) => setTtl(Number(v))}
                     options={TTL_CHOICES.map((c) => ({
                       value: String(c.secs),
-                      label: c.label,
+                      label: t(c.key),
                     }))}
                   />
                 )}
               </Field>
               <Field
-                label="Download consentiti"
-                hint="Lascia vuoto per non mettere limiti."
+                label={t("send.maxDownloadsLabel")}
+                hint={t("send.maxDownloadsHint")}
               >
                 {({ id, describedBy }) => (
                   <TextInput
@@ -562,7 +548,7 @@ export function SendSheet() {
                     inputMode="numeric"
                     value={maxDl}
                     onChange={(e) => setMaxDl(e.currentTarget.value)}
-                    placeholder="illimitati"
+                    placeholder={t("send.maxDownloadsPlaceholder")}
                   />
                 )}
               </Field>
@@ -571,15 +557,14 @@ export function SendSheet() {
 
           {(mode === "code" || mode === "link") && !relay && (
             <div className="card card-pad t-sm" style={{ borderColor: "var(--red)" }}>
-              Serve un relay per questa modalità e non ne risulta configurato
-              nessuno. Impostane uno da <strong>Impostazioni</strong>.
+              {t("send.noRelay")}
             </div>
           )}
 
           {mode === "ticket" && (
             <div className="hstack-sm">
               <Badge kind="info">
-                <Icon.Lock size={10} /> Nessun relay Arvolo
+                <Icon.Lock size={10} /> {t("send.noArvoloRelay")}
               </Badge>
             </div>
           )}

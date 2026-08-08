@@ -11,7 +11,8 @@
 // worse than one that offers nothing.
 
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
-import { fire, useStore, type Route } from "../store";
+import { fire, TITLE_KEY, useStore, type Route } from "../store";
+import { useT } from "../i18n";
 import { useModal } from "../ui/Sheet";
 import { Icon } from "../ui/Icons";
 import { Avatar } from "../ui/Bits";
@@ -28,6 +29,7 @@ interface Entry {
 }
 
 export function CommandPalette() {
+  const t = useT();
   const open = useStore((s) => s.paletteOpen);
   const setOpen = useStore((s) => s.setPaletteOpen);
   const go = useStore((s) => s.go);
@@ -55,94 +57,96 @@ export function CommandPalette() {
   useModal(paletteRef, () => setOpen(false), open);
 
   const entries = useMemo<Entry[]>(() => {
-    const nav = (route: Route, label: string, icon: JSX.Element, kw?: string): Entry => ({
+    const nav = (route: Route, icon: JSX.Element, kw: string): Entry => ({
       key: `go:${route}`,
-      label,
+      // The same label the rail and the header use — one name per place.
+      label: t(TITLE_KEY[route]),
       icon,
       keywords: kw,
-      group: "Vai a",
+      group: t("palette.groupGoTo"),
       run: () => go(route),
     });
+
+    const actions = t("palette.groupActions");
+    const people = t("palette.groupPeople");
 
     const list: Entry[] = [
       {
         key: "send",
-        label: "Invia file…",
-        hint: "contatto, codice, link o ticket",
+        label: t("palette.send"),
+        hint: t("palette.sendHint"),
         icon: <Icon.Send />,
-        keywords: "manda spedisci upload nuovo",
-        group: "Azioni",
+        keywords: t("palette.sendKw"),
+        group: actions,
         run: () => openSheet([]),
       },
       {
         key: "receive",
-        label: "Ricevi…",
-        hint: "incolla un codice o un ticket",
+        label: t("palette.receive"),
+        hint: t("palette.receiveHint"),
         icon: <Icon.Receive />,
-        keywords: "scarica download incolla",
-        group: "Azioni",
+        keywords: t("palette.receiveKw"),
+        group: actions,
         run: openReceive,
       },
       {
         key: "pair-contact",
-        label: "Scambia contatti con qualcuno",
-        hint: "vi salvate a vicenda, già verificati",
+        label: t("palette.pairContact"),
+        hint: t("palette.pairContactHint"),
         icon: <Icon.Qr />,
-        keywords: "pairing accoppia aggiungi persona verifica",
-        group: "Azioni",
+        keywords: t("palette.pairContactKw"),
+        group: actions,
         run: () => fire(startPairing("contact_host")),
       },
       {
         key: "pair-device",
-        label: "Collega un altro tuo dispositivo",
+        label: t("palette.pairDevice"),
         icon: <Icon.Devices />,
-        keywords: "multidevice identita sincronizza",
-        group: "Azioni",
+        keywords: t("palette.pairDeviceKw"),
+        group: actions,
         run: () => fire(startPairing("device_host")),
       },
       {
         key: "sync",
-        label: "Sincronizza la rubrica adesso",
+        label: t("palette.sync"),
         icon: <Icon.Refresh />,
-        keywords: "contatti dispositivi",
-        group: "Azioni",
+        keywords: t("palette.syncKw"),
+        group: actions,
         run: () => fire(syncNow()),
       },
       {
         key: "pause-all",
-        label: pauseAll
-          ? "Riprendi tutti i trasferimenti"
-          : "Metti in pausa tutti i trasferimenti",
+        label: pauseAll ? t("palette.resumeAll") : t("palette.pauseAll"),
         icon: pauseAll ? <Icon.Play /> : <Icon.Pause />,
-        keywords: "pausa tutto ferma sospendi riprendi",
-        group: "Azioni",
+        keywords: t("palette.pauseAllKw"),
+        group: actions,
         run: () => fire(togglePauseAll()),
       },
       {
         key: "clear-finished",
-        label: "Pulisci i trasferimenti conclusi",
+        label: t("palette.clearFinished"),
         icon: <Icon.Trash />,
-        keywords: "svuota completati",
-        group: "Azioni",
+        keywords: t("palette.clearFinishedKw"),
+        group: actions,
         run: () => fire(clearFinished()),
       },
-      nav("transfers", "Trasferimenti", <Icon.Transfers />, "board invii"),
-      nav("people", "Persone", <Icon.People />, "contatti rubrica"),
-      nav("deposits", "Link e depositi", <Icon.Link />, "relay revoca"),
-      nav("history", "Cronologia", <Icon.History />, "storico log"),
-      nav("devices", "I tuoi dispositivi", <Icon.Devices />, "sync identita"),
-      nav("settings", "Impostazioni", <Icon.Settings />, "config relay nome"),
+      nav("transfers", <Icon.Transfers />, t("palette.navTransfersKw")),
+      nav("people", <Icon.People />, t("palette.navPeopleKw")),
+      nav("deposits", <Icon.Link />, t("palette.navDepositsKw")),
+      nav("history", <Icon.History />, t("palette.navHistoryKw")),
+      nav("devices", <Icon.Devices />, t("palette.navDevicesKw")),
+      nav("settings", <Icon.Settings />, t("palette.navSettingsKw")),
       {
         key: "theme",
         label:
           theme === "dark"
-            ? "Passa al tema chiaro"
+            ? t("palette.themeLight")
             : theme === "light"
-              ? "Segui il tema di sistema"
-              : "Passa al tema scuro",
+              ? t("palette.themeSystem")
+              : t("palette.themeDark"),
         icon: theme === "dark" ? <Icon.Sun /> : <Icon.Moon />,
-        keywords: "tema scuro chiaro dark light aspetto",
-        group: "Azioni",
+        keywords: t("palette.themeKw"),
+        group: actions,
         run: () =>
           setTheme(theme === "dark" ? "light" : theme === "light" ? "system" : "dark"),
       },
@@ -152,19 +156,19 @@ export function CommandPalette() {
       if (c.blocked) continue;
       list.push({
         key: `to:${c.name}`,
-        label: `Invia a ${c.name}`,
-        hint: c.verified ? "verificato" : "non verificato",
+        label: t("palette.sendTo", c.name),
+        hint: c.verified ? t("palette.verified") : t("palette.notVerified"),
         icon: <Avatar name={c.display_name || c.name} id={c.id} size={18} />,
         keywords: `${c.display_name} ${c.id}`,
-        group: "Persone",
-        run: () => openSheet([], c.name),
+        group: people,
+        run: () => openSheet([], c.name, "contact"),
       });
       list.push({
         key: `open:${c.name}`,
-        label: `Apri la scheda di ${c.name}`,
+        label: t("palette.openCard", c.name),
         icon: <Icon.Info />,
-        keywords: `${c.display_name} impronta fingerprint verifica`,
-        group: "Persone",
+        keywords: `${c.display_name} ${t("palette.personKw")}`,
+        group: people,
         run: () => {
           go("people");
           openPerson(c.name);
@@ -185,6 +189,7 @@ export function CommandPalette() {
     clearFinished,
     togglePauseAll,
     pauseAll,
+    t,
   ]);
 
   const shown = useMemo(() => {
@@ -235,14 +240,14 @@ export function CommandPalette() {
         className="palette"
         role="dialog"
         aria-modal="true"
-        aria-label="Cerca ed esegui"
+        aria-label={t("palette.label")}
       >
         <input
           ref={inputRef}
           value={q}
           onChange={(e) => setQ(e.currentTarget.value)}
-          placeholder="Cerca un comando o una persona…"
-          aria-label="Cerca un comando o una persona"
+          placeholder={t("palette.placeholder")}
+          aria-label={t("palette.placeholder")}
           role="combobox"
           aria-expanded="true"
           aria-controls="palette-list"
@@ -266,7 +271,7 @@ export function CommandPalette() {
         <div className="list" id="palette-list" role="listbox" ref={listRef}>
           {shown.length === 0 && (
             <div className="t-sm t-mut" style={{ padding: 18, textAlign: "center" }}>
-              Niente corrisponde a «{q}».
+              {t("palette.noMatch", q)}
             </div>
           )}
           {shown.map((e, i) => {

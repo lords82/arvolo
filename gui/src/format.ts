@@ -1,6 +1,7 @@
 // Presentation helpers: byte/size formatting, id shortening, and the colour/label
 // metadata maps ported from the mock's `renderVals`.
 
+import { t } from "./i18n";
 import type { DepositDto, Method, UIStatus, UITransfer } from "./types";
 
 export function fmtBytes(bytes: number): string {
@@ -44,24 +45,24 @@ export interface StatusMeta {
 }
 export function statusMeta(s: UIStatus): StatusMeta {
   switch (s) {
-    case "in corso":
-      return { tone: "out", text: "In corso" };
-    case "completato":
-      return { tone: "ok", text: "Completato" };
+    case "active":
+      return { tone: "out", text: t("status.active") };
+    case "completed":
+      return { tone: "ok", text: t("status.completed") };
     case "deposited":
-      return { tone: "in", text: "Depositato" };
-    case "in attesa":
-      return { tone: "warn", text: "In pausa" };
-    case "in arrivo":
-      return { tone: "warn", text: "Da confermare" };
-    case "in stallo":
-      return { tone: "mut", text: "In stallo" };
-    case "fallito":
-      return { tone: "bad", text: "Fallito" };
-    case "in annullamento":
-      return { tone: "mut", text: "Annullamento…" };
-    case "annullato":
-      return { tone: "mut", text: "Annullato" };
+      return { tone: "in", text: t("status.deposited") };
+    case "paused":
+      return { tone: "warn", text: t("status.paused") };
+    case "incoming":
+      return { tone: "warn", text: t("status.incoming") };
+    case "stalled":
+      return { tone: "mut", text: t("status.stalled") };
+    case "failed":
+      return { tone: "bad", text: t("status.failed") };
+    case "cancelling":
+      return { tone: "mut", text: t("status.cancelling") };
+    case "cancelled":
+      return { tone: "mut", text: t("status.cancelled") };
   }
 }
 
@@ -70,17 +71,23 @@ export interface MethodMeta {
   label: string;
   tone: Tone;
 }
-const METHODS: Record<Method, MethodMeta> = {
-  p2p: { glyph: "⇄", label: "Diretto", tone: "in" },
-  cloud: { glyph: "☁", label: "Mailbox", tone: "mut" },
-  link: { glyph: "◇", label: "Link", tone: "violet" },
-  ticket: { glyph: "⛓", label: "Ticket", tone: "out" },
+/** Glyph and tone are language-independent; only the label is looked up, and it
+ *  is looked up per call rather than baked into a module constant — a constant
+ *  built at import time would keep the launch language for ever. */
+const METHODS: Record<Method, { glyph: string; key: "method.p2p" | "method.cloud" | "method.link" | "method.ticket"; tone: Tone }> = {
+  p2p: { glyph: "⇄", key: "method.p2p", tone: "in" },
+  cloud: { glyph: "☁", key: "method.cloud", tone: "mut" },
+  link: { glyph: "◇", key: "method.link", tone: "violet" },
+  ticket: { glyph: "⛓", key: "method.ticket", tone: "out" },
 };
 export function methodMeta(m: Method): MethodMeta {
   // `METHODS[m]` alone walks the prototype chain: "toString"/"valueOf" would hit
   // Object.prototype's, which is truthy, so `??` would not fall back and the row
   // would render `undefined`. Only an own key counts.
-  return Object.prototype.hasOwnProperty.call(METHODS, m) ? METHODS[m] : METHODS.cloud;
+  const spec = Object.prototype.hasOwnProperty.call(METHODS, m)
+    ? METHODS[m]
+    : METHODS.cloud;
+  return { glyph: spec.glyph, label: t(spec.key), tone: spec.tone };
 }
 
 /** File-kind tint, as a tone. Grouped by what the file *is* rather than by
@@ -124,18 +131,18 @@ export function extTint(ext: string): Tone {
 /** Progress-bar modifier classes: direction, plus the state that overrides it.
  *  A finished bar is green and a failed one red regardless of which way it went —
  *  at that point the outcome is the only thing left worth encoding. */
-export function barClass(t: UITransfer): string {
-  const dir = t.dir === "out" ? "out" : "in";
-  if (t.status === "completato") return `prog ${dir} done`;
-  if (t.status === "fallito") return `prog ${dir} bad`;
-  if (t.status === "in stallo" || t.status === "in attesa")
+export function barClass(tx: UITransfer): string {
+  const dir = tx.dir === "out" ? "out" : "in";
+  if (tx.status === "completed") return `prog ${dir} done`;
+  if (tx.status === "failed") return `prog ${dir} bad`;
+  if (tx.status === "stalled" || tx.status === "paused")
     return `prog ${dir} stall`;
   return `prog ${dir}`;
 }
 
-export function pct(t: UITransfer): number {
-  if (!t.size) return 0;
-  return Math.min(100, Math.round((t.transferred / t.size) * 100));
+export function pct(tx: UITransfer): number {
+  if (!tx.size) return 0;
+  return Math.min(100, Math.round((tx.transferred / tx.size) * 100));
 }
 
 /** Human throughput, e.g. "42 MB/s". */
@@ -150,37 +157,37 @@ const ETA_MAX_SECS = 30 * 24 * 3600;
 
 /** Human remaining time from size/rate, e.g. "3 min". Empty when there is nothing
  *  honest to say. */
-export function fmtEta(t: UITransfer): string {
-  if (!t.rate || t.rate <= 0 || !Number.isFinite(t.rate) || !t.size) return "";
-  const secs = Math.max(0, (t.size - t.transferred) / t.rate);
+export function fmtEta(tx: UITransfer): string {
+  if (!tx.rate || tx.rate <= 0 || !Number.isFinite(tx.rate) || !tx.size) return "";
+  const secs = Math.max(0, (tx.size - tx.transferred) / tx.rate);
   if (!Number.isFinite(secs) || secs > ETA_MAX_SECS) return "";
-  if (secs < 90) return `${Math.max(1, Math.round(secs))} s`;
-  if (secs < 90 * 60) return `${Math.round(secs / 60)} min`;
-  return `${Math.round(secs / 3600)} h`;
+  if (secs < 90) return t("eta.seconds", Math.max(1, Math.round(secs)));
+  if (secs < 90 * 60) return t("eta.minutes", Math.round(secs / 60));
+  return t("eta.hours", Math.round(secs / 3600));
 }
 
 /** The right-hand meta line under the status. */
-export function metaLine(t: UITransfer): string {
-  switch (t.status) {
-    case "in corso": {
-      const parts = [`${pct(t)}%`];
-      if (t.rate && t.rate > 0) {
-        parts.push(fmtRate(t.rate));
-        const eta = fmtEta(t);
+export function metaLine(tx: UITransfer): string {
+  switch (tx.status) {
+    case "active": {
+      const parts = [`${pct(tx)}%`];
+      if (tx.rate && tx.rate > 0) {
+        parts.push(fmtRate(tx.rate));
+        const eta = fmtEta(tx);
         if (eta) parts.push(eta);
       }
       return parts.join(" · ");
     }
-    case "in attesa":
-      return "in pausa";
-    case "in stallo":
-      return t.reason ? t.reason : "riprende appena possibile";
-    case "in arrivo":
-      return "apri per i dettagli";
+    case "paused":
+      return t("meta.paused");
+    case "stalled":
+      return tx.reason ? tx.reason : t("meta.stalled");
+    case "incoming":
+      return t("meta.incoming");
     case "deposited":
-      return "in attesa che il destinatario lo ritiri";
-    case "fallito":
-      return t.reason || "trasferimento fallito";
+      return t("meta.deposited");
+    case "failed":
+      return tx.reason || t("meta.failed");
     default:
       return "";
   }
@@ -203,16 +210,16 @@ export function isToday(ms: number): boolean {
  *  may echo it back as its own cap, so both ends of the wire can carry it. */
 const UNLIMITED = 4294967295;
 
-/** Human time until a unix-seconds deadline, e.g. "6 giorni", "3 ore". Empty once
- *  the deadline has passed — the caller says "scaduto" instead of counting down
+/** Human time until a unix-seconds deadline, e.g. "6 days", "3 hours". Empty once
+ *  the deadline has passed — the caller says "expired" instead of counting down
  *  into the negatives. */
 export function fmtUntil(unixSecs: number, nowMs: number = Date.now()): string {
   const secs = unixSecs - Math.floor(nowMs / 1000);
   if (secs <= 0) return "";
-  if (secs < 90) return secs === 1 ? "1 secondo" : `${secs} secondi`;
-  if (secs < 90 * 60) return `${Math.round(secs / 60)} minuti`;
-  if (secs < 48 * 3600) return `${Math.round(secs / 3600)} ore`;
-  return `${Math.round(secs / 86400)} giorni`;
+  if (secs < 90) return t("until.seconds", secs);
+  if (secs < 90 * 60) return t("until.minutes", Math.round(secs / 60));
+  if (secs < 48 * 3600) return t("until.hours", Math.round(secs / 3600));
+  return t("until.days", Math.round(secs / 86400));
 }
 
 export interface DepositMeta {
@@ -238,35 +245,35 @@ export function depositMeta(d: DepositDto, nowMs: number = Date.now()): DepositM
   if (d.expired) {
     return {
       tone: "mut",
-      text: "Scaduto",
+      text: t("deposit.expired"),
       // `expired` is a deadline comparison against the local clock, not a report
       // from the relay. Saying what we actually know.
-      detail: "la scadenza è passata",
+      detail: t("deposit.expiredDetail"),
       revocable: false,
     };
   }
   if (d.present === false) {
     return {
       tone: "mut",
-      text: "Non più disponibile",
+      text: t("deposit.gone"),
       detail:
-        d.kind === "link"
-          ? "scaricato fino al limite, oppure già revocato"
-          : "ritirato dal destinatario, oppure già revocato",
+        d.kind === "link" ? t("deposit.goneLink") : t("deposit.goneSealed"),
       revocable: false,
     };
   }
   const until = fmtUntil(d.expires, nowMs);
   // `fmtUntil` returns "" only once the deadline has *passed*, so the fallback
   // must not read as "about to expire".
-  const scade = until ? `scade tra ${until}` : "scadenza appena passata";
+  const when = until
+    ? t("deposit.expiresIn", until)
+    : t("deposit.expiredJustNow");
   if (d.present === null) {
     // Reachability is not the same as absence. We keep it revocable: the daemon
     // will find out for real when the user asks.
     return {
       tone: "warn",
-      text: "Stato sconosciuto",
-      detail: `relay non raggiungibile · ${scade}`,
+      text: t("deposit.unknown"),
+      detail: t("deposit.unknownDetail", when),
       revocable: true,
     };
   }
@@ -276,14 +283,23 @@ export function depositMeta(d: DepositDto, nowMs: number = Date.now()): DepositM
       d.max_downloads !== null && d.max_downloads < UNLIMITED
         ? `/${d.max_downloads}`
         : "";
-    parts.push(`${d.downloads}${cap} download`);
+    parts.push(t("deposit.downloads", d.downloads, cap));
   } else {
     // An older relay reports presence but not counts. Say the cap we asked for
     // rather than a number we do not have.
-    parts.push(d.max_label === "unlimited" ? "nessun limite" : `max ${d.max_label}`);
+    parts.push(
+      d.max_label === "unlimited"
+        ? t("deposit.noLimit")
+        : t("deposit.max", d.max_label)
+    );
   }
-  parts.push(scade);
-  return { tone: "ok", text: "Attivo", detail: parts.join(" · "), revocable: true };
+  parts.push(when);
+  return {
+    tone: "ok",
+    text: t("deposit.active"),
+    detail: parts.join(" · "),
+    revocable: true,
+  };
 }
 
 export interface Section {
@@ -300,39 +316,37 @@ export function sectionsFor(
   query: string
 ): Section[] {
   const q = query.trim().toLowerCase();
-  const match = (t: UITransfer) =>
+  const match = (tx: UITransfer) =>
     !q ||
-    t.name.toLowerCase().includes(q) ||
-    (t.peer || "").toLowerCase().includes(q);
-  const f = rows.filter((t) => t.dir === dir && match(t));
+    tx.name.toLowerCase().includes(q) ||
+    (tx.peer || "").toLowerCase().includes(q);
+  const f = rows.filter((tx) => tx.dir === dir && match(tx));
 
-  // "in annullamento" belongs here: the cancel is in flight, the transfer is still
+  // "cancelling" belongs here: the cancel is in flight, the transfer is still
   // the daemon's, and the row must stay on screen. Leaving it out of every section
-  // made it vanish the instant the user clicked Annulla — the board quietly
+  // made it vanish the instant the user clicked Cancel — the board quietly
   // disagreeing with the engine, which is the bug this whole file guards against.
   const isActive = (s: UIStatus) =>
-    s === "in corso" ||
-    s === "in attesa" ||
-    s === "in stallo" ||
-    s === "in annullamento";
+    s === "active" || s === "paused" || s === "stalled" || s === "cancelling";
   const isTerminal = (s: UIStatus) =>
-    s === "completato" ||
-    s === "fallito" ||
-    s === "annullato" ||
+    s === "completed" ||
+    s === "failed" ||
+    s === "cancelled" ||
     s === "deposited";
 
-  const pending = f.filter((t) => t.status === "in arrivo");
-  const active = f.filter((t) => isActive(t.status));
-  const today = f.filter((t) => isTerminal(t.status) && isToday(t.firstSeen));
-  const earlier = f.filter((t) => isTerminal(t.status) && !isToday(t.firstSeen));
+  const pending = f.filter((tx) => tx.status === "incoming");
+  const active = f.filter((tx) => isActive(tx.status));
+  const today = f.filter((tx) => isTerminal(tx.status) && isToday(tx.firstSeen));
+  const earlier = f.filter((tx) => isTerminal(tx.status) && !isToday(tx.firstSeen));
 
   const secs: Section[] = [];
   if (pending.length)
-    secs.push({ key: "p", title: "Da confermare", items: pending });
+    secs.push({ key: "p", title: t("section.pending"), items: pending });
   if (active.length)
-    secs.push({ key: "a", title: "In corso e in pausa", items: active });
-  if (today.length) secs.push({ key: "t", title: "Oggi", items: today });
+    secs.push({ key: "a", title: t("section.active"), items: active });
+  if (today.length)
+    secs.push({ key: "t", title: t("section.today"), items: today });
   if (earlier.length)
-    secs.push({ key: "e", title: "Precedenti", items: earlier });
+    secs.push({ key: "e", title: t("section.earlier"), items: earlier });
   return secs;
 }

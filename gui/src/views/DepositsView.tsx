@@ -13,6 +13,7 @@ import { useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { fire, useStore } from "../store";
 import { depositMeta, fmtBytes } from "../format";
+import { useT } from "../i18n";
 import { Icon } from "../ui/Icons";
 import { Badge, Button, Empty, IconButton } from "../ui/Primitives";
 import { CopyButton, ExtChip } from "../ui/Bits";
@@ -21,6 +22,7 @@ import { toast } from "../ui/Toasts";
 import type { DepositDto } from "../types";
 
 function DepositRow({ d }: { d: DepositDto }) {
+  const t = useT();
   const revoke = useStore((s) => s.revokeDeposit);
   const revoking = useStore((s) => s.revoking.includes(d.id));
   const peerLabel = useStore((s) => s.peerLabel);
@@ -45,17 +47,23 @@ function DepositRow({ d }: { d: DepositDto }) {
             <span className="tnum">{fmtBytes(d.size)}</span>
             <span className="sep" />
             <span className="truncate">
-              {isLink ? m.detail : `sigillato per ${peerLabel(d.recipient || null)} · ${m.detail}`}
+              {isLink
+                ? m.detail
+                : t(
+                    "deposits.sealedFor",
+                    peerLabel(d.recipient || null),
+                    m.detail
+                  )}
             </span>
           </div>
           {isLink && d.link && (
             <div className="copyfield" style={{ marginTop: 8 }}>
               <code className="mono">{d.link}</code>
               <IconButton
-                label="Apri nel browser"
+                label={t("deposits.openInBrowser")}
                 onClick={() =>
                   openUrl(d.link).catch((e: unknown) =>
-                    toast.bad("Non riesco ad aprire il link", String(e))
+                    toast.bad(t("deposits.openFailed"), String(e))
                   )
                 }
               >
@@ -69,11 +77,11 @@ function DepositRow({ d }: { d: DepositDto }) {
           <Badge kind={isLink ? "dev" : "info"}>
             {isLink ? (
               <>
-                <Icon.Link size={10} /> Link pubblico
+                <Icon.Link size={10} /> {t("deposits.publicLink")}
               </>
             ) : (
               <>
-                <Icon.Mailbox size={10} /> Deposito
+                <Icon.Mailbox size={10} /> {t("deposits.sealed")}
               </>
             )}
           </Badge>
@@ -84,33 +92,26 @@ function DepositRow({ d }: { d: DepositDto }) {
             disabled={revoking}
             onClick={() => setConfirm(true)}
           >
-            {m.revocable ? "Revoca" : "Rimuovi"}
+            {m.revocable ? t("deposits.revoke") : t("common.remove")}
           </Button>
         </div>
       </div>
 
       <Confirm
         open={confirm}
-        title={m.revocable ? "Revocare?" : "Rimuovere la riga?"}
-        body={
-          m.revocable ? (
-            isLink ? (
-              <>
-                Il link smette di funzionare <strong>per tutti</strong> quelli a
-                cui l'hai dato, e chi l'ha già scaricato tiene la sua copia. Il
-                file resta sul tuo disco.
-              </>
-            ) : (
-              <>
-                Il file viene tolto dal relay e l'offerta ritirata dalla casella
-                del destinatario. Se non l'ha ancora ritirato, non potrà più farlo.
-              </>
-            )
-          ) : (
-            "Sul relay non c'è più niente da togliere: sparisce solo questa riga."
-          )
+        title={
+          m.revocable
+            ? t("deposits.confirmRevokeTitle")
+            : t("deposits.confirmRemoveTitle")
         }
-        confirmLabel={m.revocable ? "Revoca" : "Rimuovi"}
+        body={
+          m.revocable
+            ? isLink
+              ? t("deposits.confirmRevokeLink")
+              : t("deposits.confirmRevokeSealed")
+            : t("deposits.confirmRemoveBody")
+        }
+        confirmLabel={m.revocable ? t("deposits.revoke") : t("common.remove")}
         danger
         busy={revoking}
         onCancel={() => setConfirm(false)}
@@ -124,6 +125,7 @@ function DepositRow({ d }: { d: DepositDto }) {
 }
 
 export function DepositsView() {
+  const t = useT();
   const deposits = useStore((s) => s.deposits);
   const loading = useStore((s) => s.depositsLoading);
   const error = useStore((s) => s.depositsError);
@@ -136,13 +138,18 @@ export function DepositsView() {
   return (
     <div className="stack">
       <div className="hstack">
-        <div className="grow t-sm t-sec">
-          Quello che hai lasciato su un relay e puoi ancora revocare. Lo stato
-          viene chiesto al relay ogni volta che apri questa schermata — non c'è
-          modo di saperlo altrimenti.
-        </div>
+        <div className="grow t-sm t-sec">{t("deposits.intro")}</div>
         <Button size="sm" onClick={() => fire(reload())} busy={loading}>
-          <Icon.Refresh size={13} /> Aggiorna
+          <Icon.Refresh size={13} /> {t("common.refresh")}
+        </Button>
+        {/* Also here, not only in the empty state: once you have a link, the
+            reason to make another one does not go away. */}
+        <Button
+          size="sm"
+          variant="primary"
+          onClick={() => openSheet([], undefined, "link")}
+        >
+          <Icon.Send size={13} /> {t("deposits.createLink")}
         </Button>
       </div>
 
@@ -156,15 +163,14 @@ export function DepositsView() {
         <div className="card">
           <Empty
             icon={<Icon.Link size={22} />}
-            title="Nessun link o deposito attivo"
+            title={t("deposits.emptyTitle")}
             action={
-              <Button variant="primary" onClick={() => openSheet([])}>
-                <Icon.Send size={14} /> Crea un link
+              <Button variant="primary" onClick={() => openSheet([], undefined, "link")}>
+                <Icon.Send size={14} /> {t("deposits.createLink")}
               </Button>
             }
           >
-            Quando crei un link pubblico o depositi un file nella casella di
-            qualcuno, compare qui — e da qui puoi revocarlo.
+            {t("deposits.emptyBody")}
           </Empty>
         </div>
       ) : (
@@ -172,7 +178,7 @@ export function DepositsView() {
           {links.length > 0 && (
             <div className="section">
               <div className="section-head">
-                <span className="t-label">Link pubblici</span>
+                <span className="t-label">{t("deposits.sectionLinks")}</span>
                 <span className="t-xs t-mut tnum">{links.length}</span>
               </div>
               <div className="card rows">
@@ -185,7 +191,7 @@ export function DepositsView() {
           {sealed.length > 0 && (
             <div className="section">
               <div className="section-head">
-                <span className="t-label">Depositi sigillati</span>
+                <span className="t-label">{t("deposits.sectionSealed")}</span>
                 <span className="t-xs t-mut tnum">{sealed.length}</span>
               </div>
               <div className="card rows">

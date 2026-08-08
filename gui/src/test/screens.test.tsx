@@ -82,12 +82,12 @@ afterEach(() => {
 
 /** Something identifying on each screen — not just "it did not throw". */
 const ROUTES: { route: Route; expect: RegExp }[] = [
-  { route: "transfers", expect: /Trascina qui i file|In uscita/ },
-  { route: "people", expect: /Scambia contatti/ },
-  { route: "deposits", expect: /Nessun link o deposito|Link pubblici/ },
-  { route: "history", expect: /Ancora niente|Oggi/ },
-  { route: "devices", expect: /identità condivisa|Carico/ },
-  { route: "settings", expect: /Chi sei|Carico/ },
+  { route: "transfers", expect: /Drag the files you want to send|Outgoing/ },
+  { route: "people", expect: /Swap contacts/ },
+  { route: "deposits", expect: /No live link or deposit|Public links/ },
+  { route: "history", expect: /Nothing yet|Today/ },
+  { route: "devices", expect: /shared identity|Loading/ },
+  { route: "settings", expect: /Who you are|Loading/ },
 ];
 
 describe("every screen mounts", () => {
@@ -156,8 +156,8 @@ describe("every overlay mounts", () => {
     harness.snapshot.contacts = [dto.contact({ name: "proj" })];
     render(<App />);
     useStore.getState().openSheet(["/a.txt"]);
-    await screen.findByText("Cosa mandi");
-    for (const mode of ["Codice", "Link", "Ticket", "A un contatto"]) {
+    await screen.findByText("What you are sending");
+    for (const mode of ["Code", "Link", "Ticket", "To a contact"]) {
       fireEvent.click(screen.getByText(mode));
       await waitFor(() => expect(document.querySelector(".sheet")).not.toBeNull());
     }
@@ -173,12 +173,12 @@ describe("every overlay mounts", () => {
     // The hardest case for this screen: nothing is known about them, so the
     // fingerprint has to carry the whole decision.
     harness.snapshot.pending = [
-      dto.offer({ id: "o1", from: "sconosciuto", name: "boh.zip" }),
+      dto.offer({ id: "o1", from: "unknown", name: "boh.zip" }),
     ];
     render(<App />);
     await screen.findByText("boh.zip");
     useStore.getState().openIncoming("o1");
-    expect(await screen.findByText(/Non in rubrica/)).toBeTruthy();
+    expect(await screen.findByText(/Not in the address book/)).toBeTruthy();
   });
 
   it("the pairing sheet, for all four kinds", async () => {
@@ -212,10 +212,10 @@ describe("every overlay mounts", () => {
       expect(useStore.getState().contacts).toHaveLength(1)
     );
     useStore.getState().setPaletteOpen(true);
-    const input = await screen.findByLabelText("Cerca un comando o una persona");
+    const input = await screen.findByLabelText("Search a command or a person…");
     fireEvent.change(input, { target: { value: "giulia" } });
     await waitFor(() =>
-      expect(screen.getByText("Invia a giulia")).toBeTruthy()
+      expect(screen.getByText("Send to giulia")).toBeTruthy()
     );
   });
 });

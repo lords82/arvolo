@@ -8,6 +8,7 @@
 import { useMemo, useState } from "react";
 import { fire, useStore } from "../store";
 import { fmtBytes } from "../format";
+import { locale, t as translate, useLang, useT } from "../i18n";
 import { Icon } from "../ui/Icons";
 import { Button, Empty, Segmented, TextInput } from "../ui/Primitives";
 import { ExtChip } from "../ui/Bits";
@@ -16,15 +17,22 @@ import type { HistoryDto } from "../types";
 
 type Filter = "all" | "send" | "recv";
 
-const DAY_FMT = new Intl.DateTimeFormat("it-IT", {
-  weekday: "long",
-  day: "numeric",
-  month: "long",
-});
-const TIME_FMT = new Intl.DateTimeFormat("it-IT", {
-  hour: "2-digit",
-  minute: "2-digit",
-});
+/** Built per call rather than once at import: the weekday and month names, and
+ *  whether the clock is 12- or 24-hour, both come from the active language. A
+ *  module-level formatter would keep the launch language for ever. */
+function dayFmt(): Intl.DateTimeFormat {
+  return new Intl.DateTimeFormat(locale(), {
+    weekday: "long",
+    day: "numeric",
+    month: "long",
+  });
+}
+function timeFmt(): Intl.DateTimeFormat {
+  return new Intl.DateTimeFormat(locale(), {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
 
 function dayKey(unixSecs: number): string {
   const d = new Date(unixSecs * 1000);
@@ -37,28 +45,40 @@ function dayLabel(unixSecs: number): string {
   const yesterday = new Date(today);
   yesterday.setDate(today.getDate() - 1);
   if (dayKey(unixSecs) === dayKey(Math.floor(today.getTime() / 1000)))
-    return "Oggi";
+    return translate("history.today");
   if (dayKey(unixSecs) === dayKey(Math.floor(yesterday.getTime() / 1000)))
-    return "Ieri";
-  return DAY_FMT.format(d);
+    return translate("history.yesterday");
+  return dayFmt().format(d);
 }
 
 /** Split a daemon status into a word and its tone. `failed: …` carries its
  *  reason after the colon and that reason is the useful half. */
 function outcome(status: string): { text: string; tone: string; detail?: string } {
-  if (status === "completed") return { text: "Completato", tone: "ok" };
-  if (status === "cancelled") return { text: "Annullato", tone: "mut" };
-  if (status === "deposited") return { text: "Depositato", tone: "in" };
+  if (status === "completed")
+    return { text: translate("history.completed"), tone: "ok" };
+  if (status === "cancelled")
+    return { text: translate("history.cancelled"), tone: "mut" };
+  if (status === "deposited")
+    return { text: translate("history.deposited"), tone: "in" };
   const [head, ...rest] = status.split(":");
   if (head === "failed")
-    return { text: "Fallito", tone: "bad", detail: rest.join(":").trim() };
+    return {
+      text: translate("history.failed"),
+      tone: "bad",
+      detail: rest.join(":").trim(),
+    };
   // Anything the engine invents that this build has not learned yet: name the
-  // fact, and keep the raw string as the detail rather than putting English in
-  // the status slot.
-  return { text: "Esito sconosciuto", tone: "mut", detail: status };
+  // fact, and keep the raw string as the detail rather than putting an
+  // untranslated wire token in the status slot.
+  return {
+    text: translate("history.unknownOutcome"),
+    tone: "mut",
+    detail: status,
+  };
 }
 
 function Row({ h }: { h: HistoryDto }) {
+  const t = useT();
   const peerLabel = useStore((s) => s.peerLabel);
   const o = outcome(h.status);
   const out = h.direction === "send";
@@ -75,7 +95,7 @@ function Row({ h }: { h: HistoryDto }) {
           </span>
           <span className="sep" />
           <span className="truncate">
-            {out ? "a" : "da"} {peerLabel(h.peer)}
+            {out ? t("common.to") : t("common.from")} {peerLabel(h.peer)}
           </span>
           <span className="sep" />
           <span className="tnum">{fmtBytes(h.total_size)}</span>
@@ -90,13 +110,17 @@ function Row({ h }: { h: HistoryDto }) {
         </div>
       </div>
       <span className="t-xs t-mut tnum">
-        {TIME_FMT.format(new Date(h.created * 1000))}
+        {timeFmt().format(new Date(h.created * 1000))}
       </span>
     </div>
   );
 }
 
 export function HistoryView() {
+  const t = useT();
+  // Not for a string on this screen — for the day headings, which `dayLabel`
+  // builds through `Intl` and the memo below caches.
+  const lang = useLang();
   const history = useStore((s) => s.history);
   const loading = useStore((s) => s.historyLoading);
   const error = useStore((s) => s.historyError);
@@ -126,32 +150,32 @@ export function HistoryView() {
       else map.set(k, { label: dayLabel(h.created), when: h.created, items: [h] });
     }
     return Array.from(map.values()).sort((a, b) => b.when - a.when);
-  }, [history, filter, q, peerLabel]);
+  }, [history, filter, q, peerLabel, lang]);
 
   return (
     <div className="stack">
       <div className="hstack wrap">
         <Segmented
-          label="Filtro cronologia"
+          label={t("history.filterLabel")}
           value={filter}
           onChange={setFilter}
           options={[
-            { value: "all", label: "Tutto" },
-            { value: "send", label: "Inviati" },
-            { value: "recv", label: "Ricevuti" },
+            { value: "all", label: t("history.filterAll") },
+            { value: "send", label: t("history.filterSent") },
+            { value: "recv", label: t("history.filterReceived") },
           ]}
         />
         <div className="grow" style={{ maxWidth: 280 }}>
           <TextInput
             value={q}
             onChange={(e) => setQ(e.currentTarget.value)}
-            placeholder="Cerca…"
-            aria-label="Cerca nella cronologia"
+            placeholder={t("history.searchPlaceholder")}
+            aria-label={t("history.searchLabel")}
           />
         </div>
         <div className="spacer grow" />
         <Button size="sm" onClick={() => fire(reload())} busy={loading}>
-          <Icon.Refresh size={13} /> Aggiorna
+          <Icon.Refresh size={13} /> {t("common.refresh")}
         </Button>
         <Button
           size="sm"
@@ -159,7 +183,7 @@ export function HistoryView() {
           disabled={!history.length}
           onClick={() => setConfirmClear(true)}
         >
-          <Icon.Trash size={13} /> Svuota
+          <Icon.Trash size={13} /> {t("history.clear")}
         </Button>
       </div>
 
@@ -173,11 +197,15 @@ export function HistoryView() {
         <div className="card">
           <Empty
             icon={<Icon.History size={22} />}
-            title={history.length ? "Nessun risultato" : "Ancora niente"}
+            title={
+              history.length
+                ? t("history.emptyNoMatch")
+                : t("history.emptyNothing")
+            }
           >
             {history.length
-              ? "Prova a cambiare filtro o ricerca."
-              : "Qui finisce ogni trasferimento concluso: cosa, con chi e com'è andata."}
+              ? t("history.emptyNoMatchBody")
+              : t("history.emptyNothingBody")}
           </Empty>
         </div>
       ) : (
@@ -198,9 +226,9 @@ export function HistoryView() {
 
       <Confirm
         open={confirmClear}
-        title="Svuotare la cronologia?"
-        body="Il registro viene dimenticato per intero e non si può recuperare. I file già ricevuti restano dove sono; questo cancella solo l'elenco."
-        confirmLabel="Svuota"
+        title={t("history.confirmClearTitle")}
+        body={t("history.confirmClearBody")}
+        confirmLabel={t("history.clear")}
         danger
         onCancel={() => setConfirmClear(false)}
         onConfirm={() => {

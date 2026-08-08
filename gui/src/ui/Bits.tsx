@@ -4,6 +4,7 @@
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import QRCode from "qrcode";
+import { useT } from "../i18n";
 import { Icon } from "./Icons";
 import { IconButton } from "./Primitives";
 import { barClass, extOf, extTint, pct, shortId } from "../format";
@@ -101,15 +102,24 @@ function useCopy() {
 
 export function CopyButton({
   value,
-  label = "Copia",
+  label,
 }: {
   value: string;
+  /** Overrides the idle label; the copied/failed states always speak for
+   *  themselves, because that is the information the button exists to give. */
   label?: string;
 }) {
+  const t = useT();
   const { state, copy } = useCopy();
   return (
     <IconButton
-      label={state === "ok" ? "Copiato" : state === "fail" ? "Copia non riuscita" : label}
+      label={
+        state === "ok"
+          ? t("common.copied")
+          : state === "fail"
+            ? t("common.copyFailed")
+            : (label ?? t("common.copy"))
+      }
       onClick={() => copy(value)}
     >
       {state === "ok" ? (
@@ -156,6 +166,7 @@ export function CodeHero({
   qr?: boolean;
   caption?: ReactNode;
 }) {
+  const t = useT();
   const { state, copy } = useCopy();
   return (
     <div className="code-hero">
@@ -165,10 +176,10 @@ export function CodeHero({
       <button className="btn btn-sm" onClick={() => copy(value)}>
         {state === "ok" ? <Icon.Check size={13} /> : <Icon.Copy size={13} />}
         {state === "ok"
-          ? "Copiato"
+          ? t("common.copied")
           : state === "fail"
-            ? "Copia non riuscita"
-            : "Copia"}
+            ? t("common.copyFailed")
+            : t("common.copy")}
       </button>
     </div>
   );
@@ -233,19 +244,20 @@ export function ExtChip({ name }: { name: string }) {
   return <span className={`ext tint-${extTint(ext)}`}>{ext}</span>;
 }
 
-export function Progress({ t }: { t: UITransfer }) {
-  const value = pct(t);
+export function Progress({ t: tx }: { t: UITransfer }) {
+  const t = useT();
+  const value = pct(tx);
   // A send with no size yet (packing, or an offer not opened) has nothing honest
   // to report as a percentage; show motion instead of a bar stuck at zero.
-  const indeterminate = t.status === "in corso" && !t.size;
+  const indeterminate = tx.status === "active" && !tx.size;
   return (
     <div
-      className={`${barClass(t)} ${indeterminate ? "indet" : ""}`}
+      className={`${barClass(tx)} ${indeterminate ? "indet" : ""}`}
       role="progressbar"
       aria-valuenow={indeterminate ? undefined : value}
       aria-valuemin={0}
       aria-valuemax={100}
-      aria-label={`Avanzamento di ${t.name}`}
+      aria-label={t("transfers.progressOf", tx.name)}
     >
       <span style={{ width: `${indeterminate ? 32 : value}%` }} />
     </div>

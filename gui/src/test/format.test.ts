@@ -28,7 +28,7 @@ function t(over: Partial<UITransfer> = {}): UITransfer {
     name: "file.txt",
     size: 1000,
     transferred: 0,
-    status: "in corso",
+    status: "active",
     encrypted: true,
     verified: false,
     method: "p2p",
@@ -44,24 +44,24 @@ function t(over: Partial<UITransfer> = {}): UITransfer {
 describe("sections", () => {
   it("25. offers, live rows, today and earlier land in the right sections, in order", () => {
     const rows = [
-      t({ key: "o1", id: 0, offerId: "o1", dir: "in", status: "in arrivo" }),
-      t({ key: "t1", dir: "in", status: "in corso" }),
-      t({ key: "t2", dir: "in", status: "completato" }),
-      t({ key: "t3", dir: "in", status: "completato", firstSeen: Date.now() - 3 * DAY }),
+      t({ key: "o1", id: 0, offerId: "o1", dir: "in", status: "incoming" }),
+      t({ key: "t1", dir: "in", status: "active" }),
+      t({ key: "t2", dir: "in", status: "completed" }),
+      t({ key: "t3", dir: "in", status: "completed", firstSeen: Date.now() - 3 * DAY }),
     ];
     const secs = sectionsFor(rows, "in", "");
     expect(secs.map((s) => s.title)).toEqual([
-      "Da confermare",
-      "In corso e in pausa",
-      "Oggi",
-      "Precedenti",
+      "To confirm",
+      "Under way and paused",
+      "Today",
+      "Earlier",
     ]);
   });
 
   it("26. an empty section is dropped, not rendered blank", () => {
-    const secs = sectionsFor([t({ status: "in corso" })], "out", "");
+    const secs = sectionsFor([t({ status: "active" })], "out", "");
     expect(secs).toHaveLength(1);
-    expect(secs[0].title).toBe("In corso e in pausa");
+    expect(secs[0].title).toBe("Under way and paused");
   });
 
   it("27. a row only appears in its own column", () => {
@@ -72,7 +72,7 @@ describe("sections", () => {
 
   it("28. a deposit awaiting pickup is not filed as still running", () => {
     const secs = sectionsFor([t({ status: "deposited" })], "out", "");
-    expect(secs[0].title).toBe("Oggi");
+    expect(secs[0].title).toBe("Today");
   });
 
   it("29. search matches the file name and the peer, case-insensitively", () => {
@@ -89,15 +89,15 @@ describe("sections", () => {
 describe("row wording", () => {
   it("30. every status has a label and a colour (no blank/undefined row)", () => {
     const all: UIStatus[] = [
-      "in arrivo",
-      "in corso",
-      "in attesa",
-      "in stallo",
-      "in annullamento",
+      "incoming",
+      "active",
+      "paused",
+      "stalled",
+      "cancelling",
       "deposited",
-      "completato",
-      "fallito",
-      "annullato",
+      "completed",
+      "failed",
+      "cancelled",
     ];
     for (const s of all) {
       const m = statusMeta(s);
@@ -111,8 +111,8 @@ describe("row wording", () => {
 
   it("31. a deposit says it is awaiting pickup, never that it was delivered", () => {
     const meta = metaLine(t({ status: "deposited" }));
-    expect(meta).toMatch(/ritir/i);
-    expect(meta).not.toMatch(/consegnat/i);
+    expect(meta).toMatch(/collect/i);
+    expect(meta).not.toMatch(/handed over/i);
   });
 
   it("32. an in-flight row shows percent, and speed/ETA once known", () => {
@@ -123,7 +123,7 @@ describe("row wording", () => {
   });
 
   it("33. a stalled row surfaces the daemon's reason", () => {
-    expect(metaLine(t({ status: "in stallo", reason: "relay 500" }))).toBe("relay 500");
+    expect(metaLine(t({ status: "stalled", reason: "relay 500" }))).toBe("relay 500");
   });
 
   it("34. percent is clamped and never divides by zero", () => {
