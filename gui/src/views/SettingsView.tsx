@@ -15,7 +15,7 @@
 import { useEffect, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { openPath } from "@tauri-apps/plugin-opener";
-import { useStore, type ThemeChoice } from "../store";
+import { fire, useStore, type ThemeChoice } from "../store";
 import {
   langNames,
   setLangChoice,
@@ -378,10 +378,15 @@ export function SettingsView() {
         body={t("settings.confirmRestartBody")}
         confirmLabel={t("app.restart")}
         onCancel={() => setConfirmRestart(false)}
-        onConfirm={async () => {
+        onConfirm={() => {
           setConfirmRestart(false);
-          await restartDaemon();
-          toast.info(t("settings.restarting"), t("settings.restartingDetail"));
+          // Only announce the restart if it was actually accepted; the failure
+          // is already reported through `actionError`, and nothing awaits this.
+          fire(
+            restartDaemon().then(() =>
+              toast.info(t("settings.restarting"), t("settings.restartingDetail"))
+            )
+          );
         }}
       />
 

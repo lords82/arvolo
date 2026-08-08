@@ -115,9 +115,11 @@ function DepositRow({ d }: { d: DepositDto }) {
         danger
         busy={revoking}
         onCancel={() => setConfirm(false)}
-        onConfirm={async () => {
+        onConfirm={() => {
           setConfirm(false);
-          await revoke(d.id);
+          // `revokeDeposit` rethrows after filing `actionError`, and `Confirm`
+          // never awaits this callback — so the rejection has to die here.
+          fire(revoke(d.id));
         }}
       />
     </>
