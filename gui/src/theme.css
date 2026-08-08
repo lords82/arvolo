@@ -48,18 +48,18 @@
 
   /* -- Direction. `-soft` is the tint a surface takes, `-line` its border,
         `-stall` the desaturated form a paused or waiting row falls back to. */
-  --out: #ea6a12;
-  --out-strong: #a94806;
+  --out: #ef6243;
+  --out-strong: #ac432b;
   /* The colour a *filled* control takes, as opposed to the colour text takes.
      They must be separate: a hue bright enough to read as ink on a dark canvas
      is far too bright to sit under white ink, and reusing one for both is how
      every primary button in this app came to be 2.3:1 in the dark theme. */
-  --out-fill: #b8500a;
+  --out-fill: #cf492c;
   --in-fill: #0a6ba1;
   --on-fill: #ffffff;
-  --out-soft: #fdf0e5;
-  --out-line: rgba(234, 106, 18, 0.28);
-  --out-stall: #b98f62;
+  --out-soft: #ffeeea;
+  --out-line: rgba(239, 98, 67, 0.28);
+  --out-stall: #c48678;
 
   --in: #0a6ba1;
   --in-strong: #08557f;
@@ -139,13 +139,13 @@
     --line-strong: rgba(245, 241, 235, 0.16);
     --line-hard: rgba(245, 241, 235, 0.28);
 
-    --out: #f79441;
-    --out-strong: #ffae66;
-    --out-soft: #3a2513;
-    --out-line: rgba(247, 148, 65, 0.34);
-    --out-stall: #a06c38;
+    --out: #fe8b70;
+    --out-strong: #feaa96;
+    --out-soft: #3d221c;
+    --out-line: rgba(254, 139, 112, 0.34);
+    --out-stall: #a96353;
     /* Kept near the light theme value: white ink still has to sit on these. */
-    --out-fill: #c4560b;
+    --out-fill: #ce482b;
     --in-fill: #0d76b0;
 
     --in: #4fa8dd;
@@ -196,13 +196,13 @@
   --line-strong: rgba(245, 241, 235, 0.16);
   --line-hard: rgba(245, 241, 235, 0.28);
 
-  --out: #f79441;
-  --out-strong: #ffae66;
-  --out-soft: #3a2513;
-  --out-line: rgba(247, 148, 65, 0.34);
-  --out-stall: #a06c38;
+  --out: #fe8b70;
+  --out-strong: #feaa96;
+  --out-soft: #3d221c;
+  --out-line: rgba(254, 139, 112, 0.34);
+  --out-stall: #a96353;
   /* Kept near the light theme value: white ink still has to sit on these. */
-  --out-fill: #c4560b;
+  --out-fill: #ce482b;
   --in-fill: #0d76b0;
 
   --in: #4fa8dd;
