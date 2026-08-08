@@ -142,6 +142,28 @@ pub(crate) fn secret_key_from_seed(seed: &[u8; 32]) -> SecretKey {
     SecretKey::from_bytes(seed)
 }
 
+/// The address to hand a *remote* peer: everything iroh knows about us minus the
+/// loopback candidates.
+///
+/// `bind_endpoint_with_key` parks the IPv6 socket on `[::1]` when the host has no
+/// IPv6 route, so `Endpoint::addr()` reports `[::1]:port` as a direct address and
+/// it travels in the ticket. The peer then probes it forever — the probe leaves
+/// their machine and arrives at *their own* loopback, where nothing answers. Never
+/// useful off-host, so it does not belong in anything we publish. Same-host dialing
+/// uses [`local_addr_of`], which keeps loopback on purpose.
+pub(crate) fn remote_addr_of(endpoint: &iroh::Endpoint) -> EndpointAddr {
+    strip_loopback(endpoint.addr())
+}
+
+/// Drop loopback IP candidates, keeping relays and every routable address.
+fn strip_loopback(mut addr: EndpointAddr) -> EndpointAddr {
+    addr.addrs.retain(|a| match a {
+        iroh::TransportAddr::Ip(sock) => !sock.ip().is_loopback(),
+        _ => true,
+    });
+    addr
+}
+
 /// Build an [`EndpointAddr`] dialable on the same host (loopback + bound ports).
 pub(crate) fn local_addr_of(endpoint: &iroh::Endpoint) -> EndpointAddr {
     let mut addr = EndpointAddr::new(endpoint.id());
@@ -174,5 +196,31 @@ mod tests {
         let t = encode_ticket(&addr).unwrap();
         let back = decode_ticket(&t).unwrap();
         assert_eq!(addr, back);
+    }
+
+    /// A loopback candidate in a published ticket makes the peer probe its *own*
+    /// loopback forever. `ARVOLO_IPV4_ONLY` parks the v6 socket there, so this is
+    /// reachable in practice, not hypothetical.
+    #[test]
+    fn a_published_address_carries_no_loopback() {
+        let addr = EndpointAddr::new(generate_secret_key().public())
+            .with_ip_addr("127.0.0.1:4242".parse().unwrap())
+            .with_ip_addr("[::1]:4243".parse().unwrap())
+            .with_ip_addr("192.168.1.9:4244".parse().unwrap())
+            .with_ip_addr("95.75.91.227:4245".parse().unwrap());
+
+        let published = strip_loopback(addr);
+
+        let mut kept: Vec<_> = published
+            .addrs
+            .iter()
+            .filter_map(|a| match a {
+                iroh::TransportAddr::Ip(s) => Some(s.to_string()),
+                _ => None,
+            })
+            .collect();
+        kept.sort();
+        // The LAN address stays: it is how two peers on one network find each other.
+        assert_eq!(kept, vec!["192.168.1.9:4244", "95.75.91.227:4245"]);
     }
 }

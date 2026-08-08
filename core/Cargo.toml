@@ -15,6 +15,9 @@ anyhow.workspace = true
 tokio = { workspace = true }
 tracing.workspace = true
 iroh = "0.95.1"
+# Same crate iroh 0.95.1 links against — needed only for `congestion::BbrConfig`,
+# which iroh re-exports the traits of but not the concrete controllers.
+iroh-quinn-proto = "0.13"
 rand = "0.9"
 postcard = { version = "1", features = ["alloc"] }
 data-encoding = "2"

@@ -63,11 +63,47 @@ pub async fn bind_endpoint_with_key(relay: RelayChoice, secret: SecretKey) -> Re
             .bind_addr_v6(SocketAddrV6::new(Ipv6Addr::LOCALHOST, 0, 0, 0));
     }
     builder
+        .transport_config(transport_config())
         .secret_key(secret)
         .alpns(vec![CHUNK_ALPN.to_vec(), CTRL_ALPN.to_vec()])
         .bind()
         .await
         .map_err(|e| anyhow::anyhow!("bind endpoint: {e}"))
+}
+
+/// QUIC transport tuning.
+///
+/// quinn defaults to Cubic, which recovers by halving and then climbing back over
+/// many round trips. That is the wrong shape for us: iroh resets the congestion
+/// controller on every path change it observes (see `rtt_actor`), and on a mobile
+/// uplink that happens every 40-60 s even when the peer address never changes.
+/// Cubic restarts from slow start each time and, at ~100 ms RTT, never reaches the
+/// link rate before the next reset — measured at a fifth of what TCP gets on the
+/// same path. BBR keeps a bandwidth estimate and re-probes in a couple of round
+/// trips instead, so a reset costs far less.
+///
+/// Measured on one mobile uplink, 60 MB: Cubic 225 s with 8 dropped connections
+/// (a second run never finished inside 400 s), BBR 34-53 s with none. On a fat
+/// server link, 100 MB: 2.9 MB/s to 3.85 MB/s. Both directions now finish at the
+/// link's TCP rate.
+///
+/// The caveat, stated plainly: quinn labels its BBR "Experimental! Use at your own
+/// risk", and BBR is known to take more than its share when sharing a bottleneck
+/// with Cubic flows. `ARVOLO_CC=cubic` restores the default — for comparing the two
+/// on one path, and as the way back if BBR misbehaves somewhere we have not measured.
+fn transport_config() -> iroh::endpoint::TransportConfig {
+    let mut cfg = iroh::endpoint::TransportConfig::default();
+    // iroh's own default, which supplying a config would otherwise drop.
+    cfg.keep_alive_interval(Some(std::time::Duration::from_secs(1)));
+    if !matches!(
+        std::env::var("ARVOLO_CC").ok().as_deref(),
+        Some("cubic") | Some("Cubic")
+    ) {
+        cfg.congestion_controller_factory(std::sync::Arc::new(
+            iroh_quinn_proto::congestion::BbrConfig::default(),
+        ));
+    }
+    cfg
 }
 
 /// Whether to run the iroh endpoint IPv4-only. `ARVOLO_IPV4_ONLY` overrides

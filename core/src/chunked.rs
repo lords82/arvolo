@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, Mutex as AsyncMutex};
 
 use crate::backfill::RelayRelease;
-use crate::node::{decode_ticket, encode_ticket, local_addr_of};
+use crate::node::{decode_ticket, encode_ticket, local_addr_of, remote_addr_of};
 use crate::transfer::{bind_endpoint, bind_endpoint_with_key, RelayChoice};
 
 /// Chunk size: 16 MiB.
@@ -607,7 +607,7 @@ impl ChunkSender {
             .spawn();
         let addr = if use_relay {
             endpoint.online().await;
-            endpoint.addr()
+            remote_addr_of(&endpoint)
         } else {
             local_addr_of(&endpoint)
         };
@@ -749,7 +749,7 @@ impl ChunkSeeder {
             .spawn();
         let addr = if use_relay {
             endpoint.online().await;
-            endpoint.addr()
+            remote_addr_of(&endpoint)
         } else {
             local_addr_of(&endpoint)
         };
