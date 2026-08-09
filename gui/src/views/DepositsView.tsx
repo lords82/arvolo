@@ -15,9 +15,9 @@ import { fire, useStore } from "../store";
 import { depositMeta, fmtBytes } from "../format";
 import { useT } from "../i18n";
 import { Icon } from "../ui/Icons";
-import { Badge, Button, Empty, IconButton } from "../ui/Primitives";
-import { CopyButton, ExtChip } from "../ui/Bits";
-import { Confirm } from "../ui/Sheet";
+import { Badge, Button, Empty } from "../ui/Primitives";
+import { CodeHero, ExtChip } from "../ui/Bits";
+import { Confirm, Sheet } from "../ui/Sheet";
 import { toast } from "../ui/Toasts";
 import type { DepositDto } from "../types";
 
@@ -27,9 +27,16 @@ function DepositRow({ d }: { d: DepositDto }) {
   const revoking = useStore((s) => s.revoking.includes(d.id));
   const peerLabel = useStore((s) => s.peerLabel);
   const [confirm, setConfirm] = useState(false);
+  const [share, setShare] = useState(false);
 
   const m = depositMeta(d);
   const isLink = d.kind === "link";
+  // What there is to hand over: a link's URL, or a sealed deposit's `arvm…`
+  // ticket. One name for both, because from here they are the same act — the
+  // string you pass to someone so they can take the file. Empty only for a
+  // deposit made before tickets were kept: that one can still be withdrawn,
+  // never handed on, and must therefore offer no button that says otherwise.
+  const handover = isLink ? d.link : d.ticket;
 
   return (
     <>
@@ -56,22 +63,6 @@ function DepositRow({ d }: { d: DepositDto }) {
                   )}
             </span>
           </div>
-          {isLink && d.link && (
-            <div className="copyfield" style={{ marginTop: 8 }}>
-              <code className="mono">{d.link}</code>
-              <IconButton
-                label={t("deposits.openInBrowser")}
-                onClick={() =>
-                  openUrl(d.link).catch((e: unknown) =>
-                    toast.bad(t("deposits.openFailed"), String(e))
-                  )
-                }
-              >
-                <Icon.External size={14} />
-              </IconButton>
-              <CopyButton value={d.link} />
-            </div>
-          )}
         </div>
         <div className="hstack-sm">
           <Badge kind={isLink ? "dev" : "info"}>
@@ -85,6 +76,25 @@ function DepositRow({ d }: { d: DepositDto }) {
               </>
             )}
           </Badge>
+          {/* One button, not three. The address itself is not printed on the row
+              either — an `arvm…` ticket is three hundred characters, and nobody
+              reads either of these off a screen. So the row says only that there
+              is something to hand over, and the panel behind it does the handing:
+              copy, QR, open. Two buttons per row that both mean "give this away"
+              only make the reader decide which one they meant.
+              It says **which** of the two it is, though. Both were briefly labelled
+              "Link", and the first thing that happened was a sealed deposit's
+              ticket being copied by someone expecting a downloadable URL. There
+              isn't one: that blob is HPKE-sealed to the recipient, so no browser
+              — and no sender — can open it, and no `#fragment` could carry the
+              key. A label that promises a URL where none can exist is worse than
+              a longer word. */}
+          {handover && (
+            <Button size="sm" onClick={() => setShare(true)}>
+              <Icon.Link size={13} />{" "}
+              {t(isLink ? "deposits.share" : "deposits.shareTicket")}
+            </Button>
+          )}
           <Button
             size="sm"
             variant="danger"
@@ -96,6 +106,57 @@ function DepositRow({ d }: { d: DepositDto }) {
           </Button>
         </div>
       </div>
+
+      {/* The panel that produced it, brought back. Same address, same QR, same
+          caption — something handed out twice must look identical both times, or
+          the second copy invites the question of whether it is the same one.
+          The state line above it is the one addition: an address the relay has
+          let go still copies and still scans, and a big confident QR for a file
+          that is no longer there is exactly the lie this screen exists to avoid. */}
+      <Sheet
+        open={share && !!handover}
+        onClose={() => setShare(false)}
+        placement="center"
+        title={isLink ? t("deposits.shareTitle") : t("deposits.shareTicketTitle")}
+        subtitle={d.name}
+        footer={
+          <>
+            {isLink && (
+              <Button
+                onClick={() =>
+                  openUrl(d.link).catch((e: unknown) =>
+                    toast.bad(t("deposits.openFailed"), String(e))
+                  )
+                }
+              >
+                <Icon.External size={14} /> {t("deposits.openInBrowser")}
+              </Button>
+            )}
+            <div className="spacer" />
+            <Button variant="primary" onClick={() => setShare(false)}>
+              {t("common.done")}
+            </Button>
+          </>
+        }
+      >
+        <div className="stack">
+          <div className={`t-sm tone-${m.tone}`} style={{ fontWeight: 600 }}>
+            {m.text} <span className="t-sec">· {m.detail}</span>
+          </div>
+          <CodeHero
+            value={handover}
+            small
+            caption={isLink ? t("send.linkDetail") : t("deposits.ticketDetail")}
+          />
+          {/* Only the link carries a footnote, and it is about the URL's shape —
+              the key after the `#`. A sealed deposit used to get one here saying
+              the recipient would probably not need this ticket at all, which is
+              true of the mailbox route and useless to someone in the act of
+              handing the thing over: it reads as "what you are about to give away
+              does not work". The caption above already says what to do with it. */}
+          {isLink && <div className="t-sm t-sec">{t("send.linkKeyNote")}</div>}
+        </div>
+      </Sheet>
 
       <Confirm
         open={confirm}

@@ -9,6 +9,10 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use arvolo_ipc::client::DaemonClient;
 
+/// Rotate the daemon log past this size. Big enough to hold the history of a
+/// long-running daemon, small enough to open in an editor and to mail to someone.
+const LOG_MAX_BYTES: u64 = 5 * 1024 * 1024;
+
 /// Locate the `arvolo` CLI binary that hosts the daemon. In order:
 /// 1. `ARVOLO_BIN` (explicit override — handy in `tauri dev`),
 /// 2. a binary sitting next to the GUI executable (the bundled/installed layout),
@@ -46,10 +50,36 @@ pub async fn is_running() -> bool {
 /// GUI closing. Best-effort: errors are surfaced to the caller to retry/report.
 fn spawn_daemon() -> Result<()> {
     let mut cmd = std::process::Command::new(arvolo_bin());
-    cmd.arg("daemon")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
+    cmd.arg("daemon").stdin(std::process::Stdio::null());
+    // Keep what it says. Spawned from here the daemon has no terminal, and its
+    // output used to go to /dev/null — which is the *common* case, so in the
+    // situation where someone most needs to know what happened there was nothing
+    // to read at all. Rotate first (we are the ones opening it), then hand it the
+    // same file for both streams: its notices and its warnings belong together and
+    // in order.
+    arvolo_ipc::rotate_log(LOG_MAX_BYTES);
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(arvolo_ipc::log_path())
+    {
+        // Both streams onto the same handle, so notices and warnings interleave in
+        // the order they happened rather than in two files nobody can line up.
+        Ok(log) => match log.try_clone() {
+            Ok(err) => {
+                cmd.stdout(log).stderr(err);
+            }
+            Err(_) => {
+                cmd.stdout(log).stderr(std::process::Stdio::null());
+            }
+        },
+        // No log is not a reason to refuse to start the daemon.
+        Err(e) => {
+            eprintln!("(couldn't open the daemon log: {e}) ");
+            cmd.stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+        }
+    }
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;

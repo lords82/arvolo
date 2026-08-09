@@ -334,7 +334,23 @@ pub(crate) fn record_history(manager: &TransferManager, id: u64, status: &str) {
     );
 }
 
+/// `arvolo recv` — with something to paste, fetch it; with nothing, show what is
+/// waiting for you and take one from the list.
 pub(crate) async fn recv(
+    ticket: Option<String>,
+    out: Option<PathBuf>,
+    password: Option<String>,
+) -> Result<()> {
+    match ticket {
+        Some(t) => recv_ticket(t, out, password).await,
+        None => recv_waiting(out, password).await,
+    }
+}
+
+/// The half of `recv` that has something to fetch from. Also the resume path's
+/// entry point, which always holds a ticket — it goes straight here rather than
+/// through the dispatcher, where "no ticket" means something else entirely.
+pub(crate) async fn recv_ticket(
     ticket: String,
     out: Option<PathBuf>,
     password: Option<String>,
@@ -493,6 +509,338 @@ pub(crate) async fn recv(
         },
     )
     .await?;
+    Ok(())
+}
+
+// ---- what's waiting for you -----------------------------------------------
+//
+// `arvolo recv` with nothing to paste. Only sends *addressed to an identity* can
+// be listed: they arrive as offers sealed to the recipient in their inbox slot on
+// the relay, so the recipient (and only the recipient — the read is authenticated
+// by proof of possession of the slot key) can enumerate them. A code, ticket or
+// link cannot appear here and never will: it is itself the capability to fetch,
+// nothing on the relay ties one to a person, and that is precisely what stops a
+// stranger from listing someone else's. So the two halves of this verb are not
+// arbitrary — paste what only you were given, list what was addressed to you.
+
+/// One row of the listing, whichever source produced it: the daemon's parked
+/// offers, or a direct read of the inbox when no daemon is running. Both carry the
+/// same facts, so both render through this one shape — the same reason `status`
+/// and `history` share a row printer rather than growing two dialects for it.
+pub(crate) struct Waiting {
+    /// The sender's base32 public id. Always the key, never a display name: every
+    /// trust question below is answered from this and nothing else.
+    from: String,
+    name: String,
+    size: u64,
+    note: String,
+    /// The sender's self-chosen name — a petname *claim*. Attacker-controlled text
+    /// that rides inside the sealed offer: shown as unverified, never in place of
+    /// the fingerprint, and never for someone we already have a name for.
+    sender_name: String,
+    /// What taking this row will actually do.
+    kind: &'static str,
+    /// Trailing hint, where the row has an id another command takes.
+    hint: Option<String>,
+}
+
+/// One inbox offer as a row. Shared with `status`, which shows the same list
+/// without the picker — so the two can't drift into disagreeing about what is
+/// waiting or who it is from.
+pub(crate) fn waiting_row(o: &arvolo_core::presence::ReceivedOffer) -> Waiting {
+    Waiting {
+        from: encode_id(&o.sender),
+        name: o.offer.name.clone(),
+        size: o.offer.size,
+        note: o.offer.note.clone(),
+        sender_name: o.offer.sender_name.clone(),
+        // Told apart locally, from the ticket inside the sealed offer: a mailbox
+        // deposit is there to be fetched now, a live ticket needs the sender
+        // online at the other end. Worth saying — it decides whether "take it
+        // later" is a plan or a way to miss it.
+        kind: if arvolo_core::offline::OfflineTicket::decode(&o.offer.ticket).is_ok() {
+            "in the relay's mailbox — fetchable now"
+        } else {
+            "live — the sender has to be online"
+        },
+        hint: None,
+    }
+}
+
+/// One non-destructive read of our own inbox slot, with blocked senders dropped.
+///
+/// Reading does not consume: the relay drops an offer only on the recipient's
+/// DELETE, so both callers can look without committing to anything. Blocked
+/// senders never reach the list, exactly as they never reach the prompt in
+/// `listen` — blocking that only made you look at it more slowly is not one.
+pub(crate) async fn read_inbox(
+    inbox: &arvolo_core::presence::InboxSubscription,
+) -> Result<Vec<arvolo_core::presence::ReceivedOffer>> {
+    // wait=0: whatever is queued right now, rather than the long poll a listener
+    // would hold open — both callers answer a question and exit.
+    let offers = inbox
+        .poll_wait(0)
+        .await
+        .context("read the offers waiting for you on the relay")?;
+    Ok(offers
+        .into_iter()
+        .filter(|o| !book::is_blocked(&encode_id(&o.sender)))
+        .collect())
+}
+
+/// How a sender is introduced in the listing: the name *we* saved for them, or
+/// else their id and what we know about it. One line per verdict, mirroring
+/// [`print_sender_banner`] — an unsaved sender is never given a name to hide
+/// behind, because the only name they have is one they chose for themselves.
+fn describe_sender(status: &book::SenderStatus, from_b32: &str) -> String {
+    match (&status.name, status.seen_before) {
+        (Some(name), _) if status.verified => format!("{name}  ✓ verified"),
+        (Some(name), _) => format!("{name}  (saved, not verified)"),
+        (None, true) => format!("{from_b32}  (known sender, not in contacts)"),
+        (None, false) => format!("{from_b32}  ⚠ NEW sender"),
+    }
+}
+
+pub(crate) fn print_waiting(rows: &[Waiting]) {
+    for (i, r) in rows.iter().enumerate() {
+        let status = book::sender_status(&r.from);
+        println!("  [{}] from {}", i + 1, describe_sender(&status, &r.from));
+        println!(
+            "      {}  ({})  ·  {}",
+            sanitize_display(&r.name),
+            human_size(r.size),
+            r.kind
+        );
+        if !r.note.is_empty() {
+            println!("      💬 {}", sanitize_display(&r.note));
+        }
+        // Rendering stays side-effect free — the TOFU name ledger is only touched
+        // for the offer actually taken, so browsing a list can't quietly record a
+        // name change for something the user then declines.
+        if status.name.is_none() && !r.sender_name.is_empty() {
+            println!(
+                "      🏷  calls themselves \"{}\" (unverified)",
+                sanitize_display(&r.sender_name)
+            );
+        }
+        // Only where it's the thing to act on: for a verified contact the
+        // fingerprint is a line of noise, for anyone else it is the check.
+        if !status.verified {
+            if let Some(fp) = book::fingerprint_of(&r.from) {
+                println!("      fingerprint: {fp}");
+            }
+        }
+        if let Some(h) = &r.hint {
+            println!("      {h}");
+        }
+        println!();
+    }
+}
+
+/// An empty list is not "nobody sent you anything" — it is "nothing *addressed to
+/// you* is queued". Say which, and say what can never be queued, or the silence
+/// reads as a bug to someone who is holding a code and waiting for it to show up.
+fn print_nothing_waiting(scope: &str) {
+    println!("Nothing waiting for you {scope}.");
+    println!();
+    println!("Only sends addressed to your identity land here (`arvolo send <you> …`).");
+    println!("A code, ticket or link can't: it *is* the permission to fetch, so nothing");
+    println!("on the relay knows one is yours — paste it instead:");
+    println!();
+    println!("    arvolo recv <code|arvc…|arvm…|link>");
+}
+
+/// Read one line from stdin. `None` on EOF — which is what a script or a
+/// `< /dev/null` run gets, and the reason this prints the list and stops there
+/// rather than choosing something nobody asked for.
+async fn prompt_line(prompt: String) -> Option<String> {
+    tokio::task::spawn_blocking(move || {
+        use std::io::Write;
+        eprint!("{prompt}");
+        let _ = std::io::stderr().flush();
+        let mut line = String::new();
+        match std::io::stdin().read_line(&mut line) {
+            Ok(0) | Err(_) => None,
+            Ok(_) => Some(line),
+        }
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+/// Ask which row to take. `None` is "none of them": `q`, an empty line, or EOF.
+/// What the picker was told to do with a row.
+enum Pick {
+    Take(usize),
+    /// Decline it: drop it from the relay without fetching it.
+    Drop(usize),
+}
+
+/// Ask what to do. `None` means "nothing": `q`, an empty line, or EOF.
+///
+/// Declining is offered because otherwise there is no way out of an unwanted
+/// arrival. Leaving it alone means looking at it again on every listing until its
+/// TTL lapses — a week, for something the sender may have sent by mistake — and the
+/// only lever that removed it was blocking the person, which is a much larger
+/// statement than "not this file".
+async fn pick_one(count: usize) -> Option<Pick> {
+    loop {
+        let line = prompt_line(format!(
+            "Take which one? [1-{count}, d<n> to decline, Enter to quit] "
+        ))
+        .await?;
+        let line = line.trim();
+        if line.is_empty() || line.eq_ignore_ascii_case("q") {
+            return None;
+        }
+        let (rest, decline) = match line.strip_prefix(['d', 'D']) {
+            Some(rest) => (rest.trim(), true),
+            None => (line, false),
+        };
+        match rest.parse::<usize>() {
+            Ok(n) if (1..=count).contains(&n) => {
+                return Some(if decline {
+                    Pick::Drop(n - 1)
+                } else {
+                    Pick::Take(n - 1)
+                })
+            }
+            _ => eprintln!(
+                "  not one of those — a number from 1 to {count}, `d` and a number to \
+                 decline it, or Enter to quit."
+            ),
+        }
+    }
+}
+
+async fn recv_waiting(out: Option<PathBuf>, password: Option<String>) -> Result<()> {
+    // A running daemon already drains the inbox into its own parked list, so its
+    // view is the authoritative one — reading the relay behind its back would show
+    // an inbox it has emptied and hide the offers it is holding.
+    #[cfg(unix)]
+    {
+        if let Some(client) = daemon_client().await {
+            return waiting_from_daemon(client, out, password).await;
+        }
+    }
+    waiting_from_relay(out, password).await
+}
+
+/// With a daemon: the offers it has parked awaiting approval — the same rows
+/// `arvolo status` shows, with the choice attached.
+#[cfg(unix)]
+async fn waiting_from_daemon(
+    mut client: ipc::client::DaemonClient,
+    out: Option<PathBuf>,
+    password: Option<String>,
+) -> Result<()> {
+    let pending = client.list_pending().await?;
+    if pending.is_empty() {
+        print_nothing_waiting("(the daemon is running and watching the relay)");
+        return Ok(());
+    }
+    let rows: Vec<Waiting> = pending
+        .iter()
+        .map(|o| Waiting {
+            from: o.from.clone(),
+            name: o.name.clone(),
+            size: o.size,
+            note: o.note.clone(),
+            sender_name: o.sender_name.clone(),
+            // The daemon holds the ticket and drives the fetch either way, so
+            // which kind it is changes nothing about what accepting does here.
+            kind: "held by the daemon, awaiting you",
+            hint: Some(format!(
+                "arvolo accept {}   ·   arvolo reject {}",
+                o.id, o.id
+            )),
+        })
+        .collect();
+    println!("Waiting for you ({}):\n", rows.len());
+    print_waiting(&rows);
+
+    let Some(pick) = pick_one(rows.len()).await else {
+        eprintln!("(nothing taken — they stay parked; `arvolo accept <id>` takes one later.)");
+        return Ok(());
+    };
+    let n = match pick {
+        Pick::Take(n) => n,
+        Pick::Drop(n) => {
+            let offer = &pending[n];
+            client.reject(offer.id.clone()).await?;
+            println!(
+                "Declined {} — it's off your list.",
+                sanitize_display(&offer.name)
+            );
+            return Ok(());
+        }
+    };
+    let offer = &pending[n];
+    note_advertised_name(&offer.from, &offer.sender_name);
+    let id = client
+        .accept_with_password(offer.id.clone(), out, password)
+        .await?;
+    println!(
+        "Accepted — the daemon is downloading it (transfer {id}). \
+         Follow it with `arvolo status --watch`."
+    );
+    Ok(())
+}
+
+/// Without a daemon: read the inbox on the relay directly.
+///
+/// Nobody is polling it in this case, so an offer sits there until its TTL lapses
+/// and the recipient never learns it existed — which is the gap this closes. The
+/// read is non-destructive by protocol (the relay drops an offer only on our
+/// DELETE), so listing costs nothing: the ack goes out below, once the file is
+/// actually saved, and a failed download leaves the offer where it was.
+async fn waiting_from_relay(out: Option<PathBuf>, password: Option<String>) -> Result<()> {
+    use arvolo_core::presence::InboxSubscription;
+
+    let relay = require_relay(None, false)?;
+    let me = my_identity()?;
+    let inbox = InboxSubscription::new(relay.clone(), &me);
+    vprintln!("reading your inbox slot on {relay} (one round trip, no waiting)…");
+    let offers = read_inbox(&inbox).await?;
+
+    if offers.is_empty() {
+        print_nothing_waiting(&format!("on {relay}"));
+        return Ok(());
+    }
+    let rows: Vec<Waiting> = offers.iter().map(waiting_row).collect();
+    println!("Waiting for you on {relay} ({}):\n", rows.len());
+    print_waiting(&rows);
+
+    let Some(pick) = pick_one(rows.len()).await else {
+        eprintln!("(nothing taken — they stay on the relay until they expire.)");
+        return Ok(());
+    };
+    let n = match pick {
+        Pick::Take(n) => n,
+        Pick::Drop(n) => {
+            // The ack is what clears an offer, and declining is an ack with no
+            // fetch in front of it. The sender is told `taken` either way: the
+            // relay records that the recipient dealt with it, and what they
+            // decided is not the relay's to know — nor, arguably, the sender's.
+            let chosen = &offers[n];
+            inbox.ack(&chosen.id).await.context("decline the offer")?;
+            println!(
+                "Declined {} — it won't be offered again.",
+                sanitize_display(&chosen.offer.name)
+            );
+            return Ok(());
+        }
+    };
+    let chosen = &offers[n];
+    note_advertised_name(&encode_id(&chosen.sender), &chosen.offer.sender_name);
+    recv_ticket(chosen.offer.ticket.clone(), out, password).await?;
+    // Saved, so it can be let go of. Acking earlier would drop it from the relay on
+    // the strength of an intention, and a fetch that then failed would have taken
+    // the offer with it — the sender's only record that they sent anything.
+    if let Err(e) = inbox.ack(&chosen.id).await {
+        eprintln!("(the file is saved, but the relay still lists the offer: {e:#})");
+    }
     Ok(())
 }
 

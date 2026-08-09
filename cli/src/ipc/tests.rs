@@ -271,6 +271,7 @@ async fn revoking_a_deposit_the_engine_made_goes_through_the_engine() {
         10,
         1,
         None,
+        "arvmHANDOVER",
         None,
         crate::util::now_unix() + 3600,
         Some(tid),
@@ -310,7 +311,7 @@ async fn revoking_a_deposit_the_engine_made_goes_through_the_engine() {
     std::env::remove_var("ARVOLO_CONFIG_DIR");
 }
 
-/// `arvolo transfers clear` drops finished rows and **keeps the history**: they are
+/// `arvolo status clear` drops finished rows and **keeps the history**: they are
 /// two different stores answering two different questions ("what's going on" vs
 /// "what happened"), and the history is the only permanent one. Wiping both from one
 /// verb would leave no record of a transfer the user only meant to tidy off a list.

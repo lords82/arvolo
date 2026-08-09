@@ -663,12 +663,12 @@ describe("the address book", () => {
     }
   });
 
-  it("Send from a person card opens the sheet already addressed to them", async () => {
+  it("Send from a person row opens the sheet already addressed to them", async () => {
     harness.snapshot.contacts = [dto.contact({ name: "proj" })];
     render(<App />);
     useStore.getState().go("people");
     fireEvent.click(
-      within((await screen.findByText("proj")).closest(".person") as HTMLElement)
+      within((await screen.findByText("proj")).closest(".row") as HTMLElement)
         .getByText("Send")
     );
     // Choosing a person and then being asked to choose them again is the app

@@ -88,7 +88,7 @@ async fn resume_download(partial: &std::path::Path) -> Result<()> {
     );
     // Hand back the same destination it was going to, so the existing partial and
     // its piece bitfield are the ones picked up.
-    crate::commands::receive::recv(ticket, Some(partial.to_path_buf()), None).await
+    crate::commands::receive::recv_ticket(ticket, Some(partial.to_path_buf()), None).await
 }
 
 /// A paused transfer: only the daemon can restart one, since only the daemon is

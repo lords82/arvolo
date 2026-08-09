@@ -136,7 +136,7 @@ fn write_record(rec: &SendRecord) -> Result<()> {
 pub fn load(id: &str) -> Result<SendRecord> {
     let path = record_path(id);
     let s = std::fs::read_to_string(&path)
-        .map_err(|_| anyhow!("no saved session '{id}' (see `arvolo transfers`)"))?;
+        .map_err(|_| anyhow!("no saved session '{id}' (see `arvolo status`)"))?;
     toml::from_str(&s).with_context(|| format!("parse session {}", path.display()))
 }
 

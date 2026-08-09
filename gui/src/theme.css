@@ -1603,41 +1603,6 @@ select {
 
 /* -- Contact card ---------------------------------------------------------- */
 
-.people-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(232px, 1fr));
-  gap: 12px;
-}
-.person {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 14px;
-  border-radius: var(--r-lg);
-  border: 1px solid var(--line);
-  background: var(--surface);
-  box-shadow: var(--shadow-1);
-  transition: border-color var(--t-fast) var(--ease),
-    box-shadow var(--t-fast) var(--ease), transform var(--t-fast) var(--ease);
-}
-.person:hover {
-  border-color: var(--line-strong);
-  box-shadow: var(--shadow-2);
-}
-.person.blocked {
-  opacity: 0.62;
-}
-.person-top {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-.person-acts {
-  display: flex;
-  gap: 6px;
-  margin-top: auto;
-}
-
 /* -- Tones ----------------------------------------------------------------- */
 
 /* The other half of `format.ts`'s `Tone`. Keeping the mapping here rather than
@@ -1729,6 +1694,27 @@ select {
   display: flex;
   align-items: center;
   gap: 6px;
+}
+/* The share panel's numbers. A grid rather than a row: four figures of very
+   different widths ("1", "just now", "1.4 GB") sit badly on one line, and each
+   needs its label under it to mean anything. */
+.stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: 10px;
+}
+.stat {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+.stat-value {
+  font-size: 18px;
+  font-weight: 650;
+  line-height: 1.2;
+}
+.stat-label {
+  margin-top: 2px;
 }
 .wrap {
   flex-wrap: wrap;

@@ -389,6 +389,57 @@ pub struct TransferDto {
     /// Cleared once the code retires — the send itself carries on.
     #[serde(default)]
     pub code: Option<String>,
+    /// This row is a file being **made available**, not a transfer under way.
+    ///
+    /// Three things land here and they are all the same thing: an `arvolo ticket`
+    /// or `code` served in the background, the same serve restored after a daemon
+    /// restart, and the seeding a completed download turns into. None of them ends
+    /// on its own — they exist until withdrawn, because the whole point is that
+    /// someone can still fetch the file.
+    ///
+    /// A UI that shows them as ordinary transfers gets two things wrong at once: a
+    /// served ticket sits at 100% for ever, which reads as stuck, and a seed row
+    /// appears at 0% as an outgoing send of a file the user never sent. Neither is
+    /// progress towards anything, so neither should be drawn as progress.
+    ///
+    /// Derived, not stored: a send with no recipient is exactly a send that exists
+    /// to be fetched (`send --to` and a live `push` both carry their peer). It says
+    /// nothing about *now* — pair it with `download_peers` to tell "available" from
+    /// "someone is pulling it right this moment".
+    #[serde(default)]
+    pub sharing: bool,
+    /// Receivers that fetched **every** chunk of this share. Exact — it counts
+    /// completed pickups, not people: one person fetching twice counts twice, and
+    /// an anonymous ticket carries no identity that could tell them apart.
+    #[serde(default)]
+    pub copies_served: u64,
+    /// Bytes uploaded for this share, across every receiver and across daemon
+    /// restarts. An estimate to within a chunk — it is what this share costs in
+    /// bandwidth, not an audit.
+    #[serde(default)]
+    pub bytes_served: u64,
+    /// Unix seconds of the last completed pickup; 0 = nobody has finished one.
+    #[serde(default)]
+    pub last_pickup: u64,
+    /// Unix seconds of the download that started this share, when it exists only
+    /// because one finished (seed-after-complete); 0 when the user asked for the
+    /// share themselves. A row nobody created has to be able to say why it is here.
+    #[serde(default)]
+    pub from_download: u64,
+    /// Where a completed receive was saved, so a UI can offer to open it — or the
+    /// folder holding it — from any row, not only from one it watched finish.
+    /// `None` for a send, an unfinished receive, or a daemon that predates it.
+    #[serde(default)]
+    pub path: Option<String>,
+    /// How far the inbox offer for a **deposited** send has got: `"pending"`,
+    /// `"arrived"`, `"taken"`, `"gone"`. `None` when there is nothing to say —
+    /// any other kind of row, or a relay not yet asked.
+    ///
+    /// The same vocabulary the deposits list uses, on purpose: a deposited send
+    /// appears in both places, and two ways of saying the same thing would be two
+    /// things to keep in step.
+    #[serde(default)]
+    pub offer_status: Option<String>,
 }
 
 /// A parked incoming offer awaiting the user's accept/reject.
@@ -463,6 +514,16 @@ pub struct DepositDto {
     /// The full browser URL, for a link. Empty for a sealed deposit.
     #[serde(default)]
     pub link: String,
+    /// The sender's `arvm…` ticket, for a sealed deposit — what you paste to
+    /// someone so they can fetch it by hand, instead of waiting for their inbox.
+    /// Empty for a link (its URL is above) and for a deposit made before tickets
+    /// were kept, whose ticket is gone for good.
+    ///
+    /// Unlike the revoke token, this is not a capability over the *sender's* side
+    /// of the deposit, and its payload key is sealed to the recipient — so it can
+    /// cross this boundary, and has to, or the sender can never hand it over twice.
+    #[serde(default)]
+    pub ticket: String,
     /// The recipient's base32 id, for a sealed deposit. Empty for a link.
     #[serde(default)]
     pub recipient: String,
@@ -490,6 +551,21 @@ pub struct DepositDto {
     /// (the relay clamps to its maximum). `None` as for `downloads`.
     #[serde(default)]
     pub max_downloads: Option<u32>,
+    /// How far the inbox offer pointing at this deposit has got: `"pending"` (no
+    /// client of theirs has read it), `"arrived"` (it reached one of their devices
+    /// — nobody has necessarily looked at it), `"taken"` (they fetched the file and
+    /// acked), or `"gone"` (retracted, or lapsed unread).
+    ///
+    /// No state says a person saw it: the relay sees reads of a slot, not eyes on
+    /// a screen, so `"arrived"` is the most the middle one can claim.
+    ///
+    /// `None` when the question doesn't apply or couldn't be answered: a public
+    /// link has no offer, nor does a deposit whose offer post failed, and a relay
+    /// that can't be reached — or one older than the `taken` state — leaves it
+    /// unset. A UI must treat it the way it treats `present: None`: say nothing
+    /// rather than invent a state. In particular, absence is never "not taken".
+    #[serde(default)]
+    pub offer_status: Option<String>,
 }
 
 /// The settings screen: what is in force, and what `config.toml` actually says.
@@ -716,6 +792,16 @@ impl From<&Transfer> for TransferDto {
             download_peers: t.download_peers,
             created: t.created,
             code: t.code.clone(),
+            // A send with nobody on the other end is a serve: `send --to` and a
+            // live push both know their recipient, so the absence of one is the
+            // signal, not a gap in it.
+            sharing: matches!(t.direction, Direction::Send) && t.peer.is_none(),
+            copies_served: t.copies_served,
+            bytes_served: t.bytes_served,
+            last_pickup: t.last_pickup,
+            from_download: t.from_download,
+            path: t.path.as_ref().map(|p| p.to_string_lossy().into_owned()),
+            offer_status: (!t.offer_status.is_empty()).then(|| t.offer_status.clone()),
         }
     }
 }
@@ -952,6 +1038,7 @@ mod tests {
                 recipient: None,
                 offer_id: "offer-1".into(),
                 poster_token: "SUPER-SECRET-POSTER-TOKEN".into(),
+                ticket: "arvmHANDOVERTICKET".into(),
             },
         };
         let line = serde_json::to_string(&EventDto::from(&ev)).unwrap();
@@ -960,6 +1047,10 @@ mod tests {
         // The other capability in there: it retracts the recipient's inbox entry.
         assert!(!line.contains("SUPER-SECRET-POSTER-TOKEN"));
         assert!(!line.contains("claim-abc"));
+        // The hand-over ticket is not a secret from the recipient's side, but the
+        // event is still just an id: a front-end keeps the ticket from its own
+        // receipt, not by listening to somebody else's deposit going by.
+        assert!(!line.contains("arvmHANDOVERTICKET"));
     }
 
     /// The GUI's TypeScript mirrors these bytes by hand (`gui/src/events.ts`), so a
@@ -1033,6 +1124,7 @@ mod tests {
             name: "photo.jpg".into(),
             size: 4242,
             link: "https://relay.example/dl/claim#key".into(),
+            ticket: String::new(),
             recipient: String::new(),
             created: 1_700_000_000,
             expires: 1_700_604_800,
@@ -1041,6 +1133,7 @@ mod tests {
             present: None,
             downloads: None,
             max_downloads: None,
+            offer_status: None,
         }]);
         let s = serde_json::to_string(&r).unwrap();
         assert_eq!(serde_json::from_str::<Response>(&s).unwrap(), r);
@@ -1055,6 +1148,12 @@ mod tests {
         };
         assert_eq!(v[0].present, None);
         assert_eq!(v[0].downloads, None);
+        // And the hand-over ticket: an older daemon never sent one, which reads as
+        // "there is none to give", not as an empty string someone could paste.
+        assert!(v[0].ticket.is_empty());
+        // Including the offer's own state: a daemon that predates it must not be
+        // read as "the recipient hasn't taken it", which is a claim nobody made.
+        assert_eq!(v[0].offer_status, None);
     }
 
     #[test]

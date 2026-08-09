@@ -7,6 +7,7 @@
 //!   arvolo code <file>             short pairing code to read out loud
 //!   arvolo ticket <file>           self-contained `arvc…` ticket to paste
 //!   arvolo recv <arvc…|arvm…|code|link>   fetch — one verb, auto-detects which
+//!   arvolo recv                    with nothing to paste: what's waiting for you
 //!
 //! P2P transport is encrypted by QUIC and each chunk is end-to-end encrypted;
 //! the offline path is end-to-end encrypted with HPKE. The relay only ever sees

@@ -5,97 +5,418 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>arvolo — secure download</title>
 <style>
-  :root { color-scheme: dark; }
-  * { box-sizing: border-box; }
-  html, body { height: 100%; }
+  /* Arvolo — browser download page.
+     ------------------------------------------------------------------------
+     The one surface of this product a stranger sees, so it speaks the same
+     language as the desktop app (gui/src/theme.css): the same warm neutral
+     ramp, the same two direction hues, the same radii and shadows. Two rules
+     from that stylesheet are worth restating, because they decide the colour
+     of everything below:
+
+       1. DIRECTION IS A COLOUR. Outgoing is warm, incoming is cool. This page
+          is the receiving end of a transfer, so the action, the card's stripe
+          and the progress bar are all blue. The only warm notes are the
+          background wash and the application icon, and neither of them is
+          about this transfer.
+       2. TRUST IS TYPOGRAPHY. The one security-bearing token on the page —
+          the `#fragment` that carries the key — is set in monospace.
+
+     Tokens are duplicated here rather than shared: the relay serves this file
+     standalone under a CSP that forbids every external resource, so it has to
+     be one self-contained document. Keep the values in step with theme.css. */
+
+  :root {
+    --canvas: #faf8f6;
+    --surface: #ffffff;
+    --surface-2: #f5f2ef;
+    --surface-3: #ebe7e2;
+    --track: #ddd8d2;
+
+    --ink: #171514;
+    --ink-sec: #57534c;
+    --ink-mut: #6e6961;
+
+    --line: rgba(23, 21, 20, 0.08);
+    --line-strong: rgba(23, 21, 20, 0.14);
+
+    --out-fill: #cf492c;
+    --in: #0a6ba1;
+    --in-fill: #0a6ba1;
+    --in-soft: #e8f2f9;
+    --on-fill: #ffffff;
+
+    --green: #12703b;
+    --red: #c22b2b;
+    --amber: #9a6100;
+    --amber-soft: #fdf2e0;
+
+    --focus: #1a72c4;
+
+    --shadow-1: 0 1px 2px rgba(58, 46, 34, 0.06), 0 1px 1px rgba(58, 46, 34, 0.04);
+    --shadow-2: 0 2px 4px rgba(58, 46, 34, 0.06), 0 6px 16px rgba(58, 46, 34, 0.08);
+    --shadow-3: 0 8px 24px rgba(58, 46, 34, 0.12), 0 24px 60px rgba(58, 46, 34, 0.16);
+
+    --r-xs: 5px;
+    --r-sm: 8px;
+    --r-md: 11px;
+    --r-lg: 15px;
+    --r-xl: 20px;
+    --r-pill: 999px;
+
+    --font: -apple-system, BlinkMacSystemFont, "Segoe UI Variable", "Segoe UI",
+      Inter, Ubuntu, "Noto Sans", sans-serif;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Segoe UI Mono",
+      "Roboto Mono", monospace;
+
+    --t-fast: 110ms;
+    --t: 180ms;
+    --ease: cubic-bezier(0.32, 0.72, 0, 1);
+
+    color-scheme: light;
+  }
+
+  /* Warm charcoal, not neutral black — the same room as the light theme. */
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --canvas: #16130f;
+      --surface: #1e1a16;
+      --surface-2: #262119;
+      --surface-3: #322b22;
+      --track: #3d352b;
+
+      --ink: #f5f1eb;
+      --ink-sec: #bdb4a8;
+      --ink-mut: #9d9487;
+
+      --line: rgba(245, 241, 235, 0.09);
+      --line-strong: rgba(245, 241, 235, 0.16);
+
+      --out-fill: #ce482b;
+      --in: #4fa8dd;
+      --in-fill: #0d76b0;
+      --in-soft: #12283a;
+
+      --green: #56c27f;
+      --red: #f0736d;
+      --amber: #e0a444;
+      --amber-soft: #35270f;
+
+      --focus: #6cb6f0;
+
+      --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+      --shadow-2: 0 2px 6px rgba(0, 0, 0, 0.4), 0 8px 22px rgba(0, 0, 0, 0.34);
+      --shadow-3: 0 10px 30px rgba(0, 0, 0, 0.5), 0 30px 70px rgba(0, 0, 0, 0.45);
+
+      color-scheme: dark;
+    }
+  }
+
+  *, *::before, *::after { box-sizing: border-box; }
+
   body {
-    margin: 0; display: grid; place-items: center; padding: 24px;
-    font: 15px/1.55 system-ui, -apple-system, Segoe UI, Roboto, Helvetica, sans-serif;
-    color: #e7ebf0;
+    margin: 0;
+    /* `svh`, not `vh`: on mobile Safari the toolbar makes `100vh` taller than
+       the visible page, which pushes a centred card off the bottom. */
+    min-height: 100vh;
+    min-height: 100svh;
+    display: grid;
+    place-items: center;
+    padding: 30px 18px;
+    font-family: var(--font);
+    font-size: 13.5px;
+    line-height: 1.45;
+    color: var(--ink);
+    /* Two faint washes, one per direction hue, so the page has depth without
+       the neon-on-black look of a crypto demo. The flat fill is declared first
+       on purpose: a browser without `color-mix` drops the whole shorthand
+       below, and without it the dark theme would fall back to a white page
+       under light ink. Every `color-mix` on this page is paired like this. */
+    background: var(--canvas);
     background:
-      radial-gradient(900px 500px at 15% -10%, #16351f 0%, transparent 55%),
-      radial-gradient(800px 500px at 110% 10%, #10233a 0%, transparent 50%),
-      #090b0e;
+      radial-gradient(760px 420px at 12% -12%, color-mix(in srgb, var(--out-fill) 13%, transparent), transparent 62%),
+      radial-gradient(680px 420px at 104% 4%, color-mix(in srgb, var(--in) 15%, transparent), transparent 58%),
+      var(--canvas);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
   }
-  .wrap { width: min(94vw, 440px); }
-  .brand {
-    display: flex; align-items: center; gap: 9px; justify-content: center;
-    margin-bottom: 16px; letter-spacing: .3px;
-  }
+
+  :focus { outline: none; }
+  :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: var(--r-sm); }
+  ::selection { background: var(--in-soft); color: var(--ink); }
+
+  .wrap { width: min(100%, 468px); }
+
+  /* -- Brand ---------------------------------------------------------------- */
+
+  .brand { display: flex; align-items: center; gap: 10px; margin: 0 0 14px; padding: 0 2px; }
+  /* The SVG paints the tile; the wrapper only casts the shadow, so its radius
+     has to be the icon's own (6.4/32 of the box) or the shadow shows corners
+     the mark doesn't have. */
   .brand .mark {
-    width: 26px; height: 26px; border-radius: 8px; display: grid; place-items: center;
-    background: linear-gradient(135deg, #46d17f, #1f9e5a); color: #06210f;
-    font-weight: 800; font-size: 15px;
+    width: 30px; height: 30px; flex: none;
+    display: grid; place-items: center;
+    border-radius: 6px;
+    box-shadow: var(--shadow-1);
   }
-  .brand b { font-size: 16px; font-weight: 700; }
+  .brand .word { font-size: 15px; font-weight: 640; letter-spacing: -0.01em; }
+  .brand .tag {
+    margin-left: auto;
+    font-size: 10.5px; font-weight: 680; letter-spacing: 0.075em;
+    text-transform: uppercase; color: var(--ink-mut);
+  }
+
+  /* -- Card ----------------------------------------------------------------- */
+
   .card {
-    padding: 26px 24px 22px; border-radius: 16px;
-    background: rgba(20,23,28,.86); border: 1px solid #232a33;
-    box-shadow: 0 20px 60px rgba(0,0,0,.45); backdrop-filter: blur(6px);
+    position: relative;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: var(--r-xl);
+    box-shadow: var(--shadow-3);
+    overflow: hidden;
   }
-  h1 { font-size: 16px; margin: 0 0 4px; }
-  .sub { color: #8b95a3; font-size: 12.5px; margin: 0 0 20px; }
+  /* The direction stripe, the same one every incoming row carries in the app —
+     laid along the top edge because this card is the whole view, not a row. */
+  .card::before {
+    content: "";
+    position: absolute; top: 0; left: 0; right: 0; height: 3px;
+    background: var(--in);
+    background: linear-gradient(90deg, var(--in), color-mix(in srgb, var(--in) 18%, transparent));
+  }
+  .card-body { padding: 22px 20px 18px; }
+
+  .badge {
+    display: inline-flex; align-items: center; gap: 5px;
+    height: 21px; padding: 0 9px;
+    border-radius: var(--r-pill);
+    background: var(--in-soft); color: var(--in);
+    font-size: 10.5px; font-weight: 650; letter-spacing: 0.02em;
+  }
+
+  h1 { margin: 13px 0 6px; font-size: 19px; font-weight: 640; letter-spacing: -0.015em; line-height: 1.25; }
+  .sub { margin: 0 0 18px; color: var(--ink-sec); font-size: 12.5px; line-height: 1.5; }
+
+  /* -- The file ------------------------------------------------------------- */
+
   .file {
-    display: flex; gap: 13px; align-items: center; margin: 0 0 18px;
-    padding: 13px 14px; border-radius: 12px;
-    background: #0d1117; border: 1px solid #20262e;
+    display: flex; align-items: center; gap: 11px;
+    padding: 11px 12px;
+    border: 1px solid var(--line);
+    border-radius: var(--r-md);
+    background: var(--surface-2);
   }
-  .file .ic { font-size: 24px; filter: grayscale(.1); }
-  .file .name { font-weight: 650; word-break: break-all; line-height: 1.35; }
-  .file .size { color: #8b95a3; font-size: 12px; margin-top: 1px; }
-  button {
-    width: 100%; padding: 13px 16px; border: 0; border-radius: 11px; cursor: pointer;
-    font: inherit; font-weight: 700; color: #06210f;
-    background: linear-gradient(135deg, #4cdd86, #22a862);
-    transition: transform .05s ease, filter .15s ease;
+  /* Same 36px square the app's file lists use, so a list of them makes a
+     column; it holds a padlock until decryption tells us the real extension. */
+  .file .ext {
+    width: 36px; height: 36px; flex: none;
+    display: grid; place-items: center;
+    border-radius: var(--r-md);
+    background: var(--surface-3); color: var(--ink-mut);
+    font-size: 9.5px; font-weight: 720; letter-spacing: 0.03em;
   }
-  button:hover:not(:disabled) { filter: brightness(1.06); }
-  button:active:not(:disabled) { transform: translateY(1px); }
-  button:disabled { opacity: .5; cursor: default; }
-  .bar { height: 7px; border-radius: 5px; background: #1a1f26; overflow: hidden; margin: 16px 0 6px; display: none; }
-  .bar > i {
+  .file .ext.named { background: var(--in-soft); color: var(--in); }
+  .file .grow { flex: 1; min-width: 0; }
+  .file .fname { font-size: 13.5px; font-weight: 570; letter-spacing: -0.005em; overflow-wrap: anywhere; }
+  .file .fmeta {
+    margin-top: 2px; font-size: 11.5px; color: var(--ink-mut);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* -- Action --------------------------------------------------------------- */
+
+  .btn {
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+    width: 100%; height: 40px; margin-top: 16px;
+    border: 1px solid var(--in-fill); border-radius: var(--r-md);
+    background: var(--in-fill); color: var(--on-fill);
+    font: inherit; font-size: 14px; font-weight: 600;
+    cursor: pointer;
+    box-shadow: var(--shadow-1);
+    transition: filter var(--t-fast) var(--ease), transform var(--t-fast) var(--ease);
+  }
+  .btn:hover:not(:disabled) { filter: brightness(1.14); }
+  .btn:active:not(:disabled) { transform: translateY(1px); }
+  .btn:disabled { opacity: 0.45; cursor: not-allowed; box-shadow: none; }
+  /* Working, not dead: a disabled button at 0.45 reads as "nothing is
+     happening", which is the opposite of the truth while bytes are moving. */
+  .btn.busy:disabled { opacity: 0.8; }
+  .btn .ico { display: grid; place-items: center; }
+  .btn .spin {
+    display: none;
+    width: 14px; height: 14px;
+    border: 2px solid rgba(255, 255, 255, 0.35);
+    border-top-color: var(--on-fill);
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+  }
+  .btn.busy .ico { display: none; }
+  .btn.busy .spin { display: block; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* Shown by dl.js the moment the transfer starts. */
+  .prog {
+    display: none;
+    height: 4px; margin-top: 14px;
+    border-radius: var(--r-pill);
+    background: var(--track);
+    overflow: hidden;
+  }
+  .prog > span {
     display: block; height: 100%; width: 0;
-    background: linear-gradient(90deg, #46d17f, #7ef0a9);
-    transition: width .12s linear;
+    border-radius: var(--r-pill);
+    background: var(--in);
+    transition: width var(--t-fast) linear;
   }
-  .status { min-height: 18px; font-size: 12.5px; color: #8b95a3; text-align: center; }
-  .status.err { color: #ff6b6b; }
-  .status.ok { color: #57df8c; }
+  .prog > span.done { background: var(--green); }
+  .prog > span.bad { background: var(--red); }
+
+  .status {
+    margin: 10px 0 0; min-height: 17px;
+    font-size: 12px; line-height: 1.45; color: var(--ink-mut);
+  }
+  .status.err { color: var(--red); }
+  .status.ok { color: var(--green); }
+
   .warn {
-    margin: 14px 0 0; padding: 10px 12px; border-radius: 10px; font-size: 12px; line-height: 1.45;
-    background: rgba(214,158,46,.10); border: 1px solid rgba(214,158,46,.35); color: #e6c07a;
+    margin: 14px 0 0; padding: 10px 12px;
+    border-radius: var(--r-md);
+    background: var(--amber-soft);
+    border: 1px solid var(--line-strong);
+    border-color: color-mix(in srgb, var(--amber) 32%, transparent);
+    color: var(--ink);
+    font-size: 11.5px; line-height: 1.45;
   }
-  .warn b { color: #f0cf8e; }
-  .lock {
-    color: #7c8695; font-size: 11.5px; margin-top: 16px; text-align: center;
-    display: flex; gap: 6px; align-items: baseline; justify-content: center;
+  .warn b { color: var(--amber); }
+
+  /* -- Foot ----------------------------------------------------------------- */
+
+  .card-foot {
+    display: flex; align-items: flex-start; gap: 9px;
+    padding: 12px 20px 13px;
+    border-top: 1px solid var(--line);
+    background: var(--surface-2);
+    color: var(--ink-mut);
+    font-size: 11.5px; line-height: 1.5;
   }
-  code { background: #0d1117; padding: 1px 5px; border-radius: 5px; font-size: 11px; color: #a7b0bd; }
-  footer { text-align: center; margin-top: 16px; font-size: 12px; color: #6b7482; }
-  footer a { color: #8b95a3; text-decoration: none; border-bottom: 1px dashed #3a434f; }
-  footer a:hover { color: #cfd6de; }
+  .card-foot svg { flex: none; margin-top: 2px; }
+  .card-foot p { margin: 0; }
+
+  code {
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 1px 5px;
+    border-radius: var(--r-xs);
+    background: var(--surface-3);
+    color: var(--ink-sec);
+  }
+
+  footer { margin-top: 14px; text-align: center; font-size: 11.5px; color: var(--ink-mut); }
+  footer a {
+    color: var(--ink-sec); text-decoration: none;
+    border-bottom: 1px solid var(--line-strong);
+    transition: color var(--t-fast) var(--ease);
+  }
+  footer a:hover { color: var(--ink); }
+
+  @media (max-width: 400px) {
+    .card-body { padding: 18px 15px 15px; }
+    .card-foot { padding: 12px 15px; }
+    h1 { font-size: 17px; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.001ms !important;
+      transition-duration: 0.001ms !important;
+    }
+  }
 </style>
 </head>
 <body>
   <div class="wrap">
-    <div class="brand"><span class="mark">A</span><b>arvolo</b></div>
+    <header class="brand">
+      <!-- The application icon, redrawn: gui/src-tauri/icons is a set of PNGs,
+           and this page may not fetch anything, so the mark is traced as a path
+           measured off Square310x310Logo.png. Its orange is the icon's own —
+           deliberately not `--out-fill`, which the app moved to vermilion
+           without regenerating the icon. Whoever opens this link should see the
+           same mark that sits in the sender's dock. -->
+      <span class="mark" aria-hidden="true">
+        <svg width="30" height="30" viewBox="0 0 32 32">
+          <rect width="32" height="32" rx="6.4" fill="#f97316"/>
+          <path fill="#fff" fill-rule="evenodd"
+                d="M14.24 8.3 9 22.4h3l1.1-3.2h5.8l1.1 3.2h3L17.44 8.3zM16 11.77 13.98 16.93h4.04z"/>
+        </svg>
+      </span>
+      <span class="word">arvolo</span>
+      <span class="tag" data-t="tag">Secure download</span>
+    </header>
+
     <main class="card">
-      <h1>Someone shared an encrypted file with you</h1>
-      <p class="sub">It's end-to-end encrypted. It gets decrypted right here in your browser — the server never sees the file or the key.</p>
-      <div class="file">
-        <span class="ic">📦</span>
-        <div>
-          <div class="name" id="name">Encrypted file</div>
-          <div class="size" id="size">tap Download to decrypt</div>
+      <div class="card-body">
+        <span class="badge">
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+               stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="3.2" y="7" width="9.6" height="7" rx="1.6"/>
+            <path d="M5.6 7V5.2a2.4 2.4 0 0 1 4.8 0V7"/>
+          </svg>
+          <span data-t="badge">End-to-end encrypted</span>
+        </span>
+
+        <h1 data-t="heading">Someone sent you a file</h1>
+        <p class="sub" data-t="sub">
+          Your browser decrypts it right here — no install, no account. The relay
+          only ever held ciphertext, and never sees the file or the key.
+        </p>
+
+        <div class="file">
+          <span class="ext" id="ext" aria-hidden="true">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+                 stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="3.2" y="7" width="9.6" height="7" rx="1.6"/>
+              <path d="M5.6 7V5.2a2.4 2.4 0 0 1 4.8 0V7"/>
+            </svg>
+          </span>
+          <div class="grow">
+            <div class="fname" id="name" data-t="fileName">Encrypted file</div>
+            <div class="fmeta" id="size" data-t="fileMeta">Its name and size appear once your browser opens it</div>
+          </div>
         </div>
+
+        <button id="go" class="btn" disabled>
+          <span class="ico" aria-hidden="true">
+            <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+                 stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12.5 3.5 3.5 12.5"/><path d="M10 12.5H3.5V6"/>
+            </svg>
+          </span>
+          <span class="spin" aria-hidden="true"></span>
+          <span id="golabel" data-t="preparing">Preparing…</span>
+        </button>
+
+        <div class="prog" id="bar"><span id="fill"></span></div>
+        <p class="status" id="status" role="status" aria-live="polite"></p>
+        <div class="warn" id="warn" hidden></div>
       </div>
-      <button id="go" disabled>Preparing…</button>
-      <div class="bar" id="bar"><i id="fill"></i></div>
-      <div class="status" id="status"></div>
-      <div class="warn" id="warn" hidden></div>
-      <div class="lock"><span>🛡️</span><span>The decryption key lives only in this link's <code>#fragment</code> — never sent to any server.</span></div>
+
+      <div class="card-foot">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+             stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="5.2" cy="10.8" r="2.8"/>
+          <path d="m7.4 8.8 5.4-5.4M11 5.2l1.4 1.4M9.6 6.6 11 8"/>
+        </svg>
+        <!-- `data-html` rather than `data-t`: these two carry mark-up (a <code>
+             and a link) that has to survive translation. The strings come from
+             dl.js's own table, never from the URL or the file. -->
+        <p data-html="keyNote">The decryption key lives only in this link's <code>#fragment</code> — the part
+        browsers never send to a server.</p>
+      </div>
     </main>
-    <footer>Secure transfer powered by <a href="https://github.com/lords82/arvolo" target="_blank" rel="noopener noreferrer">arvolo on GitHub ↗</a></footer>
+
+    <footer data-html="footer">
+      Sent with <a href="https://github.com/lords82/arvolo" target="_blank" rel="noopener noreferrer">arvolo</a>
+      — self-hosted, zero-knowledge file transfer
+    </footer>
   </div>
   <script src="/dl.js"></script>
 </body>

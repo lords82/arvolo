@@ -8,6 +8,7 @@ export type Method = "p2p" | "cloud" | "link" | "ticket";
 export type UIStatus =
   | "incoming" // a parked offer awaiting accept/reject
   | "active" // actively transferring
+  | "sharing" // made available and waiting to be fetched — not progress
   | "paused" // manually paused
   | "stalled" // auto-held, retrying when possible (daemon "waiting")
   | "deposited" // handed to the relay mailbox
@@ -34,6 +35,22 @@ export interface TransferDto {
   created: number;
   /** The live pairing code this send answers to, while one is hosted. */
   code?: string | null;
+  /** Where a completed receive was saved. Present on the snapshot too, not only
+   *  on the event that announced it — a window that starts after a download
+   *  finished must still be able to open it. */
+  path?: string | null;
+  /** How far the inbox offer for a deposited send has got. Same vocabulary as a
+   *  deposit's `offer_status`; null when there is nothing to say. */
+  offer_status?: string | null;
+  copies_served?: number;
+  bytes_served?: number;
+  last_pickup?: number;
+  from_download?: number;
+  /** This row is a file being *made available* — a served ticket/code, or the
+   *  seeding a finished download turns into — rather than a transfer under way.
+   *  None of them ends on its own, so none is progress towards anything: pair it
+   *  with `download_peers` to tell "available" from "being pulled right now". */
+  sharing?: boolean;
 }
 
 export interface OfferDto {
@@ -85,6 +102,10 @@ export interface DepositDto {
   size: number;
   /** The browser URL, for a link. Empty for a sealed deposit. */
   link: string;
+  /** The `arvm…` ticket to hand over, for a sealed deposit. Empty for a link
+   *  (its URL is above) and for a deposit made before tickets were kept — those
+   *  can still be withdrawn, but never handed over again. */
+  ticket: string;
   /** The recipient's base32 id, for a sealed deposit. Empty for a link. */
   recipient: string;
   created: number;
@@ -101,6 +122,16 @@ export interface DepositDto {
   /** The relay's own cap, possibly lower than the one requested. `null` when
    *  unknown (see `present`). */
   max_downloads: number | null;
+  /** How far the offer in the recipient's inbox has got: `"pending"` (no client
+   *  of theirs has read it), `"arrived"` (it reached one of their devices — a
+   *  listing sets this as much as their daemon does, so it is never "they have
+   *  the file", nor even "they looked"), `"taken"` (fetched and acked: the only
+   *  state that reports a person acting), `"gone"` (retracted, or lapsed unread).
+   *
+   *  `null` when there is nothing to say: a public link leaves no offer, and a
+   *  relay that could not be asked leaves no answer. Like `present`, absence is
+   *  "unknown" — never "not taken". */
+  offer_status: string | null;
 }
 
 export interface StatusDto {
@@ -284,4 +315,14 @@ export interface UITransfer {
   rate?: number;
   /** The live pairing code this send answers to, while one is hosted. */
   code?: string;
+  /** Share counters, for a `sharing` row (all 0 otherwise). `copiesServed` counts
+   *  completed pickups, not people — an anonymous ticket has no identity to count.
+   *  `fromDownload` is when the download that started this share finished, and is
+   *  0 for a share the user asked for. */
+  /** For a deposited send: "pending" | "arrived" | "taken" | "gone", or absent. */
+  offerStatus?: string;
+  copiesServed: number;
+  bytesServed: number;
+  lastPickup: number;
+  fromDownload: number;
 }

@@ -23,6 +23,7 @@ import { SettingsView } from "./views/SettingsView";
 import { SendSheet } from "./overlays/SendSheet";
 import { ReceiveSheet } from "./overlays/ReceiveSheet";
 import { IncomingDialog } from "./overlays/IncomingDialog";
+import { ShareSheet } from "./overlays/ShareSheet";
 import { PairSheet } from "./overlays/PairSheet";
 import { CommandPalette } from "./overlays/CommandPalette";
 
@@ -326,6 +327,7 @@ export function App() {
       <SendSheet />
       <ReceiveSheet />
       <IncomingDialog />
+      <ShareSheet />
       <PairSheet />
       <CommandPalette />
       <ToastHost />

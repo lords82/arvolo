@@ -117,6 +117,38 @@ pub struct Transfer {
     /// is hosting one. Cleared when the code retires; the send itself carries on,
     /// since the ticket is a separate capability.
     pub code: Option<String>,
+    /// What this share has done so far, for a send that exists to be fetched (a
+    /// served ticket/code, or the seeding a finished download turns into). All
+    /// zero for a transfer with a recipient — it isn't a share.
+    ///
+    /// Restored from disk when the daemon resumes a share, so "0 copies served"
+    /// never means "the daemon restarted".
+    pub copies_served: u64,
+    pub bytes_served: u64,
+    /// Unix seconds of the last completed pickup; 0 = never.
+    pub last_pickup: u64,
+    /// Unix seconds of the download that started this share (seed-after-complete);
+    /// 0 when the user asked for the share themselves.
+    pub from_download: u64,
+    /// Unix seconds when this share first began, across restarts (0 = not a share).
+    pub share_started: u64,
+    /// How far the inbox offer for a *deposited* send has got — `"pending"`,
+    /// `"arrived"`, `"taken"`, `"gone"` — or empty when there is nothing to say.
+    ///
+    /// The pickup watcher already asks the relay this to decide the transfer's
+    /// fate; keeping the answer costs nothing and is the difference between a row
+    /// that says "waiting to be picked up" for a week and one that says whether it
+    /// ever reached them.
+    pub offer_status: String,
+    /// Where a completed receive landed on disk.
+    ///
+    /// Kept on the transfer, not only announced in [`ManagerEvent::Completed`],
+    /// because an event reaches whoever happened to be listening at the time. A UI
+    /// that starts afterwards — or restarts — rebuilds its rows from the engine's
+    /// list, and a row that has forgotten where the file went cannot offer to open
+    /// it. "Downloaded, and now find it yourself" is a strange thing for the
+    /// window that downloaded it to say.
+    pub path: Option<PathBuf>,
 }
 
 /// What an offline send actually left on the relay, carried by
@@ -158,6 +190,28 @@ pub struct DepositInfo {
     /// is only worth keeping if it is sufficient on its own.
     pub offer_id: String,
     pub poster_token: String,
+    /// The sender's own `arvm…` ticket for this blob — the thing you hand over
+    /// when the inbox route isn't wanted or isn't working.
+    ///
+    /// Carried so a front-end can *keep* it. It used to be returned to whoever
+    /// called `deposit_to` and dropped everywhere else, which meant it existed
+    /// for exactly as long as the panel that printed it: close the sheet, or let
+    /// the terminal scroll, and the only way to hand the file over again was to
+    /// deposit it a second time. Everything needed to rebuild one is sealed
+    /// inside the ticket itself (the HPKE-wrapped content key), so it cannot be
+    /// reconstructed from the receipt's relay + claim — it is kept or it is lost.
+    ///
+    /// Not a secret in the way `revoke_token` is: the wrapped key is sealed to
+    /// the recipient, so a ticket in someone else's hands fetches ciphertext it
+    /// cannot open. That is why this one may cross the IPC boundary and those
+    /// may not.
+    ///
+    /// Empty when there is none to give: a deposit **restored** after a daemon
+    /// restart (the engine's durable record is postcard-encoded and cannot grow a
+    /// field without orphaning every record already written, so the ticket lives
+    /// only in the front-end's receipt — which is why an empty one here must
+    /// never overwrite a stored one).
+    pub ticket: String,
 }
 
 /// Events emitted as transfers and offers progress. Cloneable for [`broadcast`].
@@ -396,6 +450,13 @@ impl TransferManager {
                     pieces_from_peers: 0,
                     download_peers: 0,
                     code: None,
+                    copies_served: 0,
+                    bytes_served: 0,
+                    last_pickup: 0,
+                    from_download: 0,
+                    share_started: 0,
+                    offer_status: String::new(),
+                    path: None,
                 },
             );
             // Keep the map from growing without bound over a long session: once
@@ -750,8 +811,11 @@ impl TransferManager {
                 revoke_token: rec.revoke_token,
                 offer_id: rec.offer_id,
                 poster_token: rec.poster_token,
-                // Restoring a deposit re-watches it; it never re-hands the ticket
-                // out, and the record deliberately doesn't keep one.
+                // Restoring a deposit re-watches it; the durable record cannot
+                // carry a ticket (postcard, see below), so this restarted row has
+                // none to offer. The front-end's own receipt still has the one
+                // written at deposit time — an empty ticket here must never
+                // overwrite it. See [`DepositInfo::ticket`].
                 ticket: String::new(),
                 // The durable record predates per-deposit caps and cannot carry
                 // one: postcard is non-self-describing, so adding a field would
@@ -882,6 +946,13 @@ impl TransferManager {
         // the same content key (carried in the ticket) + node seed reproduce the
         // same chunk hashes and node id, so the ticket already handed out stays
         // valid and receivers reconnect.
+        // A share's clock starts here and is carried across restarts in its
+        // sidecar; the transfer row's own `created` restarts with the daemon.
+        let stats = ShareRecord {
+            started: crate::manager::work::unix_now(),
+            ..Default::default()
+        };
+        self.inner.set_share_stats(id, &stats);
         if let Some(dir) = &self.inner.state_dir {
             persist_send(
                 dir,
@@ -893,6 +964,7 @@ impl TransferManager {
                     owned_stage: None,
                 },
             );
+            persist_share(dir, id, &stats);
         }
 
         tokio::spawn(serve_session(self.inner.clone(), session, id, cancel));
@@ -1069,14 +1141,23 @@ impl TransferManager {
             ticket,
             owned_stage: owned.then_some(path_str),
         };
-        if let Err(e) = self.resume_serve(rec) {
+        // Stamped as coming from a download, so the row can explain itself: the
+        // user never asked for this share, and without the stamp it reads as an
+        // outgoing send of a file they never sent.
+        let now = crate::manager::work::unix_now();
+        let stats = ShareRecord {
+            from_download: now,
+            started: now,
+            ..Default::default()
+        };
+        if let Err(e) = self.resume_serve(rec, stats) {
             tracing::warn!("seed-after-complete: not seeding {}: {e:#}", path.display());
         }
     }
 
     /// Returns the **new** transfer id: a resumed send is registered afresh, and
     /// anything keyed to the old id (a hosted pairing code) has to follow it.
-    fn resume_serve(&self, rec: SendRecord) -> Result<u64> {
+    fn resume_serve(&self, rec: SendRecord, stats: ShareRecord) -> Result<u64> {
         let expected = crate::chunked::ChunkTicket::decode(&rec.ticket).context("decode ticket")?;
         let key: [u8; crate::crypto::CHUNK_KEY_LEN] = match &expected.key {
             crate::chunked::KeyDelivery::Plain(k) => {
@@ -1096,6 +1177,18 @@ impl TransferManager {
             expected.name.clone(),
             expected.total_size,
         );
+        // The counters follow the share onto its fresh id — otherwise every daemon
+        // restart would report a share that has served a hundred copies as
+        // untouched, which is the failure the sidecar exists to prevent.
+        let stats = ShareRecord {
+            started: if stats.started > 0 {
+                stats.started
+            } else {
+                crate::manager::work::unix_now()
+            },
+            ..stats
+        };
+        self.inner.set_share_stats(id, &stats);
         if let Some(dir) = &self.inner.state_dir {
             persist_send(
                 dir,
@@ -1107,6 +1200,7 @@ impl TransferManager {
                     owned_stage: rec.owned_stage.clone(),
                 },
             );
+            persist_share(dir, id, &stats);
         }
         let inner = self.inner.clone();
         tokio::spawn(async move {
@@ -1542,10 +1636,14 @@ impl TransferManager {
         }
         for rec in sends {
             let old_id = rec.id;
+            // Read the counters before dropping the record they belong to; the
+            // resume re-keys them onto the id it allocates.
+            let stats = load_share(&dir, rec.id);
             remove_send(&dir, rec.id);
+            remove_share(&dir, old_id);
             // Re-serve the same ticket (same key + node seed). Best-effort: a send
             // whose file changed/vanished just isn't resumed.
-            match self.resume_serve(rec) {
+            match self.resume_serve(rec, stats) {
                 // A send that hosted a pairing code brings it back too, re-keyed
                 // onto the fresh id the resume registered.
                 Ok(new_id) => {

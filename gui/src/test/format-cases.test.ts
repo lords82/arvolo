@@ -45,6 +45,10 @@ function t(over: Partial<UITransfer> = {}): UITransfer {
     files: 1,
     firstSeen: Date.now(),
     rank: 1,
+    copiesServed: 0,
+    bytesServed: 0,
+    lastPickup: 0,
+    fromDownload: 0,
     ...over,
   };
 }

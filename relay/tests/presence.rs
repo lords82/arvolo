@@ -60,9 +60,18 @@ async fn offline_deposit_round_trips() {
     std::fs::write(&src, &bytes).unwrap();
 
     // Deposit sealed to the recipient (the `send_to` offline path).
-    let deposited = deposit_offline(&src, &recipient.public(), &sender, &relay, 3600, 1, None)
-        .await
-        .expect("deposit");
+    let deposited = deposit_offline(
+        &src,
+        "src.bin",
+        &recipient.public(),
+        &sender,
+        &relay,
+        3600,
+        1,
+        None,
+    )
+    .await
+    .expect("deposit");
     let ticket = deposited.ticket.encode();
     assert!(
         ticket.starts_with("arvm"),

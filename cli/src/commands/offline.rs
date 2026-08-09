@@ -88,6 +88,8 @@ pub(crate) async fn send_offline(
             out.size,
             max,
             Some(out.link.clone()),
+            // A public link has no `arvm…` ticket: the URL above is the whole of it.
+            "",
             None,
             now_unix().saturating_add(ttl),
             // A link has no engine row and no recipient — it is nobody's arrival, so
@@ -109,8 +111,11 @@ pub(crate) async fn send_offline(
         );
         println!("Anyone with this link can download it in a browser — no arvolo needed:\n");
         println!("    {}\n", out.link);
+        // Say that the *address* is kept, not only the row. A link scrolled out
+        // of the terminal is otherwise assumed lost, and the file gets sent a
+        // second time rather than the URL handed over again.
         println!(
-            "Listed as '{}' in `arvolo transfers` — cancel the link (and delete it\nfrom the relay) with:\n",
+            "Listed as '{}' in `arvolo status`, which prints this address again\nwhenever you need it — cancel the link (and delete it from the relay) with:\n",
             rec.id
         );
         println!("    arvolo cancel {}\n", rec.id);
@@ -137,6 +142,7 @@ pub(crate) async fn send_offline(
     );
     let deposited = match flow::deposit_offline(
         &payload,
+        &name,
         &recipient,
         &me,
         &relay,
@@ -215,6 +221,9 @@ pub(crate) async fn send_offline(
         size,
         max,
         None,
+        // The ticket printed below, kept: it is the sender's only copy, it cannot be
+        // rebuilt from the claim, and the terminal it was printed in will scroll.
+        &encoded,
         // The resolved key, not `to` — which is whatever was typed on the command
         // line, a contact name as often as an id. The record's reader has no way to
         // tell one from the other, and needs the key: to retract the offer below, and
@@ -241,7 +250,7 @@ pub(crate) async fn send_offline(
     }
     println!("    arvolo recv {encoded}\n");
     println!(
-        "Listed as '{}' in `arvolo transfers` — cancel the delivery (and delete it\nfrom the relay) with:\n",
+        "Listed as '{}' in `arvolo status` — cancel the delivery (and delete it\nfrom the relay) with:\n",
         rec.id
     );
     println!("    arvolo cancel {}\n", rec.id);

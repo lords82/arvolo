@@ -11,7 +11,7 @@
 // leading edge is what keeps them distinguishable once they do.
 
 import { useMemo, useState } from "react";
-import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { fire, useStore } from "../store";
 import {
   fmtBytes,
@@ -38,6 +38,7 @@ function Row({ t: tx }: { t: UITransfer }) {
   const cancel = useStore((s) => s.cancel);
   const removeRow = useStore((s) => s.removeRow);
   const openIncoming = useStore((s) => s.openIncoming);
+  const openShare = useStore((s) => s.openShare);
   const moveItem = useStore((s) => s.moveItem);
   const [confirmCancel, setConfirmCancel] = useState(false);
 
@@ -52,6 +53,7 @@ function Row({ t: tx }: { t: UITransfer }) {
   // back at all.
   const live =
     tx.status === "active" ||
+    tx.status === "sharing" ||
     tx.status === "paused" ||
     tx.status === "stalled" ||
     tx.status === "deposited" ||
@@ -62,6 +64,14 @@ function Row({ t: tx }: { t: UITransfer }) {
     tx.status === "failed";
 
   const items: MenuItem[] = [];
+  if (tx.status === "sharing") {
+    items.push({
+      key: "share",
+      label: t("transfers.shareDetails"),
+      icon: <Icon.Info size={13} />,
+      onSelect: () => openShare(tx.id),
+    });
+  }
   if (tx.status === "active") {
     items.push({
       key: "pause",
@@ -79,6 +89,15 @@ function Row({ t: tx }: { t: UITransfer }) {
     });
   }
   if (tx.path) {
+    // Opening the file comes first: after a download, the thing you want is the
+    // thing, and the folder is how you go looking for it when you want something
+    // else — to move it, to check what else is there.
+    items.push({
+      key: "openfile",
+      label: t("transfers.openFile"),
+      icon: <Icon.External size={13} />,
+      onSelect: () => openFile(),
+    });
     items.push({
       key: "open",
       label: t("transfers.openFolder"),
@@ -132,21 +151,38 @@ function Row({ t: tx }: { t: UITransfer }) {
 
   // A parked offer is a decision, not a status: the whole row opens the dialog.
   const isOffer = tx.status === "incoming";
+  /** Open the received file with whatever the system uses for it. */
+  const openFile = () => {
+    if (!tx.path) return;
+    openPath(tx.path).catch((e: unknown) =>
+      toast.bad(t("transfers.openFileFailed"), String(e))
+    );
+  };
+  // What clicking the row does, when it does anything: review an offer, or look at
+  // what a share has served. Both are rows whose whole content is behind a panel;
+  // a transfer in flight shows everything it has on the row itself, so opening it
+  // would lead nowhere.
+  const openable = isOffer
+    ? () => openIncoming(tx.offerId!)
+    : tx.status === "sharing"
+      ? () => openShare(tx.id)
+      : null;
 
   return (
     <>
       <div
         className={`row dir-${tx.dir} ${done ? "is-done" : ""}`}
-        style={isOffer ? { cursor: "pointer" } : undefined}
-        onClick={isOffer ? () => openIncoming(tx.offerId!) : undefined}
-        role={isOffer ? "button" : undefined}
-        tabIndex={isOffer ? 0 : undefined}
+        style={openable ? { cursor: "pointer" } : undefined}
+        onClick={openable ?? undefined}
+        onDoubleClick={tx.path ? openFile : undefined}
+        role={openable ? "button" : undefined}
+        tabIndex={openable ? 0 : undefined}
         onKeyDown={
-          isOffer
+          openable
             ? (e) => {
                 if (e.key === "Enter" || e.key === " ") {
                   e.preventDefault();
-                  openIncoming(tx.offerId!);
+                  openable();
                 }
               }
             : undefined

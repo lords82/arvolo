@@ -136,6 +136,10 @@ describe("the window survives what the user does to it", () => {
           files: 1,
           firstSeen: Date.now(),
           rank: 1,
+          copiesServed: 0,
+          bytesServed: 0,
+          lastPickup: 0,
+          fromDownload: 0,
         },
       },
     });
@@ -174,6 +178,10 @@ describe("the window survives what the user does to it", () => {
         files: 1,
         firstSeen: Date.now(),
         rank: i,
+        copiesServed: 0,
+        bytesServed: 0,
+        lastPickup: 0,
+        fromDownload: 0,
       };
     });
     useStore.setState({ transfers });
@@ -201,6 +209,10 @@ describe("the window survives what the user does to it", () => {
           files: 1,
           firstSeen: Date.now(),
           rank: 1,
+          copiesServed: 0,
+          bytesServed: 0,
+          lastPickup: 0,
+          fromDownload: 0,
         },
       },
     });

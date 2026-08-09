@@ -66,6 +66,46 @@ pub(super) const CANCEL_RELAY_SECS: u64 = 10;
 pub(super) const RELAY_RETRY_SECS: u64 = 15 * 60;
 /// How often to re-check the recipient's presence while a send is held.
 pub(super) const WAITING_POLL_SECS: u64 = 15;
+/// Backoff bounds between live attempts that found nobody, doubling from the
+/// first to the second. A live attempt is not free to repeat: it posts an offer
+/// into the recipient's inbox, which is a capped resource and, on their side, a
+/// notification. Against a stale beacon — online by the relay's reckoning, nobody
+/// answering — the un-backed-off loop spent one of those every few seconds.
+///
+/// The cap is minutes rather than hours because the case on the other side of the
+/// trade is real too: a recipient who genuinely comes back should not wait long
+/// for the P2P window. Nothing is lost meanwhile — the mailbox path runs in
+/// parallel and delivers whether or not they ever appear.
+pub(super) const LIVE_RETRY_MIN_SECS: u64 = 30;
+pub(super) const LIVE_RETRY_MAX_SECS: u64 = 5 * 60;
+
+/// Optional bounds on a share's life, from `ARVOLO_SHARE_COPIES` /
+/// `ARVOLO_SHARE_DAYS` (config keys `share_copies` / `share_days`).
+///
+/// Unset means what it has always meant: a share serves until it is stopped by
+/// hand. That is the right default — the file is meant to be fetchable, and
+/// guessing when someone has stopped needing it is not the engine's call. But
+/// unbounded has a cost that accrues quietly: every completed download turns into
+/// a share, each one persisted and resumed at every restart, so the list grows by
+/// one row per file ever received and the machine keeps announcing itself to the
+/// swarm for all of them. A limit is how someone says "keep it available, but not
+/// forever" without having to remember to come back and tidy up.
+///
+/// 0 is read as "no limit" rather than "stop immediately": a limit of zero copies
+/// would make a share that can never serve anybody, which nobody means to ask for.
+fn share_copies_limit() -> Option<u64> {
+    std::env::var("ARVOLO_SHARE_COPIES")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|&n| n > 0)
+}
+
+fn share_days_limit() -> Option<u64> {
+    std::env::var("ARVOLO_SHARE_DAYS")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|&n| n > 0)
+}
 /// Upper bound on how long a held (`Waiting`) send keeps trying before it gives up
 /// and fails — so a too-large file to a recipient who never returns doesn't pin a
 /// payload and a task forever. Mirrors the offline mailbox/offer lifetime.
@@ -173,6 +213,14 @@ pub(super) async fn deliver_to(
     let mut too_big = false;
     let mut next_relay_try = Instant::now();
     let give_up_at = Instant::now() + Duration::from_secs(MAX_WAITING_SECS);
+    // Backoff for live attempts that find nobody. Each attempt posts a fresh offer
+    // into the recipient's inbox, so retrying on the plain poll interval against a
+    // presence beacon that says "online" while nobody ever connects churns one
+    // offer every few seconds — eighty-four of them, in the case that prompted
+    // this. Growing the gap costs a slower reconnect when they really do come
+    // back, which the mailbox path covers anyway.
+    let mut live_backoff = Duration::ZERO;
+    let mut next_live_try = Instant::now();
     loop {
         if cancel.is_cancelled() {
             handle_stop(&inner, id, &pause_flag);
@@ -193,9 +241,10 @@ pub(super) async fn deliver_to(
         }
 
         // 1) Recipient online → deliver live P2P.
-        let online = presence::check_online(&inner.client, &relay, &recipient)
-            .await
-            .unwrap_or(false);
+        let online = Instant::now() >= next_live_try
+            && presence::check_online(&inner.client, &relay, &recipient)
+                .await
+                .unwrap_or(false);
         if online {
             match serve_live_once(
                 &inner, id, &cancel, &relay, &recipient, &payload, &name, archive, &note,
@@ -225,7 +274,15 @@ pub(super) async fn deliver_to(
                     finish(&inner, id, false, Err(e));
                     return;
                 }
-                LiveOutcome::NotConnected => {}
+                LiveOutcome::NotConnected => {
+                    // Their beacon said online and nothing came of it. Wait longer
+                    // before spending another offer on the same claim.
+                    live_backoff = match live_backoff {
+                        Duration::ZERO => Duration::from_secs(LIVE_RETRY_MIN_SECS),
+                        d => (d * 2).min(Duration::from_secs(LIVE_RETRY_MAX_SECS)),
+                    };
+                    next_live_try = Instant::now() + live_backoff;
+                }
             }
         }
 
@@ -374,7 +431,12 @@ pub(super) async fn serve_live_once(
                     &wd_token,
                 )
                 .await,
-                Ok(presence::OfferStatus::Fetched) | Ok(presence::OfferStatus::Gone)
+                // Anything but `Pending` proves a client of theirs was there. The
+                // question here is only "is that presence real?", so `Arrived` —
+                // the weakest of the three — is already enough to answer it.
+                Ok(presence::OfferStatus::Arrived)
+                    | Ok(presence::OfferStatus::Taken)
+                    | Ok(presence::OfferStatus::Gone)
             ) {
                 seen = true;
                 break;
@@ -494,6 +556,7 @@ pub(super) async fn deposit_offline_and_offer(
     let max = opts.max.unwrap_or(OFFLINE_MAX_DOWNLOADS);
     let deposited = flow::deposit_offline(
         payload,
+        name,
         recipient,
         &inner.me,
         relay,
@@ -603,12 +666,30 @@ pub(super) async fn confirm_offline_delivery(
     relay: String,
     claim: String,
     expires: u64,
+    offer: Option<(PublicId, String, String)>,
 ) {
     let verdict_at = expires.saturating_sub(OFFLINE_CONFIRM_MARGIN_SECS);
     let mut delay = OFFLINE_CONFIRM_POLL_SECS;
     loop {
         let look = flow::claim_info(&relay, &claim).await.ok();
-        match read_deposit(look.as_ref(), unix_now(), verdict_at) {
+        // Only asked when the blob look was inconclusive, and only when there is an
+        // offer to ask about: a gone blob before the TTL already settles it, and a
+        // deposit handed over as a bare ticket has nobody to have acked.
+        let offer_state = match (
+            &offer,
+            read_deposit(look.as_ref(), None, unix_now(), verdict_at),
+        ) {
+            (Some((recipient, offer_id, token)), Verdict::KeepWatching) => {
+                presence::offer_status(&inner.client, &relay, recipient, offer_id, token)
+                    .await
+                    .ok()
+            }
+            _ => None,
+        };
+        if let Some(st) = offer_state {
+            inner.set_offer_status(id, st.as_str());
+        }
+        match read_deposit(look.as_ref(), offer_state, unix_now(), verdict_at) {
             Verdict::PickedUp => {
                 complete_deposit(&inner, id);
                 return;
@@ -658,7 +739,21 @@ pub(super) enum Verdict {
 /// day 7 if the relay went dark in between — it could have been collected the
 /// whole time. An expiry verdict needs the relay to still be saying "it's here"
 /// as the TTL runs out.
-pub(super) fn read_deposit(look: Option<&flow::ClaimInfo>, now: u64, verdict_at: u64) -> Verdict {
+pub(super) fn read_deposit(
+    look: Option<&flow::ClaimInfo>,
+    offer: Option<presence::OfferStatus>,
+    now: u64,
+    verdict_at: u64,
+) -> Verdict {
+    // The recipient's own ack, when the deposit left an offer to be acked. It is
+    // the only positive report of a *person* acting, and it needs no inference:
+    // everything below this line exists because, without it, "they took it" and
+    // "it expired" both looked like the blob being gone, and only the clock could
+    // tell them apart. That reasoning still runs for a deposit handed over as a
+    // bare ticket, which has no offer and so no ack.
+    if matches!(offer, Some(presence::OfferStatus::Taken)) {
+        return Verdict::PickedUp;
+    }
     match look {
         // A download count is the direct answer, when the relay is new enough to
         // report it. It only ever reaches 1 here (deposits are max=1, so the fetch
@@ -708,10 +803,11 @@ pub(super) fn spawn_offline_confirm(
         offer_id,
         poster_token,
         max,
-        // The sender's hand-delivery ticket is returned to the caller, not filed
-        // with the deposit: the record exists to *withdraw* the blob, and a ticket
-        // is a capability to fetch it.
-        ticket: _,
+        // The sender's hand-delivery ticket. Returned to the caller *and* carried
+        // on the event: the caller shows it once, and a front-end that only sees
+        // events (a daemon filing its receipt) has no other way to keep it — and
+        // it cannot be rebuilt later from the claim. See [`DepositInfo::ticket`].
+        ticket,
     } = out;
     inner.set_progress(id, size);
     inner.set_status(id, TransferStatus::Deposited);
@@ -724,6 +820,15 @@ pub(super) fn spawn_offline_confirm(
             t.and_then(|t| t.peer.clone()),
             t.map(|t| t.name.clone()).unwrap_or_default(),
         )
+    };
+
+    // What the pickup watcher needs to ask after the offer, taken before the record
+    // write below consumes the same fields. `None` when the deposit left no offer
+    // (a bare `arvm…` ticket to hand over), in which case there is no ack to wait
+    // for and the blob's own status is all there is.
+    let offer_probe = match (&recipient, offer_id.is_empty() || poster_token.is_empty()) {
+        (Some(r), false) => Some((r.clone(), offer_id.clone(), poster_token.clone())),
+        _ => None,
     };
 
     // Emitted *before* the record is written, so it carries what a front-end needs
@@ -741,6 +846,7 @@ pub(super) fn spawn_offline_confirm(
             recipient: recipient.clone(),
             offer_id: offer_id.clone(),
             poster_token: poster_token.clone(),
+            ticket,
         },
     });
 
@@ -767,6 +873,7 @@ pub(super) fn spawn_offline_confirm(
         relay,
         claim,
         expires,
+        offer_probe,
     ));
 }
 
@@ -839,12 +946,52 @@ pub(super) async fn serve_session(
             }
         }
     }
+    // A share with a day limit stops on its own. The deadline is measured from
+    // when the share *first* began, carried across restarts in its sidecar — from
+    // the transfer row it would restart with every daemon, and a limit that resets
+    // on reboot is not a limit.
+    if let Some(days) = share_days_limit() {
+        let started = inner
+            .transfers
+            .lock()
+            .unwrap()
+            .get(&id)
+            .map(|t| t.share_started)
+            .unwrap_or(0);
+        if started > 0 {
+            let deadline = started.saturating_add(days.saturating_mul(86_400));
+            let left = deadline.saturating_sub(unix_now());
+            let stop = cancel.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(left)).await;
+                tracing::info!("share reached its {days}-day limit — stopping");
+                stop.cancel();
+            });
+        }
+    }
+    let copies_cap = share_copies_limit();
+
     let delivered = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let d = delivered.clone();
     let inner_cb = inner.clone();
+    // Last progress figure seen, to turn a per-receiver running total into bytes
+    // actually uploaded. A ticket serves one receiver after another and each starts
+    // from zero, so a drop is a new receiver, not lost ground — count the new value
+    // whole. Interleaved receivers make this an estimate, which is what it is
+    // documented as; `copies_served` below is the exact number.
+    let last_progress = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let lp = last_progress.clone();
+    let cap_reached = cancel.clone();
     let result = session
         .serve(cancel, move |ev| match ev {
             SendEvent::Progress { transferred, total } => {
+                let prev = lp.swap(transferred, Ordering::Relaxed);
+                let delta = if transferred >= prev {
+                    transferred - prev
+                } else {
+                    transferred
+                };
+                inner_cb.add_bytes_served(id, delta);
                 inner_cb.set_progress(id, transferred);
                 inner_cb.emit(ManagerEvent::Progress {
                     id,
@@ -854,6 +1001,28 @@ pub(super) async fn serve_session(
             }
             SendEvent::Delivered => {
                 d.store(true, Ordering::Relaxed);
+                // A whole copy left the machine. Count it, stamp it, and reset the
+                // running total so the next receiver's first report isn't read as
+                // a continuation of this one.
+                let prev = lp.swap(0, Ordering::Relaxed);
+                inner_cb.add_bytes_served(id, total.saturating_sub(prev));
+                inner_cb.record_pickup(id, unix_now());
+                inner_cb.persist_share_stats(id);
+                // Enough copies out: stop serving. Checked here rather than on a
+                // timer because this is the only moment the count can change.
+                if let Some(cap) = copies_cap {
+                    let served = inner_cb
+                        .transfers
+                        .lock()
+                        .unwrap()
+                        .get(&id)
+                        .map(|t| t.copies_served)
+                        .unwrap_or(0);
+                    if served >= cap {
+                        tracing::info!("share served {served} copies (limit {cap}) — stopping");
+                        cap_reached.cancel();
+                    }
+                }
                 inner_cb.set_progress(id, total);
                 inner_cb.emit(ManagerEvent::Progress {
                     id,
@@ -883,6 +1052,9 @@ pub(super) fn finish(inner: &Inner, id: u64, cancelled: bool, result: Result<Opt
     if let Some(dir) = &inner.state_dir {
         remove_download(dir, id);
         remove_send(dir, id);
+        // The counters belonged to the share, and the share is over. Left behind
+        // they would be inherited by whatever id came round to that number next.
+        remove_share(dir, id);
     }
     // Drop any held `send --to` delivery state (memory + its durable record).
     drop_held(inner, id);
@@ -893,6 +1065,9 @@ pub(super) fn finish(inner: &Inner, id: u64, cancelled: bool, result: Result<Opt
             let _ = path;
         }
         Ok(path) => {
+            if let Some(p) = &path {
+                inner.set_path(id, p.clone());
+            }
             inner.set_status(id, TransferStatus::Completed);
             inner.emit(ManagerEvent::Completed { id, path });
         }
@@ -1010,7 +1185,7 @@ fn close_reason_text(reason: crate::code::CloseReason) -> String {
 
 #[cfg(test)]
 mod deposit_verdict_tests {
-    use super::{read_deposit, Verdict};
+    use super::{presence, read_deposit, Verdict};
     use crate::flow::ClaimInfo;
 
     const DEADLINE: u64 = 1_000;
@@ -1030,13 +1205,47 @@ mod deposit_verdict_tests {
         }
     }
 
+    /// The recipient's ack settles it on the spot, with the blob still sitting
+    /// there and the TTL nowhere near — the two facts the inference below needs and
+    /// cannot have this early. This is the case that used to be unanswerable.
+    #[test]
+    fn an_acked_offer_is_a_pickup_whatever_the_blob_says() {
+        assert_eq!(
+            read_deposit(
+                Some(&present()),
+                Some(presence::OfferStatus::Taken),
+                10,
+                DEADLINE
+            ),
+            Verdict::PickedUp
+        );
+    }
+
+    /// And only `Taken`. The middle state is set by any read of their inbox — a
+    /// listing as much as their daemon's poll — so treating it as a pickup would
+    /// report a glance at a list as a delivered file.
+    #[test]
+    fn an_offer_that_only_arrived_is_not_a_pickup() {
+        for st in [
+            presence::OfferStatus::Pending,
+            presence::OfferStatus::Arrived,
+            presence::OfferStatus::Gone,
+        ] {
+            assert_eq!(
+                read_deposit(Some(&present()), Some(st), 10, DEADLINE),
+                Verdict::KeepWatching,
+                "{st:?} must not conclude anything"
+            );
+        }
+    }
+
     /// The regression this whole change exists for: the old watcher gave up after
     /// 90 seconds, so a recipient who collected on day 5 left the row lying about
     /// itself forever. Long after the old window, "gone" still means delivered.
     #[test]
     fn gone_long_after_the_old_window_is_still_a_pickup() {
         assert_eq!(
-            read_deposit(Some(&gone()), 900, DEADLINE),
+            read_deposit(Some(&gone()), None, 900, DEADLINE),
             Verdict::PickedUp
         );
     }
@@ -1050,7 +1259,10 @@ mod deposit_verdict_tests {
             downloads: None,
             max_downloads: None,
         };
-        assert_eq!(read_deposit(Some(&old), 10, DEADLINE), Verdict::PickedUp);
+        assert_eq!(
+            read_deposit(Some(&old), None, 10, DEADLINE),
+            Verdict::PickedUp
+        );
     }
 
     /// When the relay does count, the count decides — no inference needed.
@@ -1062,7 +1274,7 @@ mod deposit_verdict_tests {
             max_downloads: Some(2),
         };
         assert_eq!(
-            read_deposit(Some(&fetched), 10, DEADLINE),
+            read_deposit(Some(&fetched), None, 10, DEADLINE),
             Verdict::PickedUp
         );
     }
@@ -1070,7 +1282,7 @@ mod deposit_verdict_tests {
     #[test]
     fn still_sitting_there_means_look_again() {
         assert_eq!(
-            read_deposit(Some(&present()), 999, DEADLINE),
+            read_deposit(Some(&present()), None, 999, DEADLINE),
             Verdict::KeepWatching
         );
     }
@@ -1078,7 +1290,7 @@ mod deposit_verdict_tests {
     #[test]
     fn still_there_as_the_ttl_runs_out_is_an_expiry() {
         assert_eq!(
-            read_deposit(Some(&present()), DEADLINE, DEADLINE),
+            read_deposit(Some(&present()), None, DEADLINE, DEADLINE),
             Verdict::Expired
         );
     }
@@ -1088,11 +1300,74 @@ mod deposit_verdict_tests {
     /// Reporting "never collected" there would be a guess dressed as a fact.
     #[test]
     fn a_relay_dark_at_the_deadline_yields_no_verdict() {
-        assert_eq!(read_deposit(None, DEADLINE, DEADLINE), Verdict::Unknown);
+        assert_eq!(
+            read_deposit(None, None, DEADLINE, DEADLINE),
+            Verdict::Unknown
+        );
     }
 
     #[test]
     fn an_unreachable_relay_before_the_deadline_just_retries() {
-        assert_eq!(read_deposit(None, 500, DEADLINE), Verdict::KeepWatching);
+        assert_eq!(
+            read_deposit(None, None, 500, DEADLINE),
+            Verdict::KeepWatching
+        );
+    }
+}
+
+#[cfg(test)]
+mod share_limit_tests {
+    use super::{share_copies_limit, share_days_limit};
+
+    /// These read process-global env, which the parallel test runner shares.
+    static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn with(key: &str, value: Option<&str>, f: impl FnOnce()) {
+        let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
+        match value {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+        f();
+        std::env::remove_var(key);
+    }
+
+    /// Unset is the default the user chose: a share serves until it is stopped by
+    /// hand. Nothing here may invent a limit nobody asked for.
+    #[test]
+    fn unset_means_no_limit() {
+        with("ARVOLO_SHARE_COPIES", None, || {
+            assert_eq!(share_copies_limit(), None)
+        });
+        with("ARVOLO_SHARE_DAYS", None, || {
+            assert_eq!(share_days_limit(), None)
+        });
+    }
+
+    #[test]
+    fn a_number_is_the_limit() {
+        with("ARVOLO_SHARE_COPIES", Some("5"), || {
+            assert_eq!(share_copies_limit(), Some(5))
+        });
+        with("ARVOLO_SHARE_DAYS", Some(" 30 "), || {
+            assert_eq!(share_days_limit(), Some(30))
+        });
+    }
+
+    /// Zero reads as "no limit", not "stop at once": a share allowed zero copies
+    /// could never serve anybody, which is not a thing anyone means to configure.
+    /// Nor may nonsense turn into a limit — it falls back to unbounded, the
+    /// behaviour that was there before the key existed.
+    #[test]
+    fn zero_and_nonsense_leave_it_unbounded() {
+        with("ARVOLO_SHARE_COPIES", Some("0"), || {
+            assert_eq!(share_copies_limit(), None)
+        });
+        with("ARVOLO_SHARE_DAYS", Some("presto"), || {
+            assert_eq!(share_days_limit(), None)
+        });
+        with("ARVOLO_SHARE_DAYS", Some("-1"), || {
+            assert_eq!(share_days_limit(), None)
+        });
     }
 }

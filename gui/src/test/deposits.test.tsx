@@ -39,6 +39,7 @@ function deposit(over: Partial<DepositDto> = {}): DepositDto {
     name: "relazione.pdf",
     size: 1024,
     link: "https://relay.test/dl/abc#key",
+    ticket: "",
     recipient: "",
     created: nowSecs() - 60,
     expires: nowSecs() + 7 * DAY,
@@ -47,6 +48,7 @@ function deposit(over: Partial<DepositDto> = {}): DepositDto {
     present: true,
     downloads: 0,
     max_downloads: null,
+    offer_status: null,
     ...over,
   };
 }
@@ -81,6 +83,39 @@ describe("the deposits list", () => {
     harness.snapshot.deposits = [deposit({ name: "a.pdf" })];
     await s().loadDeposits();
     expect(s().deposits.map((d) => d.name)).toContain("a.pdf");
+  });
+
+  it("141b. it turns up without being asked for — creating one refetches", async () => {
+    // 141 fetched by hand. Nobody does that: you make a link from this very
+    // screen and look at the list, which nothing pushes to. Without the refetch
+    // the row simply is not there, and a list missing the link you just made
+    // reads as "it was not kept" — the exact fear this screen answers.
+    harness.snapshot.deposits = [deposit({ name: "a.pdf" })];
+    await s().link("/a.pdf", null, null);
+    await waitFor(() =>
+      expect(s().deposits.map((d) => d.name)).toContain("a.pdf")
+    );
+  });
+
+  it("141c. a sealed deposit lands in the list the same way", async () => {
+    // A mailbox send leaves a file on a relay too, and the same list is where it
+    // is taken back from.
+    harness.snapshot.deposits = [
+      deposit({ kind: "offline", link: "", name: "conti.xlsx", recipient: "k7x2" }),
+    ];
+    await s().deposit("alice", ["/conti.xlsx"], "", null, null, null);
+    await waitFor(() =>
+      expect(s().deposits.map((d) => d.name)).toContain("conti.xlsx")
+    );
+  });
+
+  it("141d. a link still reaches the user when the refetch fails", async () => {
+    // The URL is the whole point of the call and it is already in hand; a list
+    // that could not be re-read must not turn that into a failed creation.
+    harness.fail = new Set(["listDeposits"]);
+    const url = await s().link("/a.pdf", null, null);
+    expect(url).toContain("/dl/");
+    await waitFor(() => expect(s().depositsError).toBeTruthy());
   });
 
   it("142. a daemon that cannot be asked says so, rather than showing an empty list", async () => {
@@ -130,12 +165,15 @@ describe("revoking", () => {
 });
 
 describe("the panel", () => {
-  it("147. it lists a link with its URL and controls", async () => {
+  it("147. it lists a link with the controls that hand it over", async () => {
+    // The address itself is not printed on the row any more — an `arvm…` ticket is
+    // three hundred characters and nobody reads either off a screen. What has to be
+    // there is the way to take it: copy, open, show it again.
     harness.snapshot.deposits = [deposit()];
     await s().go("deposits");
     render(<DepositsView />);
     expect(await screen.findByText("relazione.pdf")).toBeDefined();
-    expect(screen.getByText("https://relay.test/dl/abc#key")).toBeDefined();
+    expect(screen.getByText("Link", { selector: ".row button" })).toBeDefined();
     expect(screen.getByText("Withdraw", { selector: ".row button" })).toBeDefined();
   });
 
@@ -184,13 +222,91 @@ describe("the panel", () => {
   });
 
   it("150. Copy puts the link on the clipboard", async () => {
+    // From inside the panel: the row has one button, and it opens the place where
+    // the address actually is. Two row buttons that both meant "hand this over"
+    // only made the reader pick between them.
     const writeText = vi.fn(() => Promise.resolve());
     Object.assign(navigator, { clipboard: { writeText } });
     harness.snapshot.deposits = [deposit()];
     await s().go("deposits");
     render(<DepositsView />);
-    fireEvent.click(await screen.findByLabelText("Copy"));
+    fireEvent.click(await screen.findByText("Link", { selector: ".row button" }));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getByText("Copy"));
     expect(writeText).toHaveBeenCalledWith("https://relay.test/dl/abc#key");
+  });
+
+  it("150b. a link can be brought back up in full, to hand out again", async () => {
+    // The panel that produced the link is long closed; this list is the only
+    // place it still exists. Bringing it back has to give the whole thing — the
+    // address, and the QR for pointing a phone at — not just a truncated row.
+    harness.snapshot.deposits = [deposit()];
+    await s().go("deposits");
+    render(<DepositsView />);
+    fireEvent.click(await screen.findByText("Link", { selector: ".row button" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText("https://relay.test/dl/abc#key")).toBeDefined();
+    expect(within(dialog).getByText("relazione.pdf")).toBeDefined();
+  });
+
+  it("150c. re-sharing a link the relay has let go says so before the address", async () => {
+    // A dead URL still copies and still scans. Handing one out again believing
+    // it works is the failure this screen exists to prevent, so the state comes
+    // with it into the panel.
+    harness.snapshot.deposits = [deposit({ present: false })];
+    await s().go("deposits");
+    render(<DepositsView />);
+    fireEvent.click(await screen.findByText("Link", { selector: ".row button" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText("No longer available")).toBeDefined();
+  });
+
+  it("150d. a sealed deposit hands over a ticket, and never calls it a link", async () => {
+    // The case that started this: two mailbox deposits on the relay and no way to
+    // give them to anyone a second time. The ticket is kept now, so it copies.
+    // Calling its button "Link" — which it briefly did — promises a URL that
+    // cannot exist: the blob is HPKE-sealed to the recipient, so no browser can
+    // open it and no fragment could carry the key.
+    const writeText = vi.fn(() => Promise.resolve());
+    Object.assign(navigator, { clipboard: { writeText } });
+    harness.snapshot.deposits = [
+      deposit({ kind: "offline", link: "", ticket: "arvmSEALED", recipient: "k7x2" }),
+    ];
+    await s().go("deposits");
+    render(<DepositsView />);
+    expect(screen.queryByText("Link", { selector: ".row button" })).toBeNull();
+    fireEvent.click(await screen.findByText("Ticket", { selector: ".row button" }));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getByText("Copy"));
+    expect(writeText).toHaveBeenCalledWith("arvmSEALED");
+    // Nothing to open: there is no page on the relay that could decrypt it.
+    expect(within(dialog).queryByText("Open in the browser")).toBeNull();
+  });
+
+  it("150e. a deposit made before tickets were kept offers no hand-over", async () => {
+    // Nothing was stored, and nothing can be reconstructed from the claim. It can
+    // still be withdrawn — a button that promised otherwise would copy an empty
+    // string and look like it worked.
+    harness.snapshot.deposits = [
+      deposit({ kind: "offline", link: "", ticket: "", recipient: "k7x2" }),
+    ];
+    await s().go("deposits");
+    render(<DepositsView />);
+    expect(await screen.findByText("relazione.pdf")).toBeDefined();
+    expect(screen.queryByText("Ticket", { selector: ".row button" })).toBeNull();
+    expect(screen.queryByText("Link", { selector: ".row button" })).toBeNull();
+    expect(screen.getByText("Withdraw", { selector: ".row button" })).toBeDefined();
+  });
+
+  it("150f. showing a sealed deposit again gives the ticket, big", async () => {
+    harness.snapshot.deposits = [
+      deposit({ kind: "offline", link: "", ticket: "arvmSEALED", recipient: "k7x2" }),
+    ];
+    await s().go("deposits");
+    render(<DepositsView />);
+    fireEvent.click(await screen.findByText("Ticket", { selector: ".row button" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText("arvmSEALED")).toBeDefined();
   });
 
   it("151. an expired deposit offers Elimina, not Withdraw — there is nothing to take back", async () => {
@@ -210,7 +326,10 @@ describe("the panel", () => {
     render(<DepositsView />);
     expect(await screen.findByText("relazione.pdf")).toBeDefined();
     expect(screen.getByText(/sealed for/i)).toBeDefined();
-    expect(screen.queryByLabelText("Copy"), "a sealed deposit is not a public URL").toBeNull();
+    expect(
+      screen.queryByText("Link", { selector: ".row button" }),
+      "a sealed deposit is not a public URL — no browser can open it"
+    ).toBeNull();
   });
 
   it("152b. a relay that cannot be asked shows unknown, never a confident 'alive'", async () => {
@@ -235,6 +354,73 @@ describe("the panel", () => {
     expect(screen.getByText("No longer available")).toBeDefined();
     expect(screen.getByText("Remove")).toBeDefined();
     expect(screen.queryByText("Withdraw", { selector: ".row button" })).toBeNull();
+  });
+
+  // What became of the offer, which is a different question from what became of
+  // the blob. The relay reports three states and they must stay three: the two
+  // that mean "not yet", and the one — set only by the recipient's own ack — that
+  // means they have the file.
+  it("152d. a taken deposit says they took it, not that the file vanished", async () => {
+    // The fetch burns the blob, so `present` goes false either way: taken, or
+    // withdrawn by the sender. Reporting both as "no longer available, collected
+    // or already withdrawn" was a shrug about an event the relay can now confirm.
+    harness.snapshot.deposits = [
+      deposit({
+        kind: "offline",
+        link: "",
+        recipient: "peer1",
+        present: false,
+        offer_status: "taken",
+      }),
+    ];
+    await s().go("deposits");
+    render(<DepositsView />);
+    expect(await screen.findByText("Taken")).toBeDefined();
+    expect(screen.getByText(/the recipient fetched it/i)).toBeDefined();
+    expect(
+      screen.queryByText("No longer available"),
+      "an event we can confirm must not be reported as an ambiguity"
+    ).toBeNull();
+    // Nothing left to take back — they have it.
+    expect(screen.queryByText("Withdraw", { selector: ".row button" })).toBeNull();
+  });
+
+  it("152e. a deposit that only reached their device is not reported as taken", async () => {
+    // `arrived` is set by any authenticated read of the inbox — the recipient
+    // merely listing what is waiting sets it exactly as their daemon does. Saying
+    // "taken" here would turn a glance at a list into a confirmed handover, and
+    // even "seen" would claim someone looked, which nothing here can know.
+    harness.snapshot.deposits = [
+      deposit({ kind: "offline", link: "", recipient: "peer1", offer_status: "arrived" }),
+    ];
+    await s().go("deposits");
+    render(<DepositsView />);
+    expect(await screen.findByText(/not taken yet/i)).toBeDefined();
+    expect(screen.queryByText("Taken")).toBeNull();
+  });
+
+  it("152f. one nobody has looked at says so", async () => {
+    harness.snapshot.deposits = [
+      deposit({ kind: "offline", link: "", recipient: "peer1", offer_status: "pending" }),
+    ];
+    await s().go("deposits");
+    render(<DepositsView />);
+    expect(await screen.findByText(/hasn't reached them yet/i)).toBeDefined();
+  });
+
+  it("152g. an unanswerable relay says nothing about the recipient", async () => {
+    // Absence of an answer is not an answer. A daemon too old to report the state,
+    // or a relay that could not be asked, must not render as "not taken yet" —
+    // that is a claim about the recipient that nobody made.
+    harness.snapshot.deposits = [
+      deposit({ kind: "offline", link: "", recipient: "peer1", offer_status: null }),
+    ];
+    await s().go("deposits");
+    render(<DepositsView />);
+    expect(await screen.findByText("relazione.pdf")).toBeDefined();
+    expect(screen.queryByText(/not taken yet/i)).toBeNull();
+    expect(screen.queryByText(/hasn't reached them yet/i)).toBeNull();
+    expect(screen.queryByText("Taken")).toBeNull();
   });
 
   it("153. with nothing out there it says so plainly", async () => {

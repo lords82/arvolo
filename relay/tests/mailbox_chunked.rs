@@ -51,6 +51,7 @@ async fn chunked_roundtrip_multichunk() {
 
     let deposited = deposit_offline(
         src.path(),
+        "payload.bin",
         &recipient.public(),
         &sender,
         &relay,
@@ -83,6 +84,7 @@ async fn chunked_roundtrip_with_password() {
 
     let deposited = deposit_offline(
         src.path(),
+        "payload.bin",
         &recipient.public(),
         &sender,
         &relay,
@@ -128,6 +130,7 @@ async fn wrong_recipient_cannot_decrypt() {
 
     let deposited = deposit_offline(
         src.path(),
+        "payload.bin",
         &recipient.public(),
         &sender,
         &relay,

@@ -149,12 +149,28 @@ pub(crate) async fn daemon(
                             }
                         } else {
                             let size_h = human_size(size);
-                            eprintln!(
-                                "📨 offer parked: {name} ({size_h}) from {who} — approve with `arvolo accept {id}`"
-                            );
-                            // Nudge the user with a desktop notification (best-effort;
-                            // no-op on headless hosts, where the log line above stands in).
-                            notify::offer_awaiting(&name, &who, &size_h);
+                            // Announce an *arrival*, not a re-posting. A sender whose
+                            // live attempt keeps failing — the recipient's presence
+                            // beacon says online, nobody ever connects — posts a fresh
+                            // offer on every retry, and the list above already keeps
+                            // only the newest. Saying so again each time turned one
+                            // file into eighty-four notifications and eighty-four log
+                            // lines, all about the same thing still waiting.
+                            let repeat = !superseded.is_empty();
+                            if repeat {
+                                tracing::debug!(
+                                    "offer for {name} from {who} re-posted (superseding \
+                                     {} earlier one(s)) — not announcing again",
+                                    superseded.len()
+                                );
+                            } else {
+                                eprintln!(
+                                    "📨 offer parked: {name} ({size_h}) from {who} — approve with `arvolo accept {id}`"
+                                );
+                                // Nudge the user with a desktop notification (best-effort;
+                                // no-op on headless hosts, where the log line above stands in).
+                                notify::offer_awaiting(&name, &who, &size_h);
+                            }
                             pending.lock().unwrap().insert(
                                 id.clone(),
                                 ipc::protocol::OfferDto {
@@ -404,6 +420,27 @@ pub(crate) async fn daemon_events() -> Result<ipc::client::EventStream> {
 
 /// Print a one-line summary of a transfer DTO.
 #[cfg(unix)]
+/// What a row is doing, said in its own terms.
+///
+/// The engine calls a background serve `active` because it is running, which is
+/// true and useless: nothing is in flight, the file is simply available. Left as
+/// "active" a served ticket sits at 100% for ever — indistinguishable from a
+/// transfer that stalled — and the seeding a finished download turns into shows up
+/// as a 0% outgoing send of a file nobody sent. Both are the same thing, and the
+/// honest word for it is not "active".
+///
+/// While someone really is pulling, it *is* a transfer, so it says so.
+pub(crate) fn transfer_state(t: &ipc::protocol::TransferDto) -> String {
+    if t.sharing && t.status == "active" {
+        return if t.download_peers > 0 {
+            "sharing — being downloaded now".into()
+        } else {
+            "sharing — available, nobody downloading".into()
+        };
+    }
+    t.status.clone()
+}
+
 pub(crate) fn print_transfer_dto(t: &ipc::protocol::TransferDto, rate: Option<u64>) {
     let is_send = t.direction == "send";
     let arrow = if is_send { "→" } else { "←" };
@@ -446,12 +483,20 @@ pub(crate) fn print_transfer_dto(t: &ipc::protocol::TransferDto, rate: Option<u6
     };
     println!(
         "  [{}] {arrow} {peer}  {}{progress}{speed}  ({}){peers}",
-        t.id, t.name, t.status
+        t.id,
+        t.name,
+        transfer_state(t)
     );
     // A code hosted in the daemon has no terminal left to have printed it — this
     // list is where you come back to read it out again.
     if let Some(code) = &t.code {
         println!("        code: arvolo recv {code}");
+    }
+    // A deposited send says "waiting to be picked up" for as long as a week. What
+    // the recipient's end has actually done with it belongs right here, in the
+    // words the deposits section already uses.
+    if let Some(line) = crate::commands::status::offer_line(t.offer_status.as_deref()) {
+        println!("        {line}");
     }
 }
 
@@ -462,7 +507,7 @@ pub(crate) async fn accept_cmd(offer_id: String, out: Option<PathBuf>) -> Result
         .await
         .context("no daemon running (start `arvolo daemon`)")?;
     let id = client.accept(offer_id, out).await?;
-    eprintln!("✓ accepted — downloading (transfer {id}). Track it with `arvolo transfers`.");
+    eprintln!("✓ accepted — downloading (transfer {id}). Track it with `arvolo status`.");
     Ok(())
 }
 
@@ -528,7 +573,7 @@ pub(crate) async fn serve_ticket_via_daemon(
         print_qr(&ticket);
     }
     println!(
-        "Tracked as transfer {id} — follow it with `arvolo transfers`, stop it with `arvolo cancel {id}`."
+        "Tracked as transfer {id} — follow it with `arvolo status`, stop it with `arvolo cancel {id}`."
     );
     Ok(())
 }
@@ -579,7 +624,7 @@ pub(crate) async fn serve_code_via_daemon(
 
 /// Hand a push off to the running daemon and return immediately — the daemon
 /// delivers it in the background, concurrent and surviving our exit. Mirrors
-/// [`serve_ticket_via_daemon`]; observe progress with `arvolo transfers`.
+/// [`serve_ticket_via_daemon`]; observe progress with `arvolo status`.
 #[cfg(unix)]
 pub(crate) async fn push_via_daemon(
     mut client: ipc::client::DaemonClient,
@@ -606,7 +651,63 @@ pub(crate) async fn push_via_daemon(
         .context("daemon rejected the push")?;
     println!(
         "queued as transfer {id} — the daemon delivers it in the background.\n\
-         Track it with `arvolo transfers`, stop it with `arvolo cancel {id}`."
+         Track it with `arvolo status`, stop it with `arvolo cancel {id}`."
     );
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod share_line_tests {
+    use super::transfer_state;
+    use arvolo_ipc::protocol::TransferDto;
+
+    fn dto(sharing: bool, download_peers: usize, status: &str) -> TransferDto {
+        TransferDto {
+            id: 1,
+            direction: "send".into(),
+            peer: None,
+            name: "delega.pdf".into(),
+            total_size: 100,
+            transferred: 100,
+            status: status.into(),
+            swarm_peers: 0,
+            pieces_from_peers: 0,
+            download_peers,
+            created: 0,
+            code: None,
+            sharing,
+            copies_served: 0,
+            bytes_served: 0,
+            last_pickup: 0,
+            from_download: 0,
+            path: None,
+            offer_status: None,
+        }
+    }
+
+    /// The bug in one assertion: a served ticket that has finished serving is not
+    /// a transfer stuck at 100%, and must not be worded as one.
+    #[test]
+    fn a_finished_share_is_not_reported_as_a_running_transfer() {
+        let line = transfer_state(&dto(true, 0, "active"));
+        assert!(line.contains("sharing"), "{line}");
+        assert!(!line.contains("active"), "{line}");
+    }
+
+    /// While bytes really are moving it *is* a transfer, and says so.
+    #[test]
+    fn a_share_being_pulled_says_so() {
+        let line = transfer_state(&dto(true, 2, "active"));
+        assert!(line.contains("being downloaded now"), "{line}");
+    }
+
+    /// Everything else is left exactly as the engine worded it: a cancelled share
+    /// is cancelled, and a send with a recipient was never a share to begin with.
+    #[test]
+    fn nothing_else_is_reworded() {
+        assert_eq!(transfer_state(&dto(true, 0, "cancelled")), "cancelled");
+        assert_eq!(transfer_state(&dto(false, 0, "active")), "active");
+        let failed = "failed: relay unreachable";
+        assert_eq!(transfer_state(&dto(true, 0, failed)), failed);
+    }
 }

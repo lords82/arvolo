@@ -31,7 +31,7 @@ import {
   TextInput,
   TrustBadges,
 } from "../ui/Primitives";
-import { Avatar, CopyField, Fingerprint } from "../ui/Bits";
+import { Avatar, CopyField, Fingerprint, ShortId } from "../ui/Bits";
 import { MenuButton, type MenuItem } from "../ui/Menu";
 import { Confirm, Sheet } from "../ui/Sheet";
 import { toast } from "../ui/Toasts";
@@ -73,7 +73,7 @@ function PresenceDot({ id }: { id: string }) {
   );
 }
 
-function PersonCard({ c }: { c: ContactDto }) {
+function PersonRow({ c }: { c: ContactDto }) {
   const t = useT();
   const openSheet = useStore((s) => s.openSheet);
   const openPerson = useStore((s) => s.openPerson);
@@ -151,28 +151,63 @@ function PersonCard({ c }: { c: ContactDto }) {
 
   return (
     <>
-      <div className={`person ${c.blocked ? "blocked" : ""}`}>
-        <div className="person-top">
-          <Avatar name={c.display_name || c.name} id={c.id} size={38} />
-          <div className="grow" style={{ minWidth: 0 }}>
-            <div className="hstack-sm">
-              <PresenceDot id={c.id} />
-              <span className="truncate" style={{ fontWeight: 620 }}>
-                {c.name}
-              </span>
-            </div>
-            <div className="t-xs t-mut truncate">
-              {c.display_name && c.display_name !== c.name
-                ? t("people.goesBy", c.display_name)
-                : " "}
-            </div>
+      {/* A row, like every other list in the app. It was a card, on the theory
+          that a person is an entity rather than an event and so deserves a face
+          of their own. What the grid actually bought was one tile adrift in a
+          wide window at small address books, and at large ones it threw away the
+          thing a list does best: the same attribute in the same place on every
+          line, so "who is online" and "who is unverified" are read down a column
+          instead of hunted inside forty tiles.
+
+          The fingerprint did not come across, and that is deliberate. It is the
+          one string in this app that must never be shown truncated — it exists
+          to be read out loud and compared, and an ellipsis through the middle of
+          it makes that impossible. A row cannot promise it the width, so it
+          stays whole in the details panel, which is where comparing happens
+          anyway. The row carries the short id instead: that one is for
+          recognising someone, not for verifying them. */}
+      <div className={`row ${c.blocked ? "is-done" : ""}`}>
+        <Avatar name={c.display_name || c.name} id={c.id} size={34} />
+
+        <div className="row-main">
+          {/* `truncate` goes on the name, never on the line that holds the dot.
+              It carries `overflow: hidden`, and the online dot's pulse is drawn
+              as a 6px box-shadow ring *outside* its 7px box — put the two on the
+              same element and the ring is sliced off flat against the left edge.
+              The name still ellipsises; `.row-main` above is `min-width: 0`, so
+              the flex line can shrink to let it. */}
+          <div className="row-name hstack-sm" title={c.name}>
+            <PresenceDot id={c.id} />
+            <span className="truncate">{c.name}</span>
           </div>
-          <MenuButton items={items} label={t("people.rowActions", c.name)}>
-            <Icon.More size={15} />
-          </MenuButton>
+          <div className="row-meta">
+            {c.display_name && c.display_name !== c.name && (
+              <>
+                <span className="truncate">
+                  {t("people.goesBy", c.display_name)}
+                </span>
+                <span className="sep" />
+              </>
+            )}
+            <ShortId value={c.id} />
+          </div>
+
+          {c.pending_name && (
+            <div
+              className="card card-pad t-xs"
+              style={{ borderColor: "var(--amber)", padding: 10, marginTop: 8 }}
+            >
+              {t("people.wantsToBeCalled", c.pending_name)}
+              <div className="hstack-sm" style={{ marginTop: 7 }}>
+                <Button size="sm" onClick={() => fire(acceptName(c.name))}>
+                  {t("people.approve")}
+                </Button>
+              </div>
+            </div>
+          )}
         </div>
 
-        <div className="hstack-sm wrap">
+        <div className="row-actions">
           <TrustBadges
             verified={c.verified}
             trusted={c.trusted}
@@ -183,38 +218,6 @@ function PersonCard({ c }: { c: ContactDto }) {
               {t("people.notVerified")}
             </Badge>
           )}
-        </div>
-
-        {c.pending_name && (
-          <div
-            className="card card-pad t-xs"
-            style={{ borderColor: "var(--amber)", padding: 10 }}
-          >
-            {t("people.wantsToBeCalled", c.pending_name)}
-            <div className="hstack-sm" style={{ marginTop: 7 }}>
-              <Button size="sm" onClick={() => fire(acceptName(c.name))}>
-                {t("people.approve")}
-              </Button>
-            </div>
-          </div>
-        )}
-
-        <button
-          className="fingerprint truncate"
-          title={`${c.fingerprint}\n${c.id}`}
-          onClick={() => openPerson(c.name)}
-          style={{
-            border: 0,
-            background: "transparent",
-            padding: 0,
-            textAlign: "left",
-            cursor: "pointer",
-          }}
-        >
-          {c.fingerprint}
-        </button>
-
-        <div className="person-acts">
           <Button
             size="sm"
             variant="primary"
@@ -226,6 +229,9 @@ function PersonCard({ c }: { c: ContactDto }) {
           <Button size="sm" onClick={() => openPerson(c.name)}>
             {t("people.details")}
           </Button>
+          <MenuButton items={items} label={t("people.rowActions", c.name)}>
+            <Icon.More size={15} />
+          </MenuButton>
         </div>
       </div>
 
@@ -736,9 +742,9 @@ export function PeopleView() {
           </Empty>
         </div>
       ) : (
-        <div className="people-grid">
+        <div className="card rows">
           {shown.map((c) => (
-            <PersonCard key={c.name} c={c} />
+            <PersonRow key={c.name} c={c} />
           ))}
         </div>
       )}

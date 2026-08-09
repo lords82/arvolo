@@ -126,8 +126,18 @@ async fn poster_can_retract_its_own_offer() {
     );
 }
 
+/// The whole ladder, in the order a real offer walks it: `pending` → `arrived` →
+/// `taken`.
+///
+/// The last step is the one worth guarding. The recipient's ack used to delete the
+/// row, so "they took it" and "it expired unread" were the same answer — `gone` —
+/// and the sender's only positive signal was the middle one, which any
+/// authenticated read sets — a `recv` listing as much as a daemon poll. Reporting a
+/// glance at a list as a delivery is the failure this separation exists to prevent,
+/// so the assertions below pin both halves: a read must reach `Arrived` and stop
+/// there, and only the ack may reach `Taken`.
 #[tokio::test]
-async fn offer_status_flips_to_fetched_when_a_live_recipient_polls() {
+async fn offer_status_walks_pending_then_arrived_then_taken() {
     let relay = spawn_relay().await;
     let sender = Identity::generate();
     let recipient = Identity::generate();
@@ -170,8 +180,12 @@ async fn offer_status_flips_to_fetched_when_a_live_recipient_polls() {
             .is_err()
     );
 
-    // The recipient's authenticated poll marks the offer fetched.
+    // The recipient's authenticated read gets the offer onto their machine — and
+    // no further. Reading twice must not promote it either: the second poll is
+    // exactly what a `recv` listing followed by a `status` looks like, and neither
+    // is anyone taking anything.
     let sub = InboxSubscription::new(relay.clone(), &recipient);
+    assert_eq!(sub.poll_wait(0).await.expect("poll").len(), 1);
     assert_eq!(sub.poll_wait(0).await.expect("poll").len(), 1);
     let st = offer_status(
         &client,
@@ -182,10 +196,79 @@ async fn offer_status_flips_to_fetched_when_a_live_recipient_polls() {
     )
     .await
     .expect("status");
-    assert_eq!(st, OfferStatus::Fetched);
+    assert_eq!(
+        st,
+        OfferStatus::Arrived,
+        "a read says the offer reached them, never that they took it"
+    );
 
-    // After the recipient acks it, the offer is gone.
+    // Only the ack — which the client sends once the file is actually saved —
+    // reaches `Taken`.
     sub.ack(&posted.id).await.expect("ack");
+    let st = offer_status(
+        &client,
+        &relay,
+        &recipient.public(),
+        &posted.id,
+        &posted.poster_token,
+    )
+    .await
+    .expect("status");
+    assert_eq!(
+        st,
+        OfferStatus::Taken,
+        "an expiry also produces `Gone`, so a taken offer must not report it"
+    );
+
+    // The tombstone answers the poster and nothing else: the recipient must not be
+    // offered the same file a second time.
+    assert!(
+        sub.poll_wait(0).await.expect("poll").is_empty(),
+        "a taken offer is out of the recipient's inbox"
+    );
+}
+
+/// A retracted offer is `Gone`, not `Taken`: the tombstone must record that the
+/// recipient acted, never that the sender did. They are opposite outcomes and the
+/// sender is the one asking.
+#[tokio::test]
+async fn a_retracted_offer_is_gone_not_taken() {
+    let relay = spawn_relay().await;
+    let sender = Identity::generate();
+    let recipient = Identity::generate();
+    let client = reqwest::Client::new();
+
+    let posted = post_offer(
+        &client,
+        &relay,
+        &recipient.public(),
+        &sender,
+        &Offer {
+            name: "recalled.bin".into(),
+            size: 1,
+            chunks: 1,
+            ticket: "arvcRECALL".into(),
+            note: String::new(),
+            sender_name: String::new(),
+        },
+        None,
+    )
+    .await
+    .expect("post");
+
+    // It reached the recipient's client, then the sender pulled it back anyway.
+    let sub = InboxSubscription::new(relay.clone(), &recipient);
+    assert_eq!(sub.poll_wait(0).await.expect("poll").len(), 1);
+    retract_offer(
+        &client,
+        &relay,
+        &recipient.public(),
+        &posted.id,
+        &posted.poster_token,
+    )
+    .await
+    .expect("retract");
+
     let st = offer_status(
         &client,
         &relay,

@@ -78,6 +78,21 @@ impl Inner {
         }
     }
 
+    /// Remember where a completed receive was saved, so the row can still offer
+    /// to open it long after the event that announced it.
+    pub(super) fn set_path(&self, id: u64, path: std::path::PathBuf) {
+        if let Some(t) = self.transfers.lock().unwrap().get_mut(&id) {
+            t.path = Some(path);
+        }
+    }
+
+    /// Record how far a deposited send's inbox offer has got, as last reported.
+    pub(super) fn set_offer_status(&self, id: u64, status: &str) {
+        if let Some(t) = self.transfers.lock().unwrap().get_mut(&id) {
+            t.offer_status = status.to_string();
+        }
+    }
+
     pub(super) fn set_progress(&self, id: u64, transferred: u64) {
         if let Some(t) = self.transfers.lock().unwrap().get_mut(&id) {
             t.transferred = transferred;
@@ -100,6 +115,62 @@ impl Inner {
     pub(super) fn set_download_peers(&self, id: u64, count: usize) {
         if let Some(t) = self.transfers.lock().unwrap().get_mut(&id) {
             t.download_peers = count;
+        }
+    }
+
+    /// Install a share's counters (on registering a resumed share, from its
+    /// sidecar record) so a restart doesn't report a week-old share as untouched.
+    pub(super) fn set_share_stats(&self, id: u64, rec: &super::records::ShareRecord) {
+        if let Some(t) = self.transfers.lock().unwrap().get_mut(&id) {
+            t.copies_served = rec.copies_served;
+            t.bytes_served = rec.bytes_served;
+            t.last_pickup = rec.last_pickup;
+            t.from_download = rec.from_download;
+            t.share_started = rec.started;
+        }
+    }
+
+    /// Read a share's counters back out, to persist them.
+    pub(super) fn share_stats(&self, id: u64) -> super::records::ShareRecord {
+        let transfers = self.transfers.lock().unwrap();
+        let Some(t) = transfers.get(&id) else {
+            return Default::default();
+        };
+        super::records::ShareRecord {
+            copies_served: t.copies_served,
+            bytes_served: t.bytes_served,
+            last_pickup: t.last_pickup,
+            from_download: t.from_download,
+            started: t.share_started,
+        }
+    }
+
+    /// Add `bytes` to what this share has uploaded.
+    pub(super) fn add_bytes_served(&self, id: u64, bytes: u64) {
+        if let Some(t) = self.transfers.lock().unwrap().get_mut(&id) {
+            t.bytes_served = t.bytes_served.saturating_add(bytes);
+        }
+    }
+
+    /// One receiver got the whole file: count the copy and stamp the moment.
+    pub(super) fn record_pickup(&self, id: u64, at: u64) {
+        if let Some(t) = self.transfers.lock().unwrap().get_mut(&id) {
+            t.copies_served = t.copies_served.saturating_add(1);
+            t.last_pickup = at;
+        }
+    }
+
+    /// Write a share's counters to its sidecar.
+    ///
+    /// Called on a completed pickup, not on every progress tick: a share can serve
+    /// a large file to several peers at once, and a write per chunk would spend the
+    /// disk on a number nobody reads that often. What that costs is the bytes
+    /// served since the last pickup, if the daemon dies without one — the copies
+    /// count and the timestamps, which are what the view is actually built on, are
+    /// written exactly when they change.
+    pub(super) fn persist_share_stats(&self, id: u64) {
+        if let Some(dir) = &self.state_dir {
+            super::records::persist_share(dir, id, &self.share_stats(id));
         }
     }
 

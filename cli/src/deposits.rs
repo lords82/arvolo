@@ -6,7 +6,7 @@
 //! printed token. Removing a record revokes the blob on the relay (see `arvolo
 //! cancel <id>`), so the file/link lives exactly as long as this local record.
 //!
-//! Deposits are listed by `arvolo transfers` (the "left on relay" section) and by
+//! Deposits are listed by `arvolo status` (the "left on relay" section) and by
 //! the GUI's deposits panel, both through [`list_dtos`].
 //!
 //! A record holds the revoke token (a capability secret), so its file is written
@@ -77,6 +77,22 @@ pub struct DepositRecord {
     pub max: u32,
     /// For a public link: the full browser URL. `None` for a sealed deposit.
     pub link: Option<String>,
+    /// For a sealed deposit: the sender's own `arvm…` ticket, kept so the delivery
+    /// can be handed over again — pasted to the recipient when their inbox route
+    /// isn't wanted or isn't working. Empty for a link, and for records written
+    /// before this field existed.
+    ///
+    /// It has to be *kept*, not derived: the ticket carries the HPKE-wrapped
+    /// content key, which is nowhere else in this record. Without it, the only way
+    /// to re-hand a deposit was to make a second one — and the first would still be
+    /// sitting on the relay, sealed, uncollectable, until its TTL.
+    ///
+    /// A capability to *fetch*, not to open: the wrapped key is sealed to the
+    /// recipient's identity, so a copied ticket downloads bytes nobody but them can
+    /// decrypt. That is what makes it safe to show in a UI, next to a revoke token
+    /// that never is.
+    #[serde(default)]
+    pub ticket: String,
     /// For a sealed deposit: the recipient's base32 id — always the resolved key,
     /// never the name that was typed, so a reader can decode it and a UI can match it
     /// to a contact. `None` for a link. (Records written before this was made true
@@ -176,6 +192,13 @@ pub fn id_for(claim: &str) -> String {
 /// taken whole rather than as a loose id/token pair, which in this argument list
 /// would sit next to `revoke_token` and be one transposition away from a silent
 /// disaster.
+///
+/// One exception to that overwrite, and it is the reason [`DepositRecord::ticket`]
+/// survives at all: **an empty `ticket` never erases a stored one.** A deposit the
+/// daemon restores after a restart is re-recorded from an event that has no ticket
+/// (the engine's own record can't carry one), and a plain overwrite would quietly
+/// bin the sender's only copy on every restart — the file still sealed on the relay,
+/// and no longer handable to anyone.
 #[allow(clippy::too_many_arguments)]
 pub fn save(
     kind: &str,
@@ -186,13 +209,20 @@ pub fn save(
     size: u64,
     max: u32,
     link: Option<String>,
+    ticket: &str,
     recipient: Option<String>,
     expires: u64,
     transfer_id: Option<u64>,
     offer: Option<&PostedOffer>,
 ) -> Result<DepositRecord> {
+    let id = id_for(claim);
+    let ticket = if ticket.is_empty() {
+        load(&id).map(|prev| prev.ticket).unwrap_or_default()
+    } else {
+        ticket.to_string()
+    };
     let rec = DepositRecord {
-        id: id_for(claim),
+        id,
         kind: kind.to_string(),
         relay: relay.to_string(),
         claim: claim.to_string(),
@@ -201,6 +231,7 @@ pub fn save(
         size,
         max,
         link,
+        ticket,
         recipient,
         created: now_secs(),
         expires,
@@ -223,7 +254,7 @@ pub fn save(
 /// one-shot CLI path calls [`save`] itself; the engine can't — it lives in
 /// `arvolo-core`, below this store — so its two front-ends (the daemon, and a
 /// foreground `send --to`) call this on the event instead. Without it, a deposit
-/// made through the engine was missing from `arvolo transfers`' "left on relay"
+/// made through the engine was missing from `arvolo status`' "left on relay"
 /// section and from the GUI's deposits panel; a foreground send dropped the revoke
 /// token entirely, leaving the file on the relay until its TTL with no way back.
 ///
@@ -241,6 +272,9 @@ pub fn record_from_event(transfer_id: Option<u64>, info: &arvolo_core::manager::
         info.size,
         info.max,
         None,
+        // Empty on a deposit the engine *restored* rather than made; `save` keeps
+        // whatever this record already had rather than blanking it.
+        &info.ticket,
         info.recipient.as_ref().map(crate::util::encode_id),
         info.expires,
         transfer_id,
@@ -347,7 +381,7 @@ const CLAIM_STATUS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 /// best-effort: unreachable leaves the live fields `None`, and the caller says it
 /// does not know rather than inventing an answer.
 ///
-/// Shared by the daemon's `ListDeposits` and by `arvolo transfers` without one, so
+/// Shared by the daemon's `ListDeposits` and by `arvolo status` without one, so
 /// both render the same view of the same store.
 ///
 /// Building the list also **sweeps** the records whose TTL is well past (see
@@ -357,6 +391,17 @@ const CLAIM_STATUS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 /// good. Listing is the only moment every record is looked at, so it's where the
 /// sweep goes; it is idempotent and needs no relay. The engine reaps its own expired
 /// records at startup for the same reason (see `restore_deposited`).
+/// What it takes to ask after a deposit's inbox offer, or `None` when there is
+/// nothing to ask about: a public link leaves no offer, an older record predates
+/// the tokens being kept, and only the poster token authorises the question.
+fn offer_query(d: &DepositRecord) -> Option<(arvolo_core::crypto::PublicId, String, String)> {
+    if d.offer_id.is_empty() || d.poster_token.is_empty() {
+        return None;
+    }
+    let recipient = crate::book::decode_id(d.recipient.as_deref()?).ok()?;
+    Some((recipient, d.offer_id.clone(), d.poster_token.clone()))
+}
+
 pub async fn list_dtos() -> Vec<DepositDto> {
     let recs: Vec<DepositRecord> = list()
         .into_iter()
@@ -378,6 +423,11 @@ pub async fn list_dtos() -> Vec<DepositDto> {
             continue;
         }
         let (relay, claim) = (d.relay.clone(), d.claim.clone());
+        // The offer the deposit left in the recipient's inbox, when it left one.
+        // Asked in the same task as the blob: both are round trips to the same
+        // relay about the same deposit, so pairing them keeps the whole list one
+        // wave of requests rather than two.
+        let offer = offer_query(d);
         set.spawn(async move {
             let info = tokio::time::timeout(
                 CLAIM_STATUS_TIMEOUT,
@@ -386,13 +436,36 @@ pub async fn list_dtos() -> Vec<DepositDto> {
             .await
             .ok()
             .and_then(|r| r.ok());
-            (i, info)
+            let status = match offer {
+                None => None,
+                Some((recipient, id, token)) => tokio::time::timeout(
+                    CLAIM_STATUS_TIMEOUT,
+                    arvolo_core::presence::offer_status(
+                        &reqwest::Client::new(),
+                        &relay,
+                        &recipient,
+                        &id,
+                        &token,
+                    ),
+                )
+                .await
+                .ok()
+                .and_then(|r| r.ok())
+                .map(|s| s.as_str().to_string()),
+            };
+            (i, info, status)
         });
     }
     let mut live: HashMap<usize, arvolo_core::flow::ClaimInfo> = HashMap::new();
+    let mut offers: HashMap<usize, String> = HashMap::new();
     while let Some(joined) = set.join_next().await {
-        if let Ok((i, Some(info))) = joined {
-            live.insert(i, info);
+        if let Ok((i, info, status)) = joined {
+            if let Some(info) = info {
+                live.insert(i, info);
+            }
+            if let Some(status) = status {
+                offers.insert(i, status);
+            }
         }
     }
 
@@ -406,11 +479,13 @@ pub async fn list_dtos() -> Vec<DepositDto> {
                 present: info.map(|l| l.present),
                 downloads: info.and_then(|l| l.downloads),
                 max_downloads: info.and_then(|l| l.max_downloads),
+                offer_status: offers.get(&i).cloned(),
                 id: d.id,
                 kind: d.kind,
                 name: d.name,
                 size: d.size,
                 link: d.link.unwrap_or_default(),
+                ticket: d.ticket,
                 recipient: d.recipient.unwrap_or_default(),
                 created: d.created,
                 expires: d.expires,
@@ -456,6 +531,7 @@ mod tests {
             4242,
             UNLIMITED,
             Some("https://relay.example/dl/abc123claim#key".into()),
+            "",
             None,
             expires,
             None,
@@ -520,6 +596,54 @@ expires = 1700003600
         std::env::remove_var("ARVOLO_CONFIG_DIR");
     }
 
+    /// Re-recording a deposit **must not blank its ticket**. A daemon restart
+    /// restores every awaiting-pickup deposit and re-files a receipt for each, from
+    /// an event that carries no ticket — the engine's own record is postcard-encoded
+    /// and cannot grow a field. A plain overwrite would therefore delete the sender's
+    /// only copy on the first restart: the file still sealed on the relay, and
+    /// nobody left who could be given it.
+    #[test]
+    fn re_recording_a_deposit_does_not_blank_its_ticket() {
+        let _guard = crate::testlock::ENV
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("ARVOLO_CONFIG_DIR", dir.path());
+
+        let args = |ticket: &str| {
+            save(
+                KIND_OFFLINE,
+                "https://relay.example",
+                "restartclaim",
+                "revoke-me",
+                "budget.xlsx",
+                10,
+                1,
+                None,
+                ticket,
+                Some("k7x2".into()),
+                now_secs() + 3600,
+                Some(7),
+                None,
+            )
+        };
+        let rec = args("arvmKEEPME").unwrap();
+        // What a restart does: same claim, same everything, no ticket to offer.
+        args("").unwrap();
+        assert_eq!(
+            load(&rec.id).expect("load").ticket,
+            "arvmKEEPME",
+            "a restart must not cost the sender their hand-over ticket"
+        );
+
+        // A genuinely new ticket for the same claim still wins — this is a
+        // don't-erase rule, not a write-once one.
+        args("arvmREPLACED").unwrap();
+        assert_eq!(load(&rec.id).expect("load").ticket, "arvmREPLACED");
+
+        std::env::remove_var("ARVOLO_CONFIG_DIR");
+    }
+
     /// The offer's id and token are kept so a withdrawal can retract it later — the
     /// half that used to be dropped on the floor, leaving the recipient an arrival
     /// pointing at a blob that was already deleted.
@@ -540,6 +664,7 @@ expires = 1700003600
             10,
             1,
             None,
+            "arvmSEALEDTICKET",
             Some("k7x2".into()),
             now_secs() + 3600,
             None,
@@ -555,6 +680,10 @@ expires = 1700003600
         assert_eq!(loaded.poster_token, "poster-1");
         // (That neither reaches a UI is settled by `DepositDto` having nowhere to put
         // them — a capability the compiler keeps off the wire needs no test.)
+
+        // The ticket, on the other hand, exists to be handed out again: it is the
+        // sender's only copy and cannot be rebuilt from the claim.
+        assert_eq!(loaded.ticket, "arvmSEALEDTICKET");
 
         std::env::remove_var("ARVOLO_CONFIG_DIR");
     }
@@ -579,6 +708,7 @@ expires = 1700003600
             10,
             UNLIMITED,
             None,
+            "",
             None,
             now_secs().saturating_sub(REAP_GRACE_SECS + 60),
             None,
@@ -614,6 +744,7 @@ expires = 1700003600
             10,
             1,
             None,
+            "",
             None,
             now_secs().saturating_sub(60),
             None,
@@ -653,6 +784,7 @@ expires = 1700003600
             10,
             1,
             None,
+            "",
             None,
             now_secs().saturating_sub(60),
             None,

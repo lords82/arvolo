@@ -53,6 +53,12 @@ async fn dl_page_and_script_are_served_from_the_relay() {
     let body = page.text().await.unwrap();
     assert!(body.contains("arvolo"), "branded page");
     assert!(body.contains("/dl.js"), "page references its script");
+    // The page ships English inline as the fallback and tags each string so the
+    // script can swap it for the reader's language before first paint.
+    assert!(
+        body.contains("data-t=\"heading\"") && body.contains("data-html=\"footer\""),
+        "page strings are tagged for translation"
+    );
 
     let js = c.get(format!("{relay}/dl.js")).send().await.unwrap();
     assert!(js.status().is_success());
@@ -64,6 +70,20 @@ async fn dl_page_and_script_are_served_from_the_relay() {
         .unwrap()
         .to_string();
     assert!(js_ct.contains("javascript"), "script content-type: {js_ct}");
+    // …and the script carries all four dictionaries, picked off the browser's
+    // own language list. Nothing is fetched at runtime, so they ship together.
+    let js_body = js.text().await.unwrap();
+    assert!(
+        js_body.contains("navigator.languages"),
+        "browser-language pick"
+    );
+    for probe in [
+        "Qualcuno ti ha mandato un file",
+        "Quelqu'un vous a envoyé un fichier",
+        "Jemand hat Ihnen eine Datei geschickt",
+    ] {
+        assert!(js_body.contains(probe), "missing translation: {probe}");
+    }
 
     // The streaming service worker is served from the root with a root scope.
     let sw = c.get(format!("{relay}/arvolo-sw.js")).send().await.unwrap();
@@ -146,6 +166,36 @@ async fn links_can_be_disabled_by_the_relay() {
         .unwrap()
         .to_lowercase()
         .contains("administrator"));
+
+    // ...in the reader's language, which the 403 page can only get from the
+    // request: it ships no script, so nothing translates it in the browser.
+    for (accept, want) in [
+        ("it-IT,it;q=0.9,en;q=0.8", "it"),
+        ("de-AT", "de"),
+        ("es-ES,fr;q=0.7", "fr"),
+        ("ja,zh-CN;q=0.8", "en"),
+    ] {
+        let page = c
+            .get(format!("{relay}/dl/anyclaim"))
+            .header("accept-language", accept)
+            .send()
+            .await
+            .unwrap();
+        let body = page.text().await.unwrap();
+        assert!(
+            body.contains(&format!("<html lang=\"{want}\">")),
+            "{accept:?} should render the page as {want}"
+        );
+        // All four translations ship; CSS reveals the negotiated one.
+        assert!(body.contains("I link di download sono disattivati"));
+        // An unsubstituted placeholder would match no `:lang()` rule. English
+        // still shows (the CSS defaults to it), but the negotiation would be
+        // silently dead, so catch it here rather than in a screenshot.
+        assert!(
+            !body.contains("{{"),
+            "template placeholder left in the page"
+        );
+    }
 
     // A link deposit fails fast (before uploading) with the admin explanation.
     let dir = tempfile::tempdir().unwrap();

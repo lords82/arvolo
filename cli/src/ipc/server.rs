@@ -890,6 +890,8 @@ async fn create_link(d: &Daemon, path: String, ttl: Option<u64>, max: Option<u32
                 out.size,
                 max,
                 Some(out.link.clone()),
+                // No `arvm…` ticket on the link path: the URL is the capability.
+                "",
                 None,
                 crate::util::now_unix().saturating_add(ttl),
                 // A link is deposited directly, not through the engine: no transfer

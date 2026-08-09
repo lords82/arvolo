@@ -192,6 +192,13 @@ arvolo send <id-or-contact> ./report.pdf --deposit   # prints an arvm… ticket
 arvolo recv arvm…                                         # fetches + decrypts (burns on read)
 ```
 
+The recipient doesn't need the ticket, though — the send was addressed to them,
+so a bare `arvolo recv` lists it and takes it:
+
+```sh
+arvolo recv                                               # what's waiting for you; pick one
+```
+
 **Browser download link** — anyone can open it in a browser, no install; the key
 lives only in the URL `#fragment`, so the relay stays zero-knowledge:
 

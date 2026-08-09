@@ -13,23 +13,12 @@
 // compare, on each machine, to know they match.
 
 import { fire, useStore } from "../store";
-import { t as translate, useT } from "../i18n";
+import { useT } from "../i18n";
 import { Icon } from "../ui/Icons";
 import { Badge, Button, Empty, SwitchRow } from "../ui/Primitives";
 import { CopyField, Fingerprint } from "../ui/Bits";
 import { toast } from "../ui/Toasts";
-
-function ago(unixSecs: number): string {
-  if (!unixSecs) return "";
-  const secs = Math.max(0, Math.floor(Date.now() / 1000) - unixSecs);
-  // Every branch can land on exactly 1 — a daily sync hits the last one square
-  // on — so none of them may hardcode the plural. Each dictionary decides for
-  // itself where the singular is, which is not the same rule in every language.
-  if (secs < 60) return translate("ago.moments");
-  if (secs < 3600) return translate("ago.minutes", Math.round(secs / 60));
-  if (secs < 86400) return translate("ago.hours", Math.round(secs / 3600));
-  return translate("ago.days", Math.round(secs / 86400));
-}
+import { fmtAgo as ago } from "../format";
 
 export function DevicesView() {
   const t = useT();

@@ -68,29 +68,65 @@ const DL_CSP: &str = "default-src 'none'; script-src 'self'; style-src 'unsafe-i
      connect-src 'self'; img-src 'self' data:; worker-src 'self'; frame-src 'self'; \
      frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
 
-/// Shown (with 403) when the administrator has disabled download links.
-const DL_DISABLED_HTML: &str = "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
-<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>arvolo</title></head>\
-<body style=\"font-family:system-ui,sans-serif;background:#0b0d10;color:#e7ebf0;display:grid;\
-place-items:center;min-height:100vh;margin:0;padding:24px\"><main style=\"max-width:420px;text-align:center\">\
-<h1 style=\"font-size:17px;margin:0 0 8px\">Download links are turned off</h1>\
-<p style=\"color:#8b95a3;font-size:13px;line-height:1.5\">The administrator of this relay has disabled \
-public browser download links. Ask the sender to share the file another way.</p></main></body></html>";
+/// Shown (with 403) when the administrator has disabled download links. Its own
+/// file rather than a string literal here, so it can carry the same styling as
+/// the download page it stands in for.
+const DL_DISABLED_HTML: &str = include_str!("web/disabled.html");
 
 const LINKS_DISABLED_MSG: &str = "public download links are disabled by this relay's administrator";
 
-fn links_disabled_page() -> Response {
+/// The languages the browser pages are translated into — the same four the
+/// desktop app speaks (`gui/src/i18n`). English is the fallback.
+const PAGE_LANGS: [&str; 4] = ["en", "it", "fr", "de"];
+
+/// Pick a page language from `Accept-Language`.
+///
+/// Only the 403 page needs this. The download page itself translates in the
+/// browser, off `navigator.languages`, because it is a static file and must
+/// stay cacheable — and because its running commentary ("Decrypting…", the
+/// failure messages) lives in the script anyway.
+///
+/// Quality values are honoured and the region is dropped (`de-AT` → `de`), so a
+/// reader whose header is `es, de;q=0.5` gets German rather than English. Ties
+/// go to the earlier entry, which is the reader's own order of preference.
+fn negotiate_lang(headers: &HeaderMap) -> &'static str {
+    let Some(header) = headers
+        .get(axum::http::header::ACCEPT_LANGUAGE)
+        .and_then(|v| v.to_str().ok())
+    else {
+        return "en";
+    };
+    let mut best: Option<(f32, &'static str)> = None;
+    for part in header.split(',') {
+        let mut bits = part.split(';');
+        let tag = bits.next().unwrap_or("").trim().to_ascii_lowercase();
+        let base = tag.split('-').next().unwrap_or("");
+        let Some(lang) = PAGE_LANGS.iter().find(|l| **l == base) else {
+            continue;
+        };
+        let q = bits
+            .find_map(|b| b.trim().strip_prefix("q=").map(str::trim).map(str::parse))
+            .unwrap_or(Ok(1.0))
+            .unwrap_or(0.0);
+        if q > 0.0 && best.is_none_or(|(best_q, _)| q > best_q) {
+            best = Some((q, lang));
+        }
+    }
+    best.map_or("en", |(_, lang)| lang)
+}
+
+fn links_disabled_page(headers: &HeaderMap) -> Response {
     (
         StatusCode::FORBIDDEN,
         [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
-        DL_DISABLED_HTML,
+        DL_DISABLED_HTML.replace("{{lang}}", negotiate_lang(headers)),
     )
         .into_response()
 }
 
-async fn dl_page_handler(State(state): State<AppState>) -> Response {
+async fn dl_page_handler(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if !state.links_enabled {
-        return links_disabled_page();
+        return links_disabled_page(&headers);
     }
     (
         [
@@ -932,10 +968,13 @@ async fn inbox_get_handler(
     loop {
         let rows = state.mailbox.inbox_list(&slot, now_unix());
         if !rows.is_empty() {
-            // A live recipient is polling: mark these offers seen so their posters
-            // can tell "delivered to an online client" from "stale presence".
+            // A recipient client is reading: mark these offers arrived, so their
+            // posters can tell a client that is really there from stale presence.
+            // Arrival only — a listing lands here exactly as a daemon poll does,
+            // and neither is anyone looking, let alone deciding. The `taken` stamp
+            // comes later, on the ack, if the file is actually taken.
             let ids: Vec<String> = rows.iter().map(|(id, _)| id.clone()).collect();
-            state.mailbox.inbox_mark_fetched(&slot, &ids, now_unix());
+            state.mailbox.inbox_mark_arrived(&slot, &ids, now_unix());
             let items: Vec<arvolo_core::presence::InboxItem> = rows
                 .into_iter()
                 .map(|(id, blob)| arvolo_core::presence::InboxItem { id, blob })
@@ -971,11 +1010,13 @@ async fn inbox_delete_handler(
             return StatusCode::NO_CONTENT;
         }
     }
-    // Recipient ack: owner of the slot, proven by a session token.
+    // Recipient ack: owner of the slot, proven by a session token. Recorded as
+    // taken rather than deleted, so the poster gets an answer that an expiry can't
+    // also produce; the row is emptied and reaped at its original TTL.
     if !inbox_authorized(&headers, &slot, &state.auth_secret) {
         return StatusCode::UNAUTHORIZED;
     }
-    state.mailbox.inbox_delete(&slot, &id);
+    state.mailbox.inbox_mark_taken(&slot, &id, now_unix());
     StatusCode::NO_CONTENT
 }
 
@@ -998,7 +1039,15 @@ async fn inbox_status_handler(
         InboxStatus::BadToken => Err(StatusCode::UNAUTHORIZED),
         InboxStatus::Gone => Ok("gone"),
         InboxStatus::Pending => Ok("pending"),
-        InboxStatus::Fetched => Ok("fetched"),
+        // Still spelled `fetched` on the wire, though the state is now called what
+        // it always meant. A client older than this relay maps the word it knows to
+        // "a live client has it" and keeps working; renaming it would have made
+        // every such client read an unknown word, fall through to `pending`, and
+        // abandon live sends to recipients who were right there. `taken` is purely
+        // additive — an old client falls through to `pending` for it, which costs
+        // nothing: by then the recipient has the file.
+        InboxStatus::Arrived => Ok("fetched"),
+        InboxStatus::Taken => Ok("taken"),
     }
 }
 
@@ -1425,5 +1474,44 @@ mod rz_v2_tests {
         // turn into 410 Gone rather than a silently un-renewed slot.
         let ancient = now - (RZ_MAX_SLOT_LIFETIME + 10);
         assert!(rz_v2_expiry(ancient) <= now);
+    }
+}
+
+#[cfg(test)]
+mod page_lang_tests {
+    use super::*;
+
+    fn lang(accept: &str) -> &'static str {
+        let mut h = HeaderMap::new();
+        h.insert(
+            axum::http::header::ACCEPT_LANGUAGE,
+            accept.parse().expect("header value"),
+        );
+        negotiate_lang(&h)
+    }
+
+    #[test]
+    fn plain_tags_and_regions_resolve_to_a_page_language() {
+        assert_eq!(lang("it"), "it");
+        assert_eq!(lang("de-AT"), "de");
+        assert_eq!(lang("FR-ca"), "fr");
+        assert_eq!(negotiate_lang(&HeaderMap::new()), "en");
+    }
+
+    #[test]
+    fn quality_beats_position_and_unknown_tags_are_skipped() {
+        // The reader's own order decides between equals...
+        assert_eq!(lang("fr,it"), "fr");
+        // ...but an explicit q wins over it, which is the whole point of the header.
+        assert_eq!(lang("fr;q=0.4,it;q=0.9"), "it");
+        // A language we don't speak must not consume the choice.
+        assert_eq!(lang("es-ES,es;q=0.9,de;q=0.5"), "de");
+        // `q=0` means "not this one"; with nothing else on offer we fall back.
+        assert_eq!(lang("it;q=0"), "en");
+        // Nothing recognisable at all, including the wildcard.
+        assert_eq!(lang("*"), "en");
+        assert_eq!(lang("zh-CN,ja;q=0.8"), "en");
+        // A malformed q is untrusted rather than fatal: it loses to a real one.
+        assert_eq!(lang("de;q=banana,it;q=0.3"), "it");
     }
 }

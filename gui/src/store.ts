@@ -133,6 +133,23 @@ function sampleRate(id: number, bytes: number, prevRate?: number): number | unde
   return prevRate ? 0.7 * prevRate + 0.3 * inst : inst;
 }
 
+/** What a row is doing, from the daemon's status *and* what kind of row it is.
+ *
+ *  The engine calls a background serve "active" because it is running, which is
+ *  true and unhelpful: nothing is in flight, the file is just available. Rendered
+ *  as a transfer, a served ticket sits at 100% for ever — indistinguishable from
+ *  one that stalled — and the seeding a finished download turns into shows up as a
+ *  0% outgoing send of a file the user never sent. Both are `sharing`.
+ *
+ *  While someone is actually pulling, it *is* a transfer, and stays "active" so
+ *  the progress and rate mean what they say. */
+function statusOf(dto: TransferDto): { status: UIStatus; reason?: string } {
+  const base = toUIStatus(dto.status);
+  if (base.status === "active" && dto.sharing && dto.download_peers === 0)
+    return { status: "sharing" };
+  return base;
+}
+
 /** Split a daemon status string into a UI status + optional reason. */
 function toUIStatus(raw: string): { status: UIStatus; reason?: string } {
   if (raw === "active") return { status: "active" };
@@ -228,6 +245,9 @@ interface State {
    *  Invia, a drop on the window), and the sheet starts on a contact. */
   sheetMode: SendMode | null;
   incomingOfferId: string | null; // incoming offer dialog
+  /** Transfer id whose share panel is open, if any. A share has no progress to
+   *  watch, so its numbers live behind a panel rather than crowding the row. */
+  shareOpen: number | null;
   receiveOpen: boolean; // paste-a-ticket sheet
   /** The person whose detail sheet is open, by contact name. */
   personOpen: string | null;
@@ -254,9 +274,12 @@ interface State {
   closeSheet: () => void;
   openIncoming: (offerId: string) => void;
   closeIncoming: () => void;
+  openShare: (id: number) => void;
+  closeShare: () => void;
   openPerson: (name: string | null) => void;
   /** Fetch what is still on a relay. There is no event to keep it live, so a
-   *  stale list must never be what greets the user: `go("deposits")` refetches. */
+   *  stale list must never be what greets the user: `go("deposits")` refetches,
+   *  and so does anything that *adds* a row — see `link` and `deposit`. */
   loadDeposits: () => Promise<void>;
   /** Withdraw a deposit from the relay and forget it. Irreversible: the link stops
    *  working for everyone who has it. */
@@ -356,8 +379,24 @@ export const useStore = create<State>((set, get) => {
     }
   };
 
+  /** Re-read the deposits after something has just added one.
+   *
+   *  The list is the only place a link exists once the panel that produced it is
+   *  closed — it is where you go to copy the URL again, hand it to someone else,
+   *  or take it back. Nothing pushes to it (see `loadDeposits`), so a link made
+   *  while it was on screen would simply not be there, and a list that is missing
+   *  the very link you just made reads as "it wasn't kept".
+   *
+   *  Deliberately not awaited by its callers: the fetch asks every relay about
+   *  every deposit and can take seconds, while the caller's own job — handing the
+   *  user their URL — is already done. `loadDeposits` swallows its own failure
+   *  into `depositsError`, so nothing here can reject. */
+  const refreshDeposits = () => {
+    void get().loadDeposits();
+  };
+
   const dtoToUI = (d: TransferDto, prev?: UITransfer): UITransfer => {
-    const { status, reason } = toUIStatus(d.status);
+    const { status, reason } = statusOf(d);
     const dir = d.direction === "send" ? "out" : "in";
     return {
       key: `t${d.id}`,
@@ -376,7 +415,10 @@ export const useStore = create<State>((set, get) => {
       swarmPeers: d.swarm_peers,
       downloadPeers: d.download_peers,
       files: prev?.files ?? 1,
-      path: prev?.path,
+      // The engine's answer wins: it is the one that survives a restart. Falling
+      // back to what we already had keeps a path learned from a live event when
+      // talking to a daemon too old to report it.
+      path: d.path ?? prev?.path,
       // The engine's own clock, not ours: a row we first see today may well be
       // yesterday's. `created` is 0 only from a daemon that predates the field —
       // then, and only then, fall back to when we noticed it.
@@ -384,6 +426,11 @@ export const useStore = create<State>((set, get) => {
       rank: prev?.rank ?? nextRank(),
       rate: prev?.rate,
       code: d.code ?? prev?.code,
+      offerStatus: d.offer_status ?? undefined,
+      copiesServed: d.copies_served ?? 0,
+      bytesServed: d.bytes_served ?? 0,
+      lastPickup: d.last_pickup ?? 0,
+      fromDownload: d.from_download ?? 0,
     };
   };
 
@@ -408,6 +455,10 @@ export const useStore = create<State>((set, get) => {
     files: 1,
     firstSeen: prev?.firstSeen ?? now(),
     rank: prev?.rank ?? nextRank(),
+    copiesServed: 0,
+    bytesServed: 0,
+    lastPickup: 0,
+    fromDownload: 0,
   });
 
   /** Merge a partial change into an existing transfer row (creating a stub if the
@@ -455,6 +506,7 @@ export const useStore = create<State>((set, get) => {
     sheetTo: null,
     sheetMode: null,
     incomingOfferId: null,
+    shareOpen: null,
     receiveOpen: false,
     personOpen: null,
     presence: {},
@@ -756,6 +808,8 @@ export const useStore = create<State>((set, get) => {
       set({ sheetPaths: null, sheetTo: null, sheetMode: null }),
     openIncoming: (offerId) => set({ incomingOfferId: offerId }),
     closeIncoming: () => set({ incomingOfferId: null }),
+    openShare: (id) => set({ shareOpen: id }),
+    closeShare: () => set({ shareOpen: null }),
     openPerson: (name) => set({ personOpen: name }),
     openReceive: () => set({ receiveOpen: true }),
     closeReceive: () => set({ receiveOpen: false }),
@@ -979,16 +1033,23 @@ export const useStore = create<State>((set, get) => {
       // not wanted or is not working — and closing the panel on success would
       // destroy it the instant it was produced. The panel closes when the user
       // says so, exactly as it does for a code, a link or a ticket.
-      return act(t("store.errDeposit", to), () =>
+      const r = await act(t("store.errDeposit", to), () =>
         api.depositTo(to, paths, note, ttl, max, password)
       );
+      refreshDeposits();
+      return r;
     },
     ticket: async (paths) =>
       act(t("store.errTicket"), () => api.serveTicket(paths, null)),
     code: async (paths, keep) =>
       act(t("store.errCode"), () => api.serveCode(paths, null, keep)),
-    link: async (path, ttl, max) =>
-      act(t("store.errLink"), () => api.createLink(path, ttl, max)),
+    link: async (path, ttl, max) => {
+      const url = await act(t("store.errLink"), () =>
+        api.createLink(path, ttl, max)
+      );
+      refreshDeposits();
+      return url;
+    },
     receive: async (ticket, out, password) => {
       const id = await act(t("store.errReceive"), () =>
         api.recv(ticket, out, password)

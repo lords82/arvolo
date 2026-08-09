@@ -242,11 +242,11 @@ that may legitimately not need a reply.
 | POST / GET | `/v1/inbox/{slot}` | session (GET) | Post a sealed-sender **offer** to a recipient's inbox / long-poll for offers. |
 | POST | `/v1/inbox/{slot}/session` | proof-of-possession | Start a read session: returns a nonce sealed to the slot owner + a relay MAC over `(slot, nonce, exp)`. |
 | DELETE | `/v1/inbox/{slot}/{id}` | poster token | Retract your own offer. |
-| GET | `/v1/inbox/{slot}/{id}/status` | poster token | `pending` vs `fetched` (was the offer picked up by a live reader?). |
+| GET | `/v1/inbox/{slot}/{id}/status` | poster token | How far the offer got: `pending` (no client of theirs has read it) → `fetched` (it reached one of their devices — see below) → `taken` (they fetched the file and acked). `gone` means it ended without being taken: retracted, or lapsed. |
 | POST / GET | `/v1/presence/{slot}` | none | Publish / read a **presence beacon** (is this identity online right now?). Unauthenticated by design; see the presence caveat in §7.5. |
 | POST | `/v1/swarm/{swarm_id}/announce` | none | **Swarm tracker**: announce this peer (iroh addr + piece bitfield) for a shared `arvc…` transfer so co-downloaders find each other. The swarm id is derived from ticket content — a capability; the relay learns node addresses and bitfields, never keys or plaintext. Rows TTL out (~60 s); peers/swarms are capped. |
 | GET | `/v1/swarm/{swarm_id}/peers` | none | List the live peers announced for a swarm. A poisoned/fake announce can only waste a dial: every chunk is verified by BLAKE3 hash + AEAD, so bad providers are detected, not trusted. |
-| GET | `/dl/{claim}` | none | The browser **download page** (static HTML, strict CSP). |
+| GET | `/dl/{claim}` | none | The browser **download page** (static HTML, strict CSP). It stays a static file and translates itself in the browser (en/it/fr/de, off `navigator.languages`, English fallback). The 403 page served when links are disabled ships no script, so that one picks its language from `Accept-Language`. |
 | GET | `/dl.js`, `/arvolo-sw.js` | none | The download script and streaming service worker (embedded in the binary). |
 | GET | `/v1/features` | none | Advertise optional features so a client can fail fast: `{"links":true,"rz2":true}`. The two are read with **opposite defaults** on purpose — an unreachable or older relay means "links allowed" (worst case, a deposit is refused later) but "no rz2", because minting a v2 code no relay can host would strand whoever types it. |
 | GET | `/healthz` | none | Liveness. |
@@ -490,10 +490,34 @@ The relay therefore sees only *which slot* received an offer and when — never
 who sent it (the same goal as Signal's sealed sender). The recipient unwraps the
 outer layer, reads the sender id, and verifies it against the inner auth-mode
 seal; a forged sender fails to open. The POST also carries a **poster token**
-(hash stored) so the sender can retract the offer or query whether a live reader
-fetched it. The recipient's `listen` surfaces each offer (sender, name, size)
-and, on accept, runs the underlying transfer (an `arvc` ticket over P2P, or an
-`arvm` fetch) transparently.
+(hash stored) so the sender can retract the offer or ask how far it got. The
+recipient's `listen` surfaces each offer (sender, name, size) and, on accept, runs
+the underlying transfer (an `arvc` ticket over P2P, or an `arvm` fetch)
+transparently.
+
+**How far an offer got, and what each answer can support.** Three states, because
+three different things are true at different moments and only one of them is about
+a person:
+
+| state | set by | what it supports |
+|---|---|---|
+| `pending` | the POST | nothing has read it |
+| `fetched` (`Arrived`) | *any* authenticated read of the slot | the offer reached one of their devices. An `arvolo recv`/`status` listing sets this exactly as their daemon's poll does, so it can never mean "they have the file" — nor even "they looked" |
+| `taken` | the recipient's DELETE, sent once the file is saved | they took it — the only state that reports a person acting |
+
+The ack does not delete the row; it leaves a **tombstone** (payload dropped,
+`expires_at` untouched, reaped on the offer's own TTL). Without it, `taken` and
+"lapsed unread" were the same answer, `gone`, and the sender's only positive signal
+was `fetched` — which is why that one had to stop being read as a delivery. The
+wire keeps the word `fetched` for the middle state so that clients older than
+`taken` keep reading a newer relay correctly; internally it is called `Arrived`.
+
+There is no state for *a person saw it*, deliberately: the relay observes reads of
+a slot, never attention, and only the recipient's own client could claim otherwise.
+So no name here may imply one — which is also why the middle state is not called
+`Seen` (it claims a person) or `Received` (in a tool whose verb for taking a file
+is `recv`, it is the one word certain to be read as the state it isn't). `gone` now means only: retracted, or lapsed without being
+taken (as it also does for an offer taken on a relay that predates `taken`).
 
 **Two-phase watchdog (`arvolo send`).** `arvolo send` decides live-vs-mailbox on a real
 signal rather than a blind timer:

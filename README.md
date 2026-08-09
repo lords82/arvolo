@@ -106,6 +106,7 @@ on a relay until they fetch it:
 arvolo me                                     # recipient shows their public id
 arvolo send <id-or-contact> ./report.pdf --deposit   # deposit (HPKE E2E) + print an arvm ticket
 arvolo recv arvm…                             # recipient fetches + decrypts (burns on read)
+arvolo recv                                   # …or, with no ticket to hand: what's waiting for you
 ```
 
 **Send to a known recipient** — `send` picks the channel automatically: if
@@ -161,7 +162,8 @@ folder are packed into one archive in every case.
 | &nbsp;&nbsp;`--ttl --max --password` | Deposit/link tuning: expiry, download cap, E2E password (`send`/`link`). |
 | &nbsp;&nbsp;`--relay --use-http --qr` | Relay to use; `http://` for bare hosts (LAN/dev); render the ticket/code/link as a QR. |
 | `arvolo recv <ticket\|code\|link> [-o out] [--password]` | Receive from **any** of them — one verb, auto-detected: `arvc…`/pairing-code fetch live P2P (resumes, unpacks folders), `arvm…`/download-link decrypt from the relay. |
-| `arvolo status [--watch]` | Everything you can still **act on**: with a daemon, live in/out transfers + pending offers; then, daemon or not, what you've **left on a relay** (links / sealed deposits, with live relay status) and the **resumable** sends (`--watch` redraws). |
+| `arvolo recv` (no ticket) | What's **waiting for you**: the sends addressed to your identity, still sealed on the relay — sender, file, size, note — and you pick one. With a daemon it lists the offers it has parked instead. A code, ticket or link never appears here: it *is* the permission to fetch, so nothing on the relay knows one is yours (which is what stops anyone enumerating someone else's) — paste those. |
+| `arvolo status [--watch]` | Everything you can still **act on**: with a daemon, live in/out transfers + the offers it parked; without one, the offers read straight from your inbox on the relay (nobody else is watching it). Then either way what you've **left on a relay** (links / sealed deposits, with live relay status) and the **resumable** sends (`--watch` redraws). Take an offer with `arvolo recv`. |
 | &nbsp;&nbsp;`clear` | Closes out what's over — drops completed/cancelled/failed rows, keeping anything still going (a mailbox send awaiting pickup looks done but isn't). Never touches the relay: withdraw with `arvolo cancel <id>`. |
 | `arvolo history [--all]` | What already **happened**: the log of finished transfers, 20 most recent by default. Read-only — nothing here can still be acted on, which is what separates it from `status`. |
 | &nbsp;&nbsp;`clear` | Forget the log. Leaves the live list, your relay deposits and your resumable sends alone. |

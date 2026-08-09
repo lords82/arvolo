@@ -51,9 +51,18 @@ async fn a_streamed_multichunk_deposit_round_trips_byte_for_byte() {
         .collect();
     std::fs::write(&src, &data).unwrap();
 
-    let deposited = deposit_offline(&src, &recipient.public(), &sender, &relay, 3600, 1, None)
-        .await
-        .expect("deposit should stream to the relay and succeed");
+    let deposited = deposit_offline(
+        &src,
+        "big.bin",
+        &recipient.public(),
+        &sender,
+        &relay,
+        3600,
+        1,
+        None,
+    )
+    .await
+    .expect("deposit should stream to the relay and succeed");
 
     let out = src_dir.path().join("fetched.bin");
     let (path, n) = fetch_offline(

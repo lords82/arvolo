@@ -69,6 +69,20 @@ export const de: Dict = {
   "rail.palette": "Suchen und ausführen",
 
   "status.active": "Läuft",
+  "status.sharing": "Geteilt",
+
+  "share.title": "Geteilte Datei",
+  "share.stop": "Teilen beenden",
+  "share.copies": "abgeholte Kopien",
+  "share.now": "laden gerade",
+  "share.lastPickup": "zuletzt abgeholt",
+  "share.never": "nie",
+  "share.uploaded": "hochgeladen",
+  "share.fromDownload": (when: string) =>
+    `Sie haben das ${when} heruntergeladen, und Ihr Rechner stellt es jetzt anderen zur Verfügung.`,
+  "share.seedingSetting": "Einstellung ändern",
+  "share.countsNote":
+    "Kopien, keine Personen: Ein Ticket trägt keine Identität, dieselbe Person z\u00e4hlt beim zweiten Abholen erneut.",
   "status.completed": "Abgeschlossen",
   "status.deposited": "Abgelegt",
   "status.paused": "Pausiert",
@@ -84,6 +98,9 @@ export const de: Dict = {
   "method.ticket": "Ticket",
 
   "meta.paused": "pausiert",
+  "meta.sharing": "verfügbar — niemand lädt es gerade",
+  "meta.sharingPeers": (n) =>
+    n === 1 ? "1 Person lädt es" : `${n} Personen laden es`,
   "meta.stalled": "läuft weiter, sobald es geht",
   "meta.incoming": "für Details öffnen",
   "meta.deposited": "wartet darauf, abgeholt zu werden",
@@ -108,6 +125,8 @@ export const de: Dict = {
 
   "transfers.pause": "Pausieren",
   "transfers.resume": "Fortsetzen",
+  "transfers.openFile": "Datei öffnen",
+  "transfers.openFileFailed": "Ich kann die Datei nicht öffnen",
   "transfers.openFolder": "Ordner öffnen",
   "transfers.openFolderFailed": "Ich kann den Ordner nicht öffnen",
   "transfers.moveUp": "Nach oben",
@@ -120,6 +139,7 @@ export const de: Dict = {
   "transfers.peers": (n) => (n === 1 ? "1 Peer" : `${n} Peers`),
   "transfers.liveCode": "Code aktiv",
   "transfers.review": "Ansehen",
+  "transfers.shareDetails": "Details zum Teilen",
   "transfers.rowActions": (name) => `Aktionen für ${name}`,
   "transfers.progressOf": (name) => `Fortschritt von ${name}`,
   "transfers.confirmRevokeTitle": "Ablage zurückziehen?",
@@ -264,6 +284,10 @@ export const de: Dict = {
 
   "deposit.expired": "Abgelaufen",
   "deposit.expiredDetail": "die Frist ist verstrichen",
+  "deposit.taken": "Abgeholt",
+  "deposit.takenDetail": "die empfangende Person hat es heruntergeladen",
+  "deposit.offerPending": "noch nicht bei ihnen angekommen",
+  "deposit.offerArrived": "auf ihrem Gerät angekommen, noch nicht abgeholt",
   "deposit.gone": "Nicht mehr verfügbar",
   "deposit.goneLink": "bis zum Limit geladen, oder bereits zurückgezogen",
   "deposit.goneSealed": "abgeholt, oder bereits zurückgezogen",
@@ -278,6 +302,12 @@ export const de: Dict = {
 
   "deposits.openInBrowser": "Im Browser öffnen",
   "deposits.openFailed": "Ich kann den Link nicht öffnen",
+  "deposits.share": "Link",
+  "deposits.shareTicket": "Ticket",
+  "deposits.shareTicketTitle": "Das Ticket, noch einmal",
+  "deposits.ticketDetail":
+    "Fügen Sie es der Empfängerseite ein: es öffnet sich in deren Arvolo, oder mit `arvolo recv`. Entschlüsseln kann es nur sie — es ist auf ihre Identität versiegelt.",
+  "deposits.shareTitle": "Der Link, noch einmal",
   "deposits.publicLink": "Öffentlicher Link",
   "deposits.sealed": "Ablage",
   "deposits.revoke": "Zurückziehen",

@@ -14,6 +14,8 @@ pub(crate) struct Config {
     pub(crate) iroh_relay: Option<String>,
     pub(crate) seed: Option<bool>,
     pub(crate) seed_after: Option<u64>,
+    pub(crate) share_days: Option<u64>,
+    pub(crate) share_copies: Option<u64>,
     pub(crate) swarm: Option<String>,
     pub(crate) concurrency: Option<u32>,
     ipv4_only: Option<bool>,
@@ -200,12 +202,17 @@ pub fn apply_config_to_env() {
     // the env expects (or `None` to leave the env untouched). `debug` maps to "1"
     // only when on, since core treats *any* value of ARVOLO_DEBUG as enabled.
     // Bridged with env > config > default precedence via `set_if_unset`.
-    let bridges: [(&str, Option<String>); 11] = [
+    let bridges: [(&str, Option<String>); 13] = [
         ("ARVOLO_TEMP_DIR", cfg.temp_dir.and_then(nonempty)),
         ("ARVOLO_IDENTITY", cfg.identity.and_then(nonempty)),
         ("ARVOLO_IROH_RELAY", cfg.iroh_relay.and_then(nonempty)),
         ("ARVOLO_SEED", cfg.seed.map(bool_env)),
         ("ARVOLO_SEED_AFTER", cfg.seed_after.map(|n| n.to_string())),
+        ("ARVOLO_SHARE_DAYS", cfg.share_days.map(|n| n.to_string())),
+        (
+            "ARVOLO_SHARE_COPIES",
+            cfg.share_copies.map(|n| n.to_string()),
+        ),
         ("ARVOLO_SWARM", cfg.swarm.and_then(nonempty)),
         ("ARVOLO_CONCURRENCY", cfg.concurrency.map(|n| n.to_string())),
         ("ARVOLO_IPV4_ONLY", cfg.ipv4_only.map(bool_env)),
@@ -275,6 +282,14 @@ pub fn write_default_config(relay: Option<&str>) -> Result<()> {
 
 # Seconds to keep backfilling the relay after a transfer completes (0 = off).
 #seed_after = 0
+
+# When to stop sharing a file you are making available (a ticket, a code, or the
+# seeding a finished download turns into). Unset = until you stop it by hand,
+# which is the default: the file is meant to be fetchable. Set one or both when
+# you would rather it lapsed on its own — otherwise every file you receive leaves
+# a share that comes back at every restart.
+#share_days = 30
+#share_copies = 5
 
 # Swarm mode for shared arvc… tickets: "on", "off", or "relay-only" (privacy).
 #swarm = "on"

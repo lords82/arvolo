@@ -9,7 +9,7 @@ use crate::crypto::{
 };
 use crate::offline::OfflineTicket;
 
-use super::recv::default_out;
+use super::recv::{default_out, safe_download_name};
 use super::MAILBOX_KEY_AAD;
 
 /// Result of an offline deposit: the ticket to hand the recipient, plus the
@@ -62,8 +62,10 @@ impl std::fmt::Display for DepositError {
 
 impl std::error::Error for DepositError {}
 
+#[allow(clippy::too_many_arguments)]
 pub async fn deposit_offline(
     path: &Path,
+    name: &str,
     recipient: &PublicId,
     me: &Identity,
     relay: &str,
@@ -209,6 +211,10 @@ pub async fn deposit_offline(
             salt,
             wrapped_key: sealed.ciphertext,
             total_size,
+            // Passed in rather than read off `path`: for a folder or a multi-file
+            // send, what is on disk is a temporary tar, and the recipient wants
+            // the name the sender meant.
+            name: name.to_string(),
         },
         revoke_token,
     })
@@ -304,8 +310,34 @@ pub async fn claim_status(relay: &str, claim: &str) -> Result<ClaimStatus> {
     })
 }
 
-/// Fetch and decrypt an offline ticket into `out` (default derived from the
-/// claim). Returns the output path and the number of plaintext bytes written.
+/// Where a mailbox fetch lands, from the caller's destination and the ticket.
+///
+/// `user_out` is a *destination*, not necessarily a filename — the same three
+/// cases the chunked receiver already distinguishes, and for the same reason:
+/// handed a directory (`--out ~/Downloads`, a GUI folder picker) this used to try
+/// to open the folder as a file and fail with "Is a directory", and handed nothing
+/// it wrote `received-<claim>.bin` even though the ticket knew the real name.
+///
+/// The name comes from the sender, so it is reduced to a single path component
+/// before it reaches the filesystem: `../../.ssh/authorized_keys` saves as
+/// `authorized_keys`, inside the chosen directory and nowhere else. A ticket
+/// minted before names were carried has none, and falls back to the claim-derived
+/// name it always had.
+fn mailbox_out(user_out: Option<&Path>, t: &OfflineTicket) -> PathBuf {
+    let named = safe_download_name(&t.name);
+    match (user_out, named) {
+        (Some(dir), Some(n)) if dir.is_dir() => dir.join(n),
+        (Some(dir), None) if dir.is_dir() => dir.join(default_out(&t.claim)),
+        // Anything else the caller named is the file they asked for.
+        (Some(file), _) => file.to_path_buf(),
+        (None, Some(n)) => PathBuf::from(n),
+        (None, None) => default_out(&t.claim),
+    }
+}
+
+/// Fetch and decrypt an offline ticket into `out` — a directory to save inside, a
+/// filename to use, or nothing at all, in which case the ticket's own name is
+/// used. Returns the output path and the number of plaintext bytes written.
 pub async fn fetch_offline(
     ticket: &str,
     out: Option<PathBuf>,
@@ -376,7 +408,7 @@ pub async fn fetch_offline(
     // Stream the ciphertext chunk stream straight to disk, decrypting a 16 MiB
     // chunk at a time — peak memory is ~one chunk, never the whole file. `carry`
     // reassembles exactly one sealed chunk from arbitrary HTTP frame boundaries.
-    let out = out.unwrap_or_else(|| default_out(&t.claim));
+    let out = mailbox_out(out.as_deref(), &t);
     let mut outfile = tokio::fs::File::create(&out)
         .await
         .with_context(|| format!("create {}", out.display()))?;
@@ -406,4 +438,72 @@ pub async fn fetch_offline(
     }
     outfile.flush().await.context("flush output")?;
     Ok((out, total_size as usize))
+}
+
+#[cfg(test)]
+mod mailbox_out_tests {
+    use super::*;
+
+    fn ticket(name: &str) -> OfflineTicket {
+        OfflineTicket {
+            relay: "https://relay.example".into(),
+            claim: "claim1234567890abcdef".into(),
+            sender: vec![1, 2, 3],
+            salt: Vec::new(),
+            wrapped_key: vec![9],
+            total_size: 10,
+            name: name.into(),
+        }
+    }
+
+    /// The bug this resolves: a mailbox fetch used to write `received-<claim>.bin`
+    /// even though the sender had a name for it.
+    #[test]
+    fn a_named_ticket_is_saved_under_its_name() {
+        assert_eq!(
+            mailbox_out(None, &ticket("report.pdf")),
+            PathBuf::from("report.pdf")
+        );
+    }
+
+    /// And the other half: `--out <dir>` used to be opened as a file and fail with
+    /// EISDIR, which is how a folder picker or a shell tab-complete ends up here.
+    #[test]
+    fn a_directory_is_saved_into_not_opened() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            mailbox_out(Some(dir.path()), &ticket("report.pdf")),
+            dir.path().join("report.pdf")
+        );
+    }
+
+    #[test]
+    fn a_named_destination_is_taken_literally() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("elsewhere.bin");
+        assert_eq!(mailbox_out(Some(&file), &ticket("report.pdf")), file);
+    }
+
+    /// The name is the sender's to choose, so it never reaches the filesystem as
+    /// more than one component.
+    #[test]
+    fn a_traversal_name_cannot_escape_the_chosen_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = mailbox_out(Some(dir.path()), &ticket("../../.ssh/authorized_keys"));
+        assert_eq!(out, dir.path().join("authorized_keys"));
+        assert!(out.starts_with(dir.path()));
+    }
+
+    /// A ticket minted before names were carried keeps exactly the behaviour it
+    /// had — including inside a directory, which is the case that used to fail.
+    #[test]
+    fn a_nameless_ticket_falls_back_to_the_claim() {
+        let t = ticket("");
+        assert_eq!(mailbox_out(None, &t), default_out(&t.claim));
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            mailbox_out(Some(dir.path()), &t),
+            dir.path().join(default_out(&t.claim))
+        );
+    }
 }

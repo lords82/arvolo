@@ -80,6 +80,20 @@ export const en = {
 
   // ---- transfer status ---------------------------------------------------
   "status.active": "Under way",
+  "status.sharing": "Shared",
+
+  "share.title": "Shared file",
+  "share.stop": "Stop sharing",
+  "share.copies": "copies taken",
+  "share.now": "downloading now",
+  "share.lastPickup": "last taken",
+  "share.never": "never",
+  "share.uploaded": "uploaded",
+  "share.fromDownload": (when: string) =>
+    `You downloaded this ${when}, and your computer is now making it available to others.`,
+  "share.seedingSetting": "Change this",
+  "share.countsNote":
+    "Copies taken, not people: a ticket carries no identity, so the same person fetching twice counts twice.",
   "status.completed": "Completed",
   "status.deposited": "Deposited",
   "status.paused": "Paused",
@@ -95,6 +109,9 @@ export const en = {
   "method.ticket": "Ticket",
 
   "meta.paused": "paused",
+  "meta.sharing": "available — nobody downloading it",
+  "meta.sharingPeers": (n: number) =>
+    n === 1 ? "1 person downloading it" : `${n} people downloading it`,
   "meta.stalled": "resumes as soon as it can",
   "meta.incoming": "open for the details",
   "meta.deposited": "waiting for the recipient to collect it",
@@ -125,6 +142,8 @@ export const en = {
   // ---- transfers ---------------------------------------------------------
   "transfers.pause": "Pause",
   "transfers.resume": "Resume",
+  "transfers.openFile": "Open file",
+  "transfers.openFileFailed": "I can't open the file",
   "transfers.openFolder": "Open the folder",
   "transfers.openFolderFailed": "I can't open the folder",
   "transfers.moveUp": "Move up",
@@ -137,6 +156,7 @@ export const en = {
   "transfers.peers": (n: number) => (n === 1 ? "1 peer" : `${n} peers`),
   "transfers.liveCode": "code live",
   "transfers.review": "Review",
+  "transfers.shareDetails": "Sharing details",
   "transfers.rowActions": (name: string) => `Actions for ${name}`,
   "transfers.progressOf": (name: string) => `Progress of ${name}`,
   "transfers.confirmRevokeTitle": "Withdraw the deposit?",
@@ -276,6 +296,10 @@ export const en = {
   // ---- deposits ----------------------------------------------------------
   "deposit.expired": "Expired",
   "deposit.expiredDetail": "the deadline has passed",
+  "deposit.taken": "Taken",
+  "deposit.takenDetail": "the recipient fetched it",
+  "deposit.offerPending": "it hasn't reached them yet",
+  "deposit.offerArrived": "on their device, not taken yet",
   "deposit.gone": "No longer available",
   "deposit.goneLink": "downloaded up to the limit, or already withdrawn",
   "deposit.goneSealed": "collected by the recipient, or already withdrawn",
@@ -290,6 +314,12 @@ export const en = {
 
   "deposits.openInBrowser": "Open in the browser",
   "deposits.openFailed": "I can't open the link",
+  "deposits.share": "Link",
+  "deposits.shareTicket": "Ticket",
+  "deposits.shareTicketTitle": "The ticket, again",
+  "deposits.ticketDetail":
+    "Paste it to the recipient: it opens in their Arvolo, or with `arvolo recv`. Only they can decrypt it — it is sealed to their identity.",
+  "deposits.shareTitle": "The link, again",
   "deposits.publicLink": "Public link",
   "deposits.sealed": "Deposit",
   "deposits.revoke": "Withdraw",

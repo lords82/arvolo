@@ -30,12 +30,41 @@ pub struct OfflineTicket {
     /// Chunked format: plaintext size of the file, so the receiver can frame the
     /// chunk stream. 0 for the legacy format.
     pub total_size: u64,
+    /// The file's name, so the receiver saves it under the name it was sent with.
+    ///
+    /// Empty for a ticket minted before this field existed — those still decode
+    /// (see [`OfflineTicket::decode`]) and still fetch; they just fall back to a
+    /// claim-derived name, which is what they always did.
+    ///
+    /// In the clear inside the ticket, like the chunked ticket's own `name`. The
+    /// ticket is the capability to fetch *and* decrypt, so anyone holding it can
+    /// read the file anyway — hiding the name from them would protect nothing, and
+    /// the relay never sees a ticket.
+    pub name: String,
 }
 
 /// Postcard wire form — a self-describing, length-prefixed layout so raw byte
 /// fields (sender id, salt) can hold any value without a delimiter clash.
 #[derive(Serialize, Deserialize)]
 struct OfflineWire {
+    relay: String,
+    claim: String,
+    sender: Vec<u8>,
+    salt: Vec<u8>,
+    wrapped_key: Vec<u8>,
+    total_size: u64,
+    name: String,
+}
+
+/// The shape before `name` was added.
+///
+/// Postcard is not self-describing and decodes positionally, so a ticket written
+/// by an older build simply ends where this struct ends: reading it as
+/// [`OfflineWire`] runs off the end and fails. Keeping the old shape lets those
+/// tickets go on working — they live for days after being handed out, and an
+/// upgrade must not quietly turn one into "not an offline ticket".
+#[derive(Deserialize)]
+struct OfflineWireV1 {
     relay: String,
     claim: String,
     sender: Vec<u8>,
@@ -59,6 +88,7 @@ impl OfflineTicket {
             salt: self.salt.clone(),
             wrapped_key: self.wrapped_key.clone(),
             total_size: self.total_size,
+            name: self.name.clone(),
         })
         .expect("serialize offline ticket");
         format!("{PREFIX}{}", data_encoding::BASE32_NOPAD.encode(&bytes))
@@ -73,7 +103,21 @@ impl OfflineTicket {
         let bytes = data_encoding::BASE32_NOPAD
             .decode(body.to_uppercase().as_bytes())
             .context("decode offline ticket")?;
-        let w: OfflineWire = postcard::from_bytes(&bytes).context("deserialize offline ticket")?;
+        // Newest shape first; an older ticket falls short of it and is read with
+        // the shape it was written in, with no name to offer.
+        if let Ok(w) = postcard::from_bytes::<OfflineWire>(&bytes) {
+            return Ok(OfflineTicket {
+                relay: w.relay,
+                claim: w.claim,
+                sender: w.sender,
+                salt: w.salt,
+                wrapped_key: w.wrapped_key,
+                total_size: w.total_size,
+                name: w.name,
+            });
+        }
+        let w: OfflineWireV1 =
+            postcard::from_bytes(&bytes).context("deserialize offline ticket")?;
         Ok(OfflineTicket {
             relay: w.relay,
             claim: w.claim,
@@ -81,6 +125,7 @@ impl OfflineTicket {
             salt: w.salt,
             wrapped_key: w.wrapped_key,
             total_size: w.total_size,
+            name: String::new(),
         })
     }
 }
@@ -98,6 +143,7 @@ mod tests {
             salt: Vec::new(),
             wrapped_key: vec![9, 8, 7, 6],
             total_size: 1_234_567,
+            name: "report.pdf".into(),
         };
         let decoded = OfflineTicket::decode(&t.encode()).unwrap();
         assert_eq!(t, decoded);
@@ -114,6 +160,7 @@ mod tests {
             salt: vec![1, b'|', 2, 3, 0xff, 0x00, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9],
             wrapped_key: vec![b'|', 0x00, 0xff],
             total_size: 0,
+            name: "conti 2026.xlsx".into(),
         };
         let decoded = OfflineTicket::decode(&t.encode()).unwrap();
         assert_eq!(t, decoded);

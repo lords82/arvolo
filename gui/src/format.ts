@@ -47,6 +47,10 @@ export function statusMeta(s: UIStatus): StatusMeta {
   switch (s) {
     case "active":
       return { tone: "out", text: t("status.active") };
+    // Muted on purpose: nothing is happening, and nothing is wrong. A tone that
+    // asked for attention would make every file you ever downloaded ask for it.
+    case "sharing":
+      return { tone: "mut", text: t("status.sharing") };
     case "completed":
       return { tone: "ok", text: t("status.completed") };
     case "deposited":
@@ -137,12 +141,30 @@ export function barClass(tx: UITransfer): string {
   if (tx.status === "failed") return `prog ${dir} bad`;
   if (tx.status === "stalled" || tx.status === "paused")
     return `prog ${dir} stall`;
+  // A share is complete by definition — the file is all there, waiting. Drawing it
+  // as a bar invites reading a full one as "done" and an empty one as "stuck",
+  // which is exactly how a seed row came to look like a failed send.
+  if (tx.status === "sharing") return `prog ${dir} stall`;
   return `prog ${dir}`;
 }
 
 export function pct(tx: UITransfer): number {
   if (!tx.size) return 0;
   return Math.min(100, Math.round((tx.transferred / tx.size) * 100));
+}
+
+/** How long ago a unix timestamp was, in words. Empty for 0 — which every caller
+ *  uses to mean "never happened", and which must not render as "moments ago".
+ *
+ *  Every branch can land on exactly 1, so none of them hardcodes the plural: each
+ *  dictionary decides where its own singular is. */
+export function fmtAgo(unixSecs: number, nowMs: number = Date.now()): string {
+  if (!unixSecs) return "";
+  const secs = Math.max(0, Math.floor(nowMs / 1000) - unixSecs);
+  if (secs < 60) return t("ago.moments");
+  if (secs < 3600) return t("ago.minutes", Math.round(secs / 60));
+  if (secs < 86400) return t("ago.hours", Math.round(secs / 3600));
+  return t("ago.days", Math.round(secs / 86400));
 }
 
 /** Human throughput, e.g. "42 MB/s". */
@@ -178,14 +200,31 @@ export function metaLine(tx: UITransfer): string {
       }
       return parts.join(" · ");
     }
+    case "sharing":
+      return tx.downloadPeers > 0
+        ? t("meta.sharingPeers", tx.downloadPeers)
+        : t("meta.sharing");
     case "paused":
       return t("meta.paused");
     case "stalled":
       return tx.reason ? tx.reason : t("meta.stalled");
     case "incoming":
       return t("meta.incoming");
-    case "deposited":
-      return t("meta.deposited");
+    case "deposited": {
+      // "Waiting to be picked up" is true for as long as a week, and says nothing
+      // about whether it ever reached them. When the relay has told us, say that
+      // instead — in the same words the deposits panel uses for the same fact.
+      const offer = {
+        pending: "deposit.offerPending",
+        arrived: "deposit.offerArrived",
+        taken: "deposit.taken",
+      }[tx.offerStatus ?? ""] as
+        | "deposit.offerPending"
+        | "deposit.offerArrived"
+        | "deposit.taken"
+        | undefined;
+      return offer ? t(offer) : t("meta.deposited");
+    }
     case "failed":
       return tx.reason || t("meta.failed");
     default:
@@ -252,6 +291,22 @@ export function depositMeta(d: DepositDto, nowMs: number = Date.now()): DepositM
       revocable: false,
     };
   }
+  // Before the blob question, because it outranks it. A sealed deposit that has
+  // been taken reads as gone from the relay — the fetch burns it — and "gone" is
+  // also what a withdrawal looks like, so the row used to say "collected, or
+  // already withdrawn" about an event we now know happened. `taken` is the only
+  // state reported by the recipient's own ack, so it is the only one that can say
+  // this outright.
+  if (d.offer_status === "taken") {
+    return {
+      tone: "ok",
+      text: t("deposit.taken"),
+      detail: t("deposit.takenDetail"),
+      // Nothing left to take back: they have the file. Withdrawing now would only
+      // delete a blob that has already served its purpose.
+      revocable: false,
+    };
+  }
   if (d.present === false) {
     return {
       tone: "mut",
@@ -293,6 +348,11 @@ export function depositMeta(d: DepositDto, nowMs: number = Date.now()): DepositM
         : t("deposit.max", d.max_label)
     );
   }
+  // Still out there: say how far it got with the person it was sent to. Only the
+  // two states that mean "not yet" are worth a word here — `taken` returned above,
+  // and `gone`/`null` have nothing to add to a row that is still live.
+  if (d.offer_status === "pending") parts.push(t("deposit.offerPending"));
+  if (d.offer_status === "arrived") parts.push(t("deposit.offerArrived"));
   parts.push(when);
   return {
     tone: "ok",
@@ -327,7 +387,11 @@ export function sectionsFor(
   // made it vanish the instant the user clicked Cancel — the board quietly
   // disagreeing with the engine, which is the bug this whole file guards against.
   const isActive = (s: UIStatus) =>
-    s === "active" || s === "paused" || s === "stalled" || s === "cancelling";
+    s === "active" ||
+    s === "sharing" ||
+    s === "paused" ||
+    s === "stalled" ||
+    s === "cancelling";
   const isTerminal = (s: UIStatus) =>
     s === "completed" ||
     s === "failed" ||

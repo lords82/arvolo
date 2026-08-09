@@ -295,15 +295,57 @@ pub async fn retract_offer(
     Ok(())
 }
 
-/// Whether an offer we posted has been seen by (or handed off to) the recipient.
+/// How far an offer we posted has got.
+///
+/// A ladder, not a pair of flags: `Pending` → `Arrived` → `Taken`, with `Gone` off
+/// to the side for the offers that ended without ever being taken. The distinction
+/// that matters is between the middle two. `Arrived` is a fact about a *machine* —
+/// some client of theirs read the offer, which a `recv`/`status` listing does as
+/// much as a daemon poll — and for a while it was the best news available, so it
+/// got read as "they have the file". `Taken` is the fact about the *person*: they
+/// fetched it and acked. Keeping them apart is what stops a glance at a list from
+/// being reported as a delivery.
+///
+/// There is a fourth thing one might want — *did a human look at it?* — and it is
+/// deliberately absent, because nothing here can answer it. The relay sees reads of
+/// a slot, not eyes on a screen; only the recipient's own client could claim it,
+/// and no such claim is made. So no name on this ladder may suggest a person: what
+/// the middle state knows is that the offer arrived somewhere, and `Arrived` is the
+/// most it can say. (`Seen` was the earlier name and said too much; `Received` says
+/// worse — in a tool whose verb for taking a file is literally `recv`, it is the
+/// one word guaranteed to be read as the state it isn't.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OfferStatus {
-    /// Still queued, not yet seen by a live recipient poll.
+    /// Still queued: no client of theirs has read it.
     Pending,
-    /// A live recipient polled the inbox and received it.
-    Fetched,
-    /// No longer on the relay — the recipient acked/accepted it (or it expired).
+    /// A recipient client read the offer — it reached one of their devices. Says
+    /// nothing about whether anyone has looked at it, let alone decided.
+    Arrived,
+    /// The recipient took it: fetched and acked. The only state that reports a
+    /// person acting.
+    Taken,
+    /// Gone without being taken: expired, or retracted by us. A relay older than
+    /// the `taken` state also answers this for an offer that *was* taken — it has
+    /// no way to tell us apart from an expiry, which is the gap `Taken` closes.
     Gone,
+}
+
+impl OfferStatus {
+    /// The name a UI shows and a DTO carries.
+    ///
+    /// Not the same vocabulary as the HTTP body, where `Arrived` is still spelled
+    /// `fetched` so that clients older than this state keep reading the relay
+    /// correctly. That compatibility spelling has no business leaking upwards: the
+    /// only place it exists is [`offer_status`]'s parse and the relay's own
+    /// handler.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            OfferStatus::Pending => "pending",
+            OfferStatus::Arrived => "arrived",
+            OfferStatus::Taken => "taken",
+            OfferStatus::Gone => "gone",
+        }
+    }
 }
 
 /// Ask the relay whether an offer we posted has been seen yet (poster-authed).
@@ -327,7 +369,10 @@ pub async fn offer_status(
         .context("relay rejected offer status")?;
     let body = resp.text().await.unwrap_or_default();
     Ok(match body.trim() {
-        "fetched" => OfferStatus::Fetched,
+        // `fetched` is the wire spelling of `Arrived` — kept as-is so this client
+        // and one older than the state it names read the same relay the same way.
+        "fetched" => OfferStatus::Arrived,
+        "taken" => OfferStatus::Taken,
         "gone" => OfferStatus::Gone,
         _ => OfferStatus::Pending,
     })

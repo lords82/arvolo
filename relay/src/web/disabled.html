@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="{{lang}}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>arvolo</title>
+<style>
+  /* The 403 twin of dl.html. Same tokens, same card, no script: whoever follows
+     a dead link should still land somewhere that looks like the product.
+     No script also means no client-side translation, so this page carries all
+     four languages at once: the relay negotiates one from `Accept-Language`
+     and stamps it into `{{lang}}` on <html>, and `:lang()` reveals that one. */
+  :root {
+    --canvas: #faf8f6; --surface: #ffffff; --surface-2: #f5f2ef; --surface-3: #ebe7e2;
+    --ink: #171514; --ink-sec: #57534c; --ink-mut: #6e6961;
+    --line: rgba(23, 21, 20, 0.08); --line-strong: rgba(23, 21, 20, 0.14);
+    --out-fill: #cf492c; --on-fill: #ffffff; --amber: #9a6100; --amber-soft: #fdf2e0;
+    --shadow-1: 0 1px 2px rgba(58, 46, 34, 0.06), 0 1px 1px rgba(58, 46, 34, 0.04);
+    --shadow-3: 0 8px 24px rgba(58, 46, 34, 0.12), 0 24px 60px rgba(58, 46, 34, 0.16);
+    --font: -apple-system, BlinkMacSystemFont, "Segoe UI Variable", "Segoe UI",
+      Inter, Ubuntu, "Noto Sans", sans-serif;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --canvas: #16130f; --surface: #1e1a16; --surface-2: #262119; --surface-3: #322b22;
+      --ink: #f5f1eb; --ink-sec: #bdb4a8; --ink-mut: #9d9487;
+      --line: rgba(245, 241, 235, 0.09); --line-strong: rgba(245, 241, 235, 0.16);
+      --out-fill: #ce482b; --amber: #e0a444; --amber-soft: #35270f;
+      --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+      --shadow-3: 0 10px 30px rgba(0, 0, 0, 0.5), 0 30px 70px rgba(0, 0, 0, 0.45);
+      color-scheme: dark;
+    }
+  }
+  *, *::before, *::after { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; min-height: 100svh;
+    display: grid; place-items: center; padding: 30px 18px;
+    font-family: var(--font); font-size: 13.5px; line-height: 1.45; color: var(--ink);
+    /* Flat fill first — see the note in dl.html: without `color-mix` the whole
+       shorthand is dropped and the dark theme would land on a white page. */
+    background: var(--canvas);
+    background:
+      radial-gradient(760px 420px at 12% -12%, color-mix(in srgb, var(--out-fill) 13%, transparent), transparent 62%),
+      var(--canvas);
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { width: min(100%, 440px); }
+  .brand { display: flex; align-items: center; gap: 10px; margin: 0 0 14px; padding: 0 2px; }
+  .brand .mark {
+    width: 30px; height: 30px; flex: none; display: grid; place-items: center;
+    border-radius: 6px; box-shadow: var(--shadow-1);
+  }
+  .brand .word { font-size: 15px; font-weight: 640; letter-spacing: -0.01em; }
+  .card {
+    position: relative; overflow: hidden;
+    padding: 22px 20px;
+    background: var(--surface); border: 1px solid var(--line);
+    border-radius: 20px; box-shadow: var(--shadow-3);
+  }
+  .card::before {
+    content: ""; position: absolute; top: 0; left: 0; right: 0; height: 3px;
+    background: var(--amber);
+    background: linear-gradient(90deg, var(--amber), color-mix(in srgb, var(--amber) 18%, transparent));
+  }
+  .badge {
+    display: inline-flex; align-items: center; gap: 5px; height: 21px; padding: 0 9px;
+    border-radius: 999px; background: var(--amber-soft); color: var(--amber);
+    font-size: 10.5px; font-weight: 650; letter-spacing: 0.02em;
+  }
+  h1 { margin: 13px 0 6px; font-size: 19px; font-weight: 640; letter-spacing: -0.015em; line-height: 1.25; }
+  p { margin: 0; color: var(--ink-sec); font-size: 12.5px; line-height: 1.5; }
+  footer { margin-top: 14px; text-align: center; font-size: 11.5px; color: var(--ink-mut); }
+  footer a { color: var(--ink-sec); text-decoration: none; border-bottom: 1px solid var(--line-strong); }
+
+  /* Exactly one of the four shows. Every translated node is a <span>, so a
+     plain `inline` is enough and no `revert` is needed.
+
+     English is visible by DEFAULT and hidden only once another language wins,
+     rather than being revealed by `:root:lang(en)`. That asymmetry is the
+     fallback: if `{{lang}}` is ever served unsubstituted — or the file is
+     opened straight off disk — `:lang()` matches nothing, and a rule that only
+     ever reveals would leave a card with no words in it at all. */
+  [data-lang]:not([data-lang="en"]) { display: none; }
+  :root:lang(it) [data-lang="en"],
+  :root:lang(fr) [data-lang="en"],
+  :root:lang(de) [data-lang="en"] { display: none; }
+  :root:lang(it) [data-lang="it"],
+  :root:lang(fr) [data-lang="fr"],
+  :root:lang(de) [data-lang="de"] { display: inline; }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <header class="brand">
+      <!-- The application icon, redrawn: gui/src-tauri/icons is a set of PNGs,
+           and this page may not fetch anything, so the mark is traced as a path
+           measured off Square310x310Logo.png. Its orange is the icon's own —
+           deliberately not `--out-fill`, which the app moved to vermilion
+           without regenerating the icon. Whoever opens this link should see the
+           same mark that sits in the sender's dock. -->
+      <span class="mark" aria-hidden="true">
+        <svg width="30" height="30" viewBox="0 0 32 32">
+          <rect width="32" height="32" rx="6.4" fill="#f97316"/>
+          <path fill="#fff" fill-rule="evenodd"
+                d="M14.24 8.3 9 22.4h3l1.1-3.2h5.8l1.1 3.2h3L17.44 8.3zM16 11.77 13.98 16.93h4.04z"/>
+        </svg>
+      </span>
+      <span class="word">arvolo</span>
+    </header>
+    <main class="card">
+      <span class="badge">
+        <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+             stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M8 2.6 14.2 13H1.8z"/><path d="M8 6.4v3M8 11.4v.2"/>
+        </svg>
+        <span lang="en" data-lang="en">Unavailable</span>
+        <span lang="it" data-lang="it">Non disponibile</span>
+        <span lang="fr" data-lang="fr">Indisponible</span>
+        <span lang="de" data-lang="de">Nicht verfügbar</span>
+      </span>
+      <h1>
+        <span lang="en" data-lang="en">Download links are turned off</span>
+        <span lang="it" data-lang="it">I link di download sono disattivati</span>
+        <span lang="fr" data-lang="fr">Les liens de téléchargement sont désactivés</span>
+        <span lang="de" data-lang="de">Download-Links sind abgeschaltet</span>
+      </h1>
+      <p>
+        <span lang="en" data-lang="en">The administrator of this relay has disabled public
+        browser download links. Ask the sender to share the file another way.</span>
+        <span lang="it" data-lang="it">L'amministratore di questo relay ha disattivato i link
+        di download pubblici. Chiedi a chi te l'ha mandato di condividere il file in un altro modo.</span>
+        <span lang="fr" data-lang="fr">L'administrateur de ce relais a désactivé les liens de
+        téléchargement publics. Demandez à l'expéditeur de partager le fichier autrement.</span>
+        <span lang="de" data-lang="de">Die Administration dieses Relays hat öffentliche
+        Download-Links abgeschaltet. Bitten Sie den Absender, die Datei anders zu teilen.</span>
+      </p>
+    </main>
+    <footer>
+      <a href="https://github.com/lords82/arvolo" target="_blank" rel="noopener noreferrer">arvolo</a>
+      <span lang="en" data-lang="en">— self-hosted, zero-knowledge file transfer</span>
+      <span lang="it" data-lang="it">— trasferimento file self-hosted, a conoscenza zero</span>
+      <span lang="fr" data-lang="fr">— transfert de fichiers auto-hébergé, à connaissance nulle</span>
+      <span lang="de" data-lang="de">— selbst gehosteter Zero-Knowledge-Dateitransfer</span>
+    </footer>
+  </div>
+</body>
+</html>

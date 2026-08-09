@@ -1,4 +1,4 @@
-//! `arvolo cancel <id>` — take back anything `arvolo transfers` shows.
+//! `arvolo cancel <id>` — take back anything `arvolo status` shows.
 //!
 //! The user sees one list, so they get one verb. Behind it are three kinds of
 //! thing, told apart by the shape of their id and by which store holds them:

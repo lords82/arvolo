@@ -117,6 +117,7 @@ describe("every screen mounts", () => {
         name: "x.pdf",
         size: 10,
         link: "https://relay.test/dl/a#k",
+        ticket: "",
         recipient: "",
         created: 1,
         expires: Math.floor(Date.now() / 1000) + 3600,
@@ -125,6 +126,7 @@ describe("every screen mounts", () => {
         present: true,
         downloads: 0,
         max_downloads: 1,
+        offer_status: null,
       },
     ];
     harness.snapshot.history = [

@@ -67,6 +67,20 @@ export const it: Dict = {
   "rail.palette": "Cerca ed esegui",
 
   "status.active": "In corso",
+  "status.sharing": "In condivisione",
+
+  "share.title": "File in condivisione",
+  "share.stop": "Smetti di condividere",
+  "share.copies": "copie ritirate",
+  "share.now": "lo stanno scaricando",
+  "share.lastPickup": "ultimo ritiro",
+  "share.never": "mai",
+  "share.uploaded": "caricati",
+  "share.fromDownload": (when: string) =>
+    `L\u2019hai scaricato ${when}, e ora il tuo computer lo sta rendendo disponibile ad altri.`,
+  "share.seedingSetting": "Cambia impostazione",
+  "share.countsNote":
+    "Copie ritirate, non persone: un ticket non porta con s\u00e9 alcuna identit\u00e0, quindi la stessa persona che scarica due volte conta due volte.",
   "status.completed": "Completato",
   "status.deposited": "Depositato",
   "status.paused": "In pausa",
@@ -82,6 +96,9 @@ export const it: Dict = {
   "method.ticket": "Ticket",
 
   "meta.paused": "in pausa",
+  "meta.sharing": "disponibile — nessuno la sta scaricando",
+  "meta.sharingPeers": (n) =>
+    n === 1 ? "1 persona la sta scaricando" : `${n} persone la stanno scaricando`,
   "meta.stalled": "riprende appena possibile",
   "meta.incoming": "apri per i dettagli",
   "meta.deposited": "in attesa che il destinatario lo ritiri",
@@ -106,6 +123,8 @@ export const it: Dict = {
 
   "transfers.pause": "Metti in pausa",
   "transfers.resume": "Riprendi",
+  "transfers.openFile": "Apri file",
+  "transfers.openFileFailed": "Non riesco ad aprire il file",
   "transfers.openFolder": "Apri la cartella",
   "transfers.openFolderFailed": "Non riesco ad aprire la cartella",
   "transfers.moveUp": "Sposta su",
@@ -118,6 +137,7 @@ export const it: Dict = {
   "transfers.peers": (n) => (n === 1 ? "1 peer" : `${n} peer`),
   "transfers.liveCode": "codice attivo",
   "transfers.review": "Rivedi",
+  "transfers.shareDetails": "Dettagli condivisione",
   "transfers.rowActions": (name) => `Azioni per ${name}`,
   "transfers.progressOf": (name) => `Avanzamento di ${name}`,
   "transfers.confirmRevokeTitle": "Revocare il deposito?",
@@ -256,6 +276,10 @@ export const it: Dict = {
 
   "deposit.expired": "Scaduto",
   "deposit.expiredDetail": "la scadenza è passata",
+  "deposit.taken": "Ritirato",
+  "deposit.takenDetail": "il destinatario l'ha scaricato",
+  "deposit.offerPending": "non è ancora arrivato da lui",
+  "deposit.offerArrived": "arrivato sul suo dispositivo, non ancora ritirato",
   "deposit.gone": "Non più disponibile",
   "deposit.goneLink": "scaricato fino al limite, oppure già revocato",
   "deposit.goneSealed": "ritirato dal destinatario, oppure già revocato",
@@ -270,6 +294,12 @@ export const it: Dict = {
 
   "deposits.openInBrowser": "Apri nel browser",
   "deposits.openFailed": "Non riesco ad aprire il link",
+  "deposits.share": "Link",
+  "deposits.shareTicket": "Ticket",
+  "deposits.shareTicketTitle": "Il ticket, di nuovo",
+  "deposits.ticketDetail":
+    "Incollalo al destinatario: si apre nel suo Arvolo, o con `arvolo recv`. Può decifrarlo solo lui — è sigillato sulla sua identità.",
+  "deposits.shareTitle": "Il link, di nuovo",
   "deposits.publicLink": "Link pubblico",
   "deposits.sealed": "Deposito",
   "deposits.revoke": "Revoca",

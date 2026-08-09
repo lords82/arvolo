@@ -280,13 +280,21 @@ pub(crate) enum Command {
         #[arg(long)]
         qr: bool,
     },
-    /// Receive from any ticket, code or link.
+    /// Receive from any ticket, code or link — or see what's waiting for you.
     ///
     /// One verb for all of them — it works out which it is: a P2P ticket
     /// (`arvc…`) or pairing code (`N-word-word[@relay]`) fetches live, an
     /// offline/mailbox ticket (`arvm…`) or download link decrypts from the relay.
+    ///
+    /// With nothing to paste it lists instead: the sends addressed to *you*
+    /// (`arvolo send <you> …`), still sealed on the relay, and you pick one. A
+    /// code, ticket or link never appears in that list — it *is* the permission to
+    /// fetch, so nothing on the relay knows which ones are meant for you, which is
+    /// also what stops anyone from enumerating yours.
     Recv {
-        ticket: String,
+        /// The ticket, pairing code or download link. Leave it out to see what's
+        /// waiting for you and take one from the list.
+        ticket: Option<String>,
         #[arg(short, long, add = ArgValueCompleter::new(PathCompleter::any()))]
         out: Option<PathBuf>,
         /// Password for a password-protected offline ticket / link.
@@ -297,9 +305,10 @@ pub(crate) enum Command {
     ///
     /// Everything you can still act on: live transfers (in/out) and offers
     /// awaiting approval, files you left on a relay (links and sealed mailbox
-    /// deposits), and interrupted sends you can resume. With a daemon running
-    /// this includes its live state; without one it shows everything that lives
-    /// on disk. Take any of it back with `arvolo cancel <id>`.
+    /// deposits), and interrupted sends you can resume. With a daemon running the
+    /// offers are the ones it has parked; without one they're read straight from
+    /// your inbox on the relay, since nobody else is watching it. Take any of it
+    /// back with `arvolo cancel <id>` — or take an offer with `arvolo recv`.
     ///
     /// What already finished is a different question, and lives in `arvolo
     /// history`.

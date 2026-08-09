@@ -24,7 +24,7 @@ fn record_path(id: &str) -> PathBuf {
     history_dir().join(format!("{id}.toml"))
 }
 
-/// A finished transfer, as shown by `arvolo transfers list`.
+/// A finished transfer, as shown by `arvolo history`.
 #[derive(Serialize, Deserialize, Clone)]
 pub struct HistoryRecord {
     pub id: String,

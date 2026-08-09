@@ -428,6 +428,7 @@ export const dto = {
       name: "photo.jpg",
       size: 4242,
       link: "https://relay.test/dl/claim1#key",
+      ticket: "",
       recipient: "",
       created: Math.floor(Date.now() / 1000),
       expires: Math.floor(Date.now() / 1000) + 7 * 86400,
@@ -436,6 +437,8 @@ export const dto = {
       present: true,
       downloads: 0,
       max_downloads: null,
+      // A link has no offer to report on; a sealed deposit overrides this.
+      offer_status: null,
       ...over,
     };
   },

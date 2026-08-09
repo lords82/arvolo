@@ -69,6 +69,20 @@ export const fr: Dict = {
   "rail.palette": "Chercher et exécuter",
 
   "status.active": "En cours",
+  "status.sharing": "Partagé",
+
+  "share.title": "Fichier partagé",
+  "share.stop": "Arrêter le partage",
+  "share.copies": "copies récupérées",
+  "share.now": "en cours de téléchargement",
+  "share.lastPickup": "dernière récupération",
+  "share.never": "jamais",
+  "share.uploaded": "envoyés",
+  "share.fromDownload": (when: string) =>
+    `Vous l\u2019avez téléchargé ${when}, et votre ordinateur le met maintenant à disposition des autres.`,
+  "share.seedingSetting": "Modifier ce réglage",
+  "share.countsNote":
+    "Des copies, pas des personnes : un ticket ne porte aucune identité, donc la même personne qui récupère deux fois compte deux fois.",
   "status.completed": "Terminé",
   "status.deposited": "Déposé",
   "status.paused": "En pause",
@@ -84,6 +98,9 @@ export const fr: Dict = {
   "method.ticket": "Ticket",
 
   "meta.paused": "en pause",
+  "meta.sharing": "disponible — personne ne le télécharge",
+  "meta.sharingPeers": (n) =>
+    n === 1 ? "1 personne le télécharge" : `${n} personnes le téléchargent`,
   "meta.stalled": "reprend dès que possible",
   "meta.incoming": "ouvrir pour les détails",
   "meta.deposited": "en attente du retrait par le destinataire",
@@ -109,6 +126,8 @@ export const fr: Dict = {
 
   "transfers.pause": "Mettre en pause",
   "transfers.resume": "Reprendre",
+  "transfers.openFile": "Ouvrir le fichier",
+  "transfers.openFileFailed": "Je n'arrive pas à ouvrir le fichier",
   "transfers.openFolder": "Ouvrir le dossier",
   "transfers.openFolderFailed": "Je n'arrive pas à ouvrir le dossier",
   "transfers.moveUp": "Monter",
@@ -121,6 +140,7 @@ export const fr: Dict = {
   "transfers.peers": (n) => (n === 1 ? "1 pair" : `${n} pairs`),
   "transfers.liveCode": "code actif",
   "transfers.review": "Revoir",
+  "transfers.shareDetails": "Détails du partage",
   "transfers.rowActions": (name) => `Actions pour ${name}`,
   "transfers.progressOf": (name) => `Progression de ${name}`,
   "transfers.confirmRevokeTitle": "Retirer le dépôt ?",
@@ -267,6 +287,10 @@ export const fr: Dict = {
 
   "deposit.expired": "Expiré",
   "deposit.expiredDetail": "l'échéance est passée",
+  "deposit.taken": "Récupéré",
+  "deposit.takenDetail": "le destinataire l'a téléchargé",
+  "deposit.offerPending": "il n'est pas encore arrivé chez le destinataire",
+  "deposit.offerArrived": "arrivé sur son appareil, pas encore récupéré",
   "deposit.gone": "Plus disponible",
   "deposit.goneLink": "téléchargé jusqu'à la limite, ou déjà retiré",
   "deposit.goneSealed": "retiré par le destinataire, ou déjà retiré par vous",
@@ -281,6 +305,12 @@ export const fr: Dict = {
 
   "deposits.openInBrowser": "Ouvrir dans le navigateur",
   "deposits.openFailed": "Je n'arrive pas à ouvrir le lien",
+  "deposits.share": "Link",
+  "deposits.shareTicket": "Ticket",
+  "deposits.shareTicketTitle": "Le ticket, à nouveau",
+  "deposits.ticketDetail":
+    "Collez-le au destinataire : il s'ouvre dans son Arvolo, ou avec `arvolo recv`. Lui seul peut le déchiffrer — il est scellé à son identité.",
+  "deposits.shareTitle": "Le lien, à nouveau",
   "deposits.publicLink": "Lien public",
   "deposits.sealed": "Dépôt",
   "deposits.revoke": "Retirer",

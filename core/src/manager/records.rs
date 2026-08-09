@@ -129,6 +129,79 @@ pub(super) fn load_sends(dir: &Path) -> Vec<SendRecord> {
     load_records(dir, "send-")
 }
 
+/// What a share has actually done: kept **beside** its [`SendRecord`], not inside
+/// it.
+///
+/// The reason is the same one that made the paused flag a marker file. These
+/// records are postcard, which is not self-describing: a new field on `SendRecord`
+/// makes every record an older build wrote fail to decode, and `load_records`
+/// silently skips what it can't read — so an upgrade would quietly stop resuming
+/// the shares that already existed, and leak the staged tars they own. A sidecar
+/// has no such failure mode: absent simply means "no counters yet, start at zero",
+/// which is also exactly right for a share that predates them.
+///
+/// Aggregates only, deliberately. Who fetched a file is not recorded — an
+/// anonymous ticket carries no identity to record in the first place, and keeping
+/// a log of other people's activity on someone's disk is a decision to be taken on
+/// purpose, not arrived at by collecting whatever was easy to collect.
+#[derive(Default, Clone, Copy, serde::Serialize, serde::Deserialize)]
+pub(super) struct ShareRecord {
+    /// Receivers that disconnected having fetched **every** chunk. Exact: it
+    /// counts [`crate::flow::SendEvent::Delivered`], which is emitted on exactly
+    /// that. Not "people" — one person fetching twice counts twice, and an
+    /// anonymous ticket gives us no way to tell the difference.
+    pub(super) copies_served: u64,
+    /// Bytes uploaded for this file, across every receiver. An **estimate**: the
+    /// underlying progress is itself chunks-delivered × chunk size, and with
+    /// several receivers at once their reports interleave. Right to within a chunk
+    /// for the common case, and the only number that says what this share costs in
+    /// bandwidth.
+    pub(super) bytes_served: u64,
+    /// Unix seconds of the last completed pickup; 0 = nobody has ever finished
+    /// one. The line that actually answers "can I stop sharing this?".
+    pub(super) last_pickup: u64,
+    /// For a share that exists because a download finished (seed-after-complete):
+    /// unix seconds of that download. 0 for a ticket or code the user asked for.
+    ///
+    /// Worth keeping precisely because the user did *not* create these rows: told
+    /// "you downloaded this on the 9th, and are now making it available", a row
+    /// that otherwise looks like a send of a file they never sent explains itself.
+    pub(super) from_download: u64,
+    /// Unix seconds when this share first began serving — the *original* moment,
+    /// not the last resume.
+    ///
+    /// A resumed share is registered afresh and gets a new `created`, so an age
+    /// measured from the transfer row restarts every time the daemon does, and a
+    /// limit measured that way would never be reached on a machine that reboots.
+    /// 0 in a sidecar written before this field: such a share is treated as
+    /// beginning now, which errs towards keeping it rather than dropping it.
+    pub(super) started: u64,
+}
+
+pub(super) fn share_record_path(dir: &Path, id: u64) -> PathBuf {
+    dir.join(format!("share-{id}.pc"))
+}
+
+pub(super) fn persist_share(dir: &Path, id: u64, rec: &ShareRecord) {
+    if let Ok(bytes) = postcard::to_allocvec(rec) {
+        let _ = std::fs::create_dir_all(dir);
+        let _ = write_record_private(&share_record_path(dir, id), &bytes);
+    }
+}
+
+/// The counters for a share, or zeroes when there are none (a share older than
+/// this record, or one that has yet to serve anybody).
+pub(super) fn load_share(dir: &Path, id: u64) -> ShareRecord {
+    std::fs::read(share_record_path(dir, id))
+        .ok()
+        .and_then(|b| postcard::from_bytes(&b).ok())
+        .unwrap_or_default()
+}
+
+pub(super) fn remove_share(dir: &Path, id: u64) {
+    let _ = std::fs::remove_file(share_record_path(dir, id));
+}
+
 /// On-disk record of an in-progress `send --to` delivery, so the daemon can
 /// restore it after a restart: a paused one comes back paused, an active one
 /// resumes delivering. Small (a recipient id + a path + status).

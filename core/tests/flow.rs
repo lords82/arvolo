@@ -1,11 +1,45 @@
 //! End-to-end coverage of the core transfer flow: prepare_send + recv_chunked
 //! over a local (relay-disabled) path, plus cancellation.
 
+// The `HEAVY` guard below is deliberately held across awaits, which is what
+// `await_holding_lock` exists to catch — and what it warns about cannot happen
+// here. The lint's hazard is a second task on the *same* runtime blocking on a
+// lock the suspended task holds; nothing takes this lock inside a test's runtime,
+// and `#[tokio::test]` gives each test a current-thread runtime of its own. What
+// blocks is the *other test's thread*, waiting its turn, which is the entire point
+// of the guard. An async mutex would make the wait cooperative and so let the
+// tests interleave again — the opposite of what is wanted.
+#![allow(clippy::await_holding_lock)]
+
 use std::sync::{Arc, Mutex};
 
 use arvolo_core::flow::{self, RecvEvent, RecvOutcome, SendEvent};
 use arvolo_core::transfer::RelayChoice;
 use tokio_util::sync::CancellationToken;
+
+/// Serializes the tests that run a real transfer.
+///
+/// Two reasons, and the second is the one that bites. Three of them tune
+/// `ARVOLO_CONCURRENCY`, which is process-global: run side by side, one removes it
+/// while another is mid-fetch, and each stops testing the window it says it does.
+/// And every one of them stands up iroh endpoints and moves tens of megabytes over
+/// them — ten at once on one machine oversubscribes CPU, disk and sockets so badly
+/// that the binary stops making progress at all. Run serially the same ten finish
+/// in about five minutes; run in parallel this file was left out of every test run
+/// for hanging past twenty, which meant the chunked fetch path — the most delicate
+/// thing here — was in practice covered by nothing.
+///
+/// A plain mutex rather than a test-framework attribute: no new dependency, and it
+/// says why it exists right where someone adding the eleventh test will read it.
+/// Take it first thing in any test that transfers; the pure ones (tar packing) do
+/// not need it and stay parallel.
+static HEAVY: Mutex<()> = Mutex::new(());
+
+/// Take [`HEAVY`], surviving a panic in an earlier test: a poisoned lock would
+/// turn one failure into nine, hiding whatever else was broken.
+fn heavy() -> std::sync::MutexGuard<'static, ()> {
+    HEAVY.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 /// The sender must conclude a send is **delivered** once the receiver has acked
 /// every chunk — that is the only fact that means "they have the whole file".
@@ -19,6 +53,7 @@ use tokio_util::sync::CancellationToken;
 /// must still fire.
 #[tokio::test]
 async fn sender_reports_delivered_once_every_chunk_is_acked() {
+    let _heavy = heavy();
     let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("src.bin");
     let out = dir.path().join("out.bin");
@@ -86,6 +121,7 @@ async fn sender_reports_delivered_once_every_chunk_is_acked() {
 /// transfer. A stranger can't open the key, so can't join.
 #[test]
 fn shared_identity_devices_co_swarm_a_sealed_transfer() {
+    let _heavy = heavy();
     use arvolo_core::crypto::{open, random_chunk_key, seal, seal_chunk, Identity};
     use arvolo_core::hash::Hash;
     use arvolo_core::swarm::swarm_id;
@@ -134,6 +170,7 @@ fn shared_identity_devices_co_swarm_a_sealed_transfer() {
 
 #[tokio::test]
 async fn send_then_recv_roundtrip_emits_events() {
+    let _heavy = heavy();
     let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("src.bin");
     let out = dir.path().join("out.bin");
@@ -206,6 +243,7 @@ async fn send_then_recv_roundtrip_emits_events() {
 
 #[tokio::test]
 async fn recv_cancelled_returns_without_saving() {
+    let _heavy = heavy();
     let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("src.bin");
     let out = dir.path().join("out.bin");
@@ -260,6 +298,7 @@ async fn recv_cancelled_returns_without_saving() {
 
 #[tokio::test]
 async fn archive_roundtrip_packs_and_extracts() {
+    let _heavy = heavy();
     let dir = tempfile::tempdir().unwrap();
     // A source folder with a nested file.
     let src = dir.path().join("folder");
@@ -342,6 +381,7 @@ fn pack_tar_is_deterministic_and_content_sensitive() {
 
 #[tokio::test]
 async fn sealed_to_recipient_only_intended_can_decrypt() {
+    let _heavy = heavy();
     use arvolo_core::crypto::Identity;
 
     let dir = tempfile::tempdir().unwrap();
@@ -414,6 +454,7 @@ async fn sealed_to_recipient_only_intended_can_decrypt() {
 
 #[tokio::test]
 async fn parallel_fetch_preserves_integrity_and_order() {
+    let _heavy = heavy();
     // 3 chunks with a window of 2 forces refill and out-of-order completion,
     // yet chunks must be committed to disk in order (byte-identical output).
     std::env::set_var("ARVOLO_CONCURRENCY", "2");
@@ -476,6 +517,7 @@ async fn parallel_fetch_preserves_integrity_and_order() {
 // it already had. Exercises out-of-order commit + sidecar crash-safety end-to-end.
 #[tokio::test]
 async fn resume_mid_transfer_from_real_partial() {
+    let _heavy = heavy();
     use std::sync::atomic::{AtomicUsize, Ordering};
     std::env::set_var("ARVOLO_CONCURRENCY", "2");
     let dir = tempfile::tempdir().unwrap();
@@ -582,6 +624,7 @@ async fn resume_mid_transfer_from_real_partial() {
 
 #[tokio::test]
 async fn resume_from_sidecar_fetches_only_missing() {
+    let _heavy = heavy();
     use arvolo_core::swarm::{bitfield_new, bitfield_set};
     use std::path::PathBuf;
     std::env::set_var("ARVOLO_CONCURRENCY", "2");

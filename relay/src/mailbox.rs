@@ -34,16 +34,35 @@ pub struct Claimed {
 }
 
 /// Poster-facing status of an inbox offer (see [`Mailbox::inbox_status_by_poster`]).
+///
+/// Three things can be true of an offer and they are not the same thing: nobody
+/// has read it, a recipient's client holds it, and the recipient actually took the
+/// file. The middle one used to be the end of the ladder — [`Self::Taken`] was
+/// indistinguishable from an expiry, both reported as [`Self::Gone`] — which left
+/// the sender's only positive signal carrying a claim it can't support: any
+/// authenticated poll sets it, including one that merely *lists* what is waiting.
+/// Giving "they took it" a state of its own is what lets the middle one go back to
+/// answering only the question it can.
+///
+/// Note what is *not* here: whether a person looked. The relay sees reads of a
+/// slot, never eyes on a screen, so no name on this ladder may imply one —
+/// [`Self::Arrived`] is the most the middle state can honestly claim.
 #[derive(Debug, PartialEq, Eq)]
 pub enum InboxStatus {
-    /// The offer no longer exists (recipient acked/accepted it, or it expired).
+    /// The offer is no longer here and was never taken: it expired, or its poster
+    /// retracted it.
     Gone,
     /// The presented retract token does not match this offer.
     BadToken,
-    /// Still queued, not yet seen by a live recipient poll.
+    /// Still queued: no recipient client has read it.
     Pending,
-    /// Delivered to a live, authenticated recipient poll.
-    Fetched,
+    /// A recipient's client has read the offer — it reached one of their devices.
+    /// Says nothing about the person: a `recv`/`status` listing sets this exactly
+    /// as a daemon poll does, and neither means anyone looked, let alone decided.
+    Arrived,
+    /// The recipient took it: the file was fetched and the offer acked. The only
+    /// state that reports a human acting.
+    Taken,
 }
 
 /// The metadata result of a claim: enough to read the blob file off-lock.
@@ -149,6 +168,7 @@ impl Mailbox {
                 expires_at  INTEGER NOT NULL,
                 poster_hash BLOB,
                 fetched_at  INTEGER,
+                taken_at    INTEGER,
                 PRIMARY KEY (slot, id)
             );
             CREATE INDEX IF NOT EXISTS inbox_by_slot ON inbox (slot, expires_at);
@@ -172,6 +192,12 @@ impl Mailbox {
         // Migrate databases whose inbox predates fetched_at (stamped when a live
         // recipient polls the offer, so the sender knows it was seen).
         let _ = conn.execute("ALTER TABLE inbox ADD COLUMN fetched_at INTEGER", []);
+        // Migrate databases whose inbox predates taken_at. Before it, the ack that
+        // follows a completed download deleted the row, so "they took it" and "it
+        // expired" were the same answer. Rows already gone stay gone: an offer
+        // taken before this column existed keeps reporting `Gone`, which is what
+        // that relay always said.
+        let _ = conn.execute("ALTER TABLE inbox ADD COLUMN taken_at INTEGER", []);
         // Migrate entries that predate the size column (backs the aggregate
         // stored-bytes cap; pre-existing rows count as 0 until they expire).
         let _ = conn.execute("ALTER TABLE entries ADD COLUMN size INTEGER", []);
@@ -786,10 +812,16 @@ impl Mailbox {
         .unwrap_or(false)
     }
 
-    /// Mark the given offer `ids` in `slot` as fetched (delivered to a live,
-    /// authenticated recipient poll) — first time only. Lets the poster learn
-    /// its offer was actually seen by an online client.
-    pub fn inbox_mark_fetched(&self, slot: &str, ids: &[String], now: u64) {
+    /// Mark the given offer `ids` in `slot` as read by a live, authenticated
+    /// recipient poll — first time only. Lets the poster tell a client that is
+    /// really there from stale presence.
+    ///
+    /// Deliberately *not* named for delivery: a listing sets this exactly as a
+    /// daemon poll does, so all it can honestly report is that the offer reached
+    /// one of the recipient's devices. Whether the person then took it is
+    /// [`Self::inbox_mark_taken`]'s answer to give. (The column keeps its original
+    /// name — renaming it would be a migration for nothing.)
+    pub fn inbox_mark_arrived(&self, slot: &str, ids: &[String], now: u64) {
         let conn = self.conn.lock().unwrap();
         for id in ids {
             let _ = conn.execute(
@@ -801,18 +833,38 @@ impl Mailbox {
     }
 
     /// Status of an offer for its poster (authenticated by the retract token):
-    /// `Gone` if it no longer exists (e.g. the recipient acked/accepted it),
-    /// `BadToken` if the token doesn't match, else `Pending`/`Fetched`.
+    /// `Gone` if the row isn't here, `BadToken` if the token doesn't match, else
+    /// the ladder `Pending` → `Arrived` → `Taken`.
     pub fn inbox_status_by_poster(&self, slot: &str, id: &str, token: &str) -> InboxStatus {
+        /// One offer's row, as the status question needs it: who may ask, and the
+        /// two stamps that place it on the ladder. (`fetched_at` is the original
+        /// column name for the arrival stamp — see [`Mailbox::inbox_mark_arrived`].)
+        struct StatusRow {
+            poster_hash: Option<Vec<u8>>,
+            arrived_at: Option<i64>,
+            taken_at: Option<i64>,
+        }
+
         let conn = self.conn.lock().unwrap();
-        let row: Option<(Option<Vec<u8>>, Option<i64>)> = conn
+        let row: Option<StatusRow> = conn
             .query_row(
-                "SELECT poster_hash, fetched_at FROM inbox WHERE slot = ?1 AND id = ?2",
+                "SELECT poster_hash, fetched_at, taken_at FROM inbox WHERE slot = ?1 AND id = ?2",
                 params![slot, id],
-                |r| Ok((r.get::<_, Option<Vec<u8>>>(0)?, r.get::<_, Option<i64>>(1)?)),
+                |r| {
+                    Ok(StatusRow {
+                        poster_hash: r.get(0)?,
+                        arrived_at: r.get(1)?,
+                        taken_at: r.get(2)?,
+                    })
+                },
             )
             .ok();
-        let Some((stored, fetched)) = row else {
+        let Some(StatusRow {
+            poster_hash: stored,
+            arrived_at: arrived,
+            taken_at: taken,
+        }) = row
+        else {
             return InboxStatus::Gone;
         };
         let Some(stored) = stored else {
@@ -824,18 +876,27 @@ impl Mailbox {
         {
             return InboxStatus::BadToken;
         }
-        if fetched.is_some() {
-            InboxStatus::Fetched
+        // Taken outranks arrived: taking it implies having read it, and the later
+        // fact is the one worth reporting.
+        if taken.is_some() {
+            InboxStatus::Taken
+        } else if arrived.is_some() {
+            InboxStatus::Arrived
         } else {
             InboxStatus::Pending
         }
     }
 
-    /// All unexpired offers queued in `slot`, as `(id, value)` pairs.
+    /// All unexpired offers queued in `slot`, as `(id, value)` pairs. Tombstones
+    /// of already-taken offers are excluded — they exist only to answer the
+    /// poster, and handing one back would offer the recipient the same file twice
+    /// (with an emptied payload, at that).
     pub fn inbox_list(&self, slot: &str, now: u64) -> Vec<(String, Vec<u8>)> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = match conn.prepare(
-            "SELECT id, value FROM inbox WHERE slot = ?1 AND expires_at > ?2 ORDER BY expires_at",
+            "SELECT id, value FROM inbox
+             WHERE slot = ?1 AND expires_at > ?2 AND taken_at IS NULL
+             ORDER BY expires_at",
         ) {
             Ok(s) => s,
             Err(_) => return Vec::new(),
@@ -849,11 +910,20 @@ impl Mailbox {
         }
     }
 
-    /// Delete a single offer from a slot (the recipient's ack after handling).
-    pub fn inbox_delete(&self, slot: &str, id: &str) {
+    /// The recipient's ack, once they have actually taken the file.
+    ///
+    /// Not a delete: the row becomes a **tombstone** so the poster can be told
+    /// `Taken` rather than the `Gone` that an expiry also produces — the one thing
+    /// a sender most wants to know was, until now, the same answer as "it lapsed".
+    /// The sealed payload is dropped (it can be half a megabyte and nobody will
+    /// read it again); what stays is the stamp and the poster hash that authorises
+    /// the question. It costs nothing to keep: `expires_at` is untouched, so the
+    /// existing reaper collects it at the TTL the offer already had.
+    pub fn inbox_mark_taken(&self, slot: &str, id: &str, now: u64) {
         let _ = self.conn.lock().unwrap().execute(
-            "DELETE FROM inbox WHERE slot = ?1 AND id = ?2",
-            params![slot, id],
+            "UPDATE inbox SET taken_at = ?3, value = x''
+             WHERE slot = ?1 AND id = ?2 AND taken_at IS NULL",
+            params![slot, id, now as i64],
         );
     }
 
@@ -867,12 +937,19 @@ impl Mailbox {
     }
 
     /// Number of unexpired offers already queued in one slot (per-slot flood guard).
+    ///
+    /// Tombstones don't count. The guard exists so one victim's inbox can't be
+    /// filled against them, and an offer they have already dealt with is not
+    /// occupying anything — counting their own tombstones would let a busy
+    /// recipient lock their own slot at the cap and turn "inbox full" into a
+    /// punishment for using it.
     pub fn inbox_count_slot(&self, slot: &str, now: u64) -> i64 {
         self.conn
             .lock()
             .unwrap()
             .query_row(
-                "SELECT COUNT(*) FROM inbox WHERE slot = ?1 AND expires_at > ?2",
+                "SELECT COUNT(*) FROM inbox
+                 WHERE slot = ?1 AND expires_at > ?2 AND taken_at IS NULL",
                 params![slot, now as i64],
                 |r| r.get::<_, i64>(0),
             )
