@@ -1,0 +1,3 @@
+# The CLI copied in at bundle time so the app ships with the daemon it starts
+# (see the release workflow). Built, never committed.
+/binaries/

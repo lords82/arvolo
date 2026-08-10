@@ -42,9 +42,55 @@ jobs:
           name: ${{ matrix.label }}
           path: arvolo-${{ github.ref_name }}-*
 
+  # The desktop app as a .dmg, which is what someone who is not going to open a
+  # terminal can actually install. Separate from `build` because it is a different
+  # thing to build — node, the frontend, and the Tauri bundler — and because a
+  # failure here must not hold back the CLI tarballs that `install.sh` resolves.
+  app-macos:
+    name: desktop app (dmg)
+    runs-on: macos-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: gui/package-lock.json
+      # The CLI goes *inside* the app. The GUI starts the daemon by looking for an
+      # `arvolo` binary next to its own executable and only then falls back to
+      # PATH, so an app shipped alone would work solely on machines that already
+      # have the CLI installed — which is precisely the audience a .dmg is for.
+      # Tauri's externalBin puts it there and strips the target triple.
+      - name: Build the CLI to ship inside the app
+        run: |
+          cargo build --release --locked -p arvolo-cli
+          mkdir -p gui/src-tauri/binaries
+          cp target/release/arvolo "gui/src-tauri/binaries/arvolo-$(rustc -vV | sed -n 's/^host: //p')"
+      - name: Install frontend deps
+        working-directory: gui
+        run: npm ci
+      - name: Bundle
+        working-directory: gui
+        # The sidecar is declared in a release-only config, merged over the base
+        # one. In the main config it would make `tauri dev` demand a built CLI
+        # before it would start, which is a tax on every day of work for the sake
+        # of a file that only matters when a release is cut.
+        run: npm run tauri build -- --bundles dmg --config src-tauri/tauri.release.conf.json
+      - name: Name it after the tag
+        run: |
+          src=$(ls gui/src-tauri/target/release/bundle/dmg/*.dmg | head -1)
+          cp "$src" "arvolo-${{ github.ref_name }}-macos-arm64.dmg"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-dmg
+          path: arvolo-${{ github.ref_name }}-*.dmg
+
   release:
     name: publish
-    needs: build
+    needs: [build, app-macos]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -62,6 +108,25 @@ jobs:
           generate_release_notes: true
           draft: false
           make_latest: true
+          # The .dmg is not signed with an Apple Developer ID, so macOS quarantines
+          # it on download and refuses to open it — with a message about the app
+          # being damaged, which is not what is wrong. Whoever downloads it needs
+          # to be told the one gesture that gets past it, in the release itself
+          # rather than in an issue opened three days later.
+          append_body: true
+          body: |
+            ### macOS: the .dmg is unsigned
+
+            The first time you open **Arvolo.app**, macOS will say it is damaged
+            or cannot be checked. It is neither — the app is simply not signed
+            with a paid Apple Developer ID. Right-click the app and choose
+            **Open**, then confirm; macOS remembers the choice.
+
+            From a terminal, the equivalent is:
+            `xattr -d com.apple.quarantine /Applications/Arvolo.app`
+
+            The `.tar.gz` archives are the command-line tools (`arvolo`,
+            `arvolo-relay`) and are not affected.
 
   docker:
     name: relay image (ghcr)
