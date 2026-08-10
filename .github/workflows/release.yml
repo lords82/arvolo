@@ -68,9 +68,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-deb,cargo-generate-rpm
+      # Built from source rather than downloaded. The prebuilt cargo-deb is itself
+      # linked against a newer glibc than this runner has — it refused to start
+      # with "GLIBC_2.39 not found" — which is precisely the problem this runner
+      # was chosen to avoid, arriving from the other direction. A few minutes of
+      # compilation buys a tool that runs where the packages are built.
+      - name: Packaging tools
+        run: cargo install --locked cargo-deb cargo-generate-rpm
       - name: Build
         run: cargo build --release --locked -p arvolo-cli -p arvolo-relay
       # `--no-build` on both: the release binaries are already there, and letting
@@ -129,9 +133,14 @@ jobs:
         # before it would start, which is a tax on every day of work for the sake
         # of a file that only matters when a release is cut.
         run: npm run tauri build -- --bundles dmg --config src-tauri/tauri.release.conf.json
+      # Asked for rather than assumed: `arvolo-gui` is a workspace member, so its
+      # artifacts land in the workspace's target directory and not in the crate's.
+      # Guessing the crate-local path found nothing, and the job failed *after* a
+      # successful build — the most expensive way to be wrong.
       - name: Name it after the tag
         run: |
-          src=$(ls gui/src-tauri/target/release/bundle/dmg/*.dmg | head -1)
+          out=$(cargo metadata --format-version 1 --no-deps | jq -r .target_directory)
+          src=$(ls "$out"/release/bundle/dmg/*.dmg | head -1)
           cp "$src" "arvolo-${{ github.ref_name }}-macos-arm64.dmg"
       - uses: actions/upload-artifact@v4
         with:
@@ -186,7 +195,8 @@ jobs:
         run: npm run tauri build -- --bundles appimage --config src-tauri/tauri.release.conf.json
       - name: Name it after the tag
         run: |
-          src=$(ls gui/src-tauri/target/release/bundle/appimage/*.AppImage | head -1)
+          out=$(cargo metadata --format-version 1 --no-deps | jq -r .target_directory)
+          src=$(ls "$out"/release/bundle/appimage/*.AppImage | head -1)
           cp "$src" "arvolo-${{ github.ref_name }}-linux-x86_64.AppImage"
       - uses: actions/upload-artifact@v4
         with:
