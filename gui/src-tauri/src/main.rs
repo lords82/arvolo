@@ -94,14 +94,6 @@ fn main() {
         .expect("error while running the Arvolo GUI");
 }
 
-/// Monochrome glyph for the macOS menu bar: black-on-alpha, flagged as a
-/// template image so the system tints it to match the bar (white on dark, black
-/// on light) like every other status item. Elsewhere the tray keeps the full
-/// colour app icon — a template flag is macOS-only, and a black glyph would
-/// vanish on a dark Windows taskbar.
-#[cfg(target_os = "macos")]
-const TRAY_TEMPLATE_PNG: &[u8] = include_bytes!("../icons/tray.png");
-
 /// System-tray icon with a minimal menu (Mostra / Esci). Left-clicking the icon
 /// re-opens the window hidden by the close button.
 fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
@@ -122,13 +114,6 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
             "quit" => app.exit(0),
             _ => {}
         });
-    #[cfg(target_os = "macos")]
-    {
-        tray = tray
-            .icon(tauri::image::Image::from_bytes(TRAY_TEMPLATE_PNG)?)
-            .icon_as_template(true);
-    }
-    #[cfg(not(target_os = "macos"))]
     if let Some(icon) = app.default_window_icon() {
         tray = tray.icon(icon.clone());
     }
