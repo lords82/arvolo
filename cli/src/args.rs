@@ -766,6 +766,13 @@ mod tests {
                 "`{name}` is missing from COMMAND_GROUPS, so it would not appear in `--help`"
             );
         }
+        // The reverse check — a name filed under a group that no command answers to,
+        // i.e. a typo — only means something where every command exists. Several are
+        // unix-only (`daemon`, `accept`, `reject`, `pause`), and [`grouped_commands`]
+        // already skips a name the build does not have; asserting it here on Windows
+        // reported those four as typos, which is the test being wrong about the
+        // product rather than the other way round.
+        #[cfg(unix)]
         for name in &grouped {
             assert!(
                 cmd.find_subcommand(name).is_some(),
