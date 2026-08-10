@@ -94,6 +94,10 @@ pub(crate) fn resumable_candidates() -> Vec<CompletionCandidate> {
 }
 
 /// Ids for `arvolo pause`: only a transfer that is actually running.
+// Used only by the daemon-side code, which is `#[cfg(unix)]` — so on Windows it
+// really is unreferenced, and `-D warnings` turns that into a build failure. It
+// is not dead: it is alive on the platforms where the daemon exists.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) fn transfer_candidates() -> Vec<CompletionCandidate> {
     live_transfer_candidates(|status| status == "active")
 }

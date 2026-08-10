@@ -141,6 +141,10 @@ pub fn set_config_value(key: &str, value: Option<toml::Value>) -> Result<()> {
 /// iroh relay, log level — is either derivable from elsewhere or is a knob whose
 /// wrong setting is hard to recover from through a dialog; those stay text-file
 /// settings, and the UI links to the file instead of half-exposing them.
+// Used only by the daemon-side code, which is `#[cfg(unix)]` — so on Windows it
+// really is unreferenced, and `-D warnings` turns that into a build failure. It
+// is not dead: it is alive on the platforms where the daemon exists.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub struct ConfigSnapshot {
     pub relay: Option<String>,
     pub download_dir: Option<String>,
@@ -152,6 +156,10 @@ pub struct ConfigSnapshot {
 /// Read `config.toml` into a [`ConfigSnapshot`]. A missing or unparseable file
 /// reads as "nothing configured" rather than an error — the same fallback every
 /// other reader here uses, so a settings screen opens on a fresh install.
+// Used only by the daemon-side code, which is `#[cfg(unix)]` — so on Windows it
+// really is unreferenced, and `-D warnings` turns that into a build failure. It
+// is not dead: it is alive on the platforms where the daemon exists.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub fn config_snapshot() -> ConfigSnapshot {
     let c = load_config();
     ConfigSnapshot {
