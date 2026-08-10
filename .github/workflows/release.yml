@@ -42,6 +42,56 @@ jobs:
           name: ${{ matrix.label }}
           path: arvolo-${{ github.ref_name }}-*
 
+  # .deb and .rpm of the two command-line binaries.
+  #
+  # Built on the *oldest* runner still supported rather than the newest, and that
+  # is the whole trick: a Rust binary links only libc, so the one thing that
+  # decides where the package will install is the glibc of the machine that
+  # compiled it. Built on 24.04 it demands glibc 2.39 and refuses to install on
+  # Ubuntu 22.04 or Debian 12 — distributions people are still running. Built
+  # here, it works on those and on everything newer.
+  #
+  # (The .tar.gz in the `build` job above is still produced on ubuntu-latest and
+  # so carries the higher floor. Worth aligning one day; not silently, because
+  # someone may be relying on a newer glibc feature.)
+  linux-packages:
+    name: deb + rpm (${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-22.04, arch: x86_64 }
+          - { os: ubuntu-22.04-arm, arch: aarch64 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deb,cargo-generate-rpm
+      - name: Build
+        run: cargo build --release --locked -p arvolo-cli -p arvolo-relay
+      # `--no-build` on both: the release binaries are already there, and letting
+      # each tool rebuild would double the work and risk two different binaries
+      # ending up in the two packages.
+      - name: Package
+        run: |
+          cargo deb --no-build -p arvolo-cli --output "arvolo_${{ github.ref_name }}_${{ matrix.arch }}.deb"
+          cargo deb --no-build -p arvolo-relay --output "arvolo-relay_${{ github.ref_name }}_${{ matrix.arch }}.deb"
+          cargo generate-rpm -p cli --output "arvolo-${{ github.ref_name }}-${{ matrix.arch }}.rpm"
+          cargo generate-rpm -p relay --output "arvolo-relay-${{ github.ref_name }}-${{ matrix.arch }}.rpm"
+      - name: What did we actually build
+        run: |
+          for f in *.deb; do echo "== $f"; dpkg-deb -I "$f" | sed -n 's/^ //p' | head -12; done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-packages-${{ matrix.arch }}
+          path: |
+            *.deb
+            *.rpm
+
   # The desktop app as a .dmg, which is what someone who is not going to open a
   # terminal can actually install. Separate from `build` because it is a different
   # thing to build — node, the frontend, and the Tauri bundler — and because a
@@ -90,7 +140,7 @@ jobs:
 
   release:
     name: publish
-    needs: [build, app-macos]
+    needs: [build, app-macos, linux-packages]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -99,7 +149,7 @@ jobs:
           merge-multiple: true
       # Checksums so `install.sh` can verify downloads.
       - name: Checksums
-        run: (cd dist && sha256sum arvolo-* > SHA256SUMS)
+        run: (cd dist && sha256sum arvolo* > SHA256SUMS)
       # Published directly (non-draft) and marked latest, so `install.sh`'s
       # `releases/latest` lookup resolves as soon as a vX.Y.Z tag is pushed.
       - uses: softprops/action-gh-release@v2

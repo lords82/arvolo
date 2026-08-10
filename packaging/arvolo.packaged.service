@@ -1,0 +1,33 @@
+# systemd *user* unit shipped inside the .deb / .rpm.
+#
+# The sibling `arvolo.service` in this directory is the copy-and-edit one for a
+# from-source install: it points at ~/.local/bin and carries a placeholder relay.
+# This one is installed to /usr/lib/systemd/user/arvolo.service by the package, so
+# it may not be edited in place — anything a person needs to change belongs in
+# their own config file, not here.
+#
+# Still a *user* unit, not a system one, and deliberately: the daemon holds a
+# private identity key and writes into ~/.config/arvolo and the user's download
+# folder. Run as root for everyone it would be the wrong identity, in the wrong
+# home, with the wrong permissions.
+#
+# Enable it:
+#   systemctl --user enable --now arvolo
+#   loginctl enable-linger "$USER"   # keep it running after you log out
+#
+# Configure it: ~/.config/arvolo/config.toml (relay, download_dir, …).
+# Logs: journalctl --user -u arvolo -f
+
+[Unit]
+Description=arvolo daemon (always-on receive + local control socket)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/arvolo daemon
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

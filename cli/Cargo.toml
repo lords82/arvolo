@@ -46,3 +46,45 @@ data-encoding = "2"
 # Spin up a real relay in-process for the multi-device CLI end-to-end test.
 arvolo-relay = { path = "../relay" }
 axum = "0.8"
+
+# ---- distro packages -------------------------------------------------------
+#
+# Two packages, not one: whoever installs the relay on a server does not want the
+# client daemon, and whoever installs the client does not want a relay. The
+# tarball ships both together because a tarball has no way to say "these are
+# separate things"; a package does.
+#
+# Neither binary links anything but libc — no GTK, no webkit — so one package
+# works on every distribution whose glibc is at least the builder's. That is the
+# whole reason these are easy while a package of the desktop app is not: see the
+# release workflow for which runner builds them, and why an older one is chosen.
+
+[package.metadata.deb]
+name = "arvolo"
+maintainer = "Lorenzo Bonacucina <info@termox.it>"
+section = "utils"
+priority = "optional"
+extended-description = """\
+Send files directly between devices, end-to-end encrypted. Transfers go peer to \
+peer; when a relay is needed it holds ciphertext only and you can host it \
+yourself. This package installs the command-line tool and its background daemon."""
+# `$auto` lets cargo-deb read the built binary and write the real dependency —
+# in practice the glibc floor of the machine that compiled it. Written by hand it
+# would be a guess, and the failure mode of guessing low is a package that
+# installs and then dies at the first symbol it cannot find.
+depends = "$auto"
+assets = [
+    ["target/release/arvolo", "usr/bin/", "755"],
+    ["../packaging/arvolo.packaged.service", "usr/lib/systemd/user/arvolo.service", "644"],
+    ["../README.md", "usr/share/doc/arvolo/README.md", "644"],
+    ["../docs/QUICKSTART.md", "usr/share/doc/arvolo/QUICKSTART.md", "644"],
+]
+
+[package.metadata.generate-rpm]
+name = "arvolo"
+assets = [
+    { source = "target/release/arvolo", dest = "/usr/bin/arvolo", mode = "755" },
+    { source = "packaging/arvolo.packaged.service", dest = "/usr/lib/systemd/user/arvolo.service", mode = "644" },
+    { source = "README.md", dest = "/usr/share/doc/arvolo/README.md", mode = "644" },
+    { source = "docs/QUICKSTART.md", dest = "/usr/share/doc/arvolo/QUICKSTART.md", mode = "644" },
+]
