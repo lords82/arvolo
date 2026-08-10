@@ -39,17 +39,24 @@ jobs:
             libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
             libayatana-appindicator3-dev libxdo-dev libssl-dev \
             build-essential file
+      # The desktop crate is unix-only today: it drives the daemon over
+      # `arvolo_ipc::client`, which is `#[cfg(unix)]` because the control socket
+      # is a Unix socket and the Windows named-pipe transport has not been written
+      # yet. So on Windows it cannot compile, and asking it to has kept this job
+      # red rather than telling anyone anything. Excluded here, deliberately and
+      # visibly: the CLI and the relay are still built and tested on Windows, which
+      # is what the Windows release actually ships.
       - name: Build
-        run: cargo build --all-targets --locked
+        run: cargo build --all-targets --locked ${{ runner.os == 'Windows' && '--workspace --exclude arvolo-gui' || '' }}
       # Nextest for per-test timeouts and one-process-per-test isolation (see
       # .config/nextest.toml for why this suite needs both). It does not run
       # doctests — those keep going through `cargo test`.
       - name: Test
-        run: cargo nextest run --locked --profile ci
+        run: cargo nextest run --locked --profile ci ${{ runner.os == 'Windows' && '--workspace --exclude arvolo-gui' || '' }}
       - name: Doctests
         run: cargo test --doc --locked
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --all-targets ${{ runner.os == 'Windows' && '--workspace --exclude arvolo-gui' || '' }} -- -D warnings
 
   relay-image:
     # Build (never push) the same image release.yml publishes on a tag. The
