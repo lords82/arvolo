@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::Result;
 use arvolo_core::manager::{ManagerEvent, TransferManager};
 use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+#[cfg(unix)]
 use tokio::net::UnixListener;
 use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::RecvError;
