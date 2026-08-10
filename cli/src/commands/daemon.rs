@@ -6,9 +6,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{book, sync};
 
-#[cfg(unix)]
 use crate::ipc;
-#[cfg(unix)]
 use crate::notify;
 
 use crate::ui::*;
@@ -97,7 +95,6 @@ fn open_control() -> Result<(Control, Option<std::fs::File>)> {
 /// messages. A path on unix, a pipe name on Windows — different kinds of address
 /// for the same thing, and a person debugging needs the one their system uses.
 fn control_address() -> String {
-    #[cfg(unix)]
     {
         ipc::socket_path().display().to_string()
     }
@@ -416,7 +413,6 @@ mod lock_tests {
 }
 
 /// A cancellation token that fires on SIGINT (Ctrl-C) or SIGTERM (systemd stop).
-#[cfg(unix)]
 pub(crate) fn daemon_shutdown_signal() -> CancellationToken {
     let token = CancellationToken::new();
     let t = token.clone();
@@ -445,7 +441,6 @@ pub(crate) fn daemon_shutdown_signal() -> CancellationToken {
 /// — it may not answer newer requests at all, hanging the client. So we gate on
 /// version here: same version → use it; different (or a pre-versioning daemon
 /// that reports none) → refuse loudly and exit, telling the user to restart it.
-#[cfg(unix)]
 pub(crate) async fn daemon_client() -> Option<ipc::client::DaemonClient> {
     let mut c = ipc::client::DaemonClient::connect().await.ok()?;
     c.ping().await.ok()?;
@@ -486,7 +481,6 @@ pub(crate) async fn daemon_client() -> Option<ipc::client::DaemonClient> {
 }
 
 /// A fresh subscribed event stream from the daemon.
-#[cfg(unix)]
 pub(crate) async fn daemon_events() -> Result<ipc::client::EventStream> {
     ipc::client::DaemonClient::connect()
         .await?
@@ -495,7 +489,6 @@ pub(crate) async fn daemon_events() -> Result<ipc::client::EventStream> {
 }
 
 /// Print a one-line summary of a transfer DTO.
-#[cfg(unix)]
 /// What a row is doing, said in its own terms.
 ///
 /// The engine calls a background serve `active` because it is running, which is
@@ -577,7 +570,6 @@ pub(crate) fn print_transfer_dto(t: &ipc::protocol::TransferDto, rate: Option<u6
 }
 
 /// `arvolo accept <offer_id>` — approve a parked offer and download it.
-#[cfg(unix)]
 pub(crate) async fn accept_cmd(offer_id: String, out: Option<PathBuf>) -> Result<()> {
     let mut client = daemon_client()
         .await
@@ -588,7 +580,6 @@ pub(crate) async fn accept_cmd(offer_id: String, out: Option<PathBuf>) -> Result
 }
 
 /// `arvolo reject <offer_id>` — decline a parked offer.
-#[cfg(unix)]
 pub(crate) async fn reject_cmd(offer_id: String) -> Result<()> {
     let mut client = daemon_client()
         .await
@@ -599,7 +590,6 @@ pub(crate) async fn reject_cmd(offer_id: String) -> Result<()> {
 }
 
 /// `arvolo pause <id>` — hold a `send --to` running in the daemon.
-#[cfg(unix)]
 pub(crate) async fn pause_cmd(id: u64) -> Result<()> {
     let mut client = daemon_client()
         .await
@@ -610,7 +600,6 @@ pub(crate) async fn pause_cmd(id: u64) -> Result<()> {
 }
 
 /// `arvolo resume <id>` — continue a paused `send --to`.
-#[cfg(unix)]
 pub(crate) async fn resume_cmd(id: u64) -> Result<()> {
     let mut client = daemon_client()
         .await
@@ -622,7 +611,6 @@ pub(crate) async fn resume_cmd(id: u64) -> Result<()> {
 
 /// Hand a plain ticket send to the daemon: it serves in the background. Prints the
 /// `arvc…` ticket and returns immediately; the transfer is tracked in the daemon.
-#[cfg(unix)]
 pub(crate) async fn serve_ticket_via_daemon(
     mut client: ipc::client::DaemonClient,
     paths: Vec<PathBuf>,
@@ -657,7 +645,6 @@ pub(crate) async fn serve_ticket_via_daemon(
 /// Hand a pairing code to the daemon: it hosts the rendezvous *and* serves the
 /// ticket behind it. Prints the code and returns; the code outlives this terminal
 /// and a daemon restart alike.
-#[cfg(unix)]
 pub(crate) async fn serve_code_via_daemon(
     mut client: ipc::client::DaemonClient,
     paths: Vec<PathBuf>,
@@ -701,7 +688,6 @@ pub(crate) async fn serve_code_via_daemon(
 /// Hand a push off to the running daemon and return immediately — the daemon
 /// delivers it in the background, concurrent and surviving our exit. Mirrors
 /// [`serve_ticket_via_daemon`]; observe progress with `arvolo status`.
-#[cfg(unix)]
 pub(crate) async fn push_via_daemon(
     mut client: ipc::client::DaemonClient,
     paths: Vec<PathBuf>,

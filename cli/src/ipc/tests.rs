@@ -5,6 +5,11 @@
 //! including across `.await`s — on purpose: it keeps `ARVOLO_CONFIG_DIR` (and thus
 //! `socket_path()`) stable while the daemon and client run. Only one test holds it
 //! at a time and nothing awaited re-acquires it, so there's no deadlock.
+#![cfg(unix)]
+// These drive the transport itself — binding a socket, dialling it, half-closing
+// it — rather than the protocol on top. That is unix vocabulary by construction:
+// the Windows side is a named pipe with a different shape of listener, and the
+// protocol tests it shares are the ones above the transport.
 #![allow(clippy::await_holding_lock)]
 
 use std::collections::HashMap;
