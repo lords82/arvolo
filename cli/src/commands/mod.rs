@@ -2,7 +2,6 @@
 
 pub(crate) mod cancel;
 pub(crate) mod contacts;
-#[cfg(unix)]
 pub(crate) mod daemon;
 pub(crate) mod history;
 pub(crate) mod identity;

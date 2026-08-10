@@ -162,11 +162,6 @@ fn live_transfer_candidates(wanted: fn(&str) -> bool) -> Vec<CompletionCandidate
         .collect()
 }
 
-#[cfg(not(unix))]
-fn live_transfer_candidates(_wanted: fn(&str) -> bool) -> Vec<CompletionCandidate> {
-    Vec::new()
-}
-
 /// Run one short request against the daemon, or give up.
 ///
 /// Deliberately *not* [`crate::commands::daemon::daemon_client`]: that one also
