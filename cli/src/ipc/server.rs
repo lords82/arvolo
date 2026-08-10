@@ -83,6 +83,7 @@ impl Daemon {
 }
 
 /// Accept connections until `shutdown` fires, one task per connection.
+#[cfg(unix)]
 pub async fn run(
     daemon: Daemon,
     listener: UnixListener,
@@ -108,8 +109,61 @@ pub async fn run(
     }
 }
 
-async fn handle_conn(daemon: Daemon, stream: tokio::net::UnixStream) -> Result<()> {
-    let (read, mut write) = stream.into_split();
+/// The same loop, for a channel that works the other way round.
+///
+/// A listening socket exists once and hands out connections. A named pipe does
+/// not: each *instance* serves exactly one client, and the server must already
+/// have the next instance waiting before that client connects — otherwise a
+/// client arriving in the gap is told the pipe does not exist, which reads as
+/// "no daemon" and sends the caller off to start a second one. So the order here
+/// matters: create the successor first, then hand the connected instance to its
+/// task.
+///
+/// `first` is created by the caller with the first-instance flag set, which is
+/// also what makes this the single-instance guard on Windows (see the daemon).
+#[cfg(windows)]
+pub async fn run(
+    daemon: Daemon,
+    first: tokio::net::windows::named_pipe::NamedPipeServer,
+    shutdown: CancellationToken,
+) -> Result<()> {
+    use tokio::net::windows::named_pipe::ServerOptions;
+
+    let name = arvolo_ipc::pipe_name();
+    let mut server = first;
+    loop {
+        tokio::select! {
+            _ = shutdown.cancelled() => return Ok(()),
+            connected = server.connect() => {
+                if let Err(e) = connected {
+                    tracing::warn!("ipc accept failed: {e}");
+                    continue;
+                }
+                // Stand up the next instance *before* serving this one.
+                let next = match ServerOptions::new().create(&name) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::error!("cannot keep listening on {name}: {e}");
+                        return Ok(());
+                    }
+                };
+                let stream = std::mem::replace(&mut server, next);
+                let d = daemon.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = handle_conn(d, stream).await {
+                        tracing::debug!("ipc connection ended: {e:#}");
+                    }
+                });
+            }
+        }
+    }
+}
+
+async fn handle_conn<S>(daemon: Daemon, stream: S) -> Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + 'static,
+{
+    let (read, mut write) = tokio::io::split(stream);
     let mut lines = BufReader::new(read).lines();
     while let Some(line) = lines.next_line().await? {
         if line.trim().is_empty() {
