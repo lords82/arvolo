@@ -75,7 +75,10 @@ encrypted backups to a partner, automated B2B exchange). CLI + self-hosted relay
 - **Stable API/SDK, webhooks, clean exit codes** → a product for DevOps/platform
   teams that no WeTransfer covers.
 
-### 7.3 EU sovereignty / data residency (structural advantage)
-- **Data residency / EU sovereignty** vs WeTransfer/Dropbox/US-SaaS: "your data
-  never leaves your infrastructure / the EU" (GDPR, no CLOUD Act). Strong in the EU
-  market and the **Italian public sector**. ✅ *Already led with on the README front page.*
+### 7.3 Data sovereignty / residency (structural advantage)
+- **Data residency and digital sovereignty** vs the incumbent file-transfer SaaS:
+  "your data never leaves infrastructure you control" — no vendor in the middle,
+  no foreign provider whose jurisdiction you inherit. Strongest where residency is
+  a rule rather than a preference: regulated industries, the **public sector**,
+  and secure/segmented environments where a public cloud is not an option.
+  ✅ *Already led with on the README front page.*
