@@ -70,7 +70,6 @@ pub(crate) async fn cancel_cmd(id: String, token: Option<String>) -> Result<()> 
 }
 
 /// A live transfer: only the daemon can stop one, since only the daemon is running it.
-#[cfg(unix)]
 async fn cancel_transfer(id: u64) -> Result<()> {
     use anyhow::Context;
 
@@ -80,11 +79,6 @@ async fn cancel_transfer(id: u64) -> Result<()> {
     client.cancel(id).await?;
     eprintln!("cancelled transfer {id}.");
     Ok(())
-}
-
-#[cfg(not(unix))]
-async fn cancel_transfer(id: u64) -> Result<()> {
-    bail!("transfer {id} needs a running daemon, which this platform doesn't support yet")
 }
 
 /// A file left on a relay. With a daemon we hand this to it, because a deposit *the

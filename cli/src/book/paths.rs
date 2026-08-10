@@ -128,10 +128,6 @@ pub(crate) fn names_path() -> PathBuf {
 /// two edits landing inside one mtime tick with an unchanged length would otherwise
 /// read as "no change". `seen.toml` is deliberately left out — it records every
 /// receipt and would fire on traffic, not on a book edit.
-// Used only by the daemon-side code, which is `#[cfg(unix)]` — so on Windows it
-// really is unreferenced, and `-D warnings` turns that into a build failure. It
-// is not dead: it is alive on the platforms where the daemon exists.
-#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) fn book_stamp() -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();

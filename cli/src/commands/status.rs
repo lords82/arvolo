@@ -1,4 +1,3 @@
-#[cfg(unix)]
 use std::time::Duration;
 
 use anyhow::Result;
@@ -6,14 +5,11 @@ use arvolo_ipc::protocol::DepositDto;
 
 use crate::{book, deposits, history, sessions};
 
-#[cfg(unix)]
 use crate::ipc;
 
 use crate::args::StatusAction;
-#[cfg(unix)]
 use crate::commands::daemon::{daemon_client, daemon_events, print_transfer_dto};
 use crate::commands::receive::{print_waiting, read_inbox, waiting_row, Waiting};
-#[cfg(unix)]
 use crate::ui::*;
 use crate::util::*;
 
@@ -31,19 +27,14 @@ pub(crate) async fn status_cmd(watch: bool, action: Option<StatusAction>) -> Res
         return clear_finished().await;
     }
 
-    #[cfg(unix)]
-    {
-        if let Some(client) = daemon_client().await {
-            return show_transfers_live(client, watch).await;
-        }
-        if watch {
-            eprintln!(
-                "(no daemon running — showing what's on disk; start `arvolo daemon` for a live view)"
-            );
-        }
+    if let Some(client) = daemon_client().await {
+        return show_transfers_live(client, watch).await;
     }
-    #[cfg(not(unix))]
-    let _ = watch;
+    if watch {
+        eprintln!(
+            "(no daemon running — showing what's on disk; start `arvolo daemon` for a live view)"
+        );
+    }
 
     // Say the daemon is down before showing anything else. "Is it running?" is a
     // status question, and this view is the answer to it — leaving it out is what
@@ -141,27 +132,19 @@ pub(crate) fn print_history_pointer() {
 /// leaves the relay alone: withdrawing a deposit is `arvolo cancel <id>`, an act
 /// with consequences on another machine, never a side effect of tidying a list.
 async fn clear_finished() -> Result<()> {
-    #[cfg(unix)]
-    {
-        let Some(mut client) = daemon_client().await else {
-            eprintln!(
-                "(no daemon running — the transfer list is the daemon's own state, so there's\n \
-                 nothing to clear here. `arvolo history clear` forgets the log.)"
-            );
-            return Ok(());
-        };
-        let n = client.clear_finished().await?;
-        println!(
-            "Cleared {n} finished transfer(s) — the log is kept (`arvolo history clear` \
-             forgets it), deposits kept (`arvolo cancel <id>` withdraws one)."
+    let Some(mut client) = daemon_client().await else {
+        eprintln!(
+            "(no daemon running — the transfer list is the daemon's own state, so there's\n \
+             nothing to clear here. `arvolo history clear` forgets the log.)"
         );
-        Ok(())
-    }
-    #[cfg(not(unix))]
-    {
-        eprintln!("(no daemon on this platform yet — nothing to clear.)");
-        Ok(())
-    }
+        return Ok(());
+    };
+    let n = client.clear_finished().await?;
+    println!(
+        "Cleared {n} finished transfer(s) — the log is kept (`arvolo history clear` \
+         forgets it), deposits kept (`arvolo cancel <id>` withdraws one)."
+    );
+    Ok(())
 }
 
 /// The "left on relay" section: files parked on a relay — public links and sealed
@@ -303,7 +286,6 @@ pub(crate) fn print_history_row(rec: &crate::history::HistoryRecord) {
 /// true sustained rate while still reacting to real changes. Using a wall-clock
 /// time constant (not a fixed per-tick weight) keeps it correct under irregular
 /// redraw intervals. Used only by the (unix-only) live `--watch` view.
-#[cfg(unix)]
 pub(crate) struct RateEstimator {
     bytes: u64,
     at: std::time::Instant,
@@ -311,7 +293,6 @@ pub(crate) struct RateEstimator {
     ewma: Option<f64>,
 }
 
-#[cfg(unix)]
 impl RateEstimator {
     /// Smoothing time constant: ~90% of a step change is reflected within ~3τ.
     const TAU_SECS: f64 = 3.0;
@@ -348,12 +329,10 @@ impl RateEstimator {
 /// live rows redraw on a 1s beat, but a deposit only changes when someone acts on
 /// it — a per-tick poll would spend a relay round-trip a second to reprint the
 /// same three lines, and `--watch` is exactly the mode left running for hours.
-#[cfg(unix)]
 const DEPOSIT_REFRESH: Duration = Duration::from_secs(30);
 
 /// The live daemon view (transfers in/out + pending offers), with the deposits,
 /// resumable sends and history below, and an optional `--watch` redraw loop.
-#[cfg(unix)]
 pub(crate) async fn show_transfers_live(
     mut client: ipc::client::DaemonClient,
     watch: bool,

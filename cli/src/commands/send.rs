@@ -17,7 +17,6 @@ use crate::output::vprintln;
 use crate::ui::*;
 use crate::util::*;
 
-#[cfg(unix)]
 use crate::commands::daemon::{
     daemon_client, push_via_daemon, serve_code_via_daemon, serve_ticket_via_daemon,
 };
@@ -39,7 +38,6 @@ pub(crate) async fn push(
 
     // If a daemon is running, hand the send off to it (concurrent, survives our
     // exit); otherwise fall back to a one-shot in-process send.
-    #[cfg(unix)]
     {
         if let Some(client) = daemon_client().await {
             return push_via_daemon(client, paths, to, note.to_string()).await;
@@ -270,7 +268,6 @@ pub(crate) async fn code_cmd(
     // By default hand the code to a running daemon: it hosts the rendezvous in
     // the background, survives this terminal *and* a daemon restart, and shows up
     // in `arvolo status`. `--foreground` keeps it inline. Mirrors `ticket_cmd`.
-    #[cfg(unix)]
     {
         if !foreground {
             if let Some(client) = daemon_client().await {
@@ -284,8 +281,6 @@ pub(crate) async fn code_cmd(
             }
         }
     }
-    #[cfg(not(unix))]
-    let _ = foreground;
 
     if keep {
         eprintln!(
@@ -320,7 +315,6 @@ pub(crate) async fn ticket_cmd(
     // By default hand the send to a running daemon: it serves in the background,
     // observable via `arvolo status` and surviving this terminal. `--foreground`
     // keeps it inline in this process.
-    #[cfg(unix)]
     {
         if !foreground {
             if let Some(client) = daemon_client().await {
@@ -328,8 +322,6 @@ pub(crate) async fn ticket_cmd(
             }
         }
     }
-    #[cfg(not(unix))]
-    let _ = foreground;
 
     let (payload, name, archive, temp) = announce_payload(&paths)?;
     vprintln!("plain ticket: the ticket itself is the capability (anonymous, unauthenticated)");
