@@ -23,6 +23,22 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@nextest
+      # The workspace contains the Tauri desktop crate, which on Linux links GTK
+      # and WebKitGTK — neither of which a runner has. Without these the job died
+      # in under a minute on "the system library glib-2.0 was not found", and had
+      # been dying that way since the GUI joined the workspace: main was red for a
+      # missing apt package while everyone read it as "the tests are flaky".
+      #
+      # webkit2gtk **4.1** specifically (libsoup3): Tauri 2 does not build against
+      # the 4.0 line, which is why this job cannot move to an older runner.
+      - name: Desktop toolkit (Linux only)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
+            libayatana-appindicator3-dev libxdo-dev libssl-dev \
+            build-essential file
       - name: Build
         run: cargo build --all-targets --locked
       # Nextest for per-test timeouts and one-process-per-test isolation (see
