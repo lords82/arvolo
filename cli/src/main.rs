@@ -23,11 +23,12 @@ use clap::FromArgMatches;
 mod book;
 mod deposits;
 mod history;
-// The daemon speaks over a Unix-domain socket; Windows (a future GUI target)
-// will get a named-pipe transport behind the same protocol later.
-#[cfg(unix)]
+// The daemon speaks over a local control channel: a Unix-domain socket where
+// there is one, a named pipe on Windows. Which of the two is decided inside
+// `arvolo_ipc` and in `commands::daemon::open_control`; everything above that —
+// this module, the protocol, every command that drives a daemon — is the same
+// code on both.
 mod ipc;
-#[cfg(unix)]
 mod notify;
 mod sessions;
 mod sync;
@@ -44,7 +45,6 @@ mod util;
 use args::{build_cli, Cli, Command, DeviceAction, MeAction};
 use commands::cancel::cancel_cmd;
 use commands::contacts::contacts_cmd;
-#[cfg(unix)]
 use commands::daemon::{accept_cmd, daemon, pause_cmd, reject_cmd};
 use commands::history::history_cmd;
 use commands::identity::{me, name_cmd};
@@ -169,19 +169,15 @@ async fn run() -> Result<()> {
             )
             .await
         }
-        #[cfg(unix)]
         Command::Daemon {
             download_dir,
             relay,
             use_http,
             no_sync,
         } => daemon(download_dir, relay, use_http, no_sync).await,
-        #[cfg(unix)]
         Command::Accept { offer_id, out } => accept_cmd(offer_id, out).await,
-        #[cfg(unix)]
         Command::Reject { offer_id } => reject_cmd(offer_id).await,
         Command::Cancel { id, token } => cancel_cmd(id, token).await,
-        #[cfg(unix)]
         Command::Pause { id } => pause_cmd(id).await,
         Command::Resume { id, path, qr } => resume_cmd(id, path, qr).await,
     }
