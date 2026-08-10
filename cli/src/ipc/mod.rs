@@ -5,10 +5,10 @@
 //! * [`server`] — the daemon accept-loop and request dispatch (stays here: it
 //!   owns the [`arvolo_core::manager::TransferManager`] and the CLI's policy).
 //!
-//! The socket lives at [`socket_path`] under the config dir; filesystem
-//! permissions (owner-only) are the access control, so no token scheme is needed.
-//! Windows (for the GUI) would swap the listener/dialer for a named pipe behind
-//! this same protocol.
+//! On unix the channel is a socket at [`socket_path`] under the config dir, and
+//! the filesystem is the access control: owner-only permissions, so no token
+//! scheme is needed. On Windows it is a named pipe — see `pipe_name` — guarded by
+//! its security descriptor instead, and explicitly closed to remote clients.
 
 pub use arvolo_ipc::{client, protocol};
 
@@ -24,4 +24,12 @@ use std::path::PathBuf;
 /// the shared crate so the CLI and GUI always resolve the same path.
 pub fn socket_path() -> PathBuf {
     arvolo_ipc::socket_path()
+}
+
+/// The Windows named pipe the daemon listens on. Same delegation, same reason:
+/// the CLI and the GUI must resolve the same channel, and only one place should
+/// decide how its name is built.
+#[cfg(windows)]
+pub fn pipe_name() -> String {
+    arvolo_ipc::pipe_name()
 }

@@ -94,14 +94,14 @@ fn open_control() -> Result<(Control, Option<std::fs::File>)> {
 /// Where the control channel can be found, for the startup banner and for error
 /// messages. A path on unix, a pipe name on Windows — different kinds of address
 /// for the same thing, and a person debugging needs the one their system uses.
+#[cfg(unix)]
 fn control_address() -> String {
-    {
-        ipc::socket_path().display().to_string()
-    }
-    #[cfg(windows)]
-    {
-        ipc::pipe_name()
-    }
+    ipc::socket_path().display().to_string()
+}
+
+#[cfg(windows)]
+fn control_address() -> String {
+    ipc::pipe_name()
 }
 
 /// Undo whatever `open_control` left on disk. Nothing, on Windows: a pipe exists
@@ -416,6 +416,17 @@ mod lock_tests {
 pub(crate) fn daemon_shutdown_signal() -> CancellationToken {
     let token = CancellationToken::new();
     let t = token.clone();
+    #[cfg(windows)]
+    tokio::spawn(async move {
+        // Ctrl-C is all there is: Windows has no SIGTERM, and a service stop
+        // arrives through the service control manager, which this daemon does not
+        // register with (it runs as a plain process, started by the GUI or by
+        // hand). Closing the console is the other way out, and that kills us
+        // outright rather than politely.
+        let _ = tokio::signal::ctrl_c().await;
+        t.cancel();
+    });
+    #[cfg(unix)]
     tokio::spawn(async move {
         use tokio::signal::unix::{signal, SignalKind};
         let mut term = signal(SignalKind::terminate()).ok();
