@@ -12,6 +12,13 @@
 //! Everything rides the HTTP relay on localhost, and the transfer itself is P2P
 //! over iroh with no NAT relay, so the whole thing is deterministic.
 
+// Unix only, and not by accident: `arvolo daemon` is itself `#[cfg(unix)]` —
+// the control socket is a Unix socket — so on Windows there is no daemon for any
+// of this to test. Compiled there anyway, the file failed on the unix-only file
+// metadata it uses to measure a partial download, which read like a portability
+// bug in the product rather than a test asking for something that does not exist.
+#![cfg(unix)]
+
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
