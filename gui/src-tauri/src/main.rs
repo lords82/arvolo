@@ -79,12 +79,7 @@ fn main() {
         .setup(|app| {
             setup_tray(app.handle())?;
             let handle = app.handle().clone();
-            // The whole engine bridge is unix-only until the Windows named-pipe
-            // phase; on Windows the app still opens (showing "disconnesso").
-            #[cfg(unix)]
             tauri::async_runtime::spawn(event_pump(handle));
-            #[cfg(not(unix))]
-            let _ = handle;
             Ok(())
         })
         // Closing the window hides it to the tray: transfers keep running in the
@@ -98,6 +93,14 @@ fn main() {
         .run(tauri::generate_context!())
         .expect("error while running the Arvolo GUI");
 }
+
+/// Monochrome glyph for the macOS menu bar: black-on-alpha, flagged as a
+/// template image so the system tints it to match the bar (white on dark, black
+/// on light) like every other status item. Elsewhere the tray keeps the full
+/// colour app icon — a template flag is macOS-only, and a black glyph would
+/// vanish on a dark Windows taskbar.
+#[cfg(target_os = "macos")]
+const TRAY_TEMPLATE_PNG: &[u8] = include_bytes!("../icons/tray.png");
 
 /// System-tray icon with a minimal menu (Mostra / Esci). Left-clicking the icon
 /// re-opens the window hidden by the close button.
@@ -119,6 +122,13 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
             "quit" => app.exit(0),
             _ => {}
         });
+    #[cfg(target_os = "macos")]
+    {
+        tray = tray
+            .icon(tauri::image::Image::from_bytes(TRAY_TEMPLATE_PNG)?)
+            .icon_as_template(true);
+    }
+    #[cfg(not(target_os = "macos"))]
     if let Some(icon) = app.default_window_icon() {
         tray = tray.icon(icon.clone());
     }
@@ -137,7 +147,6 @@ fn show_main_window(app: &AppHandle) {
 /// Keep a live subscription to the daemon and forward every event to the webview.
 /// Reconnects (spawning the daemon if needed) whenever the stream drops, so the
 /// UI recovers on its own after a daemon restart.
-#[cfg(unix)]
 async fn event_pump(app: AppHandle) {
     loop {
         // Make sure a daemon exists; if we can't bring one up, report disconnected
@@ -182,7 +191,6 @@ async fn event_pump(app: AppHandle) {
 
 /// Fire a native notification for an incoming offer — so arrivals surface even
 /// when the window is in the background or closed to the tray.
-#[cfg(unix)]
 fn notify_offer(app: &AppHandle, name: &str, sender_name: &str) {
     let who = if sender_name.trim().is_empty() {
         "Qualcuno".to_string()

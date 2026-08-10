@@ -332,10 +332,27 @@ pub async fn restart_daemon() -> Result<(), String> {
         }
         Ok(())
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        let _ = pid;
-        Err("restart is unix-only for now".into())
+        // No SIGTERM here, and no polite equivalent that reaches a process with no
+        // console: `taskkill` without /F asks a window to close, and the daemon has
+        // none. So this is the abrupt one — which the daemon is built to survive,
+        // since a machine can lose power mid-transfer just as easily: records for
+        // resumable downloads and sends are written as it goes, not at shutdown.
+        // What is lost is the tidy removal of the pid file, which the next start
+        // overwrites anyway.
+        let out = std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .output()
+            .map_err(|e| format!("could not run taskkill: {e}"))?;
+        if out.status.success() {
+            Ok(())
+        } else {
+            Err(format!(
+                "could not stop daemon (pid {pid}): {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ))
+        }
     }
 }
 
