@@ -13,8 +13,33 @@
 # "the suite never finishes"; now it is a failure with the test's name on it.
 slow-timeout = { period = "120s", terminate-after = 3 }
 
+# The two binaries that move real bytes over real iroh endpoints — ten transfers
+# in `flow`, three daemons in `code_daemon`. Run at once they do not merely take
+# longer, they stop making progress: locally `flow`'s ten sat past twenty minutes
+# in parallel and finished in five when serialized, and in CI all three
+# `code_daemon` tests died at the 240s deadline while the other 324 passed. A
+# two-core runner cannot host a dozen QUIC endpoints and their hashing at the same
+# time, and the failures that come out of trying look like product bugs.
+#
+# One at a time within the group; everything else still runs alongside it.
+#
+# Note this is nextest's lever, not the harness's: nextest gives each test its own
+# process, so a mutex inside a test binary — which is what serializes them under
+# plain `cargo test` (see the guard in core/tests/flow.rs) — has nothing to hold
+# across processes here. Both mechanisms exist because both runners are used.
+[test-groups]
+heavy-transfers = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'binary(flow) or binary(code_daemon)'
+test-group = 'heavy-transfers'
+
 [profile.ci]
 # Same shape, harsher deadline: CI runners are 2-core, and a wedged run there
 # burns the job's whole 6-hour budget silently.
 slow-timeout = { period = "120s", terminate-after = 2 }
 fail-fast = false
+
+[[profile.ci.overrides]]
+filter = 'binary(flow) or binary(code_daemon)'
+test-group = 'heavy-transfers'

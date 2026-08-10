@@ -15,9 +15,9 @@ the client (`arvolo`) and the single self-hostable relay (`arvolo-relay`).
 Arvolo sends files **P2P-first** — directly between two devices when both are
 online — and falls back to a **self-hostable, expiring, zero-knowledge relay**
 when the recipient is away. Every transfer is **end-to-end encrypted**: the relay
-and the network only ever see ciphertext. Your data never leaves your
-infrastructure, or the EU, and there is no third-party cloud in the middle that
-can read, retain, or be compelled to hand over your files.
+and the network only ever see ciphertext. Your data never leaves infrastructure
+you control, and there is no third-party cloud in the middle that can read,
+retain, or be compelled to hand over your files.
 
 ---
 
@@ -56,8 +56,11 @@ can read, retain, or be compelled to hand over your files.
 [`core/src/crypto.rs`](../core/src/crypto.rs) encrypts toward the recipient's
 public key **and** binds the sender's identity, using HPKE in **auth mode**:
 
-- Ciphersuite: **X25519-HKDF-SHA256** KEM, **HKDF-SHA256** KDF,
-  **ChaCha20-Poly1305** AEAD.
+- Ciphersuite: **X25519-HKDF-SHA256** KEM, **HKDF-SHA256** KDF, **AES-256-GCM**
+  AEAD — the same cipher a browser decrypts natively via WebCrypto on the
+  download-link path, so one AEAD covers the whole codebase. Equivalent in
+  strength to ChaCha20-Poly1305 (256-bit AEAD) and hardware-accelerated (AES-NI)
+  on our targets; the nonce discipline below is what AES-GCM depends on.
 - Auth mode means the recipient cryptographically learns *who* sent the payload —
   closing the gap of encrypt-only schemes (e.g. plain `age`). A wrong sender fails
   to open; a wrong recipient cannot open; tampering is rejected (AEAD tag).
@@ -68,7 +71,7 @@ public key **and** binds the sender's identity, using HPKE in **auth mode**:
 The chunked path (`arvc…` tickets) is an **ephemeral capability model**: whoever
 holds the ticket may receive. To keep the relay zero-knowledge, each chunk is
 sealed independently under a **fresh random 32-byte content key** that travels
-only inside the ticket (out-of-band), with **ChaCha20-Poly1305**:
+only inside the ticket (out-of-band), with **AES-256-GCM**:
 
 - The nonce is derived from the chunk index; the key is fresh-random per transfer,
   so each `(key, nonce)` pair is used exactly once.
@@ -130,7 +133,7 @@ only ciphertext, a relay operator — or anyone who compromises the relay — le
 
 | Property | How it is achieved |
 |---|---|
-| **End-to-end confidentiality** | HPKE / ChaCha20-Poly1305; relay & network see only ciphertext |
+| **End-to-end confidentiality** | HPKE / AES-256-GCM; relay & network see only ciphertext |
 | **Integrity & tamper-evidence** | AEAD tags on every chunk + BLAKE3 content addressing |
 | **Sender authentication** | HPKE **auth mode** binds the sender's identity |
 | **Zero-knowledge relay** | Content key is out-of-band; relay stores opaque ciphertext only |
@@ -138,7 +141,7 @@ only ciphertext, a relay operator — or anyone who compromises the relay — le
 | **Short-code safety** | SPAKE2 PAKE — no offline dictionary attack |
 | **Link-leak resistance (opt-in)** | Argon2id password wrap the relay cannot bypass |
 | **Data minimization** | Dial keys not IPs; random claim tokens; TTL auto-expiry; no PII in identities |
-| **Data sovereignty** | Self-hosted relay; ciphertext never leaves your infra / the EU |
+| **Data sovereignty** | Self-hosted relay; ciphertext never leaves infrastructure you control |
 
 ### Honest threat-model boundaries
 - **Key ↔ person binding.** Cryptography guarantees *only the key holder can
@@ -166,8 +169,9 @@ only ciphertext, a relay operator — or anyone who compromises the relay — le
   give free resume, out-of-order/multi-source fetch, and anti-double-send between
   the direct and relay paths.
 - **Self-host in one command.** `docker run … arvolo-relay` — your servers, your
-  datacenter, EU soil. No vendor in the middle, no US SaaS, nothing to subpoena
-  under the CLOUD Act; GDPR data-residency requirements become straightforward.
+  datacenter, inside your own borders. No vendor in the middle and no foreign
+  provider in the path, which is what makes data-residency and
+  digital-sovereignty requirements straightforward to meet.
 - **Scriptable.** A clean CLI (with an expiring zero-knowledge mailbox, folders,
   and send-to-a-contact) makes machine-to-machine transfer in CI/CD pipelines a
   first-class use case, not an afterthought.
@@ -176,10 +180,12 @@ only ciphertext, a relay operator — or anyone who compromises the relay — le
 
 ## 7. Status & scope
 
-Working CLI (v0.x): P2P + relay-backfill transfer with resume, per-chunk E2E
-encryption, short pairing codes, send-to-a-contact, folders, and an expiring
-zero-knowledge mailbox. Desktop GUI, browser link-mode, and further hardening are
-on the open-core [`ROADMAP-FUTURE.md`](ROADMAP-FUTURE.md).
+Working CLI and desktop app (v0.9.x): P2P + relay-backfill transfer with resume,
+per-chunk E2E encryption, short pairing codes, send-to-a-contact, folders, an
+expiring zero-knowledge mailbox, browser download links, an always-open client
+(`listen`/`daemon`), and one identity shared across several devices. Relay
+federation, Windows and mobile are on the open-core
+[`ROADMAP-FUTURE.md`](ROADMAP-FUTURE.md).
 
 Everything in this document is open-core and self-hostable. For the commercial
 edition boundary, see [`COMMERCIAL.md`](COMMERCIAL.md) and

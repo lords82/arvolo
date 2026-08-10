@@ -19,7 +19,6 @@ pub(crate) struct Config {
     pub(crate) swarm: Option<String>,
     pub(crate) concurrency: Option<u32>,
     ipv4_only: Option<bool>,
-    pub(crate) max_fetch_bytes: Option<u64>,
     pub(crate) debug: Option<bool>,
     pub(crate) log: Option<String>,
     pub(crate) sync: Option<bool>,
@@ -202,7 +201,7 @@ pub fn apply_config_to_env() {
     // the env expects (or `None` to leave the env untouched). `debug` maps to "1"
     // only when on, since core treats *any* value of ARVOLO_DEBUG as enabled.
     // Bridged with env > config > default precedence via `set_if_unset`.
-    let bridges: [(&str, Option<String>); 13] = [
+    let bridges: [(&str, Option<String>); 12] = [
         ("ARVOLO_TEMP_DIR", cfg.temp_dir.and_then(nonempty)),
         ("ARVOLO_IDENTITY", cfg.identity.and_then(nonempty)),
         ("ARVOLO_IROH_RELAY", cfg.iroh_relay.and_then(nonempty)),
@@ -216,10 +215,6 @@ pub fn apply_config_to_env() {
         ("ARVOLO_SWARM", cfg.swarm.and_then(nonempty)),
         ("ARVOLO_CONCURRENCY", cfg.concurrency.map(|n| n.to_string())),
         ("ARVOLO_IPV4_ONLY", cfg.ipv4_only.map(bool_env)),
-        (
-            "ARVOLO_MAX_FETCH_BYTES",
-            cfg.max_fetch_bytes.map(|n| n.to_string()),
-        ),
         (
             "ARVOLO_DEBUG",
             cfg.debug.filter(|&b| b).map(|_| "1".to_string()),
@@ -299,9 +294,6 @@ pub fn write_default_config(relay: Option<&str>) -> Result<()> {
 
 # Force IPv4-only transport (default: auto-detected).
 #ipv4_only = false
-
-# Max bytes a single download link/blob will fetch (default 512 MiB).
-#max_fetch_bytes = 536870912
 
 # Extra diagnostics.
 #debug = false

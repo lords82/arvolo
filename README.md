@@ -8,23 +8,27 @@ through a server. When the recipient is away, Arvolo encrypts to their identity 
 transfer is end-to-end encrypted, and the relay only ever holds ciphertext (a
 zero-knowledge store) — which you self-host.
 
-**Your data never leaves your infrastructure — or the EU.** Files travel P2P
-directly between devices; when a relay is needed it holds only ciphertext and you
-**self-host it** (on your own servers, in your own datacenter, on EU soil). No
-third-party cloud, no US provider, nothing to subpoena under the CLOUD Act. Unlike
-WeTransfer, Dropbox, or other US SaaS, there is **no vendor in the middle** that
-can read, retain, or be compelled to hand over your files — which makes GDPR data
-residency and digital-sovereignty requirements straightforward to meet.
+**Your data never leaves infrastructure you control.** Files travel P2P directly
+between devices; when a relay is needed it holds only ciphertext and you
+**self-host it** — on your own servers, in your own datacenter, inside your own
+borders. There is **no vendor in the middle** that can read, retain, or be
+compelled to hand over your files, and no foreign provider whose jurisdiction,
+outages or pricing you inherit. That makes Arvolo a fit for companies moving
+sensitive files between sites, for secure and tightly-segmented environments where
+a public cloud is not an option, and for regions with data-residency rules or a
+digital-sovereignty mandate — anywhere data has to move without depending on
+another country's infrastructure.
 
-> Status: **working CLI** (v0.9). P2P + relay-backfill transfer with resume,
-> per-chunk E2E encryption, short human pairing codes, send-to-a-contact
-> (delivered live when they're online, **held and retried** when the relay can't
-> take it — never silently failed), a **chunked, streamed offline mailbox** (big
-> files aren't buffered in RAM), folders, and burn-after-read pickup. Plus an
-> **always-open client**
-> (`listen`/`daemon`) that receives sent files with a live watchdog, and
-> **browser download links** — share a URL that decrypts in any browser, no
-> install. Desktop GUI, relay federation, and mobile are planned (see Roadmap).
+> Status: **working CLI + desktop app** (v0.9.3). P2P + relay-backfill transfer
+> with resume, per-chunk E2E encryption, short human pairing codes,
+> send-to-a-contact (delivered live when they're online, **held and retried** when
+> the relay can't take it — never silently failed), a **chunked, streamed offline
+> mailbox** (big files aren't buffered in RAM), folders, and burn-after-read
+> pickup. Plus an **always-open client** (`listen`/`daemon`) that receives sent
+> files with a live watchdog, **browser download links** — share a URL that
+> decrypts in any browser, no install — **multi-device** support on one shared
+> identity, and a **desktop GUI** (Tauri 2, macOS/Linux) that drives the same
+> daemon. Relay federation, mobile and Windows are planned (see Roadmap).
 
 ## Install
 
@@ -61,6 +65,32 @@ cargo install --git https://github.com/lords82/arvolo arvolo-relay
 docker run -d --name arvolo-relay -p 6282:6282 -v arvolo-data:/data \
   ghcr.io/lords82/arvolo-relay:latest
 ```
+
+**Desktop app** — built from source for now (no prebuilt bundle yet), needs Node
+≥ 18 and the platform WebView:
+
+```sh
+cargo build -p arvolo-cli      # the daemon the app drives
+cd gui && npm install && npm run tauri build   # -> src-tauri/target/release/bundle/
+```
+
+## Desktop app
+
+A cross-platform GUI (Tauri 2 + React) that runs **alongside** the CLI rather than
+replacing it: it holds no second transfer engine, it is a thin client of the same
+background daemon, over the local IPC socket. Closing the window leaves transfers
+running, and both frontends share one engine and one identity.
+
+The app is **two verbs and six places** — Send / Receive above Transfers, People,
+Links and deposits, History, Your devices and Settings — all reachable from a
+`⌘K` palette, with drag-and-drop, a system tray, native notifications for
+incoming offers, light/dark themes, and the interface in **English, Italian,
+French and German**. It covers the CLI's surface (see the parity table in
+[`gui/README.md`](gui/README.md)); QR *scanning* and disk-session send recovery
+stay CLI-only.
+
+**macOS and Linux** are supported; Windows is deferred until `arvolo-ipc` grows a
+named-pipe transport.
 
 ## Quickstart
 
@@ -162,8 +192,9 @@ folder are packed into one archive in every case.
 | &nbsp;&nbsp;`--ttl --max --password` | Deposit/link tuning: expiry, download cap, E2E password (`send`/`link`). |
 | &nbsp;&nbsp;`--relay --use-http --qr` | Relay to use; `http://` for bare hosts (LAN/dev); render the ticket/code/link as a QR. |
 | `arvolo recv <ticket\|code\|link> [-o out] [--password]` | Receive from **any** of them — one verb, auto-detected: `arvc…`/pairing-code fetch live P2P (resumes, unpacks folders), `arvm…`/download-link decrypt from the relay. |
-| `arvolo recv` (no ticket) | What's **waiting for you**: the sends addressed to your identity, still sealed on the relay — sender, file, size, note — and you pick one. With a daemon it lists the offers it has parked instead. A code, ticket or link never appears here: it *is* the permission to fetch, so nothing on the relay knows one is yours (which is what stops anyone enumerating someone else's) — paste those. |
-| `arvolo status [--watch]` | Everything you can still **act on**: with a daemon, live in/out transfers + the offers it parked; without one, the offers read straight from your inbox on the relay (nobody else is watching it). Then either way what you've **left on a relay** (links / sealed deposits, with live relay status) and the **resumable** sends (`--watch` redraws). Take an offer with `arvolo recv`. |
+| `arvolo recv` (no ticket) | What's **waiting for you**: the sends addressed to your identity, still sealed on the relay — sender, file, size, note — and you pick one, or `d<n>` to refuse it outright. With a daemon it lists the offers it has parked instead. A code, ticket or link never appears here: it *is* the permission to fetch, so nothing on the relay knows one is yours (which is what stops anyone enumerating someone else's) — paste those. |
+| `arvolo status [--watch]` | Everything you can still **act on**: with a daemon, live in/out transfers + the offers it parked; without one, the offers read straight from your inbox on the relay (nobody else is watching it). Then either way what you've **left on a relay** (links / sealed deposits, saying whether it merely *arrived* on a device or the recipient actually *took* it) and the **resumable** sends (`--watch` redraws). Take an offer with `arvolo recv`. |
+| &nbsp;&nbsp;*shares* | A ticket, a code, or the seeding a finished download turns into is listed as an ongoing **share**, not a transfer — no progress bar, because it isn't progress towards anything. Each carries copies taken, who's downloading now, last pickup and bytes uploaded; aggregates only, since an anonymous ticket carries no identity (copies, not people). |
 | &nbsp;&nbsp;`clear` | Closes out what's over — drops completed/cancelled/failed rows, keeping anything still going (a mailbox send awaiting pickup looks done but isn't). Never touches the relay: withdraw with `arvolo cancel <id>`. |
 | `arvolo history [--all]` | What already **happened**: the log of finished transfers, 20 most recent by default. Read-only — nothing here can still be acted on, which is what separates it from `status`. |
 | &nbsp;&nbsp;`clear` | Forget the log. Leaves the live list, your relay deposits and your resumable sends alone. |
@@ -244,7 +275,9 @@ For a relay without TLS, write the scheme explicitly: `relay = "http://relay.loc
 
 Every environment variable in the client table below has a matching `config.toml`
 key (same name, lowercased without the `ARVOLO_` prefix — e.g. `ARVOLO_SEED` →
-`seed`); the env var wins when both are set. Contacts live in
+`seed`); the env var wins when both are set. Two keys are config-only: `sync`
+(keep the address book in step across your linked devices, on by default) and
+`display_name` (set it with `arvolo name "…"`). Contacts live in
 `~/.config/arvolo/contacts.toml` (managed via `arvolo contacts`).
 
 ### Environment variables
@@ -269,9 +302,12 @@ Everything below is **optional** (defaults shown).
 | `ARVOLO_IDENTITY` | `<config>/identity.key` | Path to your identity key. |
 | `ARVOLO_SEED` | `1` (on) | Keep seeding a completed file into the swarm. Set `0`/`false`/`no`/`off` to opt out. |
 | `ARVOLO_SEED_AFTER` | `0` (off) | Seconds to keep backfilling the relay after a transfer completes. |
+| `ARVOLO_SHARE_DAYS` | unset | Stop a share (ticket, code, or the seeding a finished download becomes) after N days. Unset = it lasts until you stop it by hand, so every file you receive leaves a share that comes back at each restart. |
+| `ARVOLO_SHARE_COPIES` | unset | The same bound, counted in copies taken. Either or both may be set. |
 | `ARVOLO_SWARM` | on | BitTorrent-style swarm for shared `arvc…` tickets. Set `off`/`0`/`relay-only` to disable (privacy escape hatch). |
 | `ARVOLO_CONCURRENCY` | `4` | Parallel chunk fetches (clamped to 1–16). |
 | `ARVOLO_IPV4_ONLY` | auto | `1` forces IPv4-only (auto-detected when there's no IPv6 route). |
+| `ARVOLO_CC` | `bbr` | QUIC congestion controller. `cubic` restores quinn's default — the way back if BBR misbehaves on a path we haven't measured. |
 | `ARVOLO_IROH_RELAY` | n0 public | Self-hosted **iroh** NAT relay for P2P hole-punching. |
 | `ARVOLO_DEBUG` | off | Extra diagnostics. |
 | `RUST_LOG` | `info` | `tracing` log level. |
@@ -295,7 +331,11 @@ Everything below is **optional** (defaults shown).
 ## How it works
 
 - **P2P transport** over [iroh](https://www.iroh.computer/) QUIC (dial by key, not
-  IP; automatic hole-punching with relay fallback).
+  IP; automatic hole-punching with relay fallback), with **BBR** congestion
+  control: iroh resets the controller on every path event, so on a mobile uplink
+  Cubic restarted from slow start every 40–60 s and never reached rate. Measured
+  on the same 60 MB link: 225 s under Cubic, 34–53 s under BBR, which is what TCP
+  gets on that path (`ARVOLO_CC=cubic` reverts).
 - **Per-chunk E2E encryption**: files are split into 16 MiB chunks, each sealed
   with AES-256-GCM under a per-transfer key; the content key travels only in the
   ticket/code. The sender encrypts **on the fly** and stores nothing — sending a
@@ -311,10 +351,20 @@ Everything below is **optional** (defaults shown).
   rendezvous exchanges the ticket, so two short words are safe (no offline
   dictionary attack) and the relay never sees the ticket in the clear.
 - **Always-open client**: `listen`/`daemon` keep a client online; `arvolo send`
-  delivers offers
-  through a zero-knowledge inbox (proof-of-possession session auth) and presence
-  beacons, with a two-phase watchdog that delivers **live P2P** when the recipient
-  is online and falls back to the **mailbox** when they aren't.
+  delivers offers through a zero-knowledge inbox (proof-of-possession session
+  auth) and presence beacons, with a two-phase watchdog that delivers **live P2P**
+  when the recipient is online and falls back to the **mailbox** when they aren't.
+  A live send whose recipient never connects re-offers on a 30 s→5 min backoff
+  rather than every few seconds, and the recipient is told about the *arrival*,
+  not about each re-publication.
+- **Knowing what happened**: an offer moves along a scale — *pending*, *arrived*,
+  *taken* — so "they picked it up" and "it expired" stop being the same answer.
+  The recipient's ack leaves a tombstone the sender reads directly; the middle
+  state says only that the offer reached a device, never that a person looked at
+  it, because the relay sees reads of a slot, not anyone's attention.
+- **One identity across devices**: `device pair`/`join` share a single identity
+  (SPAKE2 over a short code), so contacts see one id, any device can open what was
+  sent to you, and the address book — including the blocklist — stays in step.
 - **Browser download links**: `arvolo link` deposits a chunked AES-256-GCM
   container; the relay serves a self-contained page that fetches the ciphertext and
   decrypts it in the browser (key only in the URL `#fragment`), streaming to disk
@@ -338,16 +388,21 @@ own iroh relay on a VPS, point clients with `ARVOLO_IROH_RELAY` and a configured
 | Crate | Path | Role |
 |-------|------|------|
 | `arvolo-core` | [`core/`](core/) | Engine: transport, chunk protocol, crypto, flows. |
-| `arvolo-cli` (`arvolo`) | [`cli/`](cli/) | Command-line client. |
+| `arvolo-cli` (`arvolo`) | [`cli/`](cli/) | Command-line client and the daemon. |
 | `arvolo-relay` | [`relay/`](relay/) | Self-hostable zero-knowledge relay / mailbox. |
+| `arvolo-ipc` | [`arvolo-ipc/`](arvolo-ipc/) | The daemon's local wire protocol + client, shared by both frontends. |
+| `arvolo-gui` | [`gui/`](gui/) | Tauri 2 + React desktop app — a thin client of the daemon. |
 
-Build & test: `cargo build && cargo test`.
+Build & test: `cargo build && cargo test`. The GUI has its own suite:
+`cd gui && npm test`.
 
 ## Roadmap
 
-Shipped recently: the always-open client (`listen`/`daemon`) and browser download
-links (the Firefox Send heir). Planned next: desktop GUI, relay federation (short
-codes across independent relays), and mobile. Post-MVP ideas are tracked in
+Shipped recently: the **desktop GUI**, **multi-device** support on one shared
+identity (paired over a short code, address book kept in step), the always-open
+client (`listen`/`daemon`), and browser download links (the Firefox Send heir).
+Planned next: relay federation (short codes across independent relays), Windows
+support for the daemon IPC and the GUI, and mobile. Post-MVP ideas are tracked in
 [`docs/ROADMAP-FUTURE.md`](docs/ROADMAP-FUTURE.md).
 
 ## Licensing
