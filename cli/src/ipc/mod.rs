@@ -18,10 +18,16 @@ pub mod server;
 #[cfg(test)]
 mod tests;
 
+#[cfg(unix)]
 use std::path::PathBuf;
 
 /// Path to the daemon control socket (honors `ARVOLO_CONFIG_DIR`). Delegates to
 /// the shared crate so the CLI and GUI always resolve the same path.
+///
+/// Unix only, symmetrically with `pipe_name` below: on Windows nothing here has a
+/// socket to name, and an unused re-export is a claim that something exists when
+/// it does not.
+#[cfg(unix)]
 pub fn socket_path() -> PathBuf {
     arvolo_ipc::socket_path()
 }
