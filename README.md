@@ -32,7 +32,7 @@ another country's infrastructure.
 
 ## Install
 
-**One-liner** (Linux x86_64/aarch64, macOS arm64):
+**One-liner** (Linux x86_64/aarch64, macOS Apple Silicon + Intel):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/lords82/arvolo/main/install.sh | sh
