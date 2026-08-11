@@ -8,8 +8,9 @@
 #   ARVOLO_VERSION       tag to install, e.g. v0.1.0 (default: latest published)
 #   ARVOLO_INSTALL_DIR   install directory (default: /usr/local/bin, else ~/.local/bin)
 #
-# POSIX sh, no bashisms. Prebuilt binaries currently cover Linux x86_64,
-# Linux aarch64, and macOS arm64; other platforms fall back to `cargo install`.
+# POSIX sh, no bashisms. Prebuilt binaries currently cover Linux x86_64, Linux
+# aarch64, and macOS (one archive for both Apple Silicon and Intel); other
+# platforms fall back to `cargo install`.
 set -eu
 
 REPO="lords82/arvolo"
@@ -31,17 +32,22 @@ cargo_fallback() {
 # --- detect platform -------------------------------------------------------
 os="$(uname -s)"
 arch="$(uname -m)"
+# Each platform names the archives it can use, best first. macOS lists two: one
+# archive now holds both architectures, and "macos-arm64" stays behind it so this
+# script can still install a release cut before that was true — someone pinning
+# ARVOLO_VERSION to an older tag should not be told their Mac is unsupported.
 case "$os" in
   Linux)
     case "$arch" in
-      x86_64 | amd64) label="linux-x86_64" ;;
-      aarch64 | arm64) label="linux-aarch64" ;;
+      x86_64 | amd64) labels="linux-x86_64" ;;
+      aarch64 | arm64) labels="linux-aarch64" ;;
       *) cargo_fallback "$os/$arch" ;;
     esac ;;
   Darwin)
     case "$arch" in
-      arm64 | aarch64) label="macos-arm64" ;;
-      *) cargo_fallback "$os/$arch (macOS Intel has no prebuilt binary)" ;;
+      arm64 | aarch64) labels="macos-universal macos-arm64" ;;
+      x86_64 | amd64) labels="macos-universal" ;;
+      *) cargo_fallback "$os/$arch" ;;
     esac ;;
   *) cargo_fallback "$os/$arch" ;;
 esac
@@ -67,14 +73,26 @@ if [ -z "$tag" ]; then
   [ -n "$tag" ] || err "could not determine the latest release (is one published, not just draft?). Set ARVOLO_VERSION=vX.Y.Z"
 fi
 
-asset="arvolo-${tag}-${label}.tar.gz"
 base="https://github.com/$REPO/releases/download/$tag"
-info "Installing arvolo $tag ($label)…"
 
 # --- download + verify + extract ------------------------------------------
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT INT TERM
-dl "$base/$asset" "$tmp/$asset" || err "download failed: $base/$asset"
+
+# Take the first candidate this release actually has. Asking the release rather
+# than assuming means one script serves tags from either side of the change.
+asset=""
+for l in $labels; do
+  candidate="arvolo-${tag}-${l}.tar.gz"
+  if dl "$base/$candidate" "$tmp/$candidate" 2>/dev/null; then
+    label="$l"; asset="$candidate"; break
+  fi
+done
+# Nothing published for this platform at this tag — which for an Intel Mac means
+# a tag older than the universal build. Point at the source route rather than
+# reporting a bare download failure, since that route does work.
+[ -n "$asset" ] || cargo_fallback "$os/$arch at $tag"
+info "Installing arvolo $tag ($label)…"
 
 # Best-effort SHA256 verification against the release's SHA256SUMS.
 sumtool=""

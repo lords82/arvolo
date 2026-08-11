@@ -23,17 +23,43 @@ jobs:
         include:
           - { os: ubuntu-latest, label: linux-x86_64 }
           - { os: ubuntu-24.04-arm, label: linux-aarch64 }
-          - { os: macos-latest, label: macos-arm64 }
+          - { os: macos-latest, label: macos-universal }
           - { os: windows-latest, label: windows-x86_64 }
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build
-        run: cargo build --release --locked -p arvolo-cli -p arvolo-relay
+        if: matrix.label != 'macos-universal'
+        run: |
+          cargo build --release --locked -p arvolo-cli -p arvolo-relay
+          echo "PKGDIR=target/release" >> "$GITHUB_ENV"
+        shell: bash
+      # macOS ships one archive for both kinds of Mac instead of one per chip.
+      # Built by compiling twice and joining the results with `lipo`, which is
+      # how a Mach-O binary carries two architectures in one file — the same
+      # mechanism macOS itself used through the PowerPC and Intel transitions.
+      #
+      # Cross-compiled from the arm64 runner rather than built on an Intel one.
+      # GitHub's Intel macOS runners are the last of their line, and a job that
+      # needs them is a job with an expiry date; this one has none.
+      - name: Build (macOS, both architectures)
+        if: matrix.label == 'macos-universal'
+        run: |
+          rustup target add x86_64-apple-darwin aarch64-apple-darwin
+          cargo build --release --locked --target x86_64-apple-darwin -p arvolo-cli -p arvolo-relay
+          cargo build --release --locked --target aarch64-apple-darwin -p arvolo-cli -p arvolo-relay
+          mkdir -p universal
+          for b in arvolo arvolo-relay; do
+            lipo -create -output "universal/$b" \
+              "target/x86_64-apple-darwin/release/$b" \
+              "target/aarch64-apple-darwin/release/$b"
+            lipo -info "universal/$b"
+          done
+          echo "PKGDIR=universal" >> "$GITHUB_ENV"
       - name: Package (unix)
         if: runner.os != 'Windows'
-        run: tar czf "arvolo-${{ github.ref_name }}-${{ matrix.label }}.tar.gz" -C target/release arvolo arvolo-relay
+        run: tar czf "arvolo-${{ github.ref_name }}-${{ matrix.label }}.tar.gz" -C "$PKGDIR" arvolo arvolo-relay
       - name: Package (windows)
         if: runner.os == 'Windows'
         run: Compress-Archive -Path target/release/arvolo.exe, target/release/arvolo-relay.exe -DestinationPath "arvolo-${{ github.ref_name }}-${{ matrix.label }}.zip"
@@ -161,11 +187,25 @@ jobs:
       # PATH, so an app shipped alone would work solely on machines that already
       # have the CLI installed — which is precisely the audience a .dmg is for.
       # Tauri's externalBin puts it there and strips the target triple.
+      #
+      # Built for both architectures, because the app is: one .dmg that runs on
+      # any Mac. All three names are written on purpose. Tauri picks a sidecar by
+      # the target triple of the build, and for a universal build the triple it
+      # asks for is not something to guess at from a machine that cannot run the
+      # installer — so both single-architecture names and the joined one are laid
+      # out, and whichever it reaches for is there. The unused ones are ignored.
       - name: Build the CLI to ship inside the app
         run: |
-          cargo build --release --locked -p arvolo-cli
+          rustup target add x86_64-apple-darwin aarch64-apple-darwin
+          cargo build --release --locked --target x86_64-apple-darwin -p arvolo-cli
+          cargo build --release --locked --target aarch64-apple-darwin -p arvolo-cli
           mkdir -p gui/src-tauri/binaries
-          cp target/release/arvolo "gui/src-tauri/binaries/arvolo-$(rustc -vV | sed -n 's/^host: //p')"
+          cp target/x86_64-apple-darwin/release/arvolo gui/src-tauri/binaries/arvolo-x86_64-apple-darwin
+          cp target/aarch64-apple-darwin/release/arvolo gui/src-tauri/binaries/arvolo-aarch64-apple-darwin
+          lipo -create -output gui/src-tauri/binaries/arvolo-universal-apple-darwin \
+            gui/src-tauri/binaries/arvolo-x86_64-apple-darwin \
+            gui/src-tauri/binaries/arvolo-aarch64-apple-darwin
+          lipo -info gui/src-tauri/binaries/arvolo-universal-apple-darwin
       - name: Install frontend deps
         working-directory: gui
         run: npm ci
@@ -175,16 +215,42 @@ jobs:
         # one. In the main config it would make `tauri dev` demand a built CLI
         # before it would start, which is a tax on every day of work for the sake
         # of a file that only matters when a release is cut.
-        run: npm run tauri build -- --bundles dmg --config src-tauri/tauri.release.conf.json
+        run: npm run tauri build -- --target universal-apple-darwin --bundles dmg --config src-tauri/tauri.release.conf.json
       # Asked for rather than assumed: `arvolo-gui` is a workspace member, so its
       # artifacts land in the workspace's target directory and not in the crate's.
       # Guessing the crate-local path found nothing, and the job failed *after* a
       # successful build — the most expensive way to be wrong.
+      #
+      # Searched for rather than spelled out, because `--target` moves the bundle
+      # under a per-target directory: the path that was right yesterday is wrong
+      # today, and would fail at the last step of a job that had already done all
+      # the work. The check on the result is what makes the search honest.
       - name: Name it after the tag
         run: |
           out=$(cargo metadata --format-version 1 --no-deps | jq -r .target_directory)
-          src=$(ls "$out"/release/bundle/dmg/*.dmg | head -1)
-          cp "$src" "arvolo-${{ github.ref_name }}-macos-arm64.dmg"
+          src=$(find "$out" -path '*/release/bundle/dmg/*.dmg' | head -1)
+          [ -n "$src" ] || { echo "no .dmg produced under $out"; exit 1; }
+          cp "$src" "arvolo-${{ github.ref_name }}-macos-universal.dmg"
+      # "Universal" is a claim about what is inside, so it gets checked before
+      # anyone downloads it: open the disk image and ask each of the two binaries
+      # which architectures it holds. A single-architecture app under a universal
+      # name is worse than no universal build at all — it fails on the machines
+      # the name promises, and only there.
+      - name: Both architectures, or it is not universal
+        run: |
+          hdiutil attach "arvolo-${{ github.ref_name }}-macos-universal.dmg" \
+            -nobrowse -readonly -mountpoint /tmp/dmg >/dev/null
+          status=0
+          for b in arvolo-gui arvolo; do
+            info=$(lipo -info "/tmp/dmg/Arvolo.app/Contents/MacOS/$b")
+            echo "$info"
+            case "$info" in
+              *x86_64*arm64* | *arm64*x86_64*) ;;
+              *) echo "::error::$b is not a universal binary"; status=1 ;;
+            esac
+          done
+          hdiutil detach /tmp/dmg >/dev/null
+          exit $status
       - uses: actions/upload-artifact@v4
         with:
           name: macos-dmg
@@ -292,6 +358,12 @@ jobs:
 
             The `.tar.gz` archives are the command-line tools (`arvolo`,
             `arvolo-relay`) and are affected by neither.
+
+            ### macOS: one download for every Mac
+
+            There is no separate Intel build to choose. Both the `.dmg` and the
+            macOS `.tar.gz` are universal — each binary inside carries both
+            architectures, so the same file runs on Apple Silicon and on Intel.
 
   docker:
     name: relay image (ghcr)
