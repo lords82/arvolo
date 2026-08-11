@@ -43,10 +43,14 @@ tokio-util = { version = "0.7", features = ["io"] }
 async-stream = "0.3"
 tar = "0.4"
 
-# Unix `statvfs` for a best-effort pre-flight free-space check before a download
-# (already in the tree transitively; unix-only, so non-unix skips the check).
+# Unix `statvfs` for a best-effort pre-flight free-space check before a download.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# The same check on Windows (`GetDiskFreeSpaceExW`). Both crates are already in
+# the tree transitively, so neither adds a build.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
 tokio = { workspace = true }
