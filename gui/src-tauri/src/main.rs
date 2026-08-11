@@ -11,6 +11,7 @@
 //!   engine event to the webview as `engine://event`, plus a `engine://connected`
 //!   heartbeat and a native notification for incoming offers.
 
+mod badge;
 mod bridge;
 mod daemon;
 
@@ -165,10 +166,12 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
         });
 
     // The menu bar wants the monochrome template icon, which macOS tints for the
-    // light or dark bar; elsewhere the tray shows the regular app icon.
+    // light or dark bar; elsewhere the tray shows the regular app icon. Either way
+    // this is the unbadged state — `badge::apply` paints the count on top once the
+    // pump knows what is pending.
     #[cfg(target_os = "macos")]
     {
-        let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/tray.png"))?;
+        let icon = tauri::image::Image::from_bytes(badge::PLAIN_TEMPLATE)?;
         tray = tray.icon(icon).icon_as_template(true);
     }
     #[cfg(not(target_os = "macos"))]
@@ -219,6 +222,9 @@ async fn event_pump(app: AppHandle) {
         };
 
         let _ = app.emit(EV_CONNECTED, true);
+        // A fresh connection says nothing about what was already pending — the
+        // offers that piled up while the GUI was down are only in the daemon.
+        badge::refresh(&app).await;
 
         // Loops while events arrive; exits on a closed (`Ok(None)`) or errored
         // stream, which drops us to the outer reconnect loop.
@@ -229,12 +235,32 @@ async fn event_pump(app: AppHandle) {
             {
                 notify_offer(&app, name, sender_name);
             }
+            // The webview first: the badge costs a round-trip to the daemon, and
+            // the UI should not wait behind it.
             let _ = app.emit(EV_ENGINE, &ev);
+            if moves_the_count(&ev) {
+                badge::refresh(&app).await;
+            }
         }
 
         let _ = app.emit(EV_CONNECTED, false);
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
+}
+
+/// Whether an event can change how many decisions are waiting on the user.
+///
+/// `Progress` is the one that must stay out: it fires continuously for the whole
+/// length of a transfer, and every match here costs a round-trip to the daemon.
+/// `Completed` and `Cancelled` stay out too — a transfer ending decides nothing,
+/// it only reports. `Started` is in because that is what an accepted offer turns
+/// into; a *rejected* one emits nothing at all, so the reject command refreshes
+/// the badge itself.
+fn moves_the_count(ev: &EventDto) -> bool {
+    matches!(
+        ev,
+        EventDto::OfferReceived { .. } | EventDto::ContactsChanged | EventDto::Started { .. }
+    )
 }
 
 /// Fire a native notification for an incoming offer — so arrivals surface even

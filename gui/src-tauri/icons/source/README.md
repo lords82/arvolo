@@ -1,7 +1,8 @@
 # Icon sources
 
 The PNG/ICNS/ICO files one level up are **generated**. These three SVGs are the
-originals; edit them, not the bitmaps.
+originals; edit them, not the bitmaps. The counter badge is generated too, but
+from `gen-badge.py` rather than a checked-in SVG — see "The badge" below.
 
 The mark is concept **2c — "In arrivo"** from the Arvolo design system: a wedge
 dropping into an open box, the file still in flight and the box waiting for it.
@@ -20,6 +21,7 @@ Every file here carries the identical glyph, drawn in a 100-unit box —
 | `arvolo-icon.svg` | `icon.png`, `icon.icns` — macOS |
 | `arvolo-icon-square.svg` | `32x32.png`, `128x128*.png`, `icon.ico`, `Square*Logo.png`, `StoreLogo.png` — Linux and Windows |
 | `arvolo-tray-template.svg` | `tray.png` — the macOS menu bar |
+| `gen-badge.py` | `../badge/tray-*.png`, `../badge/app-*.png`, `../badge/overlay.png` — the counter |
 
 Two app shapes, because the platforms disagree about the canvas. macOS reserves
 a margin: the artwork is a 824×824 squircle centred on a 1024×1024 canvas, and
@@ -43,6 +45,45 @@ Windows and Linux, which keep the full app icon.
 The relay's `dl.html` and `disabled.html` inline the same glyph by hand: those
 pages may not fetch anything, so the geometry is duplicated there. Change the
 mark and they need the same edit.
+
+## The badge
+
+`../badge/` holds the counter variants: the tray icon with a number on it, one
+file per count, `1`–`9` then `9+`. The number is a circle knocked **out** of the
+mark — a real hole, not a disc painted on top — with the digit sitting in it.
+That is what makes a single file work everywhere: the hole is transparent, so the
+same bitmap reads against a light bar and a dark one, and no platform needs its
+own colour treatment. Nothing here is macOS-only; every platform goes through
+`TrayIcon::set_icon`.
+
+The two families place the badge differently, and the difference is deliberate:
+
+| Family | Canvas | Where the circle bites |
+| --- | --- | --- |
+| `tray-N.png` | 36×36, black on alpha | The mark is **full bleed**, so the circle eats into it: the wedge loses its right corner and the box's right arm comes out shorter than the left. |
+| `app-N.png` | 64×64, full-bleed colour | The mark is inset 19.5/100, so the same top-right circle removes only orange and the glyph is untouched. |
+
+The bitten look on the menu bar is a choice, not a bug — a knockout needs a
+filled field to remove, and the template has none, so inside a square canvas the
+alternative was shrinking the mark by a fifth to let the circle pass. Restore the
+unbitten version by giving `TRAY` in `gen-badge.py` the same inset `APP` has.
+
+`overlay.png` is the Windows taskbar overlay, which the system draws at 16pt. A
+digit does not survive that size — it turns to a blob — so the overlay carries a
+plain disc and only says *there is something*. The same limit applies to a
+Windows tray at 100% DPI, where the 64px `app-N.png` is downsampled to 16px; the
+digit is legible from about 24px and clean from 32px.
+
+Digits are baked in as **outlines**, pulled from Helvetica Bold in
+`/System/Library/Fonts/Helvetica.ttc`, so regenerating does not depend on which
+fonts a machine has installed. Only the script does, and only when the geometry
+changes. Ten glyphs that never change are not worth a font rasteriser inside the
+GUI, which is why none of this is drawn at runtime.
+
+```sh
+cd gui/src-tauri/icons/source
+python3 gen-badge.py            # needs fonttools and rsvg-convert
+```
 
 ## Regenerating
 
