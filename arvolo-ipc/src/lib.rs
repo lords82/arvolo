@@ -9,14 +9,20 @@
 //! in the CLI crate: it needs engine + policy (trust, notifications, history)
 //! that don't belong on the wire. This crate is just the contract plus the client.
 //!
-//! The socket lives at [`socket_path`] under the config dir; filesystem
-//! permissions (owner-only) are the access control, so no token scheme is needed.
-//! Windows (for the GUI) would swap the listener/dialer for a named pipe behind
-//! this same protocol — a later phase.
+//! **Where the channel lives, and what guards it, differs by platform.** On unix
+//! it is a socket file under the config dir, and the filesystem is the access
+//! control: owner-only permissions on both the socket and its parent directory,
+//! so no token scheme is needed. On Windows there is no such file — the channel is
+//! a **named pipe**, which lives in a machine-wide namespace rather than in a
+//! directory. Everything above the connect call is identical: the same
+//! newline-delimited JSON, the same requests, the same replies.
+//!
+//! That difference is why the pipe's name is derived from the config directory
+//! (see [`pipe_name`]): two users, or two isolated test instances, must not land
+//! on the same pipe just because the namespace is flat.
 
 pub mod protocol;
 
-#[cfg(unix)]
 pub mod client;
 
 use std::path::PathBuf;
@@ -52,8 +58,49 @@ fn home_dir() -> PathBuf {
 }
 
 /// Path to the daemon control socket (honors `ARVOLO_CONFIG_DIR`).
+///
+/// Unix only in practice: on Windows the channel is a named pipe and has no path
+/// on disk. Kept available on both so callers that merely *report* where the
+/// daemon lives — an error message, a status line — have something to print.
 pub fn socket_path() -> PathBuf {
     config_dir().join("daemon.sock")
+}
+
+/// The Windows named pipe the daemon listens on, derived from the config dir.
+///
+/// Pipe names live in one flat, machine-wide namespace, so a fixed name would put
+/// two users of the same machine — or two tests that isolate themselves with
+/// `ARVOLO_CONFIG_DIR`, which is how this suite keeps instances apart — on the
+/// same channel. Deriving it from the directory reproduces the separation the
+/// unix side gets for free by being a file inside that directory.
+///
+/// The tail of the path is kept readable (it is what a person sees in a process
+/// explorer) and a short FNV-1a digest of the whole path is appended so that two
+/// different directories ending in the same name cannot collide. FNV rather than
+/// the standard hasher because this value must be identical in two separate
+/// processes, possibly built at different times: `DefaultHasher` promises no such
+/// stability, and a mismatch would be a client unable to find its own daemon.
+pub fn pipe_name() -> String {
+    let dir = config_dir();
+    let full = dir.to_string_lossy();
+
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in full.as_bytes() {
+        hash ^= *b as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+
+    let tail: String = full
+        .chars()
+        .rev()
+        .take(24)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+
+    format!(r"\\.\pipe\arvolo-{tail}-{hash:016x}")
 }
 
 /// Path to the daemon's pid file (honors `ARVOLO_CONFIG_DIR`) — what a frontend

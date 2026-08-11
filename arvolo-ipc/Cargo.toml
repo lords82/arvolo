@@ -14,9 +14,9 @@ anyhow.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 data-encoding = "2"
-# The client half speaks the async socket; unix-only for now (Windows named-pipe
-# is a later phase — see `socket_path`).
-[target.'cfg(unix)'.dependencies]
+# The client half speaks the control channel on both platforms now — a unix socket
+# there, a named pipe here — so tokio is no longer unix-only. Which of the two it
+# opens is decided in `client::open`; everything above that is the same protocol.
 tokio = { workspace = true }
 
 [dev-dependencies]

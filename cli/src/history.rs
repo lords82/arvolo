@@ -128,5 +128,9 @@ fn restrict(path: &Path) {
     let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
 }
 
+/// Not a no-op by oversight: on Windows a file's access comes from the list on
+/// the directory it is created in, which [`crate::book::restrict_config_dir`]
+/// narrows once at startup. Re-applying it per file would spend a process
+/// spawn on each record for a protection the file already inherited.
 #[cfg(not(unix))]
 fn restrict(_path: &Path) {}

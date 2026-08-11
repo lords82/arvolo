@@ -373,7 +373,6 @@ pub(crate) enum Command {
     /// of asking (`arvolo contacts trust`), and notifies you about the rest. It
     /// also exposes a local control socket, so `send`/`status`/etc. all drive
     /// this one shared instance. Meant to run under systemd/launchd. Needs a relay.
-    #[cfg(unix)]
     Daemon {
         /// Directory to save accepted downloads into
         /// (default: ~/Arvolo).
@@ -391,7 +390,6 @@ pub(crate) enum Command {
         no_sync: bool,
     },
     /// Accept a parked offer by its id (see `arvolo status`) and download it.
-    #[cfg(unix)]
     Accept {
         /// The offer id shown by `arvolo status`.
         #[arg(add = ArgValueCandidates::new(completions::offer_candidates))]
@@ -401,14 +399,12 @@ pub(crate) enum Command {
         out: Option<PathBuf>,
     },
     /// Reject a parked offer by its id.
-    #[cfg(unix)]
     Reject {
         /// The offer id shown by `arvolo status`.
         #[arg(add = ArgValueCandidates::new(completions::offer_candidates))]
         offer_id: String,
     },
     /// Pause an in-progress transfer (hold it; resume or cancel later).
-    #[cfg(unix)]
     Pause {
         /// The transfer id shown by `arvolo status`.
         #[arg(add = ArgValueCandidates::new(completions::transfer_candidates))]
@@ -766,13 +762,11 @@ mod tests {
                 "`{name}` is missing from COMMAND_GROUPS, so it would not appear in `--help`"
             );
         }
-        // The reverse check — a name filed under a group that no command answers to,
-        // i.e. a typo — only means something where every command exists. Several are
-        // unix-only (`daemon`, `accept`, `reject`, `pause`), and [`grouped_commands`]
-        // already skips a name the build does not have; asserting it here on Windows
-        // reported those four as typos, which is the test being wrong about the
-        // product rather than the other way round.
-        #[cfg(unix)]
+        // Both directions again, on every platform: `daemon`, `accept`, `reject` and
+        // `pause` used to exist only on unix, so this check had to be skipped
+        // elsewhere or it reported them as typos. Now that the control channel has a
+        // Windows transport they exist everywhere, and a name here with no command
+        // behind it is once more what it sounds like — a mistake.
         for name in &grouped {
             assert!(
                 cmd.find_subcommand(name).is_some(),

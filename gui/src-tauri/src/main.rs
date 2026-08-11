@@ -79,12 +79,7 @@ fn main() {
         .setup(|app| {
             setup_tray(app.handle())?;
             let handle = app.handle().clone();
-            // The whole engine bridge is unix-only until the Windows named-pipe
-            // phase; on Windows the app still opens (showing "disconnesso").
-            #[cfg(unix)]
             tauri::async_runtime::spawn(event_pump(handle));
-            #[cfg(not(unix))]
-            let _ = handle;
             Ok(())
         })
         // Closing the window hides it to the tray: transfers keep running in the
@@ -137,7 +132,6 @@ fn show_main_window(app: &AppHandle) {
 /// Keep a live subscription to the daemon and forward every event to the webview.
 /// Reconnects (spawning the daemon if needed) whenever the stream drops, so the
 /// UI recovers on its own after a daemon restart.
-#[cfg(unix)]
 async fn event_pump(app: AppHandle) {
     loop {
         // Make sure a daemon exists; if we can't bring one up, report disconnected
@@ -182,7 +176,6 @@ async fn event_pump(app: AppHandle) {
 
 /// Fire a native notification for an incoming offer — so arrivals surface even
 /// when the window is in the background or closed to the tray.
-#[cfg(unix)]
 fn notify_offer(app: &AppHandle, name: &str, sender_name: &str) {
     let who = if sender_name.trim().is_empty() {
         "Qualcuno".to_string()

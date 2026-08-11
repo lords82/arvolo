@@ -6,9 +6,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{book, sync};
 
-#[cfg(unix)]
 use crate::ipc;
-#[cfg(unix)]
 use crate::notify;
 
 use crate::ui::*;
@@ -17,24 +15,31 @@ use crate::util::*;
 use crate::commands::receive::record_history;
 
 /// Run the persistent background engine behind a local control socket.
+/// The control channel the daemon listens on: a bound socket on unix, the first
+/// pipe instance on Windows. The rest of the daemon does not care which.
 #[cfg(unix)]
-pub(crate) async fn daemon(
-    download_dir: Option<PathBuf>,
-    relay: Option<String>,
-    use_http: bool,
-    no_sync: bool,
-) -> Result<()> {
-    use std::collections::HashMap;
-    use std::os::unix::fs::PermissionsExt;
-    use std::sync::{Arc, Mutex};
+type Control = tokio::net::UnixListener;
+#[cfg(windows)]
+type Control = tokio::net::windows::named_pipe::NamedPipeServer;
 
-    // Single-instance guard — FIRST, before any engine work. The kernel-enforced
-    // flock() is the real gate: it dies with the process (never stale) and can't
-    // be fooled by a daemon that is alive but too busy to answer a probe. Without
-    // it, a second daemon would "steal" the socket path from a live-but-slow one
-    // and both engines would run on the same identity/state — double deposits,
-    // forked history. Taking it before the engine spins up also means a losing
-    // twin never even subscribes to the relay inbox.
+/// Open the control channel, and with it the guarantee that only one daemon runs.
+///
+/// The guarantee is the interesting half, and each platform already owns a
+/// mechanism for it. On unix it is `flock(2)`: kernel-enforced, dies with the
+/// process so it is never stale, and — unlike probing the socket — cannot be
+/// fooled by a daemon that is alive but too busy to answer. Without it a second
+/// daemon would take the socket path from a live-but-slow first one and two
+/// engines would run on one identity: double deposits, forked history.
+///
+/// On Windows the pipe *is* the lock. Creating the first instance of a name fails
+/// outright if another process already holds it, which is the same guarantee from
+/// the same kind of source — the kernel, not a file someone might leave behind.
+/// So there is no lock file to return there, and nothing to clean up if the
+/// process is killed.
+#[cfg(unix)]
+fn open_control() -> Result<(Control, Option<std::fs::File>)> {
+    use std::os::unix::fs::PermissionsExt;
+
     let sock = ipc::socket_path();
     if let Some(parent) = sock.parent() {
         std::fs::create_dir_all(parent).ok();
@@ -43,7 +48,85 @@ pub(crate) async fn daemon(
         // the window when the freshly-bound socket may still carry umask perms.
         std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).ok();
     }
-    let _instance_lock = acquire_instance_lock(&book::config_dir().join("daemon.lock"))?;
+    let lock = acquire_instance_lock(&book::config_dir().join("daemon.lock"))?;
+    // With the lock held, an existing socket file can only be a leftover from a
+    // crashed daemon — safe to clear before binding.
+    if sock.exists() {
+        std::fs::remove_file(&sock).ok();
+    }
+    let listener = tokio::net::UnixListener::bind(&sock)
+        .with_context(|| format!("bind control socket {}", sock.display()))?;
+    // Owner-only: the filesystem permission is the access control.
+    std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o600)).ok();
+    Ok((listener, Some(lock)))
+}
+
+#[cfg(windows)]
+fn open_control() -> Result<(Control, Option<std::fs::File>)> {
+    use tokio::net::windows::named_pipe::ServerOptions;
+
+    let name = ipc::pipe_name();
+    let pipe = ServerOptions::new()
+        // Both halves of the single-instance guard and of the access control.
+        //
+        // `first_pipe_instance` makes this call fail when another process already
+        // owns the name — that is the flock equivalent, and the reason no lock
+        // file exists on this platform.
+        //
+        // `reject_remote_clients` is set explicitly even though it is the default:
+        // a named pipe is reachable over SMB unless it says otherwise, and this
+        // channel accepts files, reads the address book and approves offers. A
+        // security-relevant default is one to state, not to inherit quietly.
+        //
+        // What guards it locally is the pipe's default security descriptor, which
+        // grants the creating user, SYSTEM and Administrators — and no other
+        // ordinary user. That is the same practical boundary the unix side draws
+        // with 0600: an administrator of the machine can already read the identity
+        // key off disk, so admitting them here concedes nothing that was not
+        // already conceded.
+        .first_pipe_instance(true)
+        .reject_remote_clients(true)
+        .create(&name)
+        .with_context(|| format!("cannot listen on {name} (another daemon is probably running)"))?;
+    Ok((pipe, None))
+}
+
+/// Where the control channel can be found, for the startup banner and for error
+/// messages. A path on unix, a pipe name on Windows — different kinds of address
+/// for the same thing, and a person debugging needs the one their system uses.
+#[cfg(unix)]
+fn control_address() -> String {
+    ipc::socket_path().display().to_string()
+}
+
+#[cfg(windows)]
+fn control_address() -> String {
+    ipc::pipe_name()
+}
+
+/// Undo whatever `open_control` left on disk. Nothing, on Windows: a pipe exists
+/// only while its process does.
+#[cfg(unix)]
+fn close_control() {
+    std::fs::remove_file(ipc::socket_path()).ok();
+}
+
+#[cfg(windows)]
+fn close_control() {}
+
+pub(crate) async fn daemon(
+    download_dir: Option<PathBuf>,
+    relay: Option<String>,
+    use_http: bool,
+    no_sync: bool,
+) -> Result<()> {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    // The control channel FIRST, before any engine work: opening it is also what
+    // claims the right to be the only daemon, and a losing twin must not get as
+    // far as subscribing to the relay inbox.
+    let (listener, _instance_lock) = open_control()?;
 
     let relay = require_relay(relay, use_http)?;
     let me = my_identity()?;
@@ -65,16 +148,6 @@ pub(crate) async fn daemon(
     let inbox = manager.spawn_inbox()?;
     let _auto_sync =
         (!no_sync && book::sync_enabled()).then(|| sync::spawn_auto_sync(relay.clone()));
-
-    // With the lock held, an existing socket file can only be a leftover from a
-    // crashed daemon — safe to clear before binding.
-    if sock.exists() {
-        std::fs::remove_file(&sock).ok();
-    }
-    let listener = tokio::net::UnixListener::bind(&sock)
-        .with_context(|| format!("bind control socket {}", sock.display()))?;
-    // Owner-only: the filesystem permission is the access control.
-    std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o600)).ok();
 
     // Advisory pidfile for service tooling (not the guard).
     let pidfile = book::config_dir().join("daemon.pid");
@@ -229,7 +302,7 @@ pub(crate) async fn daemon(
     eprintln!("arvolo daemon up.");
     eprintln!("  identity: {my_id}");
     eprintln!("  relay:    {relay}");
-    eprintln!("  socket:   {}", sock.display());
+    eprintln!("  channel:  {}", control_address());
     eprintln!("  saving:   {}", download_dir.display());
 
     // Resume any downloads that were in flight when the daemon last stopped — each
@@ -248,7 +321,7 @@ pub(crate) async fn daemon(
     pairings.cancel_all();
 
     inbox.cancel();
-    std::fs::remove_file(&sock).ok();
+    close_control();
     std::fs::remove_file(&pidfile).ok();
     result
 }
@@ -340,10 +413,20 @@ mod lock_tests {
 }
 
 /// A cancellation token that fires on SIGINT (Ctrl-C) or SIGTERM (systemd stop).
-#[cfg(unix)]
 pub(crate) fn daemon_shutdown_signal() -> CancellationToken {
     let token = CancellationToken::new();
     let t = token.clone();
+    #[cfg(windows)]
+    tokio::spawn(async move {
+        // Ctrl-C is all there is: Windows has no SIGTERM, and a service stop
+        // arrives through the service control manager, which this daemon does not
+        // register with (it runs as a plain process, started by the GUI or by
+        // hand). Closing the console is the other way out, and that kills us
+        // outright rather than politely.
+        let _ = tokio::signal::ctrl_c().await;
+        t.cancel();
+    });
+    #[cfg(unix)]
     tokio::spawn(async move {
         use tokio::signal::unix::{signal, SignalKind};
         let mut term = signal(SignalKind::terminate()).ok();
@@ -369,7 +452,6 @@ pub(crate) fn daemon_shutdown_signal() -> CancellationToken {
 /// — it may not answer newer requests at all, hanging the client. So we gate on
 /// version here: same version → use it; different (or a pre-versioning daemon
 /// that reports none) → refuse loudly and exit, telling the user to restart it.
-#[cfg(unix)]
 pub(crate) async fn daemon_client() -> Option<ipc::client::DaemonClient> {
     let mut c = ipc::client::DaemonClient::connect().await.ok()?;
     c.ping().await.ok()?;
@@ -410,7 +492,6 @@ pub(crate) async fn daemon_client() -> Option<ipc::client::DaemonClient> {
 }
 
 /// A fresh subscribed event stream from the daemon.
-#[cfg(unix)]
 pub(crate) async fn daemon_events() -> Result<ipc::client::EventStream> {
     ipc::client::DaemonClient::connect()
         .await?
@@ -419,7 +500,6 @@ pub(crate) async fn daemon_events() -> Result<ipc::client::EventStream> {
 }
 
 /// Print a one-line summary of a transfer DTO.
-#[cfg(unix)]
 /// What a row is doing, said in its own terms.
 ///
 /// The engine calls a background serve `active` because it is running, which is
@@ -501,7 +581,6 @@ pub(crate) fn print_transfer_dto(t: &ipc::protocol::TransferDto, rate: Option<u6
 }
 
 /// `arvolo accept <offer_id>` — approve a parked offer and download it.
-#[cfg(unix)]
 pub(crate) async fn accept_cmd(offer_id: String, out: Option<PathBuf>) -> Result<()> {
     let mut client = daemon_client()
         .await
@@ -512,7 +591,6 @@ pub(crate) async fn accept_cmd(offer_id: String, out: Option<PathBuf>) -> Result
 }
 
 /// `arvolo reject <offer_id>` — decline a parked offer.
-#[cfg(unix)]
 pub(crate) async fn reject_cmd(offer_id: String) -> Result<()> {
     let mut client = daemon_client()
         .await
@@ -523,7 +601,6 @@ pub(crate) async fn reject_cmd(offer_id: String) -> Result<()> {
 }
 
 /// `arvolo pause <id>` — hold a `send --to` running in the daemon.
-#[cfg(unix)]
 pub(crate) async fn pause_cmd(id: u64) -> Result<()> {
     let mut client = daemon_client()
         .await
@@ -534,7 +611,6 @@ pub(crate) async fn pause_cmd(id: u64) -> Result<()> {
 }
 
 /// `arvolo resume <id>` — continue a paused `send --to`.
-#[cfg(unix)]
 pub(crate) async fn resume_cmd(id: u64) -> Result<()> {
     let mut client = daemon_client()
         .await
@@ -546,7 +622,6 @@ pub(crate) async fn resume_cmd(id: u64) -> Result<()> {
 
 /// Hand a plain ticket send to the daemon: it serves in the background. Prints the
 /// `arvc…` ticket and returns immediately; the transfer is tracked in the daemon.
-#[cfg(unix)]
 pub(crate) async fn serve_ticket_via_daemon(
     mut client: ipc::client::DaemonClient,
     paths: Vec<PathBuf>,
@@ -581,7 +656,6 @@ pub(crate) async fn serve_ticket_via_daemon(
 /// Hand a pairing code to the daemon: it hosts the rendezvous *and* serves the
 /// ticket behind it. Prints the code and returns; the code outlives this terminal
 /// and a daemon restart alike.
-#[cfg(unix)]
 pub(crate) async fn serve_code_via_daemon(
     mut client: ipc::client::DaemonClient,
     paths: Vec<PathBuf>,
@@ -625,7 +699,6 @@ pub(crate) async fn serve_code_via_daemon(
 /// Hand a push off to the running daemon and return immediately — the daemon
 /// delivers it in the background, concurrent and surviving our exit. Mirrors
 /// [`serve_ticket_via_daemon`]; observe progress with `arvolo status`.
-#[cfg(unix)]
 pub(crate) async fn push_via_daemon(
     mut client: ipc::client::DaemonClient,
     paths: Vec<PathBuf>,

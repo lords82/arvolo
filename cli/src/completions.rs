@@ -26,7 +26,6 @@ use crate::{book, deposits, sessions};
 /// How long a TAB is allowed to wait on the daemon before we give up and answer
 /// from disk alone. Generous for a socket on the same machine, still far below
 /// the ~200 ms where a shell starts to feel stuck.
-#[cfg(unix)]
 const DAEMON_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(150);
 
 /// `arvolo completions <shell>` — print the shell-side integration.
@@ -94,17 +93,13 @@ pub(crate) fn resumable_candidates() -> Vec<CompletionCandidate> {
 }
 
 /// Ids for `arvolo pause`: only a transfer that is actually running.
-// Used only by the daemon-side code, which is `#[cfg(unix)]` — so on Windows it
-// really is unreferenced, and `-D warnings` turns that into a build failure. It
-// is not dead: it is alive on the platforms where the daemon exists.
-#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) fn transfer_candidates() -> Vec<CompletionCandidate> {
     live_transfer_candidates(|status| status == "active")
 }
 
-/// Offer ids for `arvolo accept` / `arvolo reject`. Both are daemon-only verbs,
-/// so off unix there is nothing to offer.
-#[cfg(unix)]
+/// Offer ids for `arvolo accept` / `arvolo reject`. Both are daemon-only verbs —
+/// which, since the control channel gained a Windows transport, no longer means
+/// unix-only.
 pub(crate) fn offer_candidates() -> Vec<CompletionCandidate> {
     let Some(offers) = with_daemon(|mut c| async move { c.list_pending().await }) else {
         return Vec::new();
@@ -152,7 +147,6 @@ fn session_candidates() -> Vec<CompletionCandidate> {
 ///
 /// Empty when there is no daemon — which is not an error worth reporting inside
 /// a TAB, just fewer candidates.
-#[cfg(unix)]
 fn live_transfer_candidates(wanted: fn(&str) -> bool) -> Vec<CompletionCandidate> {
     let Some(transfers) = with_daemon(|mut c| async move { c.list().await }) else {
         return Vec::new();
@@ -168,11 +162,6 @@ fn live_transfer_candidates(wanted: fn(&str) -> bool) -> Vec<CompletionCandidate
         .collect()
 }
 
-#[cfg(not(unix))]
-fn live_transfer_candidates(_wanted: fn(&str) -> bool) -> Vec<CompletionCandidate> {
-    Vec::new()
-}
-
 /// Run one short request against the daemon, or give up.
 ///
 /// Deliberately *not* [`crate::commands::daemon::daemon_client`]: that one also
@@ -183,7 +172,6 @@ fn live_transfer_candidates(_wanted: fn(&str) -> bool) -> Vec<CompletionCandidat
 /// The work happens on its own thread with its own runtime. Completion runs
 /// before `main` enters the async runtime, but borrowing a thread costs
 /// microseconds and keeps that ordering from becoming a trap for later.
-#[cfg(unix)]
 fn with_daemon<T, F, Fut>(f: F) -> Option<T>
 where
     T: Send + 'static,

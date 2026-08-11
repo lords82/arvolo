@@ -5,35 +5,66 @@
 use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::net::UnixStream;
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 
 use crate::protocol::{
     ConfigDto, ConfigPatch, ContactDto, DepositDto, EventDto, HistoryDto, OfferDto, PairKind,
     PresenceDto, Request, RequestEnvelope, Response, ServerMessage, StatusDto, SyncDto,
     TransferDto,
 };
-use crate::socket_path;
+
+/// The read half of a connection, whatever carried it.
+///
+/// Boxed rather than generic, and that is a deliberate trade: the transport
+/// differs by platform — a unix socket one side, a named pipe the other — and
+/// every method below is pure protocol that does not care which. A generic
+/// parameter would spread that difference through every signature and every
+/// caller; a `cfg` on each method would fork the protocol itself. One virtual
+/// call per line of JSON is not a cost anyone will measure on a local socket.
+type Read = BufReader<Box<dyn AsyncRead + Unpin + Send>>;
+type Write = Box<dyn AsyncWrite + Unpin + Send>;
 
 /// An RPC connection to the running daemon.
 pub struct DaemonClient {
-    reader: BufReader<OwnedReadHalf>,
-    writer: OwnedWriteHalf,
+    reader: Read,
+    writer: Write,
     next_id: u32,
+}
+
+/// Open the control channel, however this platform carries one.
+///
+/// The two arms differ in one respect beyond the type: on unix the daemon's
+/// absence is a missing *file*, on Windows a missing *pipe*. Both are the same
+/// answer to the caller — "no daemon" — and both are the signal to fall back to
+/// running the engine in-process or spawning one.
+async fn open() -> Result<(Read, Write)> {
+    #[cfg(unix)]
+    {
+        let path = crate::socket_path();
+        let stream = tokio::net::UnixStream::connect(&path)
+            .await
+            .with_context(|| format!("no daemon at {} (start `arvolo daemon`)", path.display()))?;
+        let (r, w) = tokio::io::split(stream);
+        Ok((BufReader::new(Box::new(r) as _), Box::new(w) as _))
+    }
+    #[cfg(windows)]
+    {
+        let name = crate::pipe_name();
+        let stream = tokio::net::windows::named_pipe::ClientOptions::new()
+            .open(&name)
+            .with_context(|| format!("no daemon at {name} (start `arvolo daemon`)"))?;
+        let (r, w) = tokio::io::split(stream);
+        Ok((BufReader::new(Box::new(r) as _), Box::new(w) as _))
+    }
 }
 
 impl DaemonClient {
     /// Connect to the daemon control socket. Returns `Err` if it's absent or
     /// refuses (no daemon running) — the signal for callers to fall back.
     pub async fn connect() -> Result<Self> {
-        let path = socket_path();
-        let stream = UnixStream::connect(&path)
-            .await
-            .with_context(|| format!("no daemon at {} (start `arvolo daemon`)", path.display()))?;
-        let (read, writer) = stream.into_split();
+        let (reader, writer) = open().await?;
         Ok(Self {
-            reader: BufReader::new(read),
+            reader,
             writer,
             next_id: 1,
         })
@@ -439,7 +470,7 @@ impl DaemonClient {
 
 /// A live stream of engine events from a subscribed connection.
 pub struct EventStream {
-    reader: BufReader<OwnedReadHalf>,
+    reader: Read,
 }
 
 impl EventStream {

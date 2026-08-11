@@ -93,14 +93,8 @@ async fn resume_download(partial: &std::path::Path) -> Result<()> {
 
 /// A paused transfer: only the daemon can restart one, since only the daemon is
 /// running it.
-#[cfg(unix)]
 async fn resume_transfer(id: u64) -> Result<()> {
     crate::commands::daemon::resume_cmd(id).await
-}
-
-#[cfg(not(unix))]
-async fn resume_transfer(id: u64) -> Result<()> {
-    bail!("transfer {id} needs a running daemon, which this platform doesn't support yet")
 }
 
 #[cfg(test)]
