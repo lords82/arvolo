@@ -58,8 +58,18 @@
   /* The colour a *filled* control takes, as opposed to the colour text takes.
      They must be separate: a hue bright enough to read as ink on a dark canvas
      is far too bright to sit under white ink, and reusing one for both is how
-     every primary button in this app came to be 2.3:1 in the dark theme. */
-  --out-fill: #bf5811;
+     every primary button in this app came to be 2.3:1 in the dark theme.
+
+     This one is a deliberate compromise, and the number is here so nobody has to
+     rediscover it. White on the icon's own orange is 2.8:1 — unreadable. Darkened
+     until white is comfortably AA it becomes #bf5811, at 4.5:1, which reads as
+     brown next to the rest of the warm family. This sits between: 3.5:1 with
+     white, 89% of the icon's lightness. It clears AA for large text and does not
+     for the 13px labels these buttons actually use — chosen with that known,
+     because the fill is two controls while the true orange carries everything
+     else on screen. Dark ink on the full orange was tried (6.5:1) and read as a
+     warning label rather than a button. */
+  --out-fill: #dd6614;
   --in-fill: #0a6ba1;
   --on-fill: #ffffff;
   --out-soft: #fff1e8;
@@ -150,7 +160,7 @@
     --out-line: rgba(227, 154, 102, 0.34);
     --out-stall: #926e54;
     /* Kept near the light theme value: white ink still has to sit on these. */
-    --out-fill: #bd5811;
+    --out-fill: #dd6614;
     --in-fill: #0d76b0;
 
     --in: #4fa8dd;
@@ -207,7 +217,7 @@
   --out-line: rgba(227, 154, 102, 0.34);
   --out-stall: #926e54;
   /* Kept near the light theme value: white ink still has to sit on these. */
-  --out-fill: #bd5811;
+  --out-fill: #dd6614;
   --in-fill: #0d76b0;
 
   --in: #4fa8dd;
