@@ -19,7 +19,7 @@ a public cloud is not an option, and for regions with data-residency rules or a
 digital-sovereignty mandate — anywhere data has to move without depending on
 another country's infrastructure.
 
-> Status: **working CLI + desktop app** (v0.9.3). P2P + relay-backfill transfer
+> Status: **working CLI + desktop app** (v0.9.4). P2P + relay-backfill transfer
 > with resume, per-chunk E2E encryption, short human pairing codes,
 > send-to-a-contact (delivered live when they're online, **held and retried** when
 > the relay can't take it — never silently failed), a **chunked, streamed offline

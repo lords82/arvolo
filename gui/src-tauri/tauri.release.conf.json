@@ -2,6 +2,16 @@
   "bundle": {
     "externalBin": [
       "binaries/arvolo"
-    ]
+    ],
+    "windows": {
+      "wix": {
+        "fragmentPaths": [
+          "windows/path.wxs"
+        ],
+        "componentGroupRefs": [
+          "ArvoloPathGroup"
+        ]
+      }
+    }
   }
 }
