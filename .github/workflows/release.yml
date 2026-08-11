@@ -42,6 +42,49 @@ jobs:
           name: ${{ matrix.label }}
           path: arvolo-${{ github.ref_name }}-*
 
+  # The desktop app for Windows. Same three steps as the other two bundles: build
+  # the CLI, put it where the bundler expects a sidecar, bundle.
+  #
+  # Unsigned, like the .dmg — and with the same consequence under a different
+  # name: SmartScreen shows "Windows protected your PC" and hides the Run button
+  # behind "More info". Signing needs a certificate from a CA, which unlike
+  # Apple's is bought per year from a third party.
+  app-windows:
+    name: desktop app (msi)
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: gui/package-lock.json
+      - name: Build the CLI to ship inside the app
+        shell: bash
+        run: |
+          cargo build --release --locked -p arvolo-cli
+          mkdir -p gui/src-tauri/binaries
+          cp target/release/arvolo.exe "gui/src-tauri/binaries/arvolo-$(rustc -vV | sed -n 's/^host: //p').exe"
+      - name: Install frontend deps
+        working-directory: gui
+        run: npm ci
+      - name: Bundle
+        working-directory: gui
+        run: npm run tauri build -- --bundles msi --config src-tauri/tauri.release.conf.json
+      - name: Name it after the tag
+        shell: bash
+        run: |
+          out=$(cargo metadata --format-version 1 --no-deps | jq -r .target_directory)
+          src=$(ls "$out"/release/bundle/msi/*.msi | head -1)
+          cp "$src" "arvolo-${{ github.ref_name }}-windows-x86_64.msi"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-msi
+          path: arvolo-${{ github.ref_name }}-*.msi
+
   # .deb and .rpm of the two command-line binaries.
   #
   # Built on the *oldest* runner still supported rather than the newest, and that
@@ -205,7 +248,7 @@ jobs:
 
   release:
     name: publish
-    needs: [build, app-macos, app-linux, linux-packages]
+    needs: [build, app-macos, app-linux, app-windows, linux-packages]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -240,8 +283,15 @@ jobs:
             From a terminal, the equivalent is:
             `xattr -d com.apple.quarantine /Applications/Arvolo.app`
 
+            ### Windows: the .msi is unsigned
+
+            SmartScreen will say it protected your PC. Choose **More info**, then
+            **Run anyway**. The installer is not signed with a code-signing
+            certificate — a separate purchase from Apple's, and from a different
+            kind of authority.
+
             The `.tar.gz` archives are the command-line tools (`arvolo`,
-            `arvolo-relay`) and are not affected.
+            `arvolo-relay`) and are affected by neither.
 
   docker:
     name: relay image (ghcr)

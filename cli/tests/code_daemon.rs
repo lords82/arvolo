@@ -12,13 +12,6 @@
 //! Everything rides the HTTP relay on localhost, and the transfer itself is P2P
 //! over iroh with no NAT relay, so the whole thing is deterministic.
 
-// Unix only, and not by accident: `arvolo daemon` is itself `#[cfg(unix)]` —
-// the control socket is a Unix socket — so on Windows there is no daemon for any
-// of this to test. Compiled there anyway, the file failed on the unix-only file
-// metadata it uses to measure a partial download, which read like a portability
-// bug in the product rather than a test asking for something that does not exist.
-#![cfg(unix)]
-
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -210,6 +203,18 @@ async fn a_kept_code_survives_the_daemon_restarting() {
     );
 }
 
+/// Unix only, and for one reason: how it measures a half-arrived download.
+///
+/// Pieces land out of order, so file *length* says nothing — the comment below
+/// explains why at length. Allocated blocks do, and reading them is POSIX
+/// vocabulary; the Windows equivalent is `GetCompressedFileSize`, which would
+/// mean pulling in `windows-sys` and an unsafe call to make one test portable.
+///
+/// The daemon itself is not what is unavailable here — the two tests above run
+/// on both platforms and cover hosting a code and surviving a restart. What is
+/// missing on Windows is resume-after-interruption, and it is missing for want of
+/// a ruler, not of the thing being measured.
+#[cfg(unix)]
 #[tokio::test]
 async fn an_interrupted_download_resumes_without_the_code() {
     let relay = spawn_relay().await;

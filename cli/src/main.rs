@@ -83,6 +83,11 @@ async fn run() -> Result<()> {
     maybe_first_run_wizard();
     // Bridge config.toml → ARVOLO_* (env still wins) and pin the scratch dir.
     book::apply_config_to_env();
+    // Windows only, and once per process: narrow the config directory's access
+    // list so the records written inside it — identity, revoke tokens, resume
+    // records — inherit it. On unix each of those files is chmod'd where it is
+    // written instead; see the `restrict` helpers by the record stores.
+    book::restrict_config_dir();
 
     match cli.command {
         Command::Send {

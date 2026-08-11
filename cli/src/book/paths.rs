@@ -34,6 +34,55 @@ pub fn config_dir() -> PathBuf {
     home_dir().join(".config/arvolo")
 }
 
+/// Shut the config directory to its owner, once, so everything written inside it
+/// inherits that.
+///
+/// This is the Windows half of a protection unix gets per file: there, every
+/// record holding a secret is chmod'd 0600 and the directory 0700. Here there are
+/// no modes — access is a list of entries on the object — and the practical
+/// equivalent is to fix the list on the *directory* and let new files inherit it,
+/// rather than to re-apply it on every write.
+///
+/// Done with `icacls` rather than the Win32 ACL functions, which would mean
+/// `windows-sys` and a page of unsafe to build a descriptor by hand. `icacls`
+/// ships with Windows, and this runs once per process at startup: `/inheritance:r`
+/// drops whatever the parent handed down, then the current user is granted full
+/// control and nobody else is named. Administrators and SYSTEM keep their access
+/// by other means — as they do on unix, where root reads a 0600 file regardless.
+///
+/// Best effort by design: a machine where this fails is one where the directory
+/// already inherits the profile's own restrictions, which is the common case and
+/// is why this is hardening rather than a gate.
+#[cfg(windows)]
+pub fn restrict_config_dir() {
+    let dir = config_dir();
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let Ok(user) = std::env::var("USERNAME") else {
+        return;
+    };
+    let out = std::process::Command::new("icacls")
+        .arg(&dir)
+        .args(["/inheritance:r", "/grant"])
+        .arg(format!("{user}:(OI)(CI)F"))
+        .output();
+    match out {
+        Ok(o) if o.status.success() => {}
+        Ok(o) => tracing::debug!(
+            "could not restrict {}: {}",
+            dir.display(),
+            String::from_utf8_lossy(&o.stderr).trim()
+        ),
+        Err(e) => tracing::debug!("could not run icacls: {e}"),
+    }
+}
+
+/// Nothing to do: on unix each file carries its own mode, applied where it is
+/// written (see the `restrict` helpers beside the record stores).
+#[cfg(unix)]
+pub fn restrict_config_dir() {}
+
 /// Scratch directory for the client's own temporary artifacts — e.g. the tar
 /// packed when sending a folder, or an archive staged while receiving. Defaults
 /// to `<config>/tmp` (kept off the system temp dir, which may be a small tmpfs,
