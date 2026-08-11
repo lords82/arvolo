@@ -17,7 +17,7 @@ mod daemon;
 use arvolo_ipc::client::DaemonClient;
 use arvolo_ipc::protocol::EventDto;
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
-use tauri::tray::TrayIconBuilder;
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, WindowEvent};
 use tauri_plugin_notification::NotificationExt;
 
@@ -25,8 +25,14 @@ use tauri_plugin_notification::NotificationExt;
 const EV_ENGINE: &str = "engine://event";
 const EV_CONNECTED: &str = "engine://connected";
 
+/// Whether the system tray icon actually got created. Hiding the window on close
+/// is only safe if there is a tray to get back from: on Linux desktops without a
+/// StatusNotifier host (GNOME without extensions) there is none, and closing has
+/// to quit instead of leaving an unreachable process behind.
+struct HasTray(bool);
+
 fn main() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
@@ -77,25 +83,54 @@ fn main() {
             bridge::gui_version,
         ])
         .setup(|app| {
-            setup_tray(app.handle())?;
+            let has_tray = match setup_tray(app.handle()) {
+                Ok(()) => true,
+                Err(e) => {
+                    eprintln!("arvolo: icona di stato non disponibile ({e})");
+                    false
+                }
+            };
+            app.manage(HasTray(has_tray));
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(event_pump(handle));
             Ok(())
         })
-        // Closing the window hides it to the tray: transfers keep running in the
-        // daemon and arrivals keep notifying; "Esci" in the tray menu quits.
+        // Closing the window hides it away instead of quitting: transfers keep
+        // running in the daemon and arrivals keep notifying, with Arvolo left in
+        // the tray only — off the Dock on macOS, off the taskbar elsewhere.
+        // "Esci" in the tray menu quits.
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
+                let app = window.app_handle();
+                // No tray to restore from: let the close through, which quits.
+                if !app.try_state::<HasTray>().is_some_and(|t| t.0) {
+                    return;
+                }
                 api.prevent_close();
                 let _ = window.hide();
+                // A hidden window drops off the taskbar on Windows and Linux by
+                // itself; the macOS Dock icon belongs to the process, so it has
+                // to be taken down explicitly.
+                #[cfg(target_os = "macos")]
+                let _ = app.set_dock_visibility(false);
             }
         })
-        .run(tauri::generate_context!())
+        .build(tauri::generate_context!())
         .expect("error while running the Arvolo GUI");
+
+    app.run(|_app, _event| {
+        // Clicking the Dock icon (or re-launching the bundle) while Arvolo is
+        // already running asks for the window back.
+        #[cfg(target_os = "macos")]
+        if let tauri::RunEvent::Reopen { .. } = _event {
+            show_main_window(_app);
+        }
+    });
 }
 
-/// System-tray icon with a minimal menu (Mostra / Esci). Left-clicking the icon
-/// re-opens the window hidden by the close button.
+/// System-tray icon with a minimal menu (Mostra / Esci) — the way back to a
+/// window closed to the tray, and the only one once the Dock/taskbar entry is
+/// gone.
 fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
     let show = MenuItemBuilder::with_id("show", "Mostra Arvolo").build(app)?;
     let quit = MenuItemBuilder::with_id("quit", "Esci").build(app)?;
@@ -107,21 +142,49 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
 
     let mut tray = TrayIconBuilder::with_id("main")
         .menu(&menu)
-        .show_menu_on_left_click(true)
+        // macOS menu bar items open their menu on a plain click; on Windows a
+        // left click restores the app and only the right click opens the menu.
+        .show_menu_on_left_click(cfg!(target_os = "macos"))
         .tooltip("Arvolo")
         .on_menu_event(|app, event| match event.id.as_ref() {
             "show" => show_main_window(app),
             "quit" => app.exit(0),
             _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                if !cfg!(target_os = "macos") {
+                    show_main_window(tray.app_handle());
+                }
+            }
         });
+
+    // The menu bar wants the monochrome template icon, which macOS tints for the
+    // light or dark bar; elsewhere the tray shows the regular app icon.
+    #[cfg(target_os = "macos")]
+    {
+        let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/tray.png"))?;
+        tray = tray.icon(icon).icon_as_template(true);
+    }
+    #[cfg(not(target_os = "macos"))]
     if let Some(icon) = app.default_window_icon() {
         tray = tray.icon(icon.clone());
     }
+
     tray.build(app)?;
     Ok(())
 }
 
 fn show_main_window(app: &AppHandle) {
+    // Put the Dock icon back first: while Arvolo is a background-only process
+    // macOS won't bring its windows to the front.
+    #[cfg(target_os = "macos")]
+    let _ = app.set_dock_visibility(true);
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.show();
         let _ = w.unminimize();

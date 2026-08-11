@@ -93,17 +93,21 @@
 <body>
   <div class="wrap">
     <header class="brand">
-      <!-- The application icon, redrawn: gui/src-tauri/icons is a set of PNGs,
-           and this page may not fetch anything, so the mark is traced as a path
-           measured off Square310x310Logo.png. Its orange is the icon's own —
-           deliberately not `--out-fill`, which the app moved to vermilion
+      <!-- The application icon, redrawn: gui/src-tauri/icons ships PNGs, and
+           this page may not fetch anything, so the mark is the same geometry
+           its sources carry — gui/src-tauri/icons/source/arvolo-icon-square.svg,
+           full bleed, glyph inset 200/1024 of the box. Its orange is the icon's
+           own — deliberately not `--out-fill`, which the app moved to vermilion
            without regenerating the icon. Whoever opens this link should see the
            same mark that sits in the sender's dock. -->
       <span class="mark" aria-hidden="true">
         <svg width="30" height="30" viewBox="0 0 32 32">
           <rect width="32" height="32" rx="6.4" fill="#f97316"/>
-          <path fill="#fff" fill-rule="evenodd"
-                d="M14.24 8.3 9 22.4h3l1.1-3.2h5.8l1.1 3.2h3L17.44 8.3zM16 11.77 13.98 16.93h4.04z"/>
+          <g transform="translate(6.25 6.25) scale(.195)">
+            <path d="M18 46 V64 a16 16 0 0 0 16 16 h32 a16 16 0 0 0 16 -16 V46"
+                  fill="none" stroke="#faf8f6" stroke-width="12" stroke-linecap="round"/>
+            <path d="M50 40 L38 12 H62 Z" fill="#faf8f6"/>
+          </g>
         </svg>
       </span>
       <span class="word">arvolo</span>

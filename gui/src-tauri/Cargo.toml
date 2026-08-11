@@ -12,7 +12,8 @@ homepage.workspace = true
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon"] }
+# `image-png` decodes the menu-bar template glyph baked in with `include_bytes!`.
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-opener = "2"
