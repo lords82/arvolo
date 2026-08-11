@@ -40,14 +40,25 @@ pub(super) fn is_local_storage_error(e: &anyhow::Error) -> bool {
 }
 
 /// Which path to ask the OS about when the question is "how much room is there
-/// for `path`". The file itself once it exists (it settles any doubt about which
-/// filesystem it actually landed on, symlinks included); otherwise its directory,
-/// since neither `statvfs` nor `GetDiskFreeSpaceExW` will answer for a name that
-/// isn't there yet — and the current directory when the name has no parent at
-/// all, which is exactly where a bare relative filename would be written.
+/// for `path`". Neither call answers for a name that doesn't exist yet — a fresh
+/// download, which is when there is most left to write — so that case must fall
+/// back to the directory the file will be created in, or the current directory
+/// when the name has no parent at all, which is where a bare relative filename
+/// would land.
+///
+/// The two calls differ on what they accept beyond that, hence the `cfg!`:
+/// `statvfs` takes any existing path, and asking about the file itself settles
+/// which filesystem it actually landed on (a symlink may point off this one);
+/// `GetDiskFreeSpaceExW` insists on a directory and fails outright when handed a
+/// file, so on Windows the containing directory is the only question available.
 #[cfg(any(unix, windows))]
 fn probe_target(path: &Path) -> &Path {
-    if path.exists() {
+    let answerable = if cfg!(windows) {
+        path.is_dir()
+    } else {
+        path.exists()
+    };
+    if answerable {
         return path;
     }
     match path.parent() {
@@ -209,8 +220,15 @@ mod storage_error_tests {
             "a writable temp dir should report some free space"
         );
 
+        // Now the same path with the file actually there. This is the case that
+        // caught Windows out: `GetDiskFreeSpaceExW` refuses a file path, so the
+        // probe has to step up to the containing directory there.
         std::fs::write(&not_yet, b"partial").unwrap();
         let after = available_space(&not_yet).expect("free space is knowable for a partial");
         assert!(after > 0);
+
+        // And the directory itself, which is what a caller resolving a download
+        // into a folder may hand over before the filename is known.
+        assert!(available_space(dir.path()).is_some_and(|free| free > 0));
     }
 }
