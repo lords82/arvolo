@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Puts the install directory on the system PATH, so that the `arvolo` command
+  line that ships inside the app is usable from a terminal by its own name
+  instead of by its full path under Program Files.
+
+  Why a hand-written fragment: Tauri has no setting for this. Its WiX template
+  covers the app itself, and anything beyond it is added by referencing an extra
+  fragment from `bundle.windows.wix` — which is what the release config does.
+
+  Three attributes carry the actual behaviour, and each has a wrong value that
+  would be easy to pick:
+
+    Part="last"      appends to the existing PATH rather than replacing it. The
+                     default, "all", would overwrite the user's entire PATH.
+    Permanent="no"   the entry is removed when the app is uninstalled. "yes"
+                     leaves a dangling directory on PATH forever.
+    System="yes"     the machine-wide PATH, matching a per-machine install into
+                     Program Files. A per-user entry would be invisible to any
+                     other account on the same PC.
+
+  The component holds no file, so its key path is the directory itself — the
+  standard shape for an environment-only component. The GUID is fixed and must
+  stay fixed: a new one on every build would make Windows treat each release as
+  a different component and leave duplicate PATH entries behind.
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Fragment>
+    <DirectoryRef Id="INSTALLDIR">
+      <Component Id="ArvoloOnPath" Guid="8F4B2C1E-6D3A-4F58-9B71-2E0C5A9D8341" KeyPath="yes">
+        <Environment
+          Id="ArvoloPathEntry"
+          Name="PATH"
+          Value="[INSTALLDIR]"
+          Action="set"
+          Part="last"
+          System="yes"
+          Permanent="no" />
+      </Component>
+    </DirectoryRef>
+
+    <ComponentGroup Id="ArvoloPathGroup">
+      <ComponentRef Id="ArvoloOnPath" />
+    </ComponentGroup>
+  </Fragment>
+</Wix>
