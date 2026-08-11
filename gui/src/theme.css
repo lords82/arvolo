@@ -59,9 +59,16 @@
      They must be separate: a hue bright enough to read as ink on a dark canvas
      is far too bright to sit under white ink, and reusing one for both is how
      every primary button in this app came to be 2.3:1 in the dark theme. */
-  --out-fill: #bf5811;
+  --out-fill: #f97316;
   --in-fill: #0a6ba1;
+  /* Two inks, because the two fills are not equally bright. White on the brand
+     orange is 2.8:1 — unreadable — while dark ink on it is 6.5:1, *better* than
+     anything reachable by darkening the orange until white works. So the warm
+     family keeps the brand colour and changes its ink instead, which is the
+     usual answer for a bright brand hue and the one this palette was avoiding
+     by darkening. The cool fill is dark enough that white is the only option. */
   --on-fill: #ffffff;
+  --on-out: #171514;
   --out-soft: #fff1e8;
   --out-line: rgba(249, 115, 22, 0.28);
   --out-stall: #b28e74;
@@ -150,7 +157,7 @@
     --out-line: rgba(227, 154, 102, 0.34);
     --out-stall: #926e54;
     /* Kept near the light theme value: white ink still has to sit on these. */
-    --out-fill: #bd5811;
+    --out-fill: #f97316;
     --in-fill: #0d76b0;
 
     --in: #4fa8dd;
@@ -207,7 +214,7 @@
   --out-line: rgba(227, 154, 102, 0.34);
   --out-stall: #926e54;
   /* Kept near the light theme value: white ink still has to sit on these. */
-  --out-fill: #bd5811;
+  --out-fill: #f97316;
   --in-fill: #0d76b0;
 
   --in: #4fa8dd;
@@ -524,7 +531,7 @@ select {
 .rail-verb.send {
   background: var(--out-fill);
   border-color: var(--out-fill);
-  color: var(--on-fill);
+  color: var(--on-out);
   box-shadow: var(--shadow-1);
 }
 .rail-verb.send:hover {
@@ -629,7 +636,7 @@ select {
 .btn-primary {
   background: var(--out-fill);
   border-color: var(--out-fill);
-  color: var(--on-fill);
+  color: var(--on-out);
   box-shadow: var(--shadow-1);
 }
 .btn-primary:hover:not(:disabled) {
