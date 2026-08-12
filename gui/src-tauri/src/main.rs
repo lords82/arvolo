@@ -11,7 +11,7 @@
 //!   engine event to the webview as `engine://event`, plus a `engine://connected`
 //!   heartbeat and a native notification for incoming offers.
 
-mod badge;
+mod attention;
 mod bridge;
 mod daemon;
 
@@ -92,6 +92,7 @@ fn main() {
                 }
             };
             app.manage(HasTray(has_tray));
+            app.manage(attention::State::default());
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(event_pump(handle));
             Ok(())
@@ -167,11 +168,12 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
 
     // The menu bar wants the monochrome template icon, which macOS tints for the
     // light or dark bar; elsewhere the tray shows the regular app icon. Either way
-    // this is the unbadged state — `badge::apply` paints the count on top once the
-    // pump knows what is pending.
+    // this is the resting state; `attention::apply` drops the wedge into the box
+    // once the pump knows something is waiting. `icons/attention/tray-0.png` is this
+    // very file, so switching between them never resizes the mark.
     #[cfg(target_os = "macos")]
     {
-        let icon = tauri::image::Image::from_bytes(badge::PLAIN_TEMPLATE)?;
+        let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/tray.png"))?;
         tray = tray.icon(icon).icon_as_template(true);
     }
     #[cfg(not(target_os = "macos"))]
@@ -224,7 +226,7 @@ async fn event_pump(app: AppHandle) {
         let _ = app.emit(EV_CONNECTED, true);
         // A fresh connection says nothing about what was already pending — the
         // offers that piled up while the GUI was down are only in the daemon.
-        badge::refresh(&app).await;
+        attention::refresh(&app).await;
 
         // Loops while events arrive; exits on a closed (`Ok(None)`) or errored
         // stream, which drops us to the outer reconnect loop.
@@ -235,11 +237,11 @@ async fn event_pump(app: AppHandle) {
             {
                 notify_offer(&app, name, sender_name);
             }
-            // The webview first: the badge costs a round-trip to the daemon, and
-            // the UI should not wait behind it.
+            // The webview first: the tray state costs a round-trip to the daemon,
+            // and the UI should not wait behind it.
             let _ = app.emit(EV_ENGINE, &ev);
             if moves_the_count(&ev) {
-                badge::refresh(&app).await;
+                attention::refresh(&app).await;
             }
         }
 
@@ -255,7 +257,7 @@ async fn event_pump(app: AppHandle) {
 /// `Completed` and `Cancelled` stay out too — a transfer ending decides nothing,
 /// it only reports. `Started` is in because that is what an accepted offer turns
 /// into; a *rejected* one emits nothing at all, so the reject command refreshes
-/// the badge itself.
+/// the tray itself.
 fn moves_the_count(ev: &EventDto) -> bool {
     matches!(
         ev,

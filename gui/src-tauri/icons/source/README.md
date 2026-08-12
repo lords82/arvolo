@@ -1,8 +1,9 @@
 # Icon sources
 
 The PNG/ICNS/ICO files one level up are **generated**. These three SVGs are the
-originals; edit them, not the bitmaps. The counter badge is generated too, but
-from `gen-badge.py` rather than a checked-in SVG — see "The badge" below.
+originals; edit them, not the bitmaps. The attention frames are generated too, but
+from `gen-attention.py` rather than a checked-in SVG, because their geometry is
+computed per frame — see "The attention state" below.
 
 The mark is concept **2c — "In arrivo"** from the Arvolo design system: a wedge
 dropping into an open box, the file still in flight and the box waiting for it.
@@ -21,7 +22,7 @@ Every file here carries the identical glyph, drawn in a 100-unit box —
 | `arvolo-icon.svg` | `icon.png`, `icon.icns` — macOS |
 | `arvolo-icon-square.svg` | `32x32.png`, `128x128*.png`, `icon.ico`, `Square*Logo.png`, `StoreLogo.png` — Linux and Windows |
 | `arvolo-tray-template.svg` | `tray.png` — the macOS menu bar |
-| `gen-badge.py` | `../badge/tray-*.png`, `../badge/app-*.png`, `../badge/overlay.png` — the counter |
+| `gen-attention.py` | `../attention/tray-*.png`, `../attention/app-*.png` — the attention states |
 
 Two app shapes, because the platforms disagree about the canvas. macOS reserves
 a margin: the artwork is a 824×824 squircle centred on a 1024×1024 canvas, and
@@ -37,7 +38,7 @@ every sampled offset, which `rx="186"` does not.
 
 `tray.png` is a **template image**: black on alpha, no colour. macOS tints it to
 match the menu bar — white on dark, black on light — the way every other status
-item behaves; see `TRAY_TEMPLATE_PNG` in `src/main.rs`. It is 36×36 (2× of the
+item behaves; `setup_tray` in `src/main.rs` loads it. It is 36×36 (2× of the
 18pt the system scales it to) and the SVG's viewBox frames the glyph so it lands
 at 32px, i.e. 16pt, the height its neighbours sit at. Colour is only correct on
 Windows and Linux, which keep the full app icon.
@@ -46,43 +47,35 @@ The relay's `dl.html` and `disabled.html` inline the same glyph by hand: those
 pages may not fetch anything, so the geometry is duplicated there. Change the
 mark and they need the same edit.
 
-## The badge
+## The attention state
 
-`../badge/` holds the counter variants: the tray icon with a number on it, one
-file per count, `1`–`9` then `9+`. The number is a circle knocked **out** of the
-mark — a real hole, not a disc painted on top — with the digit sitting in it.
-That is what makes a single file work everywhere: the hole is transparent, so the
-same bitmap reads against a light bar and a dark one, and no platform needs its
-own colour treatment. Nothing here is macOS-only; every platform goes through
-`TrayIcon::set_icon`.
+`../attention/` holds the frames that say *something is waiting for you*. There is
+no counter and no badge: the mark says it itself. The wedge is the file in flight,
+so when a decision is pending it **falls into the box** and stays there; at rest it
+sits above, still in the air.
 
-The two families place the badge differently, and the difference is deliberate:
-
-| Family | Canvas | Where the circle bites |
+| Family | Canvas | Feeds |
 | --- | --- | --- |
-| `tray-N.png` | 36×36, black on alpha | The mark is **full bleed**, so the circle eats into it: the wedge loses its right corner and the box's right arm comes out shorter than the left. |
-| `app-N.png` | 64×64, full-bleed colour | The mark is inset 19.5/100, so the same top-right circle removes only orange and the glyph is untouched. |
+| `tray-N.png` | 36×36, black on alpha | the macOS menu bar |
+| `app-N.png` | 64×64, full-bleed colour | the Windows and Linux tray |
 
-The bitten look on the menu bar is a choice, not a bug — a knockout needs a
-filled field to remove, and the template has none, so inside a square canvas the
-alternative was shrinking the mark by a fifth to let the circle pass. Restore the
-unbitten version by giving `TRAY` in `gen-badge.py` the same inset `APP` has.
+Frame 0 is the resting state and frame 7 is the landed one, which the tray holds
+for as long as anything is pending; the frames between are only played on the way
+in. The fall accelerates — `dy` scales with `t` squared — so it reads as a drop
+rather than a slide. `tray-0.png` is byte-identical to `tray.png` on purpose: if
+the resting frame were framed even slightly differently, turning attention on and
+off would visibly resize the mark in the menu bar.
 
-`overlay.png` is the Windows taskbar overlay, which the system draws at 16pt. A
-digit does not survive that size — it turns to a blob — so the overlay carries a
-plain disc and only says *there is something*. The same limit applies to a
-Windows tray at 100% DPI, where the 64px `app-N.png` is downsampled to 16px; the
-digit is legible from about 24px and clean from 32px.
-
-Digits are baked in as **outlines**, pulled from Helvetica Bold in
-`/System/Library/Fonts/Helvetica.ttc`, so regenerating does not depend on which
-fonts a machine has installed. Only the script does, and only when the geometry
-changes. Ten glyphs that never change are not worth a font rasteriser inside the
-GUI, which is why none of this is drawn at runtime.
+A badge was tried first and does not survive this icon. At 36px a corner circle
+either shrinks to an invisible sliver or, sized to be legible, eats the box's right
+arm until the glyph reads as an **L** — there is no middle ground inside 36 pixels,
+with a digit or with an exclamation mark. Moving a piece that is already there
+costs nothing and stays legible at any size, because it is motion and position
+rather than detail.
 
 ```sh
 cd gui/src-tauri/icons/source
-python3 gen-badge.py            # needs fonttools and rsvg-convert
+python3 gen-attention.py        # needs rsvg-convert
 ```
 
 ## Regenerating

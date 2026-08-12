@@ -182,9 +182,9 @@ pub async fn reject_offer(app: tauri::AppHandle, offer_id: String) -> Result<(),
     let mut c = client().await?;
     let done = c.reject(offer_id).await.or_else(err);
     // Rejecting emits no engine event, so the pump never hears about it and the
-    // tray would keep counting an offer that is gone. Accepting needs no such
+    // wedge would stay down over an offer that is gone. Accepting needs no such
     // nudge: it turns into a `Started`, which the pump already watches.
-    crate::badge::refresh(&app).await;
+    crate::attention::refresh(&app).await;
     done
 }
 
@@ -291,7 +291,7 @@ pub async fn accept_name(app: tauri::AppHandle, who: String) -> Result<(), Strin
     let done = c.accept_name(who).await.or_else(err);
     // An approved name is one decision fewer. The daemon may or may not announce
     // the change as a `ContactsChanged`; refreshing here does not depend on it.
-    crate::badge::refresh(&app).await;
+    crate::attention::refresh(&app).await;
     done
 }
 
