@@ -20,7 +20,7 @@ use tauri::{AppHandle, Manager};
 
 /// Frames of the wedge dropping, resting state first.
 #[cfg(target_os = "macos")]
-const FRAMES: [&[u8]; 8] = [
+const FRAMES: [&[u8]; 12] = [
     include_bytes!("../icons/attention/tray-0.png"),
     include_bytes!("../icons/attention/tray-1.png"),
     include_bytes!("../icons/attention/tray-2.png"),
@@ -29,9 +29,13 @@ const FRAMES: [&[u8]; 8] = [
     include_bytes!("../icons/attention/tray-5.png"),
     include_bytes!("../icons/attention/tray-6.png"),
     include_bytes!("../icons/attention/tray-7.png"),
+    include_bytes!("../icons/attention/tray-8.png"),
+    include_bytes!("../icons/attention/tray-9.png"),
+    include_bytes!("../icons/attention/tray-10.png"),
+    include_bytes!("../icons/attention/tray-11.png"),
 ];
 #[cfg(not(target_os = "macos"))]
-const FRAMES: [&[u8]; 8] = [
+const FRAMES: [&[u8]; 12] = [
     include_bytes!("../icons/attention/app-0.png"),
     include_bytes!("../icons/attention/app-1.png"),
     include_bytes!("../icons/attention/app-2.png"),
@@ -40,6 +44,10 @@ const FRAMES: [&[u8]; 8] = [
     include_bytes!("../icons/attention/app-5.png"),
     include_bytes!("../icons/attention/app-6.png"),
     include_bytes!("../icons/attention/app-7.png"),
+    include_bytes!("../icons/attention/app-8.png"),
+    include_bytes!("../icons/attention/app-9.png"),
+    include_bytes!("../icons/attention/app-10.png"),
+    include_bytes!("../icons/attention/app-11.png"),
 ];
 
 const RESTING: usize = 0;
@@ -47,10 +55,14 @@ const LANDED: usize = FRAMES.len() - 1;
 /// Three falls: enough to catch the eye without becoming a fidget. A menu bar
 /// item that moves forever is an irritant, and it keeps the CPU awake for nothing.
 const CYCLES: usize = 3;
-const FRAME_MS: u64 = 55;
-/// A beat on the landed frame before the wedge lifts back up for the second fall,
-/// so the two reads as two arrivals rather than one stutter.
-const HOLD_MS: u64 = 260;
+/// Twelve frames at this interval is about half a second of fall — slow enough to
+/// follow, quick enough not to be a performance.
+const FALL_MS: u64 = 42;
+/// The climb back is not the message, it only keeps the loop from cutting. So it
+/// runs at double speed and every other frame: present enough that the eye tracks
+/// it, brief enough that it never competes with the fall.
+const RISE_MS: u64 = 24;
+const RISE_STEP: usize = 2;
 
 /// Whether anything is pending, plus a generation counter that lets a newer call
 /// retire an animation still in flight — otherwise a burst of arrivals would leave
@@ -116,24 +128,32 @@ pub fn apply(app: &AppHandle, pending: bool) {
 /// Play the drop, then leave the wedge in the box. Bails the moment a newer call
 /// bumps the generation, so the last caller always owns the final frame.
 async fn fall(app: AppHandle, generation: u64) {
-    let current = || {
+    let live = || {
         app.try_state::<State>()
-            .map(|s| s.generation.load(Ordering::SeqCst))
+            .is_some_and(|s| s.generation.load(Ordering::SeqCst) == generation)
     };
     for cycle in 0..CYCLES {
         for frame in 0..FRAMES.len() {
-            if current() != Some(generation) {
+            if !live() {
                 return;
             }
             set_frame(&app, frame);
-            tokio::time::sleep(Duration::from_millis(FRAME_MS)).await;
+            tokio::time::sleep(Duration::from_millis(FALL_MS)).await;
         }
-        // Rest on the floor between falls, and after the last one leave it there.
+        // Climb back for the next fall. Without this the wedge would teleport from
+        // the floor to the top between cycles, and a jump cut in a 36px glyph does
+        // not read as a repeat — it reads as a glitch.
         if cycle + 1 < CYCLES {
-            tokio::time::sleep(Duration::from_millis(HOLD_MS)).await;
+            for frame in (0..FRAMES.len()).rev().step_by(RISE_STEP) {
+                if !live() {
+                    return;
+                }
+                set_frame(&app, frame);
+                tokio::time::sleep(Duration::from_millis(RISE_MS)).await;
+            }
         }
     }
-    if current() == Some(generation) {
+    if live() {
         set_frame(&app, LANDED);
     }
 }

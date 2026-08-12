@@ -7,6 +7,17 @@
 //! simply errors and we drop it: the daemon already logged the offer, so the
 //! notification is pure convenience, never the system of record.
 //!
+//! **None of this reaches the screen on macOS 26.** `notify-rust` goes through
+//! `mac-notification-sys`, which posts via `NSUserNotificationCenter` — the API
+//! Apple deprecated in 10.14 and that no longer delivers on 26. Verified on
+//! 26.5.1: `set_application` succeeds, `show()` reports no error, and nothing is
+//! delivered or even registered in `com.apple.ncprefs`. The GUI is in the same
+//! boat, since Tauri's notification plugin sits on the same crate. Getting these
+//! back means `UNUserNotificationCenter`, which needs a signed bundle asking for
+//! authorization — something a CLI daemon cannot do at all, and the GUI can only
+//! do from an installed .app, never under `tauri dev`. Linux and Windows are
+//! unaffected.
+//!
 //! The strings here are Italian while the rest of the CLI prints English, and
 //! that is deliberate. Everything else this binary writes goes to a terminal
 //! someone opened on purpose; these land in the notification centre of a desktop,

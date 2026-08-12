@@ -16,8 +16,13 @@ Frames go into ../attention:
 
 Frame 0 is the resting state and the last frame is the landed one, which is what
 the tray holds for as long as anything is pending; the frames between them are
-only played on the way in. The fall accelerates (dy scales with t squared) so it
-reads as a drop rather than a slide.
+only played on the way in.
+
+The travel is **linear**. An ease-in looks right on paper and wrong here: over so
+few frames and so little distance — 32 units of 100, about 11px once the menu bar
+has scaled it — the slow part wastes frames where nothing visibly moves and the
+fast part lands in jumps you can count. Even steps read as motion; uneven ones
+read as stutter.
 
 Needs `rsvg-convert` (brew install librsvg).
 
@@ -30,7 +35,7 @@ HERE = pathlib.Path(__file__).resolve().parent
 OUT = HERE.parent / "attention"
 
 ORANGE, CREAM = "#F97316", "#faf8f6"
-FRAMES = 8
+FRAMES = 12
 # How far the wedge travels, in the mark's own 100-unit box. At +32 its base sits
 # just inside the box's mouth and its tip clears the inner floor at y=74.
 DROP = 32
@@ -69,8 +74,7 @@ def render(text, name, px):
 def main():
     OUT.mkdir(exist_ok=True)
     for i in range(FRAMES):
-        t = i / (FRAMES - 1)
-        dy = round(DROP * t * t, 3)
+        dy = round(DROP * i / (FRAMES - 1), 3)
         render(svg(dy, **TRAY), f"tray-{i}", 36)
         render(svg(dy, **APP), f"app-{i}", 64)
     print(f"scritti {FRAMES * 2} fotogrammi in {OUT}")

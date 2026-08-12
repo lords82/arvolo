@@ -59,10 +59,13 @@ sits above, still in the air.
 | `tray-N.png` | 36×36, black on alpha | the macOS menu bar |
 | `app-N.png` | 64×64, full-bleed colour | the Windows and Linux tray |
 
-Frame 0 is the resting state and frame 7 is the landed one, which the tray holds
+Frame 0 is the resting state and frame 11 is the landed one, which the tray holds
 for as long as anything is pending; the frames between are only played on the way
-in. The fall accelerates — `dy` scales with `t` squared — so it reads as a drop
-rather than a slide. `tray-0.png` is byte-identical to `tray.png` on purpose: if
+in. The travel is **linear**. An ease-in looked right on paper and wrong on screen:
+over twelve frames and 32 units of 100 — about 11px once the menu bar has scaled
+it — the slow part wastes frames where nothing visibly moves and the fast part
+lands in jumps you can count. Even steps read as motion, uneven ones as stutter.
+`tray-0.png` is byte-identical to `tray.png` on purpose: if
 the resting frame were framed even slightly differently, turning attention on and
 off would visibly resize the mark in the menu bar.
 
