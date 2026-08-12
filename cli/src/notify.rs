@@ -6,16 +6,22 @@
 //! `notify-rust`. On a headless host (no session bus / no display) `show()`
 //! simply errors and we drop it: the daemon already logged the offer, so the
 //! notification is pure convenience, never the system of record.
+//!
+//! The strings here are Italian while the rest of the CLI prints English, and
+//! that is deliberate. Everything else this binary writes goes to a terminal
+//! someone opened on purpose; these land in the notification centre of a desktop,
+//! next to the GUI's own — which are Italian — and often for someone who never
+//! opened a terminal at all. Same surface, same language.
 
 /// Notify the user that `who` is offering `name` (`size` already humanized) and
 /// it's waiting for approval. Runs the (blocking) platform call off the async
 /// runtime; failures are ignored.
 pub fn offer_awaiting(name: &str, who: &str, size: &str) {
     show(
-        "Arvolo — incoming file",
+        "Arvolo — file in arrivo",
         // No "run `arvolo accept`": this fires only when no front-end is attached,
         // but the user may still be about to open the app rather than a terminal.
-        format!("{who} wants to send you {name} ({size}). It is waiting for you."),
+        format!("{who} vuole inviarti “{name}” ({size}). È in attesa di una risposta."),
     );
 }
 
@@ -23,8 +29,8 @@ pub fn offer_awaiting(name: &str, who: &str, size: &str) {
 /// no approval needed, but still surfaced so they know it's happening.
 pub fn auto_downloading(name: &str, who: &str, size: &str) {
     show(
-        "Arvolo — downloading",
-        format!("Auto-downloading {name} ({size}) from trusted {who}."),
+        "Arvolo — sto scaricando",
+        format!("“{name}” ({size}) da {who}, che è un contatto fidato."),
     );
 }
 
