@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
@@ -49,6 +50,14 @@ pub struct Daemon {
     /// restored from disk would describe a daemon run that is over, and "synced 2
     /// minutes ago" is only worth showing when it is this process that did it.
     pub sync_state: Arc<Mutex<SyncState>>,
+    /// How many clients are holding an event subscription open right now.
+    ///
+    /// The daemon raises desktop notifications only when nobody is attached. Its
+    /// own `notify` module says as much — it exists because a headless daemon has
+    /// no front-end to prompt — but until this counter the condition was never
+    /// checked, so a running GUI got two notifications for every offer: one from
+    /// here and one of its own.
+    pub front_ends: Arc<AtomicUsize>,
 }
 
 /// The outcome of the most recent sync round, for [`Request::SyncStatus`].
@@ -68,6 +77,7 @@ impl Daemon {
         relay: Option<String>,
         download_dir: PathBuf,
         pending: Arc<Mutex<HashMap<String, OfferDto>>>,
+        front_ends: Arc<AtomicUsize>,
     ) -> Self {
         Daemon {
             manager,
@@ -79,6 +89,7 @@ impl Daemon {
             side_events: broadcast::channel(64).0,
             pairings: Sessions::default(),
             sync_state: Arc::new(Mutex::new(SyncState::default())),
+            front_ends,
         }
     }
 }
@@ -998,12 +1009,15 @@ fn spawn_temp_cleanup(
 /// *side* channel does not: it only means nobody currently holds a sender, which
 /// is the normal state between pairings.
 async fn stream_events(daemon: &Daemon, write: &mut (impl AsyncWrite + Unpin)) {
+    // Held for the life of the subscription: every exit from this function runs
+    // the drop, including the `return`s below, so the count cannot leak.
+    let _attached = FrontEnd::new(daemon.front_ends.clone());
     let mut engine = daemon.manager.subscribe();
     let mut side = daemon.side_events.subscribe();
     loop {
         let ev = tokio::select! {
             e = engine.recv() => match e {
-                Ok(ev) => EventDto::from(&ev),
+                Ok(ev) => stamp_auto(EventDto::from(&ev)),
                 Err(RecvError::Lagged(_)) => continue,
                 Err(RecvError::Closed) => return,
             },
@@ -1022,6 +1036,32 @@ async fn stream_events(daemon: &Daemon, write: &mut (impl AsyncWrite + Unpin)) {
         if write_msg(write, &ServerMessage::Event(ev)).await.is_err() {
             return; // client hung up
         }
+    }
+}
+
+/// Mark an offer that the daemon is about to auto-accept, so a front-end can say
+/// "arriving" instead of asking a question with only one answer. Trust is read
+/// from the same address book the auto-accept decision uses, so the two agree.
+fn stamp_auto(mut ev: EventDto) -> EventDto {
+    if let EventDto::OfferReceived { from, auto, .. } = &mut ev {
+        *auto = crate::book::sender_status(from).trusted;
+    }
+    ev
+}
+
+/// Counts one attached front-end for as long as it is alive.
+struct FrontEnd(Arc<AtomicUsize>);
+
+impl FrontEnd {
+    fn new(count: Arc<AtomicUsize>) -> Self {
+        count.fetch_add(1, Ordering::SeqCst);
+        Self(count)
+    }
+}
+
+impl Drop for FrontEnd {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
     }
 }
 

@@ -232,10 +232,13 @@ async fn event_pump(app: AppHandle) {
         // stream, which drops us to the outer reconnect loop.
         while let Ok(Some(ev)) = stream.next().await {
             if let EventDto::OfferReceived {
-                name, sender_name, ..
+                name,
+                sender_name,
+                auto,
+                ..
             } = &ev
             {
-                notify_offer(&app, name, sender_name);
+                notify_arrival(&app, name, sender_name, *auto);
             }
             // The webview first: the tray state costs a round-trip to the daemon,
             // and the UI should not wait behind it.
@@ -265,18 +268,35 @@ fn moves_the_count(ev: &EventDto) -> bool {
     )
 }
 
-/// Fire a native notification for an incoming offer — so arrivals surface even
-/// when the window is in the background or closed to the tray.
-fn notify_offer(app: &AppHandle, name: &str, sender_name: &str) {
+/// Fire a native notification for an incoming file — so arrivals surface even when
+/// the window is in the background or closed to the tray.
+///
+/// While this front-end is attached the daemon stays quiet and leaves the telling
+/// to us, so this has to cover both kinds of arrival. `auto` separates them: a
+/// trusted sender's file is already downloading, and asking the user to approve it
+/// would be offering a choice that has already been made. Only the other kind is a
+/// question, and only that kind drops the wedge in the tray.
+///
+/// On macOS this is attributed to Arvolo only from the installed bundle. Under
+/// `tauri dev` the notification plugin claims `com.apple.Terminal` instead, so a
+/// dev run's notifications land in Terminal's bucket — or nowhere, if Terminal has
+/// none granted. That is the plugin's doing, not a bug here.
+fn notify_arrival(app: &AppHandle, name: &str, sender_name: &str, auto: bool) {
     let who = if sender_name.trim().is_empty() {
         "Qualcuno".to_string()
     } else {
         sender_name.to_string()
     };
-    let _ = app
-        .notification()
-        .builder()
-        .title("Arvolo — file in arrivo")
-        .body(format!("{who} vuole inviarti “{name}”"))
-        .show();
+    let (title, body) = if auto {
+        (
+            "Arvolo — sto scaricando",
+            format!("“{name}” da {who}, che è un contatto fidato"),
+        )
+    } else {
+        (
+            "Arvolo — file in arrivo",
+            format!("{who} vuole inviarti “{name}”"),
+        )
+    };
+    let _ = app.notification().builder().title(title).body(body).show();
 }

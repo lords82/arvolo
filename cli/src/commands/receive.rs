@@ -290,7 +290,7 @@ pub(crate) async fn listen_attached(
             _ = cancel.cancelled() => break,
             ev = events.next() => {
                 match ev {
-                    Ok(Some(EventDto::OfferReceived { id, from, name, size, note, sender_name })) => {
+                    Ok(Some(EventDto::OfferReceived { id, from, name, size, note, sender_name, .. })) => {
                         handle_attached_offer(
                             &mut client,
                             OfferDto { id, from, name, size, note, sender_name },

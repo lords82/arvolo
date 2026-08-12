@@ -675,6 +675,18 @@ pub enum EventDto {
         note: String,
         #[serde(default)]
         sender_name: String,
+        /// Whether the daemon is auto-downloading this one because the sender is
+        /// trusted, so it needs no decision. A front-end must announce those as an
+        /// arrival, not as a request, or it tells the user to choose something that
+        /// has already been chosen.
+        ///
+        /// The engine cannot know: trust lives in the address book, above it. So
+        /// `From<&ManagerEvent>` leaves this false and the daemon fills it in when
+        /// it fans the event out — see `stream_events`. `serde(default)` keeps a
+        /// client talking to an older daemon working, and false is the safe way to
+        /// be wrong: the worst case is a prompt for something already downloading.
+        #[serde(default)]
+        auto: bool,
     },
     Started {
         id: u64,
@@ -823,6 +835,9 @@ impl From<&ManagerEvent> for EventDto {
                 size: *size,
                 note: note.clone(),
                 sender_name: sender_name.clone(),
+                // Left false on purpose: trust is an address-book fact the engine
+                // has no access to. The daemon overwrites it on the way out.
+                auto: false,
             },
             ManagerEvent::Started {
                 id,

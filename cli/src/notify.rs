@@ -13,7 +13,9 @@
 pub fn offer_awaiting(name: &str, who: &str, size: &str) {
     show(
         "Arvolo — incoming file",
-        format!("{who} wants to send you {name} ({size}).\nApprove with `arvolo accept`."),
+        // No "run `arvolo accept`": this fires only when no front-end is attached,
+        // but the user may still be about to open the app rather than a terminal.
+        format!("{who} wants to send you {name} ({size}). It is waiting for you."),
     );
 }
 
@@ -26,10 +28,35 @@ pub fn auto_downloading(name: &str, who: &str, size: &str) {
     );
 }
 
+/// The installed app bundle. macOS attributes a notification to a bundle, not to
+/// a process, and a bare CLI binary has none — so without this the daemon's
+/// notifications are posted by whatever `mac-notification-sys` falls back to,
+/// which is `com.apple.Finder`. They then arrive as Finder, or not at all if the
+/// user has Finder's notifications turned off, which is why they looked missing.
+#[cfg(target_os = "macos")]
+const BUNDLE_ID: &str = "it.termox.arvolo";
+
+/// Claim the bundle once per process. Fails when the app is not installed — a
+/// daemon running from a plain `cargo build` on a machine without Arvolo.app —
+/// and then we are no worse off than before.
+#[cfg(target_os = "macos")]
+fn claim_bundle() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        if let Err(e) = notify_rust::set_application(BUNDLE_ID) {
+            tracing::debug!("notifications will not be attributed to Arvolo: {e}");
+        }
+    });
+}
+
 /// Best-effort desktop notification, off the async runtime; failures ignored.
 fn show(summary: &str, body: String) {
     let summary = summary.to_string();
     tokio::task::spawn_blocking(move || {
+        #[cfg(target_os = "macos")]
+        claim_bundle();
+        // `appname` is a no-op on macOS — there the application is whatever
+        // `set_application` claimed — but it is what names the sender on Linux.
         let _ = notify_rust::Notification::new()
             .summary(&summary)
             .body(&body)

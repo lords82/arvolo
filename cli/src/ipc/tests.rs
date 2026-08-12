@@ -13,6 +13,7 @@
 #![allow(clippy::await_holding_lock)]
 
 use std::collections::HashMap;
+use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
 
 use arvolo_core::crypto::Identity;
@@ -41,6 +42,7 @@ async fn spawn_test_daemon() -> (CancellationToken, tempfile::TempDir) {
         Some("https://relay.test".into()),
         dir.path().join("downloads"),
         Arc::new(Mutex::new(HashMap::new())),
+        Arc::new(AtomicUsize::new(0)),
     );
     let stop = shutdown.clone();
     tokio::spawn(async move {
@@ -292,6 +294,7 @@ async fn revoking_a_deposit_the_engine_made_goes_through_the_engine() {
         Some("https://relay.test".into()),
         dir.path().join("downloads"),
         Arc::new(Mutex::new(HashMap::new())),
+        Arc::new(AtomicUsize::new(0)),
     );
     let stop = shutdown.clone();
     tokio::spawn(async move {
