@@ -44,9 +44,9 @@ const FRAMES: [&[u8]; 8] = [
 
 const RESTING: usize = 0;
 const LANDED: usize = FRAMES.len() - 1;
-/// Two falls is enough to catch the eye without becoming a fidget. A menu bar
+/// Three falls: enough to catch the eye without becoming a fidget. A menu bar
 /// item that moves forever is an irritant, and it keeps the CPU awake for nothing.
-const CYCLES: usize = 2;
+const CYCLES: usize = 3;
 const FRAME_MS: u64 = 55;
 /// A beat on the landed frame before the wedge lifts back up for the second fall,
 /// so the two reads as two arrivals rather than one stutter.
