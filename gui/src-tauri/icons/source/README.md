@@ -59,12 +59,19 @@ sits above, still in the air.
 | `tray-N.png` | 36×36, black on alpha | the macOS menu bar |
 | `app-N.png` | 64×64, full-bleed colour | the Windows and Linux tray |
 
-Frame 0 is the resting state and frame 11 is the landed one, which the tray holds
+Frame 0 is the resting state and frame 15 is the landed one, which the tray holds
 for as long as anything is pending; the frames between are only played on the way
-in. The travel is **linear**. An ease-in looked right on paper and wrong on screen:
-over twelve frames and 32 units of 100 — about 11px once the menu bar has scaled
-it — the slow part wastes frames where nothing visibly moves and the fast part
-lands in jumps you can count. Even steps read as motion, uneven ones as stutter.
+in.
+
+The sixteen positions are **evenly spaced** — they are only the ruler. The shape of
+the movement is not in them: `FALL` in `src/attention.rs` is a schedule of
+(frame, hold) pairs, so the curve can be retuned without regenerating a bitmap.
+Today it is an ease-out, quick off the mark and slowing into the box, chosen by
+eye against a linear ramp, an ease-in and an ease-in-with-bounce played side by
+side at this size and timing. Physics would argue for the ease-in — things fall
+faster, not slower — but across 32 units of 100, about 11px once the menu bar has
+scaled it, the accelerating version reads as a stutter ending in a jump.
+
 `tray-0.png` is byte-identical to `tray.png` on purpose: if
 the resting frame were framed even slightly differently, turning attention on and
 off would visibly resize the mark in the menu bar.

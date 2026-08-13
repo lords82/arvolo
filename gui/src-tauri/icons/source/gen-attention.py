@@ -18,11 +18,10 @@ Frame 0 is the resting state and the last frame is the landed one, which is what
 the tray holds for as long as anything is pending; the frames between them are
 only played on the way in.
 
-The travel is **linear**. An ease-in looks right on paper and wrong here: over so
-few frames and so little distance — 32 units of 100, about 11px once the menu bar
-has scaled it — the slow part wastes frames where nothing visibly moves and the
-fast part lands in jumps you can count. Even steps read as motion; uneven ones
-read as stutter.
+The positions here are **evenly spaced** — they are just the ruler. The shape of
+the movement is not baked into them: `attention.rs` holds a schedule that says
+which position to show for how long, so the curve can be retuned without
+regenerating a single bitmap. Today that schedule is an ease-out.
 
 Needs `rsvg-convert` (brew install librsvg).
 
@@ -35,7 +34,7 @@ HERE = pathlib.Path(__file__).resolve().parent
 OUT = HERE.parent / "attention"
 
 ORANGE, CREAM = "#F97316", "#faf8f6"
-FRAMES = 12
+FRAMES = 16
 # How far the wedge travels, in the mark's own 100-unit box. At +32 its base sits
 # just inside the box's mouth and its tip clears the inner floor at y=74.
 DROP = 32

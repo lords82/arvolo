@@ -20,7 +20,7 @@ use tauri::{AppHandle, Manager};
 
 /// Frames of the wedge dropping, resting state first.
 #[cfg(target_os = "macos")]
-const FRAMES: [&[u8]; 12] = [
+const FRAMES: [&[u8]; 16] = [
     include_bytes!("../icons/attention/tray-0.png"),
     include_bytes!("../icons/attention/tray-1.png"),
     include_bytes!("../icons/attention/tray-2.png"),
@@ -33,9 +33,13 @@ const FRAMES: [&[u8]; 12] = [
     include_bytes!("../icons/attention/tray-9.png"),
     include_bytes!("../icons/attention/tray-10.png"),
     include_bytes!("../icons/attention/tray-11.png"),
+    include_bytes!("../icons/attention/tray-12.png"),
+    include_bytes!("../icons/attention/tray-13.png"),
+    include_bytes!("../icons/attention/tray-14.png"),
+    include_bytes!("../icons/attention/tray-15.png"),
 ];
 #[cfg(not(target_os = "macos"))]
-const FRAMES: [&[u8]; 12] = [
+const FRAMES: [&[u8]; 16] = [
     include_bytes!("../icons/attention/app-0.png"),
     include_bytes!("../icons/attention/app-1.png"),
     include_bytes!("../icons/attention/app-2.png"),
@@ -48,6 +52,10 @@ const FRAMES: [&[u8]; 12] = [
     include_bytes!("../icons/attention/app-9.png"),
     include_bytes!("../icons/attention/app-10.png"),
     include_bytes!("../icons/attention/app-11.png"),
+    include_bytes!("../icons/attention/app-12.png"),
+    include_bytes!("../icons/attention/app-13.png"),
+    include_bytes!("../icons/attention/app-14.png"),
+    include_bytes!("../icons/attention/app-15.png"),
 ];
 
 const RESTING: usize = 0;
@@ -55,14 +63,38 @@ const LANDED: usize = FRAMES.len() - 1;
 /// Three falls: enough to catch the eye without becoming a fidget. A menu bar
 /// item that moves forever is an irritant, and it keeps the CPU awake for nothing.
 const CYCLES: usize = 3;
-/// Twelve frames at this interval is about half a second of fall — slow enough to
-/// follow, quick enough not to be a performance.
-const FALL_MS: u64 = 42;
-/// The climb back is not the message, it only keeps the loop from cutting. So it
-/// runs at double speed and every other frame: present enough that the eye tracks
-/// it, brief enough that it never competes with the fall.
-const RISE_MS: u64 = 24;
-const RISE_STEP: usize = 2;
+
+/// The fall, as (frame, how long to hold it). The frames are evenly spaced, so the
+/// shape of the movement lives here rather than in the bitmaps — which is why
+/// retuning it costs nothing.
+///
+/// This is an **ease-out**: quick off the mark, slowing into the box. Picked by
+/// eye against a linear ramp, an ease-in and an ease-in-with-bounce, all played
+/// side by side at this exact size and timing. Physics would argue for the
+/// ease-in — things fall faster, not slower — but over 32 units of 100, about 11px
+/// once the menu bar has scaled it, the accelerating version reads as a stutter
+/// that ends in a jump, and this one reads as a movement that arrives. Consecutive
+/// repeats are collapsed into a single longer hold, so the tail is one 108ms rest
+/// on the floor rather than three redundant repaints.
+const FALL: [(usize, u64); 11] = [
+    (0, 36),
+    (2, 36),
+    (4, 36),
+    (6, 36),
+    (8, 36),
+    (9, 36),
+    (11, 36),
+    (12, 36),
+    (13, 36),
+    (14, 72),
+    (15, 108),
+];
+
+/// A full second on the floor before the wedge goes back up and falls again. The
+/// stillness is what makes the repeat legible: without it the reset to the top is
+/// a jump cut, and a jump cut in a 36px glyph reads as a glitch rather than as
+/// "here it comes again".
+const PAUSE_MS: u64 = 1000;
 
 /// Whether anything is pending, plus a generation counter that lets a newer call
 /// retire an animation still in flight — otherwise a burst of arrivals would leave
@@ -133,24 +165,18 @@ async fn fall(app: AppHandle, generation: u64) {
             .is_some_and(|s| s.generation.load(Ordering::SeqCst) == generation)
     };
     for cycle in 0..CYCLES {
-        for frame in 0..FRAMES.len() {
+        for (frame, hold) in FALL {
             if !live() {
                 return;
             }
             set_frame(&app, frame);
-            tokio::time::sleep(Duration::from_millis(FALL_MS)).await;
+            tokio::time::sleep(Duration::from_millis(hold)).await;
         }
-        // Climb back for the next fall. Without this the wedge would teleport from
-        // the floor to the top between cycles, and a jump cut in a 36px glyph does
-        // not read as a repeat — it reads as a glitch.
         if cycle + 1 < CYCLES {
-            for frame in (0..FRAMES.len()).rev().step_by(RISE_STEP) {
-                if !live() {
-                    return;
-                }
-                set_frame(&app, frame);
-                tokio::time::sleep(Duration::from_millis(RISE_MS)).await;
+            if !live() {
+                return;
             }
+            tokio::time::sleep(Duration::from_millis(PAUSE_MS)).await;
         }
     }
     if live() {
