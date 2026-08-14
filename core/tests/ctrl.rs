@@ -88,7 +88,7 @@ async fn sender_reports_undelivered_tail_on_drop() {
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     drop(control);
 
-    let undelivered =
+    let (_peer, undelivered) =
         tokio::time::timeout(std::time::Duration::from_secs(30), sender.receiver_gone())
             .await
             .expect("receiver_gone timed out");

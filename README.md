@@ -303,8 +303,9 @@ Everything below is **optional** (defaults shown).
 | `ARVOLO_SEED` | `1` (on) | Keep seeding a completed file into the swarm. Set `0`/`false`/`no`/`off` to opt out. |
 | `ARVOLO_SEED_AFTER` | `0` (off) | Seconds to keep backfilling the relay after a transfer completes. |
 | `ARVOLO_SHARE_DAYS` | unset | Stop a share (ticket, code, or the seeding a finished download becomes) after N days. Unset = it lasts until you stop it by hand, so every file you receive leaves a share that comes back at each restart. |
-| `ARVOLO_SHARE_COPIES` | unset | The same bound, counted in copies taken. Either or both may be set. |
-| `ARVOLO_SWARM` | on | BitTorrent-style swarm for shared `arvc…` tickets. Set `off`/`0`/`relay-only` to disable (privacy escape hatch). |
+| `ARVOLO_SHARE_COPIES` | unset | The same bound, counted in copies taken — one per distinct receiving node that fetched the whole file. Either or both may be set. |
+| `ARVOLO_SWARM` | on | BitTorrent-style swarm for shared `arvc…` tickets. Set `off`/`0`/`relay-only` to disable (privacy escape hatch). Implied off when `ARVOLO_P2P=off`. |
+| `ARVOLO_SWARM_ANNOUNCE_SECS` | `20` | How often a swarm member re-publishes its piece bitfield to the tracker — hence also how long it takes one peer to learn what another holds. Clamped to 1–30 (the relay drops a member after 60s). Lower it only for tests: at the default, two peers on a fast link can finish a small file before either hears about the other. |
 | `ARVOLO_CONCURRENCY` | `4` | Parallel chunk fetches (clamped to 1–16). |
 | `ARVOLO_IPV4_ONLY` | auto | `1` forces IPv4-only (auto-detected when there's no IPv6 route). |
 | `ARVOLO_CC` | `bbr` | QUIC congestion controller. `cubic` restores quinn's default — the way back if BBR misbehaves on a path we haven't measured. |

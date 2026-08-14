@@ -235,7 +235,13 @@ pub async fn resume_send(
 }
 
 /// The byte figure to report, from the two things the sender knows: `sent`, the
-/// chunk bytes handed to QUIC, and `acked`, the chunks the receiver confirmed.
+/// chunk bytes handed to QUIC, and `acked`, the chunks a receiver confirmed.
+///
+/// Both are already "the furthest-along receiver" by their own measure, which for a
+/// shared ticket may be two different receivers — so the result is the best anyone
+/// is doing, not a single receiver's position. That is the only reading of one
+/// progress number that stays meaningful when a ticket is served to several people
+/// at once; per-receiver progress would need per-receiver rows to show it in.
 ///
 /// Take whichever is further along. Mid-transfer that is the wire count (acks
 /// land one whole chunk at a time, and the first only after several are in
@@ -268,9 +274,18 @@ impl SendSession {
         let chunk_size = self.sender.chunk_size() as u64;
         let mut last_progress = 0u64;
         let mut last_peers = 0usize;
-        // Delivery is concluded from the acks, so report it exactly once even
-        // though both the ack count and a later disconnect can prove it.
-        let mut delivered_reported = false;
+        // Delivery is concluded from the acks, and both the ack count and a later
+        // disconnect can prove the same one — so remember *which receivers* have
+        // already been reported, and report each of them once.
+        //
+        // This was a single bool, which is right for one receiver and wrong for a
+        // shared ticket in both directions: the second person to take the file was
+        // never counted (so `copies_served` stuck at one and a `--share-copies`
+        // limit could never be reached), while the ack count it tested was a union
+        // across receivers, so two of them taking complementary halves reported a
+        // delivery neither had.
+        let mut reported: std::collections::HashSet<iroh::EndpointId> =
+            std::collections::HashSet::new();
         let mut ticker = tokio::time::interval(std::time::Duration::from_millis(500));
         loop {
             tokio::select! {
@@ -288,15 +303,17 @@ impl SendSession {
                         last_progress = transferred;
                         on(SendEvent::Progress { transferred, total: self.total_size });
                     }
-                    // Every chunk acked ⇒ they hold the whole file. This — not the
-                    // receiver disconnecting — is what "delivered" means. Waiting for
-                    // the disconnect instead left a finished send Active indefinitely
-                    // whenever the receiver stayed connected (it keepalives, so even
-                    // the idle timeout never fires), which in turn made the manager's
-                    // delivery loop keep re-offering a file that had already arrived.
-                    if !delivered_reported && self.chunks > 0 && d >= self.chunks {
-                        delivered_reported = true;
-                        on(SendEvent::Delivered);
+                    // A receiver that has acked every chunk holds the whole file.
+                    // This — not the receiver disconnecting — is what "delivered"
+                    // means. Waiting for the disconnect instead left a finished send
+                    // Active indefinitely whenever the receiver stayed connected (it
+                    // keepalives, so even the idle timeout never fires), which in
+                    // turn made the manager's delivery loop keep re-offering a file
+                    // that had already arrived.
+                    for peer in self.sender.completed_peers() {
+                        if reported.insert(peer) {
+                            on(SendEvent::Delivered);
+                        }
                     }
                     let p = self.sender.active_peers();
                     if p != last_peers {
@@ -307,13 +324,12 @@ impl SendSession {
                 _ = self.sender.receiver_connected() => {
                     on(SendEvent::ReceiverConnected);
                 }
-                undelivered = self.sender.receiver_gone() => {
+                (peer, undelivered) = self.sender.receiver_gone() => {
                     // Empty tail ⇒ that receiver fetched the whole file. Still the
                     // authoritative signal for an empty (zero-chunk) payload, which
                     // the ack count above can never satisfy.
                     if undelivered.is_empty() {
-                        if !delivered_reported {
-                            delivered_reported = true;
+                        if reported.insert(peer) {
                             on(SendEvent::Delivered);
                         }
                         continue;

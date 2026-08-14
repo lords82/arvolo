@@ -161,6 +161,28 @@ pub(crate) fn seeding_enabled() -> bool {
 /// `SWARM_PEER_TTL_SECS`) and refreshes its peer list.
 const SWARM_ANNOUNCE_SECS: u64 = 20;
 
+/// The announce interval, with `ARVOLO_SWARM_ANNOUNCE_SECS` allowed to shorten it.
+///
+/// This interval is also how long it takes a peer to *learn* what another peer has:
+/// a member announces its bitfield on the same timer. Twenty seconds is right for a
+/// real transfer, where it is noise against the download, and wrong for anything
+/// that finishes faster than one tick — two peers pulling a file over loopback both
+/// complete while still believing the other holds nothing, and never trade a piece.
+/// That is a property of the interval, not of the swarm, so the interval is
+/// adjustable and the tests that exercise peer-to-peer exchange turn it down.
+///
+/// Clamped to 1..=30s: the relay expires a member after `SWARM_PEER_TTL_SECS` (60),
+/// so an interval anywhere near it would let a live peer drop out of the tracker
+/// between announces.
+fn swarm_announce_interval() -> std::time::Duration {
+    let secs = std::env::var("ARVOLO_SWARM_ANNOUNCE_SECS")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(SWARM_ANNOUNCE_SECS)
+        .clamp(1, 30);
+    std::time::Duration::from_secs(secs)
+}
+
 /// Whether to join the peer swarm for shared tickets. On by default. Set
 /// `ARVOLO_SWARM=off` (or `relay-only`) for the privacy escape hatch: don't
 /// announce our address to the tracker and don't seed to peers — fetch only from
@@ -211,7 +233,6 @@ pub(crate) fn spawn_swarm_coordinator(
     peers: SwarmPeers,
     cancel: CancellationToken,
 ) {
-    use std::time::Duration;
     let url = format!(
         "{}/v1/swarm/{}/announce",
         relay_http.trim_end_matches('/'),
@@ -254,7 +275,7 @@ pub(crate) fn spawn_swarm_coordinator(
             }
             tokio::select! {
                 _ = cancel.cancelled() => break,
-                _ = tokio::time::sleep(Duration::from_secs(SWARM_ANNOUNCE_SECS)) => {}
+                _ = tokio::time::sleep(swarm_announce_interval()) => {}
             }
         }
         // Best-effort deregister.

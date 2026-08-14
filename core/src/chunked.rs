@@ -17,6 +17,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::hash::Hash;
@@ -269,18 +270,34 @@ impl Drop for PeerGuard {
 /// peer, so it leads the truth — but only by what QUIC flow control allows to be
 /// in flight (a stream receive window per stream, the connection send window
 /// overall: single-digit MB), against a 64 MiB blind spot. It is a *progress*
-/// signal only: what counts as delivered stays the acks, and callers must clamp
-/// it, since a re-fetched piece (a failed fetch, an endgame duplicate, a second
-/// peer on a shared ticket) sends the same bytes twice.
+/// signal only: what counts as delivered stays the acks, and callers must still
+/// clamp it, since a re-fetched piece (a failed fetch, an endgame duplicate)
+/// sends the same bytes twice.
+///
+/// Counted **per receiver**. A shared ticket is served to several at once, and one
+/// running total across all of them answers a question nobody asked: it reaches
+/// the payload size when the *sum* of everyone's downloads does, which with two
+/// receivers is halfway through the job. Per peer, [`SentBytes::best`] is the
+/// furthest-along receiver — the only reading of "how far along is this send" that
+/// is true with one receiver and still true with five.
 #[derive(Clone, Default)]
-pub(crate) struct SentBytes(Arc<std::sync::atomic::AtomicU64>);
+pub(crate) struct SentBytes(Arc<Mutex<HashMap<EndpointId, Arc<AtomicU64>>>>);
 
 impl SentBytes {
-    fn add(&self, n: u64) {
-        self.0.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+    /// This peer's counter, taken once per connection so the write loop pays an
+    /// atomic add and not a map lookup.
+    fn counter(&self, peer: EndpointId) -> Arc<AtomicU64> {
+        self.0.lock().unwrap().entry(peer).or_default().clone()
     }
-    fn get(&self) -> u64 {
-        self.0.load(std::sync::atomic::Ordering::Relaxed)
+    /// Bytes taken by whichever receiver has taken the most.
+    fn best(&self) -> u64 {
+        self.0
+            .lock()
+            .unwrap()
+            .values()
+            .map(|c| c.load(Ordering::Relaxed))
+            .max()
+            .unwrap_or(0)
     }
 }
 
@@ -318,6 +335,9 @@ impl ProtocolHandler for ChunkServer {
         let peer = conn.remote_id();
         self.peers.enter(peer);
         let _guard = PeerGuard(self.peers.clone(), peer);
+        // Taken once for the connection: the write loop below then costs one atomic
+        // add per flow-control window, exactly as it did when the counter was global.
+        let sent = self.sent.counter(peer);
         // Serve one request per accepted bi-stream; a receiver may open several.
         while let Ok((mut send, mut recv)) = conn.accept_bi().await {
             let Some(req) = read_frame::<ChunkReq>(&mut recv).await else {
@@ -350,7 +370,7 @@ impl ProtocolHandler for ChunkServer {
                     while !body.is_empty() {
                         let Ok(n) = send.write(body).await else { break };
                         body = &body[n..];
-                        self.sent.add(n as u64);
+                        sent.fetch_add(n as u64, Ordering::Relaxed);
                     }
                 }
                 None => {
@@ -450,12 +470,30 @@ async fn open_chunk_stream(
 
 // ---- sender ---------------------------------------------------------------
 
+/// Which chunks each receiver has acked, keyed by receiver.
+///
+/// One shared set across receivers answers "which chunks has *somebody* got",
+/// which is not the question anyone asks of it. Two receivers taking complementary
+/// halves would fill a shared set completely while neither of them held the file —
+/// and that set is what decides "delivered", what a departing receiver's backfill
+/// tail is computed from, and (through `copies_served`) when a `--share-copies`
+/// limit stops the share. All three were wrong in exactly that case: a copy counted
+/// that nobody received, a tail not backfilled because someone *else* had it, and a
+/// share cut off mid-transfer with both receivers incomplete.
+///
+/// Entries are never dropped, including when a receiver disconnects: a resumed
+/// receiver must keep the acks it already gave, and "how many distinct receivers
+/// took a copy" cannot be answered by a structure that forgets them. So this grows
+/// with the number of *distinct* receivers a share has ever had — which is the
+/// quantity the share is counting anyway, at a chunk bitset each.
+type DeliveredByPeer = Arc<Mutex<HashMap<EndpointId, HashSet<u32>>>>;
+
 #[derive(Debug, Clone)]
 struct CtrlHandler {
     total: usize,
-    delivered: Arc<Mutex<HashSet<u32>>>,
+    delivered: DeliveredByPeer,
     on_relay: Arc<Mutex<HashSet<u32>>>,
-    gone_tx: mpsc::UnboundedSender<Vec<usize>>,
+    gone_tx: mpsc::UnboundedSender<(EndpointId, Vec<usize>)>,
     /// Signalled once per receiver, when its control channel connects.
     connected_tx: mpsc::UnboundedSender<()>,
 }
@@ -463,6 +501,7 @@ struct CtrlHandler {
 impl ProtocolHandler for CtrlHandler {
     async fn accept(&self, conn: Connection) -> std::result::Result<(), AcceptError> {
         let dbg = std::env::var("ARVOLO_DEBUG").is_ok();
+        let peer = conn.remote_id();
         let Ok((mut send, mut recv)) = conn.accept_bi().await else {
             if dbg {
                 eprintln!("[ctrl] accept_bi failed");
@@ -488,28 +527,43 @@ impl ProtocolHandler for CtrlHandler {
             )
             .await
             {
-                Ok(Some(CtrlMsg::Have(idx))) => {
-                    self.delivered.lock().unwrap().insert(idx);
+                // An ack for a chunk this transfer doesn't have is dropped rather
+                // than recorded. The index comes off the wire from the receiver, and
+                // the size of this set is what "they have the whole file" is decided
+                // on — so without the bound, a receiver that acked a few thousand
+                // invented indices would be counted as a completed copy, and on a
+                // share with a `--share-copies` limit that is enough to close the
+                // share on everybody else.
+                Ok(Some(CtrlMsg::Have(idx))) if (idx as usize) < self.total => {
+                    self.delivered
+                        .lock()
+                        .unwrap()
+                        .entry(peer)
+                        .or_default()
+                        .insert(idx);
                 }
                 Ok(Some(_)) => {}        // Ping/Hello: keepalive
                 Ok(None) => break "eof", // closed cleanly
                 Err(_) => break "idle",  // idle: receiver gone
             }
         };
-        // Receiver gone: report the still-undelivered chunk indices.
-        let delivered = self.delivered.lock().unwrap();
+        // Receiver gone: report the chunks *this* receiver still lacks. What another
+        // receiver happens to hold is no comfort to this one, and it is this one's
+        // tail the relay is about to be asked to keep.
+        let map = self.delivered.lock().unwrap();
+        let mine = map.get(&peer).cloned().unwrap_or_default();
+        drop(map);
         let undelivered: Vec<usize> = (0..self.total)
-            .filter(|i| !delivered.contains(&(*i as u32)))
+            .filter(|i| !mine.contains(&(*i as u32)))
             .collect();
         if dbg {
             eprintln!(
                 "[ctrl] receiver gone ({reason}); delivered={} undelivered={}",
-                delivered.len(),
+                mine.len(),
                 undelivered.len()
             );
         }
-        drop(delivered);
-        let _ = self.gone_tx.send(undelivered);
+        let _ = self.gone_tx.send((peer, undelivered));
         // Acknowledge the clean shutdown. We have read the receiver's stream to EOF,
         // so every `Have` it sent is already counted above; closing now lets its
         // `Control::finish` return at once instead of sitting out its close timeout,
@@ -528,9 +582,9 @@ pub struct ChunkSender {
     total_size: u64,
     key: [u8; crate::crypto::CHUNK_KEY_LEN],
     node_seed: [u8; 32],
-    delivered: Arc<Mutex<HashSet<u32>>>,
+    delivered: DeliveredByPeer,
     on_relay: Arc<Mutex<HashSet<u32>>>,
-    gone_rx: AsyncMutex<mpsc::UnboundedReceiver<Vec<usize>>>,
+    gone_rx: AsyncMutex<mpsc::UnboundedReceiver<(EndpointId, Vec<usize>)>>,
     connected_rx: AsyncMutex<mpsc::UnboundedReceiver<()>>,
     peers: PeerCount,
     sent: SentBytes,
@@ -632,7 +686,7 @@ impl ChunkSender {
         let endpoint =
             bind_endpoint_with_key(relay, crate::node::secret_key_from_seed(&node_seed)).await?;
 
-        let delivered = Arc::new(Mutex::new(HashSet::new()));
+        let delivered: DeliveredByPeer = Arc::new(Mutex::new(HashMap::new()));
         let on_relay = Arc::new(Mutex::new(HashSet::new()));
         let (gone_tx, gone_rx) = mpsc::unbounded_channel();
         let (connected_tx, connected_rx) = mpsc::unbounded_channel();
@@ -692,8 +746,34 @@ impl ChunkSender {
     pub fn key(&self) -> [u8; crate::crypto::CHUNK_KEY_LEN] {
         self.key
     }
+    /// Chunks acked by whichever receiver has acked the most — "how far along is
+    /// the best-served receiver", not "how many distinct chunks left the machine".
     pub fn delivered_count(&self) -> usize {
-        self.delivered.lock().unwrap().len()
+        self.delivered
+            .lock()
+            .unwrap()
+            .values()
+            .map(|s| s.len())
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Receivers that have acked every chunk — one entry per receiver holding a
+    /// complete copy. Empty for a zero-chunk payload, which no ack can ever satisfy
+    /// (the disconnect with an empty tail is what proves that one; see
+    /// [`SendSession::serve`](crate::flow::SendSession::serve)).
+    pub fn completed_peers(&self) -> Vec<EndpointId> {
+        let total = self.chunks.len();
+        if total == 0 {
+            return Vec::new();
+        }
+        self.delivered
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, got)| got.len() >= total)
+            .map(|(peer, _)| *peer)
+            .collect()
     }
 
     /// Chunk bytes pushed out to receivers so far — the fine-grained progress
@@ -701,7 +781,7 @@ impl ChunkSender {
     /// doesn't mean). Sums every receiver and every re-send, so the caller must
     /// clamp it to the payload size.
     pub fn sent_bytes(&self) -> u64 {
-        self.sent.get()
+        self.sent.best()
     }
 
     /// How many distinct peers are currently downloading from this sender.
@@ -717,12 +797,21 @@ impl ChunkSender {
         let _ = rx.recv().await;
     }
 
-    /// Resolves when a connected receiver disconnects, yielding the chunk
-    /// indices not yet delivered (the tail to backfill). Never fires if no
-    /// receiver has connected.
-    pub async fn receiver_gone(&self) -> Vec<usize> {
+    /// Resolves when a connected receiver disconnects, yielding *which* receiver it
+    /// was and the chunk indices it still lacked (the tail to backfill). Never fires
+    /// if no receiver has connected.
+    ///
+    /// The identity matters to the caller: an empty tail means that receiver has a
+    /// complete copy, and reporting it as one more delivery has to be done once per
+    /// receiver rather than once per session.
+    pub async fn receiver_gone(&self) -> (EndpointId, Vec<usize>) {
         let mut rx = self.gone_rx.lock().await;
-        rx.recv().await.unwrap_or_default()
+        rx.recv().await.unwrap_or_else(|| {
+            (
+                EndpointId::from_bytes(&[0u8; 32]).expect("zero id"),
+                Vec::new(),
+            )
+        })
     }
 
     /// Record that `indices` are now on the relay (advertised to receivers on
@@ -1139,4 +1228,34 @@ pub fn encode_addr(addr: &EndpointAddr) -> Result<String> {
 }
 pub fn decode_addr(s: &str) -> Result<EndpointAddr> {
     decode_ticket(s)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn peer() -> EndpointId {
+        crate::node::generate_secret_key().public()
+    }
+
+    #[test]
+    fn sent_bytes_reports_the_furthest_receiver_not_the_sum() {
+        let sent = SentBytes::default();
+        let (a, b) = (peer(), peer());
+        sent.counter(a).fetch_add(300, Ordering::Relaxed);
+        sent.counter(b).fetch_add(700, Ordering::Relaxed);
+        // Summed, this would read 1000 — and on a 700-byte payload a caller would
+        // clamp it to "done" while `a` still had over half to go.
+        assert_eq!(sent.best(), 700);
+
+        // The same peer coming back adds to its own total, not to a new one.
+        sent.counter(a).fetch_add(500, Ordering::Relaxed);
+        assert_eq!(sent.best(), 800);
+        assert_eq!(sent.0.lock().unwrap().len(), 2, "two peers, two counters");
+    }
+
+    #[test]
+    fn nothing_sent_yet_is_zero_not_a_panic() {
+        assert_eq!(SentBytes::default().best(), 0);
+    }
 }
