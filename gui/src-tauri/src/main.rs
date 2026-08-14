@@ -14,6 +14,8 @@
 mod attention;
 mod bridge;
 mod daemon;
+#[cfg(target_os = "macos")]
+mod notify_mac;
 
 use arvolo_ipc::client::DaemonClient;
 use arvolo_ipc::protocol::EventDto;
@@ -93,6 +95,11 @@ fn main() {
             };
             app.manage(HasTray(has_tray));
             app.manage(attention::State::default());
+            // Ask now, not at the first arrival: a permission prompt that appears
+            // the moment somebody sends you a file is in the way of the thing you
+            // wanted to see. No-op when there is no bundle to ask for.
+            #[cfg(target_os = "macos")]
+            notify_mac::request_authorization();
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(event_pump(handle));
             Ok(())
@@ -304,10 +311,11 @@ fn moves_the_count(ev: &EventDto) -> bool {
 /// would be offering a choice that has already been made. Only the other kind is a
 /// question, and only that kind drops the wedge in the tray.
 ///
-/// On macOS this is attributed to Arvolo only from the installed bundle. Under
-/// `tauri dev` the notification plugin claims `com.apple.Terminal` instead, so a
-/// dev run's notifications land in Terminal's bucket — or nowhere, if Terminal has
-/// none granted. That is the plugin's doing, not a bug here.
+/// On macOS this goes through [`notify_mac`] rather than the plugin, whose backend
+/// no longer delivers anything at all on current macOS; see that module. It needs a
+/// built app — from `tauri dev` there is no bundle, so the call reports `false` and
+/// we fall through to the plugin, which will also show nothing. A dev run being
+/// silent on macOS is expected and not worth chasing.
 fn notify_arrival(app: &AppHandle, name: &str, sender_name: &str, auto: bool) {
     let who = if sender_name.trim().is_empty() {
         "Qualcuno".to_string()
@@ -325,5 +333,16 @@ fn notify_arrival(app: &AppHandle, name: &str, sender_name: &str, auto: bool) {
             format!("{who} vuole inviarti “{name}”"),
         )
     };
+    #[cfg(target_os = "macos")]
+    if notify_mac::available() {
+        // One identifier per file name, so a re-offer of the same file replaces its
+        // banner instead of stacking a second one.
+        let id = format!("arvolo.arrival.{name}");
+        let (title, body) = (title.to_string(), body);
+        let _ = app.run_on_main_thread(move || {
+            notify_mac::post(&id, &title, &body);
+        });
+        return;
+    }
     let _ = app.notification().builder().title(title).body(body).show();
 }

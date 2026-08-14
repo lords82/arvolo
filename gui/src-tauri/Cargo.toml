@@ -25,10 +25,13 @@ tracing.workspace = true
 # The daemon client + wire contract, shared with the CLI.
 arvolo-ipc.workspace = true
 
-# Handing AppKit the Dock icon again after the window comes back from the tray.
+# Handing AppKit the Dock icon again after the window comes back from the tray,
+# and posting notifications through UNUserNotificationCenter — the plugin's backend
+# (NSUserNotificationCenter, deprecated in 10.14) delivers nothing on current macOS.
 # Same versions Tauri itself pulls, so nothing is duplicated in the tree.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
+block2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = [
     "std",
     "NSApplication",
@@ -37,7 +40,19 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
 ] }
 objc2-foundation = { version = "0.3", default-features = false, features = [
     "std",
+    "NSBundle",
     "NSData",
+    "NSError",
+    "NSString",
+] }
+objc2-user-notifications = { version = "0.3", default-features = false, features = [
+    "std",
+    "block2",
+    "UNNotificationContent",
+    "UNNotificationRequest",
+    "UNNotificationSound",
+    "UNNotificationTrigger",
+    "UNUserNotificationCenter",
 ] }
 
 # Signalling the daemon for the in-app restart (unix only).
