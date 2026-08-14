@@ -241,7 +241,15 @@ pub(super) async fn deliver_to(
         }
 
         // 1) Recipient online → deliver live P2P.
-        let online = Instant::now() >= next_live_try
+        //
+        // Unless P2P is off, in which case there is no live path to take and the
+        // probe would only be spent to learn something we cannot act on. Worse than
+        // wasteful, before this check: `serve_live_once` would reach the endpoint
+        // bind, get the refusal, and report it as `Fatal` — so turning P2P off used
+        // to *fail* every send to a recipient who happened to be online, instead of
+        // quietly depositing it as the whole point of the setting is.
+        let online = crate::transfer::p2p_enabled()
+            && Instant::now() >= next_live_try
             && presence::check_online(&inner.client, &relay, &recipient)
                 .await
                 .unwrap_or(false);

@@ -77,7 +77,13 @@ pub fn build_client(proxy: Option<&str>, timeout: Option<Duration>) -> reqwest::
     let mut builder = reqwest::Client::builder();
     if let Some(url) = proxy {
         let p = reqwest::Proxy::all(url).or_else(|e| {
-            eprintln!("warning: {PROXY_ENV}={url} is not a usable proxy ({e}); refusing to connect directly — relay requests will fail until it is fixed");
+            // Once per process: `client_with_timeout` builds a fresh client per
+            // call, and a daemon probing presence would otherwise print this on
+            // every probe for as long as the setting stays wrong.
+            static WARNED: std::sync::Once = std::sync::Once::new();
+            WARNED.call_once(|| {
+                eprintln!("warning: {PROXY_ENV}={url} is not a usable proxy ({e}); refusing to connect directly — relay requests will fail until it is fixed");
+            });
             reqwest::Proxy::all(BLACKHOLE_PROXY)
         });
         match p {

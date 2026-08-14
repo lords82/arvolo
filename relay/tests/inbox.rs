@@ -430,9 +430,17 @@ async fn a_session_is_granted_for_the_window_and_refused_outside_it() {
             now.saturating_sub(2 * INBOX_EPOCH_SECS),
             reqwest::StatusCode::FORBIDDEN,
         ),
+        // One epoch of tolerance on the future side, for a client whose clock is
+        // ahead of the relay's: it rolls over first, and refusing would lock it out
+        // of its own inbox for as long as the skew lasts.
         (
             "next epoch",
             now + INBOX_EPOCH_SECS,
+            reqwest::StatusCode::OK,
+        ),
+        (
+            "two epochs ahead",
+            now + 2 * INBOX_EPOCH_SECS,
             reqwest::StatusCode::FORBIDDEN,
         ),
     ] {

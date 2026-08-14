@@ -127,11 +127,27 @@ pub fn inbox_slots_at(pubkey: &[u8], unix: u64) -> Vec<String> {
     slot_window(SLOT_CONTEXT, pubkey, unix / INBOX_EPOCH_SECS, 1)
 }
 
-/// Does `slot` belong to `pubkey` in the currently readable window? The relay's
-/// check when handing out an inbox session: only the key whose hash *is* one of
-/// these slots may authenticate for it.
+/// Does `slot` belong to `pubkey`, as far as handing out an inbox session goes?
+/// The relay's check: only the key whose hash *is* one of these slots may
+/// authenticate for it.
+///
+/// Deliberately one epoch wider than [`inbox_slots_at`], on the future side, and
+/// this is not slack for its own sake. The two clocks here are different machines'.
+/// A client whose clock is *ahead* rolls into the next epoch before the relay does,
+/// and asks for a session on a slot the relay would call the future — and a refusal
+/// there is total: no session means no inbox reads at all, for as long as the skew
+/// lasts, which for a VM resumed from suspend or a host without NTP is not a
+/// contrived scenario. It costs nothing to allow: a session proves possession of a
+/// key, and the slot it is granted for is empty until that clock is right.
+///
+/// The reader's window stays narrow because it pays per slot in requests; this one
+/// pays nothing.
 pub fn inbox_slot_matches(pubkey: &[u8], slot: &str, unix: u64) -> bool {
-    inbox_slots_at(pubkey, unix).iter().any(|s| s == slot)
+    let epoch = unix / INBOX_EPOCH_SECS;
+    // Next, current, previous.
+    slot_window(SLOT_CONTEXT, pubkey, epoch + 1, 2)
+        .iter()
+        .any(|s| s == slot)
 }
 
 /// The presence-beacon slot for a public id at a given time (distinct from its
@@ -145,16 +161,30 @@ pub fn presence_slot_for(pubkey: &[u8]) -> String {
     presence_slot_for_at(pubkey, now_unix())
 }
 
-/// Presence slots worth asking about at `unix`: the current one, plus the previous
-/// one only while a beacon published just before the boundary could still be alive.
+/// Presence slots worth asking about at `unix`: the current one, plus a neighbour
+/// near an epoch boundary.
+///
+/// Which neighbour depends on which side of the boundary we are on, and both cases
+/// are about the *publisher's* clock, not ours. Just after a boundary, a beacon
+/// published seconds ago is still in the epoch that just ended. Just before one, a
+/// publisher whose clock runs slightly fast has already moved to the next. Either
+/// way it is one extra request, only inside a two-minute window, and only if the
+/// first slot came up empty.
 pub fn presence_slots_at(pubkey: &[u8], unix: u64) -> Vec<String> {
-    let back = u64::from(unix % PRESENCE_EPOCH_SECS < PRESENCE_GRACE_SECS);
-    slot_window(
-        PRESENCE_SLOT_CONTEXT,
-        pubkey,
-        unix / PRESENCE_EPOCH_SECS,
-        back,
-    )
+    let epoch = unix / PRESENCE_EPOCH_SECS;
+    let into = unix % PRESENCE_EPOCH_SECS;
+    let mut out = vec![derive_slot(PRESENCE_SLOT_CONTEXT, pubkey, epoch)];
+    if into < PRESENCE_GRACE_SECS {
+        out.push(derive_slot(
+            PRESENCE_SLOT_CONTEXT,
+            pubkey,
+            epoch.saturating_sub(1),
+        ));
+    } else if PRESENCE_EPOCH_SECS - into <= PRESENCE_GRACE_SECS {
+        out.push(derive_slot(PRESENCE_SLOT_CONTEXT, pubkey, epoch + 1));
+    }
+    out.dedup();
+    out
 }
 
 /// A proposed transfer, sealed to the recipient inside an `Envelope`.
@@ -1099,8 +1129,13 @@ mod tests {
             "but not one older than any row can be"
         );
         assert!(
-            !inbox_slot_matches(&k, &slot_for_at(&k, T + INBOX_EPOCH_SECS), T),
-            "nor a future one"
+            inbox_slot_matches(&k, &slot_for_at(&k, T + INBOX_EPOCH_SECS), T),
+            "the *next* epoch must authenticate: a client whose clock is ahead rolls \
+             over first, and refusing it would lock it out of its own inbox entirely"
+        );
+        assert!(
+            !inbox_slot_matches(&k, &slot_for_at(&k, T + 2 * INBOX_EPOCH_SECS), T),
+            "but the tolerance is one epoch, not unbounded"
         );
         assert!(
             !inbox_slot_matches(&k, &slot_for_at(&other, T), T),
@@ -1153,6 +1188,18 @@ mod tests {
         assert_eq!(
             presence_slots_at(&k, boundary + PRESENCE_EPOCH_SECS / 2).len(),
             1
+        );
+
+        // Just *before* the next boundary the neighbour is the other way round: a
+        // publisher whose clock runs slightly fast has already moved on.
+        let before = boundary + PRESENCE_EPOCH_SECS - 5;
+        let just_before = presence_slots_at(&k, before);
+        assert_eq!(just_before.len(), 2);
+        assert_eq!(just_before[0], presence_slot_for_at(&k, before));
+        assert_eq!(
+            just_before[1],
+            presence_slot_for_at(&k, boundary + PRESENCE_EPOCH_SECS),
+            "the second one asked is the epoch about to start"
         );
     }
 
