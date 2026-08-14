@@ -526,6 +526,11 @@ pub(super) struct DepositOutcome {
     /// tell the user how many pickups a sealed file still has, and hardcoding the
     /// burn-after-read default there made an explicit `--max 5` read back as 1.
     pub(super) max: u32,
+    /// The TTL the relay **granted** (see [`flow::Deposited::ttl_secs`]) — for the
+    /// same reason `max` is carried: everything that later states a deadline, from
+    /// the local record to the delivery-confirmation deadline, has to state this one
+    /// rather than the one we asked for.
+    pub(super) ttl_secs: u64,
 }
 
 /// A sealed mailbox deposit is burn-after-read: it is sealed to one recipient, so
@@ -567,6 +572,13 @@ pub(super) async fn deposit_offline_and_offer(
     .await?;
     let claim = deposited.ticket.claim.clone();
     let ticket = deposited.ticket.encode();
+    // From here on the relay's answer replaces our request. Posting the offer with
+    // the TTL we *asked* for is what let an offer outlive its own blob: a relay
+    // capping deposits at a day still keeps the offer for the week we named, so the
+    // recipient sees a perfectly ordinary arrival, accepts it on day two, and gets a
+    // 404 from a claim that was reaped hours earlier. Tying the offer to the granted
+    // TTL makes the arrival disappear exactly when the file it points at does.
+    let ttl = deposited.ttl_secs;
     let offer = Offer {
         name: name.to_string(),
         size,
@@ -593,6 +605,7 @@ pub(super) async fn deposit_offline_and_offer(
         poster_token: posted.poster_token,
         ticket,
         max,
+        ttl_secs: ttl,
     })
 }
 
@@ -808,6 +821,11 @@ pub(super) fn spawn_offline_confirm(
         // events (a daemon filing its receipt) has no other way to keep it — and
         // it cannot be rebuilt later from the claim. See [`DepositInfo::ticket`].
         ticket,
+        // Deliberately unused here: this function deadlines off the absolute
+        // `expires` it is handed, precisely so a restored deposit cannot have its
+        // deadline pushed out by being restored. The duration is the caller's to
+        // turn into that instant, once.
+        ttl_secs: _,
     } = out;
     inner.set_progress(id, size);
     inner.set_status(id, TransferStatus::Deposited);

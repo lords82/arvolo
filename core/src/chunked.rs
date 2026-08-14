@@ -257,12 +257,41 @@ impl Drop for PeerGuard {
     }
 }
 
+/// Running total of chunk-body bytes this server has handed to QUIC.
+///
+/// The sender's only other progress signal is the receiver's chunk acks, which
+/// arrive one whole 16 MiB piece at a time — and, since the receiver pulls
+/// several pieces at once, the *first* of them lands only after four chunks'
+/// worth of upload. On a home uplink that's a minute of a transfer that is
+/// visibly doing nothing. This counter moves continuously instead.
+///
+/// It counts bytes accepted by the send stream, not bytes acknowledged by the
+/// peer, so it leads the truth — but only by what QUIC flow control allows to be
+/// in flight (a stream receive window per stream, the connection send window
+/// overall: single-digit MB), against a 64 MiB blind spot. It is a *progress*
+/// signal only: what counts as delivered stays the acks, and callers must clamp
+/// it, since a re-fetched piece (a failed fetch, an endgame duplicate, a second
+/// peer on a shared ticket) sends the same bytes twice.
+#[derive(Clone, Default)]
+pub(crate) struct SentBytes(Arc<std::sync::atomic::AtomicU64>);
+
+impl SentBytes {
+    fn add(&self, n: u64) {
+        self.0.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+    }
+    fn get(&self) -> u64 {
+        self.0.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
 /// Serves chunks over [`CHUNK_ALPN`], from either backend.
 #[derive(Clone)]
 pub(crate) struct ChunkServer {
     backend: Arc<ChunkBackend>,
     /// Distinct peers currently fetching from this server (see [`PeerCount`]).
     peers: PeerCount,
+    /// Chunk-body bytes pushed out so far (see [`SentBytes`]).
+    sent: SentBytes,
 }
 
 impl ChunkServer {
@@ -271,6 +300,7 @@ impl ChunkServer {
         Self {
             backend: Arc::new(ChunkBackend::Files { dir }),
             peers: PeerCount::default(),
+            sent: SentBytes::default(),
         }
     }
 }
@@ -311,8 +341,17 @@ impl ProtocolHandler for ChunkServer {
                         },
                     )
                     .await;
+                    // `write_all` spelled out, so the bytes QUIC accepts can be
+                    // counted as they go: it is exactly this loop internally
+                    // (`write` returns what the flow-control window took), so
+                    // the only addition is one relaxed atomic per iteration.
                     let start = (req.offset as usize).min(ct.len());
-                    let _ = send.write_all(&ct[start..]).await;
+                    let mut body = &ct[start..];
+                    while !body.is_empty() {
+                        let Ok(n) = send.write(body).await else { break };
+                        body = &body[n..];
+                        self.sent.add(n as u64);
+                    }
                 }
                 None => {
                     let _ = write_frame(&mut send, &ChunkResp { total_len: 0 }).await;
@@ -494,6 +533,7 @@ pub struct ChunkSender {
     gone_rx: AsyncMutex<mpsc::UnboundedReceiver<Vec<usize>>>,
     connected_rx: AsyncMutex<mpsc::UnboundedReceiver<()>>,
     peers: PeerCount,
+    sent: SentBytes,
 }
 
 /// What the hashing pass produces: the chunk digests plus the sizes derived from
@@ -576,6 +616,7 @@ impl ChunkSender {
         .await
         .context("hash payload")??;
         let peers = PeerCount::default();
+        let sent = SentBytes::default();
         let chunk_server = ChunkServer {
             backend: Arc::new(ChunkBackend::OnTheFly {
                 path: path.to_path_buf(),
@@ -584,6 +625,7 @@ impl ChunkSender {
                 total_chunks,
             }),
             peers: peers.clone(),
+            sent: sent.clone(),
         };
 
         let use_relay = !matches!(relay, RelayChoice::Disabled);
@@ -624,6 +666,7 @@ impl ChunkSender {
             gone_rx: AsyncMutex::new(gone_rx),
             connected_rx: AsyncMutex::new(connected_rx),
             peers,
+            sent,
         })
     }
 
@@ -651,6 +694,14 @@ impl ChunkSender {
     }
     pub fn delivered_count(&self) -> usize {
         self.delivered.lock().unwrap().len()
+    }
+
+    /// Chunk bytes pushed out to receivers so far — the fine-grained progress
+    /// signal the ack count can't give (see [`SentBytes`] for what it does and
+    /// doesn't mean). Sums every receiver and every re-send, so the caller must
+    /// clamp it to the payload size.
+    pub fn sent_bytes(&self) -> u64 {
+        self.sent.get()
     }
 
     /// How many distinct peers are currently downloading from this sender.
@@ -737,6 +788,9 @@ impl ChunkSeeder {
                 have,
             }),
             peers: PeerCount::default(),
+            // A seeder uploads to swarm peers, not to "the" recipient, so its
+            // byte count is nobody's progress bar — nothing reads this one.
+            sent: SentBytes::default(),
         };
         // Mirror `ChunkSender::serve`: only wait to come "online" via a relay when
         // one is configured. With `RelayChoice::Disabled` there is no relay to

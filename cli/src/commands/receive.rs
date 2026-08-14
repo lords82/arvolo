@@ -363,6 +363,10 @@ pub(crate) async fn recv_ticket(
     {
         return recv_offline(ticket, out, password).await;
     }
+    // Everything past here connects to the sender. Refuse before the rendezvous, not
+    // after: resolving a code consumes it, and burning someone's code to then say we
+    // can't fetch would cost them a second one.
+    ensure_p2p("this ticket")?;
     if password.is_some() {
         eprintln!("note: --password applies only to an offline (arvm…) ticket — ignoring it here.");
     }

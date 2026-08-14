@@ -251,18 +251,53 @@ that may legitimately not need a reply.
 | GET | `/v1/features` | none | Advertise optional features so a client can fail fast: `{"links":true,"rz2":true}`. The two are read with **opposite defaults** on purpose — an unreachable or older relay means "links allowed" (worst case, a deposit is refused later) but "no rz2", because minting a v2 code no relay can host would strand whoever types it. |
 | GET | `/healthz` | none | Liveness. |
 
-### 6.2 Slots (opaque per-identity addresses)
+### 6.2 Slots (opaque per-identity addresses, rotating)
 So the relay never sees a public id, inbox and presence are addressed by a
-**derived slot**:
+**derived slot**. The derivation takes an **epoch** as well as the key, so the
+value turns over on a fixed schedule:
 
 ```
-inbox_slot    = base32( blake3_derive_key("arvolo/inbox/slot/v1",    pubkey) )
-presence_slot = base32( blake3_derive_key("arvolo/presence/slot/v1", pubkey) )
+inbox_slot    = base32( blake3_derive_key("arvolo/inbox/slot/v2",
+                                          pubkey ‖ le64(unix / 604800)) )   # 7 days
+presence_slot = base32( blake3_derive_key("arvolo/presence/slot/v2",
+                                          pubkey ‖ le64(unix / 3600)) )     # 1 hour
 ```
 
-A slot is a stable, opaque handle: anyone who knows your public id can compute
-your slot (to send you an offer or check presence), but the relay cannot invert it
-to a public id.
+Anyone who knows your public id can compute your current slot (to send you an
+offer or check presence) with no coordination, and the relay still cannot invert
+a slot to a public id.
+
+**Why it rotates.** A slot appears in the *request path*, so it lands in the
+access log of the relay and of any reverse proxy in front of it — and a client
+polls its own inbox continuously and refreshes a presence beacon every 30s. A
+slot that never changed put one unchanging string in those logs for the life of
+the identity, which groups a user's entire history together for anyone reading
+them, across IP changes, without ever learning who they are. Rotation cuts that
+thread at each boundary.
+
+**Reading across a boundary.** A reader looks in the current epoch's slot and the
+previous one, current first; the relay grants an inbox session for either and
+refuses anything older or in the future. Inbox row TTLs are clamped client-side
+to one epoch, which makes the guarantee total: a row that is still alive is
+always in a slot its owner reads. Only the current slot is long-polled — older
+slots are drained with `wait=0`, every 5 minutes in a poll loop and always on a
+one-shot read — so steady-state request volume is essentially unchanged. A
+presence check spends a second request only within 120s of a boundary, where a
+beacon published just before it can still be alive.
+
+**What rotation does not fix.** `POST /v1/inbox/{slot}/session` carries the
+owner's raw public key (the relay seals the challenge nonce to it), so the relay
+*process* still learns the key and could recompute any epoch's slot from it.
+Rotation removes the stable identifier from logs — bodies are not logged, paths
+are — but closing this properly needs the slot to *be* a per-epoch blinded public
+key, so the handshake never carries the long-term one (Tor's v3 onion-key
+blinding is the model). Not implemented.
+
+**Upgrade order.** `v2` slots are a different address space from `v1`: the relay
+must be updated **before** the clients, because it is the relay that decides
+which slots a session is granted for. A `v1` client and a `v2` client simply do
+not meet — offers and beacons are missed rather than mis-delivered, and a sealed
+`arvm…` ticket handed over directly still works throughout.
 
 ### 6.3 Capability tokens
 - **claim** — 16 random bytes; the bearer capability for one blob.
@@ -662,7 +697,8 @@ TTLs and row caps (abuse/disk-fill guards); see the constants in
 | Inbox read authorization | HPKE proof-of-possession → relay-MAC session token |
 | Link-leak resistance (opt-in) | Argon2id password wrap the relay cannot bypass |
 | Revocability | Revoke token (hash-only at the relay), constant-time checked |
-| Data minimization | Dial keys not IPs; random claims; derived slots; TTL auto-expiry; no PII in identities |
+| Data minimization | Dial keys not IPs; random claims; derived slots that **rotate** per epoch (§6.2); TTL auto-expiry; no PII in identities |
+| Client address vs relay (opt-in) | `proxy` / `ARVOLO_PROXY` routes the **whole** relay HTTP surface through a proxy (`socks5h://…` for Tor), so the relay logs the exit's address. Fails closed: a misconfigured proxy makes requests fail rather than go direct. Does **not** cover P2P (QUIC) — see §9.1(2). |
 
 ### 9.1 Honest boundaries (and why they are universal)
 
@@ -690,13 +726,35 @@ cannot, by itself, prove that key belongs to the human you think it does.
   **key-change warnings** if a saved contact's key ever changes (exactly Signal's
   model). There is no cryptographic way to remove this step.
 
-**2. The relay sees sizes and timing (metadata), never content.**
+**2. The relay sees sizes, timing and your address (metadata), never content.**
 The relay only ever holds opaque ciphertext — no plaintext, no keys, not even your
-public id (it sees a derived slot). But it unavoidably sees *how big* a blob is
-and *when* it moves.
+public id (it sees a derived slot). But it unavoidably sees *how big* a blob is,
+*when* it moves, and *what address* it came from.
 
 - *Example:* an operator can note "a ~4 MB blob appeared at 15:03 and was fetched
   at 15:07" and infer activity patterns, without ever reading a byte.
+- *The address is not incidental:* a public relay **must** group requests by
+  client IP — that is what the per-IP rate limits are — and any reverse proxy in
+  front logs it besides. Two things reduce it. Slots **rotate** (§6.2), so a
+  request path no longer carries one identifier for the life of an identity. And
+  `proxy` in `config.toml` (or `ARVOLO_PROXY`) routes every relay request through
+  a proxy — `socks5h://127.0.0.1:9050` puts the whole HTTP surface over Tor. Both
+  are partial by construction: rotation does not stop the relay process learning
+  your key at the inbox session handshake, and the proxy cannot carry **P2P**
+  traffic, which is QUIC/UDP.
+- *The P2P path has its own three knobs,* because a direct transfer reveals your
+  address to the peer by construction and no proxy can change that:
+  `iroh_relay` (your own NAT relay, or `off` for none), **`iroh_discovery`**, and
+  `p2p`. The discovery one is the least obvious and leaks the most: iroh's n0
+  preset installs a *publisher* that writes a signed `EndpointId → your addresses`
+  record into a third party's DNS, refreshed as you move networks — a stable public
+  key tied to a moving address, held by someone else. Arvolo never needs it to dial
+  (every connect takes a full `EndpointAddr` from a ticket or the swarm tracker),
+  so `iroh_discovery = "resolve"` drops the publishing and keeps the lookup; the
+  one thing it costs is re-serving an *old* ticket after your address changed
+  without a NAT relay to route by id. And `p2p = false` is the end of the line:
+  everything goes through the mailbox, which is HTTP, hence proxyable — the only
+  configuration where neither the relay nor the recipient learns your address.
 - *Same everywhere:* **Signal**'s servers still see message timing, size, and IPs
   (Sealed Sender hides the *sender label*, not the timing); **HTTPS/TLS** leaks the
   size and timing of every page you load; **Tor** exists precisely because hiding

@@ -326,7 +326,7 @@ async fn retract_offer(rec: &DepositRecord) {
         return;
     };
     if let Err(e) = arvolo_core::presence::retract_offer(
-        &reqwest::Client::new(),
+        &arvolo_core::http::client(),
         &rec.relay,
         &recipient,
         &rec.offer_id,
@@ -441,7 +441,7 @@ pub async fn list_dtos() -> Vec<DepositDto> {
                 Some((recipient, id, token)) => tokio::time::timeout(
                     CLAIM_STATUS_TIMEOUT,
                     arvolo_core::presence::offer_status(
-                        &reqwest::Client::new(),
+                        &arvolo_core::http::client(),
                         &relay,
                         &recipient,
                         &id,

@@ -178,14 +178,18 @@ fn seed_after_complete() -> std::time::Duration {
 }
 
 fn swarm_enabled() -> bool {
-    !matches!(
-        std::env::var("ARVOLO_SWARM")
-            .unwrap_or_default()
-            .trim()
-            .to_ascii_lowercase()
-            .as_str(),
-        "off" | "0" | "false" | "no" | "relay-only" | "relay_only"
-    )
+    // P2P off implies swarm off: announcing our address to the tracker is exactly
+    // what that setting is refusing, and it would be announced before any bind
+    // refused. One switch, not two to remember.
+    crate::transfer::p2p_enabled()
+        && !matches!(
+            std::env::var("ARVOLO_SWARM")
+                .unwrap_or_default()
+                .trim()
+                .to_ascii_lowercase()
+                .as_str(),
+            "off" | "0" | "false" | "no" | "relay-only" | "relay_only"
+        )
 }
 
 /// Shared list of known swarm peers: each entry is a peer's serving address and
@@ -572,7 +576,7 @@ pub async fn recv_chunked(
     });
 
     let receiver = ChunkReceiver::open(relay.clone()).await?;
-    let client = reqwest::Client::new();
+    let client = crate::http::client();
 
     // Control channel to the sender. Patience scales with fallback availability:
     // one short attempt if a relay can finish the job, three for pure P2P.

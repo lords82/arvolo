@@ -308,7 +308,10 @@ Everything below is **optional** (defaults shown).
 | `ARVOLO_CONCURRENCY` | `4` | Parallel chunk fetches (clamped to 1–16). |
 | `ARVOLO_IPV4_ONLY` | auto | `1` forces IPv4-only (auto-detected when there's no IPv6 route). |
 | `ARVOLO_CC` | `bbr` | QUIC congestion controller. `cubic` restores quinn's default — the way back if BBR misbehaves on a path we haven't measured. |
-| `ARVOLO_IROH_RELAY` | n0 public | Self-hosted **iroh** NAT relay for P2P hole-punching. |
+| `ARVOLO_IROH_RELAY` | n0 public | Self-hosted **iroh** NAT relay for P2P hole-punching. `off` uses none at all (direct/LAN only). |
+| `ARVOLO_IROH_DISCOVERY` | follows `ARVOLO_IROH_RELAY` | iroh peer discovery. `n0` publishes a signed record mapping your node's public key to your current addresses into n0's DNS **and** resolves others' the same way; `resolve` looks others up but never publishes yours; `off` neither. Unset keeps what the relay choice implied on its own (n0 relays published, anything else didn't), so nothing changes until you ask. Cost of `resolve`: a ticket you re-serve after changing network is reconnectable through a NAT relay but not by node lookup. |
+| `ARVOLO_P2P` | `1` (on) | `off` disables direct transfers: everything goes through the relay's mailbox. Slower and it touches the relay, but the mailbox is plain HTTP, so it's the only setting where **neither the relay nor the recipient** learns your address (a direct transfer always shows it to the peer, and QUIC can't cross a SOCKS proxy). Implies no swarm; `code`, `ticket` and receiving an `arvc…` ticket are refused while it's off. Never set it on a relay — it needs an endpoint for backfill and will refuse to start. |
+| `ARVOLO_PROXY` | unset (direct) | Route **every relay request** through a proxy, so the relay sees the proxy's address instead of yours. `socks5h://127.0.0.1:9050` sends it over Tor (`h` = resolve the relay's hostname at the exit). Covers the whole HTTP surface — deposits, fetches, codes, inbox, presence — but **not** direct P2P, which is QUIC and cannot cross a SOCKS proxy. If the value is unusable, relay requests fail rather than silently going direct. |
 | `ARVOLO_DEBUG` | off | Extra diagnostics. |
 | `RUST_LOG` | `info` | `tracing` log level. |
 

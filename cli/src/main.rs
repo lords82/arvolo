@@ -83,6 +83,19 @@ async fn run() -> Result<()> {
     maybe_first_run_wizard();
     // Bridge config.toml → ARVOLO_* (env still wins) and pin the scratch dir.
     book::apply_config_to_env();
+    // A proxy is checked here, before any request is built, so a typo is one clear
+    // error at the top instead of every relay operation failing further down (the
+    // client refuses to connect directly when a proxy is set but unusable, which
+    // is right but says nothing about why).
+    if let Some(p) = arvolo_core::http::configured_proxy() {
+        if let Err(e) = arvolo_core::http::check_proxy(&p) {
+            anyhow::bail!(
+                "proxy {p:?} is not usable ({e}). Fix `proxy` in config.toml or \
+                 {}, or unset it to connect directly.",
+                arvolo_core::http::PROXY_ENV
+            );
+        }
+    }
     // Windows only, and once per process: narrow the config directory's access
     // list so the records written inside it — identity, revoke tokens, resume
     // records — inherit it. On unix each of those files is chmod'd where it is

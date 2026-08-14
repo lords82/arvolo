@@ -620,9 +620,7 @@ async fn presence(d: &Daemon, ids: Vec<String>) -> Vec<PresenceDto> {
     let Some(relay) = d.relay.clone() else {
         return unknown(ids);
     };
-    let Ok(client) = reqwest::Client::builder().timeout(PRESENCE_TIMEOUT).build() else {
-        return unknown(ids);
-    };
+    let client = arvolo_core::http::client_with_timeout(PRESENCE_TIMEOUT);
 
     let mut set = tokio::task::JoinSet::new();
     for id in ids {

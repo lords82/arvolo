@@ -243,6 +243,11 @@ impl Mailbox {
     /// Record the metadata row for a blob whose ciphertext is already written at
     /// [`blob_path`](Self::blob_path). Clamps the caller's TTL (no immortal entries
     /// / no i64 overflow) and download budget.
+    ///
+    /// Returns the TTL **actually granted**, which is what the caller has to report
+    /// back to the depositor. A relay run with a tight `ARVOLO_MAX_TTL` used to keep
+    /// a fraction of what was asked without saying so, and a sender who believes
+    /// they have a week posts an offer that outlives its own payload by six days.
     #[allow(clippy::too_many_arguments)]
     pub fn commit_deposit(
         &self,
@@ -253,7 +258,7 @@ impl Mailbox {
         revoke_hash: Vec<u8>,
         size: u64,
         now: u64,
-    ) -> Result<(), MailboxError> {
+    ) -> Result<u64, MailboxError> {
         let ttl = ttl_secs.min(max_ttl_secs());
         let max_downloads = max_downloads.clamp(1, MAX_DOWNLOADS_CAP);
         let revoke_hash: Option<Vec<u8>> = if revoke_hash.is_empty() {
@@ -278,7 +283,7 @@ impl Mailbox {
                 ],
             )
             .map_err(backend)?;
-        Ok(())
+        Ok(ttl)
     }
 
     /// Store an in-memory `deposit`, returning a random claim token. Used by tests
@@ -305,7 +310,9 @@ impl Mailbox {
         let claim = self.new_claim();
         let size = deposit.ciphertext.len() as u64;
         std::fs::write(self.blob_path(&claim), &deposit.ciphertext).map_err(backend)?;
-        self.commit_deposit(
+        // The granted TTL is dropped here: this path has no wire response to carry
+        // it on, and its callers pass a TTL they already know fits.
+        let _granted = self.commit_deposit(
             &claim,
             deposit.encapped_key,
             deposit.ttl_secs,

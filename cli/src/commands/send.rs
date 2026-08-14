@@ -202,11 +202,17 @@ pub(crate) async fn send_to(
     let relay_url = require_relay(relay, use_http)?;
     let recipient = book::resolve_recipient(&who)?;
     book::warn_if_unverified(&who, &encode_id(&recipient));
+    // With P2P off there is nothing to gain from the probe: a live delivery is not
+    // available whatever it answers, so don't spend the request — and say why, or the
+    // sudden absence of the live path looks like the recipient never being online.
     let online = if deposit {
+        false
+    } else if !arvolo_core::transfer::p2p_enabled() {
+        vprintln!("P2P is off — depositing on the relay instead of probing presence");
         false
     } else {
         vprintln!("checking {who}'s presence on the relay…");
-        arvolo_core::presence::check_online(&reqwest::Client::new(), &relay_url, &recipient)
+        arvolo_core::presence::check_online(&arvolo_core::http::client(), &relay_url, &recipient)
             .await
             .unwrap_or(false)
     };
@@ -262,6 +268,8 @@ pub(crate) async fn code_cmd(
     foreground: bool,
     qr: bool,
 ) -> Result<()> {
+    // A code brokers a *direct* transfer: the rendezvous only carries the ticket.
+    ensure_p2p("a pairing code")?;
     // A bare relay host gets a scheme (https by default, http with --use-http).
     let relay = relay.map(|r| book::normalize_relay(&r, use_http));
 
@@ -301,6 +309,9 @@ pub(crate) async fn ticket_cmd(
     foreground: bool,
     qr: bool,
 ) -> Result<()> {
+    // An `arvc…` ticket is an invitation to connect to this node directly; the
+    // relay can only ever backfill chunks behind it.
+    ensure_p2p("an arvc… ticket")?;
     // A bare relay host gets a scheme (https by default, http with --use-http).
     let relay = relay.map(|r| book::normalize_relay(&r, use_http));
     // Swarm is the norm: embed the configured relay in every arvc… ticket so the
@@ -396,7 +407,7 @@ pub(crate) async fn serve_session(session: flow::SendSession, qr: bool) -> Resul
                 if verbosity() >= 1 && pct / 10 != last_pct.load(Ordering::Relaxed) / 10 {
                     last_pct.store(pct, Ordering::Relaxed);
                     vprintln!(
-                        "acked {pct}% ({}/{})",
+                        "sent {pct}% ({}/{})",
                         human_size(transferred),
                         human_size(total)
                     );

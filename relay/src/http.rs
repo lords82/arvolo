@@ -35,6 +35,14 @@ const REVOKE_TOKEN_HEADER: &str = "x-arvolo-revoke-token";
 const INBOX_POSTER_HASH_HEADER: &str = "x-arvolo-poster-hash";
 /// The inbox offer's retract token, sent on a DELETE to retract one's own offer.
 const INBOX_POSTER_TOKEN_HEADER: &str = "x-arvolo-poster-token";
+/// Seconds the relay actually granted a deposit, answered on the deposit response.
+///
+/// The request's `?ttl=` is a wish: [`Mailbox::commit_deposit`] clamps it to this
+/// relay's `ARVOLO_MAX_TTL`. Until this header existed the clamp was invisible, and
+/// the sender kept building on the number it asked for — a 7-day inbox offer over a
+/// 24-hour blob, which the recipient discovers as a 404 on the second day. A client
+/// too old to read it is no worse off than before.
+const GRANTED_TTL_HEADER: &str = "x-arvolo-ttl";
 
 // ---- HTTP layer -----------------------------------------------------------
 
@@ -840,8 +848,10 @@ async fn inbox_session_handler(
     let pubid = arvolo_core::crypto::PublicId::from_bytes(&body)
         .map_err(|_| (StatusCode::BAD_REQUEST, "invalid public id".into()))?;
     // Bind the request to the slot: only the key whose hash *is* this slot may
-    // authenticate for it.
-    if arvolo_core::presence::slot_for(&body) != slot {
+    // authenticate for it. Slots rotate per epoch, so any slot in the readable
+    // window counts — a client polling across a boundary still has rows in the
+    // previous epoch's slot and must be able to authenticate for it.
+    if !arvolo_core::presence::inbox_slot_matches(&body, &slot, now_unix()) {
         return Err((
             StatusCode::FORBIDDEN,
             "public id does not match slot".into(),
@@ -1107,7 +1117,7 @@ async fn deposit_handler(
     ip: ClientIp,
     headers: HeaderMap,
     body: axum::body::Body,
-) -> Result<String, (StatusCode, String)> {
+) -> Result<Response, (StatusCode, String)> {
     use futures_util::StreamExt;
     use tokio::io::AsyncWriteExt;
 
@@ -1241,7 +1251,9 @@ async fn deposit_handler(
         written,
         now_unix(),
     ) {
-        Ok(()) => Ok(claim),
+        // The body is still the bare claim, as every released client expects; the
+        // granted TTL rides alongside it in a header, which an older client ignores.
+        Ok(granted) => Ok(([(GRANTED_TTL_HEADER, granted.to_string())], claim).into_response()),
         Err(e) => {
             let _ = tokio::fs::remove_file(&path).await;
             Err(err_response(e))

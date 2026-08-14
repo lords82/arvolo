@@ -15,8 +15,10 @@
 //! recipient drives a normal [`crate::flow::recv_chunked`] with the embedded
 //! ticket — the ticket is never shown to the user.
 //!
-//! Slot = `base32(blake3_derive_key("arvolo/inbox/slot/v1", pubkey))` — an opaque
-//! stand-in for the raw public key (still linkable by anyone who knows the key).
+//! Slot = `base32(blake3_derive_key(context, pubkey ‖ epoch))` — an opaque stand-in
+//! for the raw public key that **rotates**: see [`INBOX_EPOCH_SECS`].
+
+use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -25,26 +27,134 @@ use tokio_util::sync::CancellationToken;
 use crate::crypto::{open, open_anon, seal, seal_anon, Identity, PublicId, Sealed};
 use crate::sync::SyncNote;
 
-/// Domain separator for the inbox slot derivation.
-const SLOT_CONTEXT: &str = "arvolo/inbox/slot/v1";
+/// Domain separator for the inbox slot derivation. `v2`: the derivation takes an
+/// epoch as well as the key, so the value rotates (see [`INBOX_EPOCH_SECS`]). The
+/// bump is what keeps a `v1` client and a `v2` one from silently agreeing on a slot
+/// they compute differently — they now simply use different slots.
+const SLOT_CONTEXT: &str = "arvolo/inbox/slot/v2";
 /// Domain separator for the presence-beacon slot derivation (distinct from the
 /// inbox slot so the two can't be correlated by the derived value alone).
-const PRESENCE_SLOT_CONTEXT: &str = "arvolo/presence/slot/v1";
+const PRESENCE_SLOT_CONTEXT: &str = "arvolo/presence/slot/v2";
 /// AAD binding a sealed offer to its purpose (rejects cross-protocol reuse).
 const OFFER_AAD: &[u8] = b"arvolo/offer/v1";
 /// AAD for the anonymous **outer** envelope seal (the sealed-sender layer).
 const ENVELOPE_AAD: &[u8] = b"arvolo/offer/env/v1";
 
-/// The inbox slot for a public id: an opaque, domain-separated hash of its bytes.
-pub fn slot_for(pubkey: &[u8]) -> String {
-    let key = blake3::derive_key(SLOT_CONTEXT, pubkey);
+// ---- slots, and why they rotate -------------------------------------------
+//
+// A slot is a hash of a public key, so the relay never sees the key in it. It was
+// also *constant for the life of that key*, and that is the part that leaked: a
+// client polls its own inbox forever and refreshes a presence beacon every 30
+// seconds, so one unchanging string appeared in the relay's request path — and in
+// the access log of any reverse proxy in front of it — for as long as the identity
+// existed. Anyone reading those logs could group a user's whole history by it
+// without ever learning who they were, and the grouping outlived any IP change.
+//
+// Deriving the slot from `(key, epoch)` instead cuts that thread at each boundary.
+// Both ends can still compute it with no coordination — a sender already knows the
+// recipient's public key, which is all the derivation needs — so this costs a hash,
+// not a protocol.
+//
+// What it does *not* fix, and what a future change must: the inbox read handshake
+// still POSTs the owner's raw public key to the relay (the relay seals a nonce to
+// it, which is how a reader proves it owns the slot). The relay process therefore
+// still learns the key on every session and could recompute any epoch's slot from
+// it. Rotation keeps the stable identifier out of the *logs* — request bodies are
+// not logged, paths are — but closing the gap properly means a slot that is itself
+// a per-epoch blinded public key, so the handshake never carries the long-term one.
+// That is a cryptographic change (Tor's v3 onion-key blinding is the model), and
+// it is deliberately not attempted here.
+
+/// How long one inbox slot lasts before it rotates.
+///
+/// The floor on this is how long an offer must stay findable: a reader looks in the
+/// current epoch's slot and the previous one, so an offer is reachable for at least
+/// one full epoch after it is posted. [`post_offer`] clamps its TTL to exactly that,
+/// which makes the invariant total — a *live* offer is never in a slot nobody reads
+/// — and it is also why this matches the sync cell's own 7-day TTL, the longest
+/// thing the inbox is asked to hold.
+pub const INBOX_EPOCH_SECS: u64 = 7 * 24 * 3600;
+
+/// How long one presence slot lasts. Far shorter than the inbox's, because a beacon
+/// lives 30 seconds: nothing needs to be findable across a boundary, so the value
+/// can turn over hourly and the reader's fallback (below) stays cheap.
+pub const PRESENCE_EPOCH_SECS: u64 = 3600;
+
+/// How long after a presence-epoch boundary the previous slot may still hold a live
+/// beacon. The relay expires beacons after 30s; two minutes is slack for clock skew
+/// between the publisher and the asker, and it is the *only* window in which
+/// [`check_online`] spends a second request.
+const PRESENCE_GRACE_SECS: u64 = 120;
+
+fn derive_slot(context: &str, pubkey: &[u8], epoch: u64) -> String {
+    let mut input = Vec::with_capacity(pubkey.len() + 8);
+    input.extend_from_slice(pubkey);
+    input.extend_from_slice(&epoch.to_le_bytes());
+    let key = blake3::derive_key(context, &input);
     data_encoding::BASE32_NOPAD.encode(&key).to_lowercase()
 }
 
-/// The presence-beacon slot for a public id (distinct from its inbox slot).
+/// The current epoch's slots, then older ones, deduped. `span` is how many epochs
+/// back are still worth reading.
+fn slot_window(context: &str, pubkey: &[u8], epoch: u64, back: u64) -> Vec<String> {
+    let mut out = Vec::with_capacity(back as usize + 1);
+    for n in 0..=back {
+        let s = derive_slot(context, pubkey, epoch.saturating_sub(n));
+        // `saturating_sub` repeats epoch 0 for a clock claiming 1970; one slot is
+        // the right answer there, not the same slot twice.
+        if !out.contains(&s) {
+            out.push(s);
+        }
+    }
+    out
+}
+
+/// The inbox slot for a public id at a given time: an opaque, domain-separated hash
+/// of the key and the epoch.
+pub fn slot_for_at(pubkey: &[u8], unix: u64) -> String {
+    derive_slot(SLOT_CONTEXT, pubkey, unix / INBOX_EPOCH_SECS)
+}
+
+/// The inbox slot for a public id **now** — the one a depositor posts to.
+pub fn slot_for(pubkey: &[u8]) -> String {
+    slot_for_at(pubkey, now_unix())
+}
+
+/// Every inbox slot that can still hold a live row for `pubkey` at `unix`, current
+/// epoch first: what a reader must look in, and what the relay must accept a session
+/// for.
+pub fn inbox_slots_at(pubkey: &[u8], unix: u64) -> Vec<String> {
+    slot_window(SLOT_CONTEXT, pubkey, unix / INBOX_EPOCH_SECS, 1)
+}
+
+/// Does `slot` belong to `pubkey` in the currently readable window? The relay's
+/// check when handing out an inbox session: only the key whose hash *is* one of
+/// these slots may authenticate for it.
+pub fn inbox_slot_matches(pubkey: &[u8], slot: &str, unix: u64) -> bool {
+    inbox_slots_at(pubkey, unix).iter().any(|s| s == slot)
+}
+
+/// The presence-beacon slot for a public id at a given time (distinct from its
+/// inbox slot).
+pub fn presence_slot_for_at(pubkey: &[u8], unix: u64) -> String {
+    derive_slot(PRESENCE_SLOT_CONTEXT, pubkey, unix / PRESENCE_EPOCH_SECS)
+}
+
+/// The presence-beacon slot for a public id **now** — the one a beacon publishes to.
 pub fn presence_slot_for(pubkey: &[u8]) -> String {
-    let key = blake3::derive_key(PRESENCE_SLOT_CONTEXT, pubkey);
-    data_encoding::BASE32_NOPAD.encode(&key).to_lowercase()
+    presence_slot_for_at(pubkey, now_unix())
+}
+
+/// Presence slots worth asking about at `unix`: the current one, plus the previous
+/// one only while a beacon published just before the boundary could still be alive.
+pub fn presence_slots_at(pubkey: &[u8], unix: u64) -> Vec<String> {
+    let back = u64::from(unix % PRESENCE_EPOCH_SECS < PRESENCE_GRACE_SECS);
+    slot_window(
+        PRESENCE_SLOT_CONTEXT,
+        pubkey,
+        unix / PRESENCE_EPOCH_SECS,
+        back,
+    )
 }
 
 /// A proposed transfer, sealed to the recipient inside an `Envelope`.
@@ -231,11 +341,23 @@ fn random_token() -> String {
     data_encoding::BASE32_NOPAD.encode(&b).to_lowercase()
 }
 
+/// Clamp an inbox TTL to the slot's own lifetime.
+///
+/// A row that outlives the window its slot is read in is worse than no row: it sits
+/// on the relay, counts against the slot's cap, and is invisible to the one client
+/// entitled to it. So the notification expires with its slot. Nothing is lost that
+/// the caller can't recover — an offline offer's blob keeps the TTL it was deposited
+/// with, and the sender's `arvm…` ticket still fetches it by hand.
+fn clamp_inbox_ttl(ttl_secs: Option<u64>) -> Option<u64> {
+    ttl_secs.map(|t| t.min(INBOX_EPOCH_SECS))
+}
+
 /// Seal `offer` to `recipient` and deposit it in the recipient's inbox on `relay`.
 /// `ttl_secs` sets how long the offer lives on the relay: `None` uses the relay's
 /// short default (fine for a live `arvc` offer whose sender is actively serving);
 /// an offline (`arvm`) offer passes the mailbox blob's TTL so the notification
-/// survives until the recipient returns.
+/// survives until the recipient returns — clamped to [`INBOX_EPOCH_SECS`], since a
+/// notification cannot usefully outlive the slot it was posted in.
 pub async fn post_offer(
     client: &reqwest::Client,
     relay: &str,
@@ -247,7 +369,7 @@ pub async fn post_offer(
     let body = encode_offer_blob(offer, recipient, me)?;
     let slot = slot_for(&recipient.to_bytes());
     let mut url = inbox_url(relay, &slot);
-    if let Some(ttl) = ttl_secs {
+    if let Some(ttl) = clamp_inbox_ttl(ttl_secs) {
         url = format!("{url}?ttl={ttl}");
     }
     // A retract capability: keep the token, hand the relay only its hash.
@@ -277,6 +399,11 @@ pub async fn post_offer(
 /// Retract an offer this client posted (by its id + poster token), e.g. a live
 /// offer being superseded by an offline fallback. Best-effort: an already-gone
 /// offer is not an error.
+///
+/// The slot is not recomputed and trusted: an offer posted before an epoch boundary
+/// lives in the *previous* epoch's slot, so this walks the readable window and stops
+/// at the one that answers. The TTL clamp in [`clamp_inbox_ttl`] is what guarantees
+/// the window still contains it while it is alive.
 pub async fn retract_offer(
     client: &reqwest::Client,
     relay: &str,
@@ -284,15 +411,26 @@ pub async fn retract_offer(
     id: &str,
     poster_token: &str,
 ) -> Result<()> {
-    let slot = slot_for(&recipient.to_bytes());
-    let url = format!("{}/{id}", inbox_url(relay, &slot));
-    client
-        .delete(url)
-        .header(POSTER_TOKEN_HEADER, poster_token)
-        .send()
-        .await
-        .context("retract offer")?;
-    Ok(())
+    let mut last = None;
+    for slot in inbox_slots_at(&recipient.to_bytes(), now_unix()) {
+        let url = format!("{}/{id}", inbox_url(relay, &slot));
+        match client
+            .delete(url)
+            .header(POSTER_TOKEN_HEADER, poster_token)
+            .send()
+            .await
+        {
+            // A wrong slot fails the poster check and falls through to the session
+            // check, which we don't satisfy: 401. Only a success means it was ours.
+            Ok(resp) if resp.status().is_success() => return Ok(()),
+            Ok(_) => {}
+            Err(e) => last = Some(e),
+        }
+    }
+    match last {
+        Some(e) => Err(anyhow::Error::new(e).context("retract offer")),
+        None => Ok(()),
+    }
 }
 
 /// How far an offer we posted has got.
@@ -357,25 +495,41 @@ pub async fn offer_status(
     id: &str,
     poster_token: &str,
 ) -> Result<OfferStatus> {
-    let slot = slot_for(&recipient.to_bytes());
-    let url = format!("{}/{id}/status", inbox_url(relay, &slot));
-    let resp = client
-        .get(url)
-        .header(POSTER_TOKEN_HEADER, poster_token)
-        .send()
-        .await
-        .context("offer status")?
-        .error_for_status()
-        .context("relay rejected offer status")?;
-    let body = resp.text().await.unwrap_or_default();
-    Ok(match body.trim() {
-        // `fetched` is the wire spelling of `Arrived` — kept as-is so this client
-        // and one older than the state it names read the same relay the same way.
-        "fetched" => OfferStatus::Arrived,
-        "taken" => OfferStatus::Taken,
-        "gone" => OfferStatus::Gone,
-        _ => OfferStatus::Pending,
-    })
+    // Like `retract_offer`, the offer may be in the previous epoch's slot. The relay
+    // answers `gone` for a row it doesn't have, which is exactly what a wrong slot
+    // looks like — so keep asking while the answer is `gone`, and only conclude the
+    // offer is gone once every slot in the window says so.
+    let mut first_err = None;
+    for slot in inbox_slots_at(&recipient.to_bytes(), now_unix()) {
+        let url = format!("{}/{id}/status", inbox_url(relay, &slot));
+        let sent = client
+            .get(url)
+            .header(POSTER_TOKEN_HEADER, poster_token)
+            .send()
+            .await
+            .context("offer status");
+        let resp =
+            match sent.and_then(|r| r.error_for_status().context("relay rejected offer status")) {
+                Ok(r) => r,
+                Err(e) => {
+                    first_err.get_or_insert(e);
+                    continue;
+                }
+            };
+        let body = resp.text().await.unwrap_or_default();
+        match body.trim() {
+            // `fetched` is the wire spelling of `Arrived` — kept as-is so this client
+            // and one older than the state it names read the same relay the same way.
+            "fetched" => return Ok(OfferStatus::Arrived),
+            "taken" => return Ok(OfferStatus::Taken),
+            "gone" => continue,
+            _ => return Ok(OfferStatus::Pending),
+        }
+    }
+    match first_err {
+        Some(e) => Err(e),
+        None => Ok(OfferStatus::Gone),
+    }
 }
 
 /// Publish (refresh) a presence beacon so contacts see `me` as online. A listening
@@ -396,15 +550,30 @@ pub async fn publish_beacon(client: &reqwest::Client, relay: &str, me: &Identity
 
 /// Is `contact` currently online (a live presence beacon on `relay`)? A network
 /// error is reported as an error; a plain "no beacon" is `Ok(false)`.
+///
+/// Normally one request. Only just after a presence-epoch boundary — where a beacon
+/// published seconds ago is still in the previous slot — is a second one spent, and
+/// only if the first found nothing.
 pub async fn check_online(
     client: &reqwest::Client,
     relay: &str,
     contact: &PublicId,
 ) -> Result<bool> {
-    let slot = presence_slot_for(&contact.to_bytes());
-    let url = format!("{}/v1/presence/{slot}", relay.trim_end_matches('/'));
-    let resp = client.get(url).send().await.context("check presence")?;
-    Ok(resp.status().is_success())
+    let mut first_err = None;
+    for slot in presence_slots_at(&contact.to_bytes(), now_unix()) {
+        let url = format!("{}/v1/presence/{slot}", relay.trim_end_matches('/'));
+        match client.get(url).send().await {
+            Ok(resp) if resp.status().is_success() => return Ok(true),
+            Ok(_) => {}
+            Err(e) => {
+                first_err.get_or_insert(e);
+            }
+        }
+    }
+    match first_err {
+        Some(e) => Err(anyhow::Error::new(e).context("check presence")),
+        None => Ok(false),
+    }
 }
 
 /// A live subscription to *my* inbox on a relay. Long-polls for offers and
@@ -413,11 +582,23 @@ pub async fn check_online(
 pub struct InboxSubscription {
     client: reqwest::Client,
     relay: String,
-    slot: String,
+    /// Owner's public key. Not a cached slot: slots rotate, so the slot to read is
+    /// derived per call and the key is what has to be kept.
+    pubkey: Vec<u8>,
     /// Owner's identity secret — needed to open the session challenge. Held here
     /// (not passed per call) so `poll`/`ack`/`run` can authenticate on their own.
     me_secret: Vec<u8>,
-    session: std::sync::Mutex<Option<CachedSession>>,
+    /// One cached session per slot: the relay's bearer token is MAC'd to the slot it
+    /// was issued for, so reading two slots means two handshakes.
+    sessions: std::sync::Mutex<HashMap<String, CachedSession>>,
+    /// Which slot each row we have seen came from, so [`Self::ack`] deletes it where
+    /// it actually lives. A DELETE naming the wrong slot answers 204 and removes
+    /// nothing (the relay marks by `(slot, id)`), so this cannot be probed for —
+    /// it has to be remembered.
+    row_slots: std::sync::Mutex<HashMap<String, String>>,
+    /// When the older slots were last drained, so the steady-state poll loop doesn't
+    /// pay for them every round.
+    last_backfill: std::sync::Mutex<u64>,
 }
 
 #[derive(Clone)]
@@ -428,6 +609,21 @@ struct CachedSession {
 
 /// Seconds the relay may hold a GET open waiting for an offer (long-poll).
 const LONG_POLL_SECS: u64 = 25;
+
+/// How often the previous epoch's slot is drained during a long-poll loop.
+///
+/// The current slot is long-polled every round, as before. A row in an older slot is
+/// by definition at least one epoch old, so nothing is gained by asking for it every
+/// 25 seconds — and asking would double a daemon's steady-state request count
+/// against the relay for no latency anyone can perceive. A one-shot read (`wait=0`:
+/// `arvolo status`, the receive listing, the sync engine) ignores this and always
+/// looks in every slot, because there a missed row is a wrong answer to a person.
+const BACKFILL_EVERY_SECS: u64 = 300;
+
+/// Cap on remembered row→slot mappings. A slot holds at most 64 rows and the window
+/// is two slots deep, so this is generous; it exists only so a session that runs for
+/// months can't grow the map without bound.
+const MAX_ROW_SLOTS: usize = 1024;
 
 /// Current unix time in seconds.
 fn now_unix() -> u64 {
@@ -441,11 +637,13 @@ impl InboxSubscription {
     /// Subscribe to the inbox of `me` on `relay`.
     pub fn new(relay: impl Into<String>, me: &Identity) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: crate::http::client(),
             relay: relay.into(),
-            slot: slot_for(&me.public().to_bytes()),
+            pubkey: me.public().to_bytes(),
             me_secret: me.secret_bytes(),
-            session: std::sync::Mutex::new(None),
+            sessions: std::sync::Mutex::new(HashMap::new()),
+            row_slots: std::sync::Mutex::new(HashMap::new()),
+            last_backfill: std::sync::Mutex::new(0),
         }
     }
 
@@ -454,19 +652,55 @@ impl InboxSubscription {
         Identity::from_secret_bytes(&self.me_secret)
     }
 
-    /// Return a valid bearer token, running the proof-of-possession handshake if
-    /// the cache is empty or the token is within 60s of expiry. `force` skips the
-    /// cache (used after a 401, in case the relay's session secret rotated).
-    async fn ensure_session(&self, force: bool) -> Result<String> {
+    /// The slot a deposit into our own inbox goes to, and the one the poll loop
+    /// holds open: the current epoch's.
+    fn current_slot(&self) -> String {
+        slot_for(&self.pubkey)
+    }
+
+    /// Every slot that can still hold a row for us, current epoch first.
+    fn read_slots(&self) -> Vec<String> {
+        inbox_slots_at(&self.pubkey, now_unix())
+    }
+
+    /// Remember where a row lives, so acking it later hits the right slot.
+    fn remember_rows(&self, slot: &str, ids: impl Iterator<Item = String>) {
+        let mut map = self.row_slots.lock().unwrap();
+        if map.len() > MAX_ROW_SLOTS {
+            // Losing the map costs nothing worse than an ack falling back to the
+            // current slot, which is where all but the oldest rows are anyway.
+            map.clear();
+        }
+        for id in ids {
+            map.insert(id, slot.to_string());
+        }
+    }
+
+    /// Whether the older slots are due a drain, stamping the clock if so.
+    fn backfill_due(&self) -> bool {
+        let now = now_unix();
+        let mut last = self.last_backfill.lock().unwrap();
+        if now.saturating_sub(*last) < BACKFILL_EVERY_SECS {
+            return false;
+        }
+        *last = now;
+        true
+    }
+
+    /// Return a valid bearer token for `slot`, running the proof-of-possession
+    /// handshake if the cache is empty or the token is within 60s of expiry. `force`
+    /// skips the cache (used after a 401, in case the relay's session secret
+    /// rotated).
+    async fn ensure_session(&self, slot: &str, force: bool) -> Result<String> {
         if !force {
-            if let Some(s) = self.session.lock().unwrap().clone() {
+            if let Some(s) = self.sessions.lock().unwrap().get(slot).cloned() {
                 if now_unix() + 60 < s.exp {
                     return Ok(s.bearer);
                 }
             }
         }
         let me = self.me()?;
-        let url = format!("{}/session", inbox_url(&self.relay, &self.slot));
+        let url = format!("{}/session", inbox_url(&self.relay, slot));
         let body = me.public().to_bytes();
         let resp = self
             .client
@@ -493,10 +727,13 @@ impl InboxSubscription {
         };
         let raw = postcard::to_allocvec(&token).context("encode session token")?;
         let bearer = data_encoding::BASE32_NOPAD.encode(&raw).to_lowercase();
-        *self.session.lock().unwrap() = Some(CachedSession {
-            bearer: bearer.clone(),
-            exp: challenge.exp,
-        });
+        self.sessions.lock().unwrap().insert(
+            slot.to_string(),
+            CachedSession {
+                bearer: bearer.clone(),
+                exp: challenge.exp,
+            },
+        );
         Ok(bearer)
     }
 
@@ -511,12 +748,7 @@ impl InboxSubscription {
     /// or unauthenticated rows are dropped from our view and acked so they stop
     /// coming back, rather than failing the whole poll.
     pub async fn poll_wait(&self, wait_secs: u64) -> Result<Vec<ReceivedOffer>> {
-        let url = format!("{}?wait={}", inbox_url(&self.relay, &self.slot), wait_secs);
-        let bytes = self.authed(reqwest::Method::GET, &url).await?;
-        if bytes.is_empty() {
-            return Ok(Vec::new());
-        }
-        let items: Vec<InboxItem> = postcard::from_bytes(&bytes).context("decode inbox items")?;
+        let items = self.items_across_slots(wait_secs).await?;
         let me = self.me()?;
         let mut out = Vec::new();
         for item in items {
@@ -546,20 +778,60 @@ impl InboxSubscription {
     /// `wait_secs`. Used by the sync engine, which needs the relay-assigned ids to
     /// clean up superseded sync notes.
     pub async fn raw_items(&self, wait_secs: u64) -> Result<Vec<InboxItem>> {
-        let url = format!("{}?wait={}", inbox_url(&self.relay, &self.slot), wait_secs);
-        let bytes = self.authed(reqwest::Method::GET, &url).await?;
-        if bytes.is_empty() {
-            return Ok(Vec::new());
+        self.items_across_slots(wait_secs).await
+    }
+
+    /// Read the rows in every slot that can still hold one, remembering where each
+    /// came from.
+    ///
+    /// Only the current slot is long-polled; the older ones are read with `wait=0`,
+    /// since a row that has been sitting in one for an epoch is not waiting on
+    /// latency. During a poll loop they are visited every [`BACKFILL_EVERY_SECS`],
+    /// and on a one-shot read (`wait_secs == 0`) always.
+    async fn items_across_slots(&self, wait_secs: u64) -> Result<Vec<InboxItem>> {
+        let slots = self.read_slots();
+        let mut out = Vec::new();
+        let mut backfill = wait_secs == 0;
+        for (i, slot) in slots.iter().enumerate() {
+            let first = i == 0;
+            if !first {
+                // Decide once, on the first older slot, so a window that grows past
+                // two slots costs one stamp rather than one per slot.
+                if i == 1 && !backfill {
+                    backfill = self.backfill_due();
+                }
+                if !backfill {
+                    break;
+                }
+            }
+            let wait = if first { wait_secs } else { 0 };
+            let url = format!("{}?wait={}", inbox_url(&self.relay, slot), wait);
+            let bytes = match self.authed(reqwest::Method::GET, slot, &url).await {
+                Ok(b) => b,
+                // A failure on the *current* slot is the caller's to see — it is the
+                // live inbox. An older slot failing is not worth losing the round
+                // over: it holds nothing time-critical by construction.
+                Err(e) if first => return Err(e),
+                Err(_) => continue,
+            };
+            if bytes.is_empty() {
+                continue;
+            }
+            let items: Vec<InboxItem> =
+                postcard::from_bytes(&bytes).context("decode inbox items")?;
+            self.remember_rows(slot, items.iter().map(|row| row.id.clone()));
+            out.extend(items);
         }
-        postcard::from_bytes(&bytes).context("decode inbox items")
+        Ok(out)
     }
 
     /// Deposit a raw blob into **our own** inbox slot (unauthenticated POST, like
     /// any depositor). `ttl_secs` sets how long the relay keeps it — the sync cell
-    /// uses a long TTL and is refreshed on each publish. Returns the relay id.
+    /// uses a long TTL and is refreshed on each publish, and is clamped to the
+    /// slot's own lifetime like any other row. Returns the relay id.
     pub async fn post_raw(&self, body: Vec<u8>, ttl_secs: Option<u64>) -> Result<String> {
-        let mut url = inbox_url(&self.relay, &self.slot);
-        if let Some(ttl) = ttl_secs {
+        let mut url = inbox_url(&self.relay, &self.current_slot());
+        if let Some(ttl) = clamp_inbox_ttl(ttl_secs) {
             url = format!("{url}?ttl={ttl}");
         }
         let resp = self
@@ -581,19 +853,33 @@ impl InboxSubscription {
     }
 
     /// Delete a handled offer from the inbox by its id.
+    ///
+    /// In whichever slot we read it from: the relay keys rows by `(slot, id)` and
+    /// answers 204 either way, so naming the current slot for a row that lives in an
+    /// older one would report success and delete nothing — the offer would come back
+    /// on the next round, forever. An id we have never seen falls back to the current
+    /// slot, which is where anything not read through this subscription would be.
     pub async fn ack(&self, id: &str) -> Result<()> {
-        let url = format!("{}/{id}", inbox_url(&self.relay, &self.slot));
-        self.authed(reqwest::Method::DELETE, &url).await?;
+        let slot = self
+            .row_slots
+            .lock()
+            .unwrap()
+            .get(id)
+            .cloned()
+            .unwrap_or_else(|| self.current_slot());
+        let url = format!("{}/{id}", inbox_url(&self.relay, &slot));
+        self.authed(reqwest::Method::DELETE, &slot, &url).await?;
+        self.row_slots.lock().unwrap().remove(id);
         Ok(())
     }
 
-    /// Perform an authenticated inbox request, attaching the bearer token and
-    /// re-authenticating once on a 401 (e.g. the relay restarted with a new
+    /// Perform an authenticated inbox request against `slot`, attaching its bearer
+    /// token and re-authenticating once on a 401 (e.g. the relay restarted with a new
     /// session secret). Returns the response body bytes.
-    async fn authed(&self, method: reqwest::Method, url: &str) -> Result<Vec<u8>> {
+    async fn authed(&self, method: reqwest::Method, slot: &str, url: &str) -> Result<Vec<u8>> {
         let mut forced = false;
         loop {
-            let bearer = self.ensure_session(forced).await?;
+            let bearer = self.ensure_session(slot, forced).await?;
             let resp = self
                 .client
                 .request(method.clone(), url)
@@ -603,7 +889,7 @@ impl InboxSubscription {
                 .context("inbox request")?;
             if resp.status() == reqwest::StatusCode::UNAUTHORIZED && !forced {
                 // Stale token — drop it and retry the handshake once.
-                *self.session.lock().unwrap() = None;
+                self.sessions.lock().unwrap().remove(slot);
                 forced = true;
                 continue;
             }
@@ -744,6 +1030,141 @@ mod tests {
             slot_for(&a.public().to_bytes()),
             presence_slot_for(&a.public().to_bytes())
         );
+    }
+
+    /// A fixed instant well inside an epoch, so the "same epoch" cases below are not
+    /// accidentally straddling a boundary.
+    const T: u64 = 100 * INBOX_EPOCH_SECS + INBOX_EPOCH_SECS / 2;
+
+    #[test]
+    fn inbox_slot_is_stable_within_an_epoch_and_rotates_across_one() {
+        let k = Identity::generate().public().to_bytes();
+        assert_eq!(slot_for_at(&k, T), slot_for_at(&k, T + 60));
+        assert_eq!(
+            slot_for_at(&k, T),
+            slot_for_at(&k, T + INBOX_EPOCH_SECS / 2 - 1),
+            "still the same epoch right up to the boundary"
+        );
+        assert_ne!(
+            slot_for_at(&k, T),
+            slot_for_at(&k, T + INBOX_EPOCH_SECS),
+            "the whole point: one epoch on, the relay sees a different string"
+        );
+    }
+
+    #[test]
+    fn a_live_row_is_always_in_a_slot_the_reader_looks_in() {
+        // The invariant that makes rotation safe: post at any moment, read at any
+        // later moment while the row can still be alive (TTL is clamped to one
+        // epoch), and the slot posted to is in the reader's window.
+        let k = Identity::generate().public().to_bytes();
+        for post_offset in [0, 1, INBOX_EPOCH_SECS / 3, INBOX_EPOCH_SECS - 1] {
+            let posted_at = T + post_offset;
+            let posted_slot = slot_for_at(&k, posted_at);
+            let ttl = clamp_inbox_ttl(Some(u64::MAX)).unwrap();
+            for age in [0, 1, ttl / 2, ttl] {
+                let slots = inbox_slots_at(&k, posted_at + age);
+                assert!(
+                    slots.contains(&posted_slot),
+                    "a row posted at +{post_offset} and read {age}s later fell outside the window"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_ttl_clamp_is_what_holds_that_invariant_up() {
+        assert_eq!(
+            clamp_inbox_ttl(Some(30 * 24 * 3600)),
+            Some(INBOX_EPOCH_SECS)
+        );
+        assert_eq!(clamp_inbox_ttl(Some(60)), Some(60));
+        // `None` still means "the relay's own short default", not "one epoch".
+        assert_eq!(clamp_inbox_ttl(None), None);
+    }
+
+    #[test]
+    fn the_relay_accepts_a_session_for_the_window_and_nothing_else() {
+        let me = Identity::generate();
+        let k = me.public().to_bytes();
+        let other = Identity::generate().public().to_bytes();
+
+        assert!(inbox_slot_matches(&k, &slot_for_at(&k, T), T));
+        assert!(
+            inbox_slot_matches(&k, &slot_for_at(&k, T - INBOX_EPOCH_SECS), T),
+            "the previous epoch's slot must still authenticate, or rows in it are unreachable"
+        );
+        assert!(
+            !inbox_slot_matches(&k, &slot_for_at(&k, T - 2 * INBOX_EPOCH_SECS), T),
+            "but not one older than any row can be"
+        );
+        assert!(
+            !inbox_slot_matches(&k, &slot_for_at(&k, T + INBOX_EPOCH_SECS), T),
+            "nor a future one"
+        );
+        assert!(
+            !inbox_slot_matches(&k, &slot_for_at(&other, T), T),
+            "and never someone else's"
+        );
+    }
+
+    #[test]
+    fn the_read_window_is_two_slots_and_current_first() {
+        let k = Identity::generate().public().to_bytes();
+        let slots = inbox_slots_at(&k, T);
+        assert_eq!(slots.len(), 2);
+        assert_eq!(
+            slots[0],
+            slot_for_at(&k, T),
+            "the current slot is read first — it's the one that gets long-polled"
+        );
+    }
+
+    #[test]
+    fn epoch_zero_yields_one_slot_not_the_same_slot_twice() {
+        // A clock claiming 1970 (or a test fixture with a small timestamp) must not
+        // make the reader ask the relay the same question twice.
+        let k = Identity::generate().public().to_bytes();
+        assert_eq!(inbox_slots_at(&k, 0).len(), 1);
+        assert_eq!(presence_slots_at(&k, 0).len(), 1);
+    }
+
+    #[test]
+    fn presence_asks_about_the_previous_slot_only_just_after_a_boundary() {
+        let k = Identity::generate().public().to_bytes();
+        let boundary = 1000 * PRESENCE_EPOCH_SECS;
+
+        // Just after: a beacon published seconds ago is still in the old slot.
+        let just_after = presence_slots_at(&k, boundary + 5);
+        assert_eq!(just_after.len(), 2);
+        assert_eq!(just_after[0], presence_slot_for_at(&k, boundary + 5));
+        assert_eq!(
+            just_after[1],
+            presence_slot_for_at(&k, boundary - 1),
+            "and the second one asked is the epoch that just ended"
+        );
+
+        // Well inside the epoch: nothing there could still be alive (beacons last
+        // 30s), so the extra request isn't spent.
+        assert_eq!(
+            presence_slots_at(&k, boundary + PRESENCE_GRACE_SECS).len(),
+            1
+        );
+        assert_eq!(
+            presence_slots_at(&k, boundary + PRESENCE_EPOCH_SECS / 2).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn presence_slots_rotate_too_and_stay_separated_from_inbox_slots() {
+        let k = Identity::generate().public().to_bytes();
+        assert_ne!(
+            presence_slot_for_at(&k, T),
+            presence_slot_for_at(&k, T + PRESENCE_EPOCH_SECS)
+        );
+        // Same key, same instant, both derivations: still unrelated values.
+        assert_ne!(presence_slot_for_at(&k, T), slot_for_at(&k, T));
     }
 
     fn test_offer() -> Offer {

@@ -740,6 +740,11 @@ pub enum EventDto {
     /// The address book changed under the daemon. Carries nothing: re-issue
     /// [`Request::ListContacts`] to pick the new book up.
     ContactsChanged,
+    /// Finished rows were dropped from the daemon's list — somebody else's
+    /// [`Request::ClearFinished`], typically `arvolo status clear` run while a
+    /// window is open. Carries nothing: drop what *you* consider finished, by the
+    /// same rule the daemon uses (a deposit awaiting pickup is not finished).
+    FinishedCleared,
     /// A hosted pairing session has its code — this is what the other machine
     /// types. Only ever emitted for the `*Host` kinds.
     PairingCode {
@@ -894,6 +899,7 @@ impl From<&ManagerEvent> for EventDto {
                 reason: reason.clone(),
             },
             ManagerEvent::ContactsChanged => EventDto::ContactsChanged,
+            ManagerEvent::FinishedCleared => EventDto::FinishedCleared,
         }
     }
 }
@@ -1117,6 +1123,7 @@ mod tests {
             // A unit variant is a bare string, NOT an object — the frontend has to
             // handle both forms.
             (EventDto::ContactsChanged, r#""contacts_changed""#),
+            (EventDto::FinishedCleared, r#""finished_cleared""#),
         ];
         for (ev, want) in cases {
             assert_eq!(

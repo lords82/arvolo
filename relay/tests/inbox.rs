@@ -350,3 +350,107 @@ async fn unauthenticated_read_and_delete_are_rejected() {
         .expect("session");
     assert_eq!(sess.status(), reqwest::StatusCode::FORBIDDEN);
 }
+
+/// The rotation contract, end to end: a row deposited in the *previous* epoch's
+/// slot — which is what every row posted before a boundary becomes — is still
+/// found, and acking it deletes it where it actually lives.
+///
+/// A sync note rather than an offer, because a note is exactly the long-lived row
+/// this has to hold for, and because `poll_wait` deliberately leaves notes alone
+/// (so this exercises the read path without the offer-decode path acking it).
+#[tokio::test]
+async fn a_row_left_in_the_previous_epochs_slot_is_still_read_and_acked() {
+    use arvolo_core::presence::{encode_sync_note, slot_for_at, INBOX_EPOCH_SECS};
+    use arvolo_core::sync::SyncNote;
+
+    let relay = spawn_relay().await;
+    let me = Identity::generate();
+    let client = reqwest::Client::new();
+
+    let old_slot = slot_for_at(
+        &me.public().to_bytes(),
+        now_unix().saturating_sub(INBOX_EPOCH_SECS),
+    );
+    let body = encode_sync_note(&SyncNote::Snapshot {
+        blob: vec![7u8; 32],
+    })
+    .expect("encode note");
+    let id = client
+        .post(format!("{relay}/v1/inbox/{old_slot}?ttl=3600"))
+        .body(body)
+        .send()
+        .await
+        .expect("post")
+        .text()
+        .await
+        .expect("id")
+        .trim()
+        .to_string();
+    assert!(!id.is_empty());
+
+    let sub = InboxSubscription::new(relay.clone(), &me);
+    let items = sub.raw_items(0).await.expect("read inbox");
+    assert_eq!(
+        items.len(),
+        1,
+        "a row one epoch old must still be inside the read window"
+    );
+    assert_eq!(items[0].id, id);
+
+    // The ack has to go to the old slot. Sent to the current one the relay would
+    // answer 204 and delete nothing, and the row would come back forever.
+    sub.ack(&id).await.expect("ack");
+    assert!(
+        sub.raw_items(0).await.expect("re-read").is_empty(),
+        "the ack landed in the wrong slot: the row is still there"
+    );
+}
+
+/// The window has a far edge: the relay must not hand out a session for a slot no
+/// live row can be in, or a leaked public id would buy an attacker every past slot.
+#[tokio::test]
+async fn a_session_is_granted_for_the_window_and_refused_outside_it() {
+    use arvolo_core::presence::{slot_for_at, INBOX_EPOCH_SECS};
+
+    let relay = spawn_relay().await;
+    let me = Identity::generate();
+    let client = reqwest::Client::new();
+    let pk = me.public().to_bytes();
+    let now = now_unix();
+
+    for (label, when, want) in [
+        ("current", now, reqwest::StatusCode::OK),
+        (
+            "previous",
+            now.saturating_sub(INBOX_EPOCH_SECS),
+            reqwest::StatusCode::OK,
+        ),
+        (
+            "two epochs back",
+            now.saturating_sub(2 * INBOX_EPOCH_SECS),
+            reqwest::StatusCode::FORBIDDEN,
+        ),
+        (
+            "next epoch",
+            now + INBOX_EPOCH_SECS,
+            reqwest::StatusCode::FORBIDDEN,
+        ),
+    ] {
+        let slot = slot_for_at(&pk, when);
+        let resp = client
+            .post(format!("{relay}/v1/inbox/{slot}/session"))
+            .body(pk.clone())
+            .send()
+            .await
+            .expect("session");
+        assert_eq!(resp.status(), want, "session for the {label} slot");
+    }
+}
+
+/// Current unix seconds, as the slot derivation counts them.
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
