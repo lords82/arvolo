@@ -1,0 +1,23 @@
+{
+  "projectId": "6aa4e0c1-5b2c-49ff-bc98-2fafdfd17733",
+  "pkg": "arvolo-gui",
+  "globalName": "Arvolo",
+  "shape": "package",
+  "srcDir": "src/ui",
+  "tsconfig": "tsconfig.json",
+  "cssEntry": "src/theme.css",
+  "componentSrcMap": {
+    "Icon": null
+  },
+  "dtsPropsFor": {
+    "Segmented": "value: string; onChange: (v: string) => void; options: { value: string; label: string }[]; block?: boolean; label: string;"
+  },
+  "overrides": {
+    "CopyButton": { "cardMode": "column" },
+    "Empty": { "cardMode": "column" },
+    "Field": { "cardMode": "column" },
+    "Sheet": { "cardMode": "single", "primaryStory": "SideSheet" }
+  },
+  "runtimeFontPrefixes": ["Inter", "JetBrains Mono", "Roboto Mono"],
+  "readmeHeader": ".design-sync/conventions.md"
+}

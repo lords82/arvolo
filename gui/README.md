@@ -105,7 +105,12 @@ app can spawn the daemon on a clean machine.
 ## Extra behaviours
 
 * **Tray**: closing the window hides it to the system tray ("Mostra Arvolo" /
-  "Esci" in the tray menu); the daemon keeps running either way.
+  "Esci" in the tray menu); the daemon keeps running either way. With the window
+  closed Arvolo leaves the Dock (macOS) and the taskbar (Windows, Linux) and
+  lives in the status area only — clicking the tray icon brings it back, as does
+  the Dock icon or a re-launch on macOS. Where no tray can be created (a Linux
+  desktop without a StatusNotifier host) closing quits instead, so the app never
+  disappears with no way back.
 * **Arrivi in attesa** are announced by a banner on every screen but the board,
   and by a count on the rail; a native notification fires even when the window
   is closed to the tray.

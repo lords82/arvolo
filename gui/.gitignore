@@ -4,3 +4,14 @@ dist/
 .vite/
 # Tauri codegen output
 src-tauri/gen/
+
+# design-sync (claude.ai/design): staged scripts, build output, machine state.
+# What IS committed: .design-sync/{config.json,NOTES.md,conventions.md,
+# tsconfig.dts.json,previews/} — the sync inputs.
+.ds-sync/
+ds-bundle/
+.ds-types/
+index.d.ts
+.design-sync/.cache/
+.design-sync/learnings/
+.design-sync/node_modules

@@ -253,6 +253,10 @@ export type EngineEvent =
   /** The address book moved (from this GUI, the CLI, or a sync). Carries nothing:
    *  refetch the contacts. */
   | { type: "contacts_changed" }
+  /** Finished rows were cleared from the daemon's list by somebody else — an
+   *  `arvolo status clear`, or another window. Carries nothing: drop the ones
+   *  this window considers finished. */
+  | { type: "finished_cleared" }
   /** A hosted pairing session has its code — what the other machine types. */
   | { type: "pairing_code"; session: string; code: string }
   /** A pairing session succeeded. `needs_restart` marks the one case a UI must

@@ -114,7 +114,7 @@ fn main() {
                 // itself; the macOS Dock icon belongs to the process, so it has
                 // to be taken down explicitly.
                 #[cfg(target_os = "macos")]
-                let _ = app.set_dock_visibility(false);
+                let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             }
         })
         .build(tauri::generate_context!())
@@ -189,12 +189,39 @@ fn show_main_window(app: &AppHandle) {
     // Put the Dock icon back first: while Arvolo is a background-only process
     // macOS won't bring its windows to the front.
     #[cfg(target_os = "macos")]
-    let _ = app.set_dock_visibility(true);
+    {
+        let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
+        restore_dock_icon(app);
+    }
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.show();
         let _ = w.unminimize();
         let _ = w.set_focus();
     }
+}
+
+/// Hand AppKit Arvolo's icon again. Leaving `Accessory` builds the Dock tile from
+/// scratch, and it is only the *bundle* that carries an icon: the bare binary
+/// `tauri dev` runs has none and lands on the generic "exec" square. Setting it
+/// ourselves makes the two look the same.
+#[cfg(target_os = "macos")]
+fn restore_dock_icon(app: &AppHandle) {
+    /// The bundle icon, baked in — the same file `tauri.conf.json` ships.
+    const ICON: &[u8] = include_bytes!("../icons/icon.icns");
+
+    let _ = app.run_on_main_thread(|| {
+        use objc2::{AllocAnyThread, MainThreadMarker};
+        use objc2_app_kit::{NSApplication, NSImage};
+        use objc2_foundation::NSData;
+
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        let data = NSData::with_bytes(ICON);
+        if let Some(icon) = NSImage::initWithData(NSImage::alloc(), &data) {
+            unsafe { NSApplication::sharedApplication(mtm).setApplicationIconImage(Some(&icon)) };
+        }
+    });
 }
 
 /// Keep a live subscription to the daemon and forward every event to the webview.

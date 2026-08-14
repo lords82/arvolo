@@ -60,7 +60,8 @@ export type WireEvent =
         cancelled: boolean;
       };
     }
-  | "contacts_changed";
+  | "contacts_changed"
+  | "finished_cleared";
 
 /** Every variant the app knows how to act on. A daemon of a different build may
  *  send something else; that is ignored rather than crashing the board. */
@@ -78,6 +79,7 @@ const KNOWN = new Set<EngineEvent["type"]>([
   "code_paired",
   "code_closed",
   "contacts_changed",
+  "finished_cleared",
   "pairing_code",
   "pairing_done",
   "pairing_failed",

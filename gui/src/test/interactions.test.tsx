@@ -331,20 +331,91 @@ describe("the row menu", () => {
     );
   });
 
-  it("118. Move down reorders without touching the daemon", async () => {
+  it("118. the arrow keys on a row's grip reorder without touching the daemon", async () => {
     harness.snapshot.transfers = [
       dto.transfer({ id: 1, name: "primo.txt", status: "active" }),
       dto.transfer({ id: 2, name: "secondo.txt", status: "active" }),
     ];
     render(<App />);
     await screen.findByText("primo.txt");
-    const before = useStore.getState().transfers.t2.rank;
-    const menu = await openRowMenu("secondo.txt");
-    fireEvent.click(within(menu).getByText("Move down"));
-    await waitFor(() =>
-      expect(useStore.getState().transfers.t2.rank).not.toBe(before)
+    const order = () =>
+      Object.values(useStore.getState().transfers)
+        .sort((a, b) => b.rank - a.rank)
+        .map((t) => t.name);
+    const [top, below] = order();
+    // The drag gesture has no keyboard, so the grip carries one: same move,
+    // one step at a time. Without it the board would be unorderable without a
+    // pointer, which is what the menu items used to cover.
+    const grip = screen.getByLabelText(
+      `Move ${below}: drag, or use the up and down arrows`
     );
+    fireEvent.keyDown(grip, { key: "ArrowUp" });
+    await waitFor(() => expect(order()[0]).toBe(below));
+    expect(order()[1]).toBe(top);
     expect(harness.recorder.cancel).toEqual([]);
+  });
+
+  it("119. dragging a grip drops the row where it was let go", async () => {
+    harness.snapshot.transfers = [1, 2, 3].map((id) =>
+      dto.transfer({ id, name: `f${id}.txt`, status: "active" })
+    );
+    render(<App />);
+    await screen.findByText("f1.txt");
+    const order = () =>
+      Object.values(useStore.getState().transfers)
+        .sort((a, b) => b.rank - a.rank)
+        .map((t) => t.name);
+    const [top, mid, bottom] = order();
+
+    const grip = screen.getByLabelText(
+      `Move ${top}: drag, or use the up and down arrows`
+    );
+    // jsdom lays nothing out — every rect is 0×0 — so the drag has to be given
+    // the geometry it would read from a real window: three rows, 60px each.
+    const rows = Array.from(
+      grip.closest(".rows")!.querySelectorAll<HTMLElement>(":scope > .row")
+    );
+    expect(rows).toHaveLength(3);
+    rows.forEach((el, i) => {
+      el.getBoundingClientRect = () =>
+        ({ top: i * 60, height: 60, bottom: i * 60 + 60 }) as DOMRect;
+    });
+
+    fireEvent.pointerDown(grip, { button: 0, clientY: 30 });
+    // Past the centre of the third row (150), so it lands last.
+    fireEvent.pointerMove(window, { clientY: 195 });
+    fireEvent.pointerUp(window, { clientY: 195 });
+    await waitFor(() => expect(order()).toEqual([mid, bottom, top]));
+  });
+
+  it("120. a drag let go on Escape leaves the order alone", async () => {
+    harness.snapshot.transfers = [1, 2].map((id) =>
+      dto.transfer({ id, name: `g${id}.txt`, status: "active" })
+    );
+    render(<App />);
+    await screen.findByText("g1.txt");
+    const order = () =>
+      Object.values(useStore.getState().transfers)
+        .sort((a, b) => b.rank - a.rank)
+        .map((t) => t.name);
+    const before = order();
+
+    const grip = screen.getByLabelText(
+      `Move ${before[0]}: drag, or use the up and down arrows`
+    );
+    const rows = Array.from(
+      grip.closest(".rows")!.querySelectorAll<HTMLElement>(":scope > .row")
+    );
+    rows.forEach((el, i) => {
+      el.getBoundingClientRect = () =>
+        ({ top: i * 60, height: 60, bottom: i * 60 + 60 }) as DOMRect;
+    });
+
+    fireEvent.pointerDown(grip, { button: 0, clientY: 30 });
+    fireEvent.pointerMove(window, { clientY: 120 });
+    fireEvent.keyDown(window, { key: "Escape" });
+    fireEvent.pointerUp(window, { clientY: 120 });
+    expect(order()).toEqual(before);
   });
 });
 

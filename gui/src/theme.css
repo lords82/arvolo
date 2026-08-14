@@ -1085,6 +1085,43 @@ select {
   opacity: 1;
 }
 
+/* -- Drag to reorder ------------------------------------------------------- */
+
+/* The file-kind chip is the handle. `touch-action: none` is not decoration:
+   without it the browser keeps the gesture for scrolling and the pointermove
+   events never arrive, so the row would simply refuse to be dragged. */
+.row-grip {
+  display: grid;
+  place-items: center;
+  cursor: grab;
+  touch-action: none;
+}
+.row-grip:focus-visible {
+  border-radius: var(--r-md);
+}
+.row.is-drag .row-grip {
+  cursor: grabbing;
+}
+/* The row under the pointer is lifted out of the list; the ones it passes
+   slide into the gap it left. Only they get the transition — the dragged row
+   has to track the pointer exactly, and 110ms of easing on it reads as lag. */
+.row.is-shift {
+  transition: transform var(--t-fast) var(--ease),
+    background var(--t-fast) var(--ease);
+}
+.row.is-drag {
+  z-index: 2;
+  background: var(--surface-2);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-2);
+  transition: none;
+}
+/* Hover is a pointing gesture, and during a drag the pointer is not pointing
+   at what it is over. */
+.rows.is-reordering .row:not(.is-drag):hover {
+  background: var(--surface);
+}
+
 /* -- Progress -------------------------------------------------------------- */
 
 .prog {

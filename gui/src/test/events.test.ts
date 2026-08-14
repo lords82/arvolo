@@ -82,6 +82,7 @@ describe("wire → app model", () => {
     // serde renders `ContactsChanged` as just `"contacts_changed"`. Treating every
     // event as an object would drop it.
     expect(normalizeEvent("contacts_changed")).toEqual({ type: "contacts_changed" });
+    expect(normalizeEvent("finished_cleared")).toEqual({ type: "finished_cleared" });
   });
 
   it("58. an event this build does not know is ignored, not fatal", () => {

@@ -10,7 +10,8 @@
 // On a narrow window the columns stack; the direction stripe down each row's
 // leading edge is what keeps them distinguishable once they do.
 
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
+import type { CSSProperties } from "react";
 import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { fire, useStore } from "../store";
 import {
@@ -28,10 +29,23 @@ import { ExtChip, Progress } from "../ui/Bits";
 import { MenuButton, type MenuItem } from "../ui/Menu";
 import { Confirm } from "../ui/Sheet";
 import { toast } from "../ui/Toasts";
+import { useReorder, type ReorderBits } from "./reorder";
 
 // `t` is the translator everywhere in this app, so the transfer this row draws
 // is `tx`. The prop keeps its name — the callers read better as `t={row}`.
-function Row({ t: tx }: { t: UITransfer }) {
+function Row({
+  t: tx,
+  grip,
+  onNudge,
+  drag,
+}: {
+  t: UITransfer;
+  /** Handle wiring from `useReorder`, on the file-kind chip. */
+  grip: ReturnType<ReorderBits["gripProps"]>;
+  /** Keyboard equivalent of the drag: −1 up, 1 down. */
+  onNudge: (delta: 1 | -1) => void;
+  drag: { className: string; style?: CSSProperties };
+}) {
   const t = useT();
   const pause = useStore((s) => s.pause);
   const resume = useStore((s) => s.resume);
@@ -39,7 +53,6 @@ function Row({ t: tx }: { t: UITransfer }) {
   const removeRow = useStore((s) => s.removeRow);
   const openIncoming = useStore((s) => s.openIncoming);
   const openShare = useStore((s) => s.openShare);
-  const moveItem = useStore((s) => s.moveItem);
   const [confirmCancel, setConfirmCancel] = useState(false);
 
   const st = statusMeta(tx.status);
@@ -112,19 +125,6 @@ function Row({ t: tx }: { t: UITransfer }) {
       },
     });
   }
-  items.push(
-    {
-      key: "up",
-      label: t("transfers.moveUp"),
-      onSelect: () => moveItem(tx.key, -1),
-      separated: items.length > 0,
-    },
-    {
-      key: "down",
-      label: t("transfers.moveDown"),
-      onSelect: () => moveItem(tx.key, 1),
-    }
-  );
   if (live) {
     items.push({
       key: "cancel",
@@ -171,8 +171,10 @@ function Row({ t: tx }: { t: UITransfer }) {
   return (
     <>
       <div
-        className={`row dir-${tx.dir} ${done ? "is-done" : ""}`}
-        style={openable ? { cursor: "pointer" } : undefined}
+        className={`row dir-${tx.dir} ${done ? "is-done" : ""} ${drag.className}`}
+        style={
+          openable ? { cursor: "pointer", ...drag.style } : drag.style
+        }
         onClick={openable ?? undefined}
         onDoubleClick={tx.path ? openFile : undefined}
         role={openable ? "button" : undefined}
@@ -188,7 +190,26 @@ function Row({ t: tx }: { t: UITransfer }) {
             : undefined
         }
       >
-        <ExtChip name={tx.name} />
+        {/* The file-kind chip doubles as the drag handle: it is the one part of
+            a row that is always there, always the same size, and never a
+            control on its own. Dragging it moves the row within its section;
+            the arrow keys do the same thing one step at a time, which is the
+            whole of the keyboard path now that the menu no longer has one. */}
+        <span
+          className="row-grip"
+          {...grip}
+          role="button"
+          tabIndex={0}
+          aria-label={t("transfers.reorder", tx.name)}
+          onKeyDown={(e) => {
+            if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
+            e.preventDefault();
+            e.stopPropagation();
+            onNudge(e.key === "ArrowUp" ? -1 : 1);
+          }}
+        >
+          <ExtChip name={tx.name} />
+        </span>
 
         <div className="row-main">
           <div className="row-name truncate" title={tx.name}>
@@ -315,6 +336,53 @@ function Row({ t: tx }: { t: UITransfer }) {
   );
 }
 
+// One section's rows, and the ordering gesture that belongs to them.
+//
+// A section, not a column, is the list you can drag inside: the sections are
+// what the board actually draws as contiguous runs of rows, and dropping a
+// row into a place it cannot be drawn — "recently finished", above the ones
+// still running — would leave the pointer and the result in different spots.
+// `reorderItems` only permutes the ranks these rows already hold, so the rest
+// of the column stays where it was.
+function SectionRows({ items }: { items: UITransfer[] }) {
+  const reorderItems = useStore((s) => s.reorderItems);
+  const rows = useMemo(
+    () => items.slice().sort((a, b) => b.rank - a.rank),
+    [items]
+  );
+  const keys = useMemo(() => rows.map((r) => r.key), [rows]);
+  const { listRef, gripProps, rowProps, active } = useReorder(
+    keys,
+    reorderItems
+  );
+
+  const nudge = useCallback(
+    (key: string, delta: 1 | -1) => {
+      const i = keys.indexOf(key);
+      const j = i + delta;
+      if (i < 0 || j < 0 || j >= keys.length) return;
+      const order = keys.slice();
+      [order[i], order[j]] = [order[j], order[i]];
+      reorderItems(order);
+    },
+    [keys, reorderItems]
+  );
+
+  return (
+    <div className={`card rows ${active ? "is-reordering" : ""}`} ref={listRef}>
+      {rows.map((row, i) => (
+        <Row
+          key={row.key}
+          t={row}
+          grip={gripProps(row.key)}
+          drag={rowProps(i)}
+          onNudge={(delta) => nudge(row.key, delta)}
+        />
+      ))}
+    </div>
+  );
+}
+
 function Column({
   dir,
   sections,
@@ -371,14 +439,7 @@ function Column({
               <span className="t-label">{sec.title}</span>
               <span className="t-xs t-mut tnum">{sec.items.length}</span>
             </div>
-            <div className="card rows">
-              {sec.items
-                .slice()
-                .sort((a, b) => b.rank - a.rank)
-                .map((row) => (
-                  <Row key={row.key} t={row} />
-                ))}
-            </div>
+            <SectionRows items={sec.items} />
           </div>
         ))
       )}

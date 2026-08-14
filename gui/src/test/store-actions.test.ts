@@ -302,34 +302,109 @@ describe("markVerified", () => {
   });
 });
 
-describe("moveItem", () => {
-  it("88. moving down swaps a row with the one below it", async () => {
+describe("reorderItems", () => {
+  const order = () =>
+    Object.values(s().transfers)
+      .sort((a, b) => b.rank - a.rank)
+      .map((t) => t.key);
+
+  it("88. the rows end up in the order they were given", async () => {
     await boot();
     harness.emit({ started: { id: 1, direction: "send", name: "primo", total_size: 1 } });
     harness.emit({ started: { id: 2, direction: "send", name: "secondo", total_size: 1 } });
-    const order = () =>
-      Object.values(s().transfers)
-        .sort((a, b) => b.rank - a.rank)
-        .map((t) => t.name);
-    const [top] = order();
-    s().moveItem(top === "primo" ? "t1" : "t2", 1);
-    expect(order()[0]).not.toBe(top);
+    const before = order();
+    s().reorderItems([...before].reverse());
+    expect(order()).toEqual([...before].reverse());
   });
 
-  it("89. a row never moves past the end of its own column", async () => {
+  it("89. rows left out of the list keep their place", async () => {
+    await boot();
+    for (const id of [1, 2, 3]) {
+      harness.emit({
+        started: { id, direction: "send", name: `f${id}`, total_size: 1 },
+      });
+    }
+    const [top, mid, bottom] = order();
+    const untouched = row(mid).rank;
+    // A section is reordered on its own, so only the ranks of the rows named
+    // may move — the one between them must not be dragged along.
+    s().reorderItems([bottom, top]);
+    expect(row(mid).rank).toBe(untouched);
+    expect(order()).toEqual([bottom, mid, top]);
+  });
+
+  it("90. unknown keys are ignored rather than crashing", async () => {
     await boot();
     harness.emit({ started: { id: 1, direction: "send", name: "solo", total_size: 1 } });
-    harness.emit({ started: { id: 2, direction: "recv", name: "altro", total_size: 1 } });
     const before = row("t1").rank;
-    // Only sibling is in the other column, so there is nothing to swap with.
-    s().moveItem("t1", 1);
-    s().moveItem("t1", -1);
+    expect(() => s().reorderItems(["t404", "t1"])).not.toThrow();
+    expect(() => s().reorderItems([])).not.toThrow();
     expect(row("t1").rank).toBe(before);
   });
 
-  it("90. moving an unknown row is a no-op, not a crash", async () => {
+  it("161. a reorder is written down, so the next run can have it back", async () => {
+    localStorage.removeItem("arvolo.order");
     await boot();
-    expect(() => s().moveItem("t404", 1)).not.toThrow();
+    harness.emit({ started: { id: 1, direction: "send", name: "primo", total_size: 1 } });
+    harness.emit({ started: { id: 2, direction: "send", name: "secondo", total_size: 1 } });
+    // Nothing is written until the user actually says something about the order.
+    expect(localStorage.getItem("arvolo.order")).toBeNull();
+
+    const keys = Object.values(s().transfers)
+      .sort((a, b) => b.rank - a.rank)
+      .map((t) => t.key);
+    s().reorderItems([...keys].reverse());
+
+    const saved = JSON.parse(localStorage.getItem("arvolo.order")!);
+    expect(saved[keys[1]]).toBeGreaterThan(saved[keys[0]]);
+  });
+
+  it("162. a fresh boot picks the remembered order back up", async () => {
+    // The rank map is read once, when the module loads — so a *new run* of the
+    // app is a new module, not a new store state.
+    localStorage.setItem("arvolo.order", JSON.stringify({ t1: 40, t2: 10 }));
+    harness.snapshot.transfers = [
+      dto.transfer({ id: 1, name: "primo" }),
+      dto.transfer({ id: 2, name: "secondo" }),
+      // Never placed by hand: it has no remembered rank, and belongs on top.
+      dto.transfer({ id: 3, name: "arrivato dopo" }),
+    ];
+    vi.resetModules();
+    const { useStore: fresh } = await import("../store");
+    const dispose = await fresh.getState().init();
+    disposers.push(dispose);
+    await vi.waitFor(() => expect(fresh.getState().connected).toBe(true));
+
+    const order = Object.values(fresh.getState().transfers)
+      .sort((a, b) => b.rank - a.rank)
+      .map((t) => t.name);
+    expect(order).toEqual(["arrivato dopo", "primo", "secondo"]);
+    localStorage.removeItem("arvolo.order");
+  });
+
+  it("163. a webview that refuses localStorage still reorders", async () => {
+    const setItem = vi
+      .spyOn(Storage.prototype, "setItem")
+      .mockImplementation(() => {
+        throw new Error("nope");
+      });
+    try {
+      await boot();
+      harness.emit({ started: { id: 1, direction: "send", name: "primo", total_size: 1 } });
+      harness.emit({ started: { id: 2, direction: "send", name: "secondo", total_size: 1 } });
+      const keys = Object.values(s().transfers)
+        .sort((a, b) => b.rank - a.rank)
+        .map((t) => t.key);
+      expect(() => s().reorderItems([...keys].reverse())).not.toThrow();
+      // The order still moved; only the remembering was lost.
+      expect(
+        Object.values(s().transfers)
+          .sort((a, b) => b.rank - a.rank)
+          .map((t) => t.key)
+      ).toEqual([...keys].reverse());
+    } finally {
+      setItem.mockRestore();
+    }
   });
 });
 

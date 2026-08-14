@@ -25,6 +25,21 @@ tracing.workspace = true
 # The daemon client + wire contract, shared with the CLI.
 arvolo-ipc.workspace = true
 
+# Handing AppKit the Dock icon again after the window comes back from the tray.
+# Same versions Tauri itself pulls, so nothing is duplicated in the tree.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSApplication",
+    "NSImage",
+    "NSResponder",
+] }
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSData",
+] }
+
 # Signalling the daemon for the in-app restart (unix only).
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
