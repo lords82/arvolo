@@ -865,7 +865,13 @@ fn inbox_authorized(headers: &HeaderMap, slot: &str, secret: &[u8; 32]) -> bool 
 async fn inbox_session_handler(
     State(state): State<AppState>,
     AxumPath(slot): AxumPath<String>,
+    ip: ClientIp,
 ) -> Result<Bytes, (StatusCode, String)> {
+    // Rate-limited like every other unauthenticated POST. Not because a challenge
+    // is worth grinding — it is useless to anyone who cannot sign it — but because
+    // "every unauthenticated write-shaped route draws from the per-IP budget" is a
+    // policy worth keeping total: the one unlimited endpoint is where a flood goes.
+    write_rate_limit(&state.write_limiter, ip.0, now_unix(), writes_per_min())?;
     // A slot that is not a key cannot be authenticated for, ever — refuse it here
     // rather than issue a challenge nobody could answer.
     if arvolo_core::presence::slot_key(&slot).is_none() {

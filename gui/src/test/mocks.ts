@@ -251,8 +251,8 @@ export function makeIpcMock() {
         harness.recorder.cancelPairing.push(session);
         return guard("cancelPairing", undefined);
       },
-      readTextFile: () => guard("readTextFile", "[]"),
-      writeTextFile: () => guard("writeTextFile", undefined),
+      importContacts: () => guard("importContacts", "[]"),
+      exportContacts: () => guard("exportContacts", "contacts.json"),
       serveCode: (paths: string[], _relay: string | null, keep: boolean) => {
         harness.recorder.serveCode.push([paths, keep]);
         return guard("serveCode", { id: 1, code: "4821-crater-mango" });

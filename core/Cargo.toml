@@ -40,6 +40,8 @@ ed25519-dalek = { version = "3.0.0-pre.1", features = ["hazmat", "digest"] }
 curve25519-dalek = "=5.0.0-pre.1"
 signature = "=3.0.0-rc.3"
 blake3 = "1"
+# Wiping the identity seed on drop; already in the tree via the dalek crates.
+zeroize = "1"
 hpke = "0.13.0"
 aes-gcm = "0.10"
 argon2 = "0.5"

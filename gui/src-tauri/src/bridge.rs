@@ -383,25 +383,76 @@ pub async fn mark_verified(name: String) -> Result<(), String> {
     c.mark_verified(name).await.or_else(err)
 }
 
-/// Read a UTF-8 file the user picked in a dialog. Used for address-book import.
+/// Open a native file picker and read the chosen address-book export. `None`
+/// if the user cancelled.
 ///
-/// Two ten-line commands rather than the `fs` plugin: the plugin brings a scope
-/// language, a capability file and a permission set to grant blanket read/write
-/// under whole directories, and all this app ever touches is the single path a
-/// human just chose in a native picker. The narrower surface is the point.
+/// The dialog lives HERE, on the native side, and that placement is the security
+/// boundary — not a convenience. The previous shape (`read_text_file(path)` /
+/// `write_text_file(path, contents)`) took whatever path the webview supplied,
+/// trusting it had come from a dialog; any script that got into the webview could
+/// call it directly and read or overwrite arbitrary files as the user. Now the
+/// webview never handles a filesystem path at all: it asks for "an import", and
+/// the user's choice in the native dialog is what grants access to one file.
+///
+/// Still two small commands rather than the `fs` plugin, whose scope language and
+/// capability files exist to grant blanket access under whole directories — all
+/// this app ever touches is the single file a human just picked.
 #[tauri::command]
-pub async fn read_text_file(path: String) -> Result<String, String> {
+pub async fn import_contacts(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .add_filter("JSON", &["json"])
+        .pick_file(move |p| {
+            let _ = tx.send(p);
+        });
+    let Some(picked) = rx.await.map_err(|e| e.to_string())? else {
+        return Ok(None); // user cancelled — not an error
+    };
+    let path = picked.into_path().map_err(|e| e.to_string())?;
     tokio::fs::read_to_string(&path)
         .await
-        .map_err(|e| format!("{path}: {e}"))
+        .map(Some)
+        .map_err(|e| format!("{}: {e}", path.display()))
 }
 
-/// Write a UTF-8 file the user picked in a save dialog (address-book export).
+/// Save the address-book export where the user picks. Returns the chosen file
+/// name (for the toast), or `None` if they cancelled.
+///
+/// `default_name` is only a *suggestion* shown in the dialog; path separators are
+/// stripped so it can never smuggle directories into the suggestion.
 #[tauri::command]
-pub async fn write_text_file(path: String, contents: String) -> Result<(), String> {
+pub async fn export_contacts(
+    app: tauri::AppHandle,
+    default_name: String,
+    contents: String,
+) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let default_name: String = default_name
+        .chars()
+        .map(|c| if matches!(c, '/' | '\\') { '_' } else { c })
+        .collect();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .add_filter("JSON", &["json"])
+        .set_file_name(&default_name)
+        .save_file(move |p| {
+            let _ = tx.send(p);
+        });
+    let Some(picked) = rx.await.map_err(|e| e.to_string())? else {
+        return Ok(None);
+    };
+    let path = picked.into_path().map_err(|e| e.to_string())?;
     tokio::fs::write(&path, contents)
         .await
-        .map_err(|e| format!("{path}: {e}"))
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(Some(
+        path.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+    ))
 }
 
 /// This GUI binary's version — the frontend compares it with the daemon's

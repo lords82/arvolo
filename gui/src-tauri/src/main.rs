@@ -83,8 +83,8 @@ fn main() {
             bridge::sync_now,
             bridge::start_pairing,
             bridge::cancel_pairing,
-            bridge::read_text_file,
-            bridge::write_text_file,
+            bridge::import_contacts,
+            bridge::export_contacts,
             bridge::gui_version,
         ])
         .setup(|app| {

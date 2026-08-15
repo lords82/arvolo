@@ -83,6 +83,17 @@ pub struct Sealed {
     pub ciphertext: Vec<u8>,
 }
 
+impl Drop for Identity {
+    /// Zero the seed when the identity leaves memory. The derived keys already do
+    /// this for themselves (ed25519-dalek and hpke both zeroize on drop); the raw
+    /// seed was the one copy that lingered — and it is the *whole* secret, from
+    /// which both halves re-derive.
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.seed.zeroize();
+    }
+}
+
 impl Identity {
     /// Generate a fresh random identity.
     pub fn generate() -> Self {

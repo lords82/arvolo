@@ -104,9 +104,12 @@ export const api = {
   /** Read/write a single file the user picked in a native dialog — the whole of
    *  the app's filesystem access from the frontend, used by address-book
    *  import/export. */
-  readTextFile: (path: string) => invoke<string>("read_text_file", { path }),
-  writeTextFile: (path: string, contents: string) =>
-    invoke<void>("write_text_file", { path, contents }),
+  /** Native open dialog + read, on the Rust side: the webview never sees a path.
+   *  Resolves to the file's text, or null if the user cancelled. */
+  importContacts: () => invoke<string | null>("import_contacts"),
+  /** Native save dialog + write. Resolves to the chosen file name, or null. */
+  exportContacts: (defaultName: string, contents: string) =>
+    invoke<string | null>("export_contacts", { defaultName, contents }),
   guiVersion: () => invoke<string>("gui_version"),
 };
 
