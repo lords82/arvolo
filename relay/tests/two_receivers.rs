@@ -25,11 +25,11 @@
 //! has nothing. `ARVOLO_SWARM_ANNOUNCE_SECS=1` shortens it; the swarm itself is
 //! untouched.
 //!
-//! Whether a piece actually crosses between the two is **reported, not asserted**;
-//! the long note at that point in the test explains why, and what it costs. The
-//! things asserted here are the ones that hold every run: both files arrive intact,
-//! the two receivers find each other, nothing errors on the way, and the sender's
-//! accounting of who got what is right.
+//! This is also the regression test for `schedule::prefer_offloadable`. Written
+//! before it existed, it recorded the opposite: the two receivers finished without
+//! ever trading a piece, because rarest-first counts the origin among a piece's
+//! providers and so ranks what a peer holds *last*. That note now lives at the
+//! assertion it turned into.
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -128,8 +128,8 @@ async fn two_peers_downloading_at_once_also_feed_each_other() {
     std::env::set_var("ARVOLO_SWARM_ANNOUNCE_SECS", "1");
     // Whichever finishes first keeps serving, so the other can still pull from it.
     std::env::set_var("ARVOLO_SEED_AFTER", "120");
-    // One piece in flight at a time, and this is the setting that decides whether
-    // there is a swarm to observe at all.
+    // Two pieces in flight, and this setting decides whether there is a swarm to
+    // observe at all.
     //
     // A receiver fetches `ARVOLO_CONCURRENCY` pieces at once (4 by default). Give a
     // four-piece file to a receiver with a four-piece window and it asks the origin
@@ -137,19 +137,26 @@ async fn two_peers_downloading_at_once_also_feed_each_other() {
     // later moment at which it is missing something it has not already started
     // fetching. The first version of this test did exactly that and observed zero
     // trades, which said nothing about the swarm and everything about the setup: a
-    // real transfer is dozens of pieces against a window of four. Narrowing the
-    // window reproduces that ratio without moving a quarter-gigabyte around.
-    std::env::set_var("ARVOLO_CONCURRENCY", "1");
+    // real transfer is dozens of pieces against a window of four. Halving the window
+    // reproduces that ratio without moving a quarter-gigabyte around.
+    //
+    // Two rather than one, because a window of one can never queue on the origin and
+    // so can never reach the case `prefer_offloadable` exists for.
+    std::env::set_var("ARVOLO_CONCURRENCY", "2");
 
     let relay = spawn_relay().await;
 
     let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("big.bin");
-    // 64 MiB -> 4 pieces. Enough that the two receivers' picks can diverge (the
-    // picker is rarest-first with a random tie-break, precisely so they do), and
-    // enough that a piece crossing between them is not a coincidence of one lucky
-    // scheduling order.
-    let data: Vec<u8> = (0..64 * 1024 * 1024u64)
+    // 128 MiB -> 8 pieces, which with a window of two is four rounds of fetching.
+    //
+    // The size is set by the number of *rounds*, not by the number of pieces. A peer
+    // has nothing to offer until it has verified something, and it advertises that
+    // only on its next announce — so the earliest a trade can happen is the third
+    // round. At 64 MiB (four pieces, two rounds) both receivers had asked the origin
+    // for the whole file before either had anything to give, and the test read zero
+    // trades no matter what the scheduler did.
+    let data: Vec<u8> = (0..128 * 1024 * 1024u64)
         .map(|i| (i * 197 + 11) as u8)
         .collect();
     std::fs::write(&src, &data).unwrap();
@@ -167,7 +174,7 @@ async fn two_peers_downloading_at_once_also_feed_each_other() {
     )
     .await
     .expect("prepare_send");
-    assert_eq!(session.chunks, 4);
+    assert_eq!(session.chunks, 8);
     assert!(session.has_relay, "the ticket must carry the tracker relay");
     let ticket = session.ticket.clone();
 
@@ -213,8 +220,8 @@ async fn two_peers_downloading_at_once_also_feed_each_other() {
     //    here depends on the swarm working.
     for (i, out) in outs.iter().enumerate() {
         assert!(
-            wait_for_file(out, &data, Duration::from_secs(120)).await,
-            "receiver {i} never completed (committed {}/4)",
+            wait_for_file(out, &data, Duration::from_secs(240)).await,
+            "receiver {i} never completed (committed {}/8)",
             committed(&evs[i])
         );
     }
@@ -227,30 +234,28 @@ async fn two_peers_downloading_at_once_also_feed_each_other() {
         "neither receiver ever saw a swarm peer: {seen:?}"
     );
 
-    // 3. Did they actually trade? **Reported, not asserted** — and the reason is the
-    //    finding this test exists to record.
+    // 3. And they actually fed each other. This is the claim the test is named for.
     //
-    //    The piece picker is rarest-first, and because the origin holds every piece,
-    //    a piece a peer already has counts one provider *more* than one it lacks. So
-    //    a peer's pieces are systematically picked last. Watching the per-piece log
-    //    of a run: both receivers took piece 3 and piece 1 respectively, then both
-    //    went to the origin for piece 4, then both for piece 2 — each holding a piece
-    //    the other lacked the whole time. Only the final piece each has no
-    //    alternative, and there the origin can still win the cost comparison. Across
-    //    runs that last piece came from a peer sometimes and from the origin other
-    //    times, so asserting it would buy a test that fails every other run.
+    //    It did not hold before `prefer_offloadable`. The picker is rarest-first, and
+    //    because the origin holds every piece, a piece a peer already has counts one
+    //    provider *more* than one it lacks — so a peer's pieces were picked last. The
+    //    per-piece log of a run then read: both receivers took a distinct piece, then
+    //    both went to the origin for the same third piece, then both for the same
+    //    fourth, each sitting on a piece the other needed the whole time. A piece
+    //    crossed between the two in one run out of four.
     //
-    //    What that costs in the case this test is named for: the origin uploaded four
-    //    pieces to each of two receivers, where five would have done. On a home
-    //    uplink sending to two people that is the difference the swarm is supposed to
-    //    make, and today it is left on the table with a healthy origin. Making it
-    //    reliable means letting the origin's load steer the *piece* choice and not
-    //    only the *source* choice — a scheduler change with real tuning risk, and a
-    //    decision to take deliberately rather than inside a test fix.
+    //    With the filter, a run of this test reads: 16 pieces delivered in all, 11
+    //    from the origin and 5 between the peers, the first trade at the third round
+    //    — as soon as a peer has anything to offer and the origin is busy. Roughly a
+    //    third of the origin's upload gone, without giving up rarest-first: half the
+    //    window still drains the pieces only the origin has, which is what keeps the
+    //    swarm alive if it leaves.
     let traded: Vec<u64> = evs.iter().map(|e| from_peers(e)).collect();
-    eprintln!(
-        "swarm: pieces taken from a peer, per receiver: {traded:?} (opportunistic — \
-         see the note in this test)"
+    eprintln!("swarm: pieces taken from a peer, per receiver: {traded:?}");
+    assert!(
+        traded.iter().sum::<u64>() > 0,
+        "no piece ever came from a peer: {traded:?} — both receivers took everything \
+         from the origin, which is what this test exists to catch"
     );
     // Printed rather than asserted on, because `RecvEvent::Warning` is not only for
     // faults: a completed download announces "seeding to the swarm for 120s" through

@@ -770,6 +770,11 @@ pub async fn recv_chunked(
             // lacks, so rarest-first already steers each device toward pieces its
             // peers are missing; the random tie-break stops two devices in identical
             // state from picking the same piece, spreading distinct pieces faster.
+            //
+            // Ahead of that, `prefer_offloadable` takes the origin's load into
+            // account: while a request to it is already in flight, only pieces
+            // somebody else can serve are considered. See that function for why the
+            // gate is there rather than a blanket preference.
             let fresh = {
                 use rand::Rng;
                 let cands: Vec<(usize, Vec<(String, iroh::EndpointAddr)>)> = remaining
@@ -781,6 +786,12 @@ pub async fn recv_chunked(
                         (!p.is_empty()).then_some((i, p))
                     })
                     .collect();
+                let origin_busy = sender_id
+                    .as_deref()
+                    .map(|id| in_flight.get(id).copied().unwrap_or(0) > 0)
+                    .unwrap_or(false);
+                let cands =
+                    super::schedule::prefer_offloadable(cands, sender_id.as_deref(), origin_busy);
                 // Rarest-first: among the pieces with the fewest providers, pick one
                 // at random so two peers in the same state don't grab the same piece.
                 let mut rare = super::schedule::rarest_set(cands);
