@@ -84,6 +84,27 @@ describe("snapshot seeding", () => {
     );
   });
 
+  it("a daemon that refuses to start says why, instead of just going quiet", async () => {
+    // The failure mode an upgrade creates: the daemon exits on an identity file it
+    // will not load, and — spawned by the GUI, with no terminal — its explanation
+    // goes to a log nobody opens. The window would otherwise show "disconnesso"
+    // and nothing else, which is the one thing the user can already see.
+    await boot();
+    harness.setConnected(false);
+    harness.failDaemon(
+      "the daemon did not come up in time. Ultime righe del daemon:\n" +
+        "identity.key is not an arvolo identity of this version"
+    );
+    await vi.waitFor(() =>
+      expect(useStore.getState().loadError).toContain("not an arvolo identity")
+    );
+
+    // And the explanation does not outlive the problem: once the daemon is up, a
+    // stale reason on screen would be its own kind of lie.
+    harness.setConnected(true);
+    await vi.waitFor(() => expect(useStore.getState().loadError).toBeNull());
+  });
+
   it("3. a reconnect re-seeds the board", async () => {
     await boot();
     expect(rows()).toHaveLength(0);

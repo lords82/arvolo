@@ -120,6 +120,11 @@ export function onEngineEvent(cb: (ev: EngineEvent) => void): Promise<UnlistenFn
   });
 }
 
+/** Subscribe to *why* the daemon would not start, when it would not start. */
+export function onDaemonError(cb: (reason: string) => void): Promise<UnlistenFn> {
+  return listen<string>("engine://daemon-error", (e) => cb(e.payload));
+}
+
 /** Subscribe to the connected/disconnected heartbeat. */
 export function onConnected(cb: (connected: boolean) => void): Promise<UnlistenFn> {
   return listen<boolean>("engine://connected", (e) => cb(e.payload));

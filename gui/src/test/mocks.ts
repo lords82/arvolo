@@ -67,6 +67,8 @@ export interface Harness {
   emit: (wire: WireEvent) => void;
   /** Flip the connected heartbeat. */
   setConnected: (c: boolean) => void;
+  /** Report why the daemon would not start (see `onDaemonError`). */
+  failDaemon: (reason: string) => void;
   /** What `reload()` will find on the daemon. */
   snapshot: {
     status: StatusDto | null;
@@ -174,6 +176,7 @@ export const harness: Harness = {
   recorder: freshRecorder(),
   emit: () => {},
   setConnected: () => {},
+  failDaemon: () => {},
   snapshot: freshSnapshot(),
   fail: new Set(),
 };
@@ -374,6 +377,12 @@ export function makeIpcMock() {
     },
     onConnected: (cb: (c: boolean) => void) => {
       harness.setConnected = cb;
+      return Promise.resolve(() => {});
+    },
+    // Why the daemon would not start. Exposed on the harness so a test can put the
+    // store in the state a user hits after an upgrade: no daemon, and a reason.
+    onDaemonError: (cb: (reason: string) => void) => {
+      harness.failDaemon = cb;
       return Promise.resolve(() => {});
     },
   };

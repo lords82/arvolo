@@ -2,7 +2,7 @@
 // snapshot and then mutated purely by pushed engine events (no polling).
 
 import { create } from "zustand";
-import { api, onConnected, onEngineEvent } from "./ipc";
+import { api, onConnected, onDaemonError, onEngineEvent } from "./ipc";
 import { shortId } from "./format";
 import { t } from "./i18n";
 import { toast } from "./ui/Toasts";
@@ -623,7 +623,18 @@ export const useStore = create<State>((set, get) => {
       const unlistenEv = await onEngineEvent((ev) => get().applyEvent(ev));
       const unlistenConn = await onConnected((c) => {
         set({ connected: c });
-        if (c) get().reload();
+        // A daemon that came up explains itself by existing: drop any stale
+        // reason so the banner does not outlive the problem it described.
+        if (c) {
+          set({ loadError: null });
+          get().reload();
+        }
+      });
+      // The daemon has no terminal when the GUI spawns it, so without this its
+      // reason for not starting — an identity file it refuses, a relay it cannot
+      // reach — reaches nobody, and the window shows only "disconnesso".
+      const unlistenDaemonErr = await onDaemonError((reason) => {
+        if (!get().connected) set({ loadError: reason });
       });
 
       // Seed the snapshot, retrying until it lands. The backend pump emits
@@ -646,6 +657,7 @@ export const useStore = create<State>((set, get) => {
         stopped = true;
         unlistenEv();
         unlistenConn();
+        unlistenDaemonErr();
       };
     },
 

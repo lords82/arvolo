@@ -27,6 +27,8 @@ use tauri_plugin_notification::NotificationExt;
 /// Frontend event channels.
 const EV_ENGINE: &str = "engine://event";
 const EV_CONNECTED: &str = "engine://connected";
+/// Why the daemon would not start, when it would not start.
+const EV_DAEMON_ERROR: &str = "engine://daemon-error";
 
 /// Whether the system tray icon actually got created. Hiding the window on close
 /// is only safe if there is a tray to get back from: on Linux desktops without a
@@ -238,7 +240,13 @@ async fn event_pump(app: AppHandle) {
     loop {
         // Make sure a daemon exists; if we can't bring one up, report disconnected
         // and retry shortly.
-        if daemon::ensure_running().await.is_err() {
+        if let Err(e) = daemon::ensure_running().await {
+            // Say *why*, not just that. A daemon spawned from here has no terminal,
+            // so its own explanation — an identity file it refuses to load, a relay
+            // it cannot reach — would otherwise stay in a log file behind a banner
+            // reading "disconnesso", which is the one thing the user can already
+            // see. `ensure_running` quotes the tail of that log into this error.
+            let _ = app.emit(EV_DAEMON_ERROR, format!("{e:#}"));
             let _ = app.emit(EV_CONNECTED, false);
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             continue;
