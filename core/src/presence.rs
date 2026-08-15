@@ -15,8 +15,11 @@
 //! recipient drives a normal [`crate::flow::recv_chunked`] with the embedded
 //! ticket — the ticket is never shown to the user.
 //!
-//! Slot = `base32(blake3_derive_key(context, pubkey ‖ epoch))` — an opaque stand-in
-//! for the raw public key that **rotates**: see [`INBOX_EPOCH_SECS`].
+//! An inbox slot is not a hash of the public id but a **per-epoch blinded public
+//! key** derived from it (see [`crate::crypto::blinded`]): a sender computes it from
+//! the contact id, the owner can sign for it, and the relay — which authenticates
+//! that signature against the slot itself — never learns whose inbox it is holding.
+//! Slots rotate; see [`INBOX_EPOCH_SECS`].
 
 use std::collections::HashMap;
 
@@ -27,43 +30,41 @@ use tokio_util::sync::CancellationToken;
 use crate::crypto::{open, open_anon, seal, seal_anon, Identity, PublicId, Sealed};
 use crate::sync::SyncNote;
 
-/// Domain separator for the inbox slot derivation. `v2`: the derivation takes an
-/// epoch as well as the key, so the value rotates (see [`INBOX_EPOCH_SECS`]). The
-/// bump is what keeps a `v1` client and a `v2` one from silently agreeing on a slot
-/// they compute differently — they now simply use different slots.
-const SLOT_CONTEXT: &str = "arvolo/inbox/slot/v2";
-/// Domain separator for the presence-beacon slot derivation (distinct from the
-/// inbox slot so the two can't be correlated by the derived value alone).
+/// Domain separator for the presence-beacon slot derivation. Only the beacon hashes
+/// its way to a slot now — an inbox slot is a blinded key (see [`slot_for`]) — so
+/// there is no inbox context to be distinct from any more.
 const PRESENCE_SLOT_CONTEXT: &str = "arvolo/presence/slot/v2";
 /// AAD binding a sealed offer to its purpose (rejects cross-protocol reuse).
 const OFFER_AAD: &[u8] = b"arvolo/offer/v1";
 /// AAD for the anonymous **outer** envelope seal (the sealed-sender layer).
 const ENVELOPE_AAD: &[u8] = b"arvolo/offer/env/v1";
 
-// ---- slots, and why they rotate -------------------------------------------
+// ---- slots: what they are, and why they rotate ----------------------------
 //
-// A slot is a hash of a public key, so the relay never sees the key in it. It was
-// also *constant for the life of that key*, and that is the part that leaked: a
-// client polls its own inbox forever and refreshes a presence beacon every 30
-// seconds, so one unchanging string appeared in the relay's request path — and in
-// the access log of any reverse proxy in front of it — for as long as the identity
-// existed. Anyone reading those logs could group a user's whole history by it
-// without ever learning who they were, and the grouping outlived any IP change.
+// An inbox slot is a **per-epoch blinded public key** derived from the owner's
+// signing half (`crate::crypto::blinded`). Two properties make the whole scheme
+// work, and they pull in opposite directions until blinding reconciles them:
 //
-// Deriving the slot from `(key, epoch)` instead cuts that thread at each boundary.
-// Both ends can still compute it with no coordination — a sender already knows the
-// recipient's public key, which is all the derivation needs — so this costs a hash,
-// not a protocol.
+// - a *sender* must be able to compute it, knowing only the contact id, or nobody
+//   could address you;
+// - the *relay* must not be able to tie one epoch's slot to another's, or rotating
+//   them would be decoration.
 //
-// What it does *not* fix, and what a future change must: the inbox read handshake
-// still POSTs the owner's raw public key to the relay (the relay seals a nonce to
-// it, which is how a reader proves it owns the slot). The relay process therefore
-// still learns the key on every session and could recompute any epoch's slot from
-// it. Rotation keeps the stable identifier out of the *logs* — request bodies are
-// not logged, paths are — but closing the gap properly means a slot that is itself
-// a per-epoch blinded public key, so the handshake never carries the long-term one.
-// That is a cryptographic change (Tor's v3 onion-key blinding is the model), and
-// it is deliberately not attempted here.
+// Blinding gives both: `A' = h·A` is computable by anyone holding `A`, and reveals
+// nothing about `A` to someone who does not.
+//
+// The rotation is what keeps a stable identifier out of the request path — and so
+// out of the relay's access log, and out of the log of any reverse proxy in front of
+// it. Before it, one unchanging string named you there for the life of your
+// identity: enough to group your whole history without knowing who you were, and it
+// outlived any change of IP.
+//
+// The earlier version of this hashed the public id instead, and had a hole it could
+// not close: reading an inbox meant POSTing your public key to the relay so it could
+// seal a challenge to it. The relay therefore learned the long-term identity of
+// every reader, and from it could recompute every slot that identity would ever have
+// — so the rotation protected the logs and nothing else. The slot carrying its own
+// key is what closed that: see the proof-of-possession section below.
 
 /// How long one inbox slot lasts before it rotates.
 ///
@@ -94,60 +95,59 @@ fn derive_slot(context: &str, pubkey: &[u8], epoch: u64) -> String {
     data_encoding::BASE32_NOPAD.encode(&key).to_lowercase()
 }
 
-/// The current epoch's slots, then older ones, deduped. `span` is how many epochs
-/// back are still worth reading.
-fn slot_window(context: &str, pubkey: &[u8], epoch: u64, back: u64) -> Vec<String> {
-    let mut out = Vec::with_capacity(back as usize + 1);
-    for n in 0..=back {
-        let s = derive_slot(context, pubkey, epoch.saturating_sub(n));
-        // `saturating_sub` repeats epoch 0 for a clock claiming 1970; one slot is
-        // the right answer there, not the same slot twice.
+/// Encode a slot: the base32 of a 32-byte blinded key. The same shape the
+/// hash-derived slots had, so nothing downstream notices the change of meaning.
+fn encode_slot(key: &[u8; crate::crypto::blinded::KEY_LEN]) -> String {
+    data_encoding::BASE32_NOPAD.encode(key).to_lowercase()
+}
+
+/// The key a slot names, or `None` if it is not a slot at all.
+///
+/// This is the relay's way in, and the reason the handshake no longer carries a
+/// public key: the slot *is* the key it authenticates against, so the relay can
+/// check ownership without ever learning whose inbox it is.
+pub fn slot_key(slot: &str) -> Option<Vec<u8>> {
+    data_encoding::BASE32_NOPAD
+        .decode(slot.trim().to_uppercase().as_bytes())
+        .ok()
+        .filter(|k| k.len() == crate::crypto::blinded::KEY_LEN)
+}
+
+/// The inbox slot of `id` for a given epoch: its signing half, blinded.
+fn slot_for_epoch(id: &PublicId, epoch: u64) -> String {
+    encode_slot(&crate::crypto::blinded::public_at(id, epoch))
+}
+
+/// The inbox slot for an identity at a given time.
+pub fn slot_for_at(id: &PublicId, unix: u64) -> String {
+    slot_for_epoch(id, unix / INBOX_EPOCH_SECS)
+}
+
+/// The inbox slot for an identity **now** — the one a depositor posts to.
+pub fn slot_for(id: &PublicId) -> String {
+    slot_for_at(id, now_unix())
+}
+
+/// Every inbox slot that can still hold a live row for `id` at `unix`, current
+/// epoch first: what a reader must look in.
+///
+/// There is no matching "does this slot belong to this key" for the relay any more,
+/// and its absence is the point of the change. The relay used to be handed a public
+/// key and asked to check it hashed to the slot — which is how it came to know every
+/// reader's long-term identity, and with it every slot that identity would ever
+/// have. Now the slot carries its own key and a signature settles ownership, so the
+/// relay has nothing to compare and no epoch of its own to be right about. The
+/// clock-skew tolerance that check needed went with it.
+pub fn inbox_slots_at(id: &PublicId, unix: u64) -> Vec<String> {
+    let epoch = unix / INBOX_EPOCH_SECS;
+    let mut out = Vec::with_capacity(2);
+    for n in 0..=1u64 {
+        let s = slot_for_epoch(id, epoch.saturating_sub(n));
         if !out.contains(&s) {
             out.push(s);
         }
     }
     out
-}
-
-/// The inbox slot for a public id at a given time: an opaque, domain-separated hash
-/// of the key and the epoch.
-pub fn slot_for_at(pubkey: &[u8], unix: u64) -> String {
-    derive_slot(SLOT_CONTEXT, pubkey, unix / INBOX_EPOCH_SECS)
-}
-
-/// The inbox slot for a public id **now** — the one a depositor posts to.
-pub fn slot_for(pubkey: &[u8]) -> String {
-    slot_for_at(pubkey, now_unix())
-}
-
-/// Every inbox slot that can still hold a live row for `pubkey` at `unix`, current
-/// epoch first: what a reader must look in, and what the relay must accept a session
-/// for.
-pub fn inbox_slots_at(pubkey: &[u8], unix: u64) -> Vec<String> {
-    slot_window(SLOT_CONTEXT, pubkey, unix / INBOX_EPOCH_SECS, 1)
-}
-
-/// Does `slot` belong to `pubkey`, as far as handing out an inbox session goes?
-/// The relay's check: only the key whose hash *is* one of these slots may
-/// authenticate for it.
-///
-/// Deliberately one epoch wider than [`inbox_slots_at`], on the future side, and
-/// this is not slack for its own sake. The two clocks here are different machines'.
-/// A client whose clock is *ahead* rolls into the next epoch before the relay does,
-/// and asks for a session on a slot the relay would call the future — and a refusal
-/// there is total: no session means no inbox reads at all, for as long as the skew
-/// lasts, which for a VM resumed from suspend or a host without NTP is not a
-/// contrived scenario. It costs nothing to allow: a session proves possession of a
-/// key, and the slot it is granted for is empty until that clock is right.
-///
-/// The reader's window stays narrow because it pays per slot in requests; this one
-/// pays nothing.
-pub fn inbox_slot_matches(pubkey: &[u8], slot: &str, unix: u64) -> bool {
-    let epoch = unix / INBOX_EPOCH_SECS;
-    // Next, current, previous.
-    slot_window(SLOT_CONTEXT, pubkey, epoch + 1, 2)
-        .iter()
-        .any(|s| s == slot)
 }
 
 /// The presence-beacon slot for a public id at a given time (distinct from its
@@ -256,44 +256,62 @@ pub fn encode_inbox_items(items: &[InboxItem]) -> Result<Vec<u8>> {
 
 // ---- read authentication (proof of possession) ----------------------------
 //
-// Anyone can *deposit* an offer (you must be reachable), but only the inbox
-// owner may *read* or *delete* it — otherwise a stranger who knows your public
-// id could drain your offers or map your presence. X25519 keys can't sign, so
-// instead of a signature we prove possession of the slot's private key: the
-// relay seals a random nonce to the owner's public key (base-mode HPKE); only
-// the owner can open it and echo the nonce back. The relay binds that nonce to
-// the slot with a keyed MAC and hands back a short-lived bearer token, so the
-// handshake happens once per session, not per poll.
+// Anyone can *deposit* an offer (you must be reachable), but only the inbox owner
+// may *read* or *delete* it — otherwise a stranger who knows your public id could
+// drain your offers or map your presence.
+//
+// The slot is a per-epoch blinded public key (see [`crate::crypto::blinded`]), so
+// the proof is a signature: the relay decodes the slot, issues a random nonce, and
+// checks the signature against the slot itself. Nothing identifies the owner, and no
+// key is transmitted — the relay authenticates a reader it cannot name.
+//
+// It used to be an HPKE round trip instead: the client sent its public key, the
+// relay sealed a nonce to it, and opening the seal was the proof. That worked, and
+// it meant the relay learned every reader's long-term identity — and with it every
+// slot that identity would ever have, in any epoch, which made rotating the slots
+// pointless against the relay itself. The nonce still exists for freshness; only the
+// part that named you is gone.
+//
+// The relay binds the nonce to the slot with a keyed MAC, so it can verify it issued
+// this challenge without storing sessions, and the client presents the signed nonce
+// as a short-lived bearer token — the handshake happens once per session, not per
+// poll.
 
-/// AAD binding a session challenge to its purpose.
-const SESSION_AAD: &[u8] = b"arvolo/inbox/session/v1";
+/// Domain separator for what a session signature covers.
+const SESSION_SIG_CONTEXT: &[u8] = b"arvolo/inbox/session/v2";
 
-/// What `POST /v1/inbox/{slot}/session` returns: a nonce sealed to the owner,
-/// plus the relay's MAC over `(slot, nonce, exp)` and the expiry. The client
-/// opens the seal to recover the nonce and assembles a [`SessionToken`].
+/// What `POST /v1/inbox/{slot}/session` returns: a random nonce, the relay's MAC
+/// over `(slot, nonce, exp)`, and the expiry. Public — the security is in the
+/// signature the client must produce over it, not in hiding the challenge.
 #[derive(Serialize, Deserialize)]
 pub struct SessionChallenge {
-    pub encapped_key: Vec<u8>,
-    pub ciphertext: Vec<u8>,
-    pub exp: u64,
-    pub mac: Vec<u8>,
-}
-
-/// The bearer credential the client presents on authenticated inbox requests.
-/// `nonce` proves it opened the seal; `mac`/`exp` let the relay verify it issued
-/// this nonce for this slot — statelessly, without storing sessions.
-#[derive(Serialize, Deserialize)]
-pub struct SessionToken {
     pub nonce: Vec<u8>,
     pub exp: u64,
     pub mac: Vec<u8>,
 }
 
-/// Seal a proof-of-possession `nonce` to `recipient` for a session challenge
-/// (base-mode HPKE with the session AAD). Called by the relay; keeps the AAD
-/// encapsulated so both ends can't drift.
-pub fn seal_session_nonce(recipient: &PublicId, nonce: &[u8]) -> Result<Sealed> {
-    seal_anon(nonce, recipient, SESSION_AAD)
+/// The bearer credential the client presents on authenticated inbox requests.
+/// `sig` proves possession of the slot's blinded secret; `mac`/`exp` let the relay
+/// verify it issued this nonce for this slot — statelessly, without storing
+/// sessions.
+#[derive(Serialize, Deserialize)]
+pub struct SessionToken {
+    pub nonce: Vec<u8>,
+    pub exp: u64,
+    pub mac: Vec<u8>,
+    pub sig: Vec<u8>,
+}
+
+/// The exact bytes a session signature covers: the context, the slot, the nonce and
+/// the expiry. Both ends build it here so they cannot drift, and every field is
+/// bound — a signature cannot be moved to another slot, nonce or lifetime.
+pub fn session_signing_input(slot: &str, nonce: &[u8], exp: u64) -> Vec<u8> {
+    let mut out = Vec::with_capacity(SESSION_SIG_CONTEXT.len() + slot.len() + nonce.len() + 8);
+    out.extend_from_slice(SESSION_SIG_CONTEXT);
+    out.extend_from_slice(slot.as_bytes());
+    out.extend_from_slice(nonce);
+    out.extend_from_slice(&exp.to_le_bytes());
+    out
 }
 
 /// Encode a [`SessionChallenge`] for the relay's `/session` response.
@@ -303,12 +321,11 @@ pub fn encode_session_challenge(c: &SessionChallenge) -> Result<Vec<u8>> {
 
 /// Decode a bearer token string (base32 of a postcard [`SessionToken`]) back into
 /// its parts. `None` on any malformed input.
-pub fn decode_session_token(bearer: &str) -> Option<(Vec<u8>, u64, Vec<u8>)> {
+pub fn decode_session_token(bearer: &str) -> Option<SessionToken> {
     let raw = data_encoding::BASE32_NOPAD
         .decode(bearer.trim().to_uppercase().as_bytes())
         .ok()?;
-    let t: SessionToken = postcard::from_bytes(&raw).ok()?;
-    Some((t.nonce, t.exp, t.mac))
+    postcard::from_bytes(&raw).ok()
 }
 
 /// An offer received and decrypted from the inbox, with its authenticated sender.
@@ -397,7 +414,7 @@ pub async fn post_offer(
     ttl_secs: Option<u64>,
 ) -> Result<PostedOffer> {
     let body = encode_offer_blob(offer, recipient, me)?;
-    let slot = slot_for(&recipient.to_bytes());
+    let slot = slot_for(recipient);
     let mut url = inbox_url(relay, &slot);
     if let Some(ttl) = clamp_inbox_ttl(ttl_secs) {
         url = format!("{url}?ttl={ttl}");
@@ -442,7 +459,7 @@ pub async fn retract_offer(
     poster_token: &str,
 ) -> Result<()> {
     let mut last = None;
-    for slot in inbox_slots_at(&recipient.to_bytes(), now_unix()) {
+    for slot in inbox_slots_at(recipient, now_unix()) {
         let url = format!("{}/{id}", inbox_url(relay, &slot));
         match client
             .delete(url)
@@ -530,7 +547,7 @@ pub async fn offer_status(
     // looks like — so keep asking while the answer is `gone`, and only conclude the
     // offer is gone once every slot in the window says so.
     let mut first_err = None;
-    for slot in inbox_slots_at(&recipient.to_bytes(), now_unix()) {
+    for slot in inbox_slots_at(recipient, now_unix()) {
         let url = format!("{}/{id}/status", inbox_url(relay, &slot));
         let sent = client
             .get(url)
@@ -612,9 +629,9 @@ pub async fn check_online(
 pub struct InboxSubscription {
     client: reqwest::Client,
     relay: String,
-    /// Owner's public key. Not a cached slot: slots rotate, so the slot to read is
-    /// derived per call and the key is what has to be kept.
-    pubkey: Vec<u8>,
+    /// Owner's public id. Not a cached slot: slots rotate, so the slot to read is
+    /// derived per call and the identity is what has to be kept.
+    public: PublicId,
     /// Owner's identity secret — needed to open the session challenge. Held here
     /// (not passed per call) so `poll`/`ack`/`run` can authenticate on their own.
     me_secret: Vec<u8>,
@@ -669,7 +686,7 @@ impl InboxSubscription {
         Self {
             client: crate::http::client(),
             relay: relay.into(),
-            pubkey: me.public().to_bytes(),
+            public: me.public(),
             me_secret: me.secret_bytes(),
             sessions: std::sync::Mutex::new(HashMap::new()),
             row_slots: std::sync::Mutex::new(HashMap::new()),
@@ -685,12 +702,12 @@ impl InboxSubscription {
     /// The slot a deposit into our own inbox goes to, and the one the poll loop
     /// holds open: the current epoch's.
     fn current_slot(&self) -> String {
-        slot_for(&self.pubkey)
+        slot_for(&self.public)
     }
 
     /// Every slot that can still hold a row for us, current epoch first.
     fn read_slots(&self) -> Vec<String> {
-        inbox_slots_at(&self.pubkey, now_unix())
+        inbox_slots_at(&self.public, now_unix())
     }
 
     /// Remember where a row lives, so acking it later hits the right slot.
@@ -717,6 +734,19 @@ impl InboxSubscription {
         true
     }
 
+    /// Which of our epochs produced `slot`, if any.
+    ///
+    /// A reader holds two slots at once and signs for whichever it is talking to, so
+    /// the epoch cannot be taken from the clock at signing time — the previous
+    /// epoch's slot needs the previous epoch's key. Searching the same short window
+    /// the reader uses keeps the two definitions from drifting apart.
+    fn epoch_of(&self, slot: &str, me: &Identity) -> Option<u64> {
+        let now = now_unix() / INBOX_EPOCH_SECS;
+        (0..=1u64)
+            .map(|n| now.saturating_sub(n))
+            .find(|&e| slot_for_epoch(&me.public(), e) == slot)
+    }
+
     /// Return a valid bearer token for `slot`, running the proof-of-possession
     /// handshake if the cache is empty or the token is within 60s of expiry. `force`
     /// skips the cache (used after a 401, in case the relay's session secret
@@ -731,11 +761,11 @@ impl InboxSubscription {
         }
         let me = self.me()?;
         let url = format!("{}/session", inbox_url(&self.relay, slot));
-        let body = me.public().to_bytes();
+        // No body: the relay needs nothing from us to issue a challenge, and that is
+        // the improvement — this request used to carry our public key.
         let resp = self
             .client
             .post(&url)
-            .body(body)
             .send()
             .await
             .context("request inbox session")?
@@ -744,16 +774,22 @@ impl InboxSubscription {
         let bytes = resp.bytes().await.context("read session challenge")?;
         let challenge: SessionChallenge =
             postcard::from_bytes(&bytes).context("decode session challenge")?;
-        // Open the sealed nonce — only our private key can, which is the proof.
-        let sealed = Sealed {
-            encapped_key: challenge.encapped_key,
-            ciphertext: challenge.ciphertext,
-        };
-        let nonce = open_anon(&sealed, &me, SESSION_AAD).context("open session challenge")?;
+        // Sign the challenge with the blinded secret for the epoch this slot belongs
+        // to. Which epoch that is has to be *found*, not assumed: the slot may be the
+        // previous one (we read two), and only its own blinded key can sign for it.
+        let epoch = self
+            .epoch_of(slot, &me)
+            .context("no epoch of ours produces this slot")?;
+        let sig = crate::crypto::blinded::sign_at(
+            &me,
+            epoch,
+            &session_signing_input(slot, &challenge.nonce, challenge.exp),
+        );
         let token = SessionToken {
-            nonce,
+            nonce: challenge.nonce,
             exp: challenge.exp,
             mac: challenge.mac,
+            sig: sig.to_vec(),
         };
         let raw = postcard::to_allocvec(&token).context("encode session token")?;
         let bearer = data_encoding::BASE32_NOPAD.encode(&raw).to_lowercase();
@@ -1043,43 +1079,101 @@ fn decode_offer(blob: &[u8], me: &Identity) -> Option<(PublicId, Offer)> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn slot_is_stable_and_key_specific() {
-        let a = Identity::generate();
-        let b = Identity::generate();
-        assert_eq!(
-            slot_for(&a.public().to_bytes()),
-            slot_for(&a.public().to_bytes())
-        );
-        assert_ne!(
-            slot_for(&a.public().to_bytes()),
-            slot_for(&b.public().to_bytes())
-        );
-        // The presence slot is domain-separated from the inbox slot for the same key.
-        assert_ne!(
-            slot_for(&a.public().to_bytes()),
-            presence_slot_for(&a.public().to_bytes())
-        );
-    }
-
     /// A fixed instant well inside an epoch, so the "same epoch" cases below are not
     /// accidentally straddling a boundary.
     const T: u64 = 100 * INBOX_EPOCH_SECS + INBOX_EPOCH_SECS / 2;
 
     #[test]
+    fn a_slot_is_a_key_and_belongs_to_one_identity() {
+        let (a, b) = (Identity::generate(), Identity::generate());
+        let slot = slot_for_at(&a.public(), T);
+        assert_ne!(
+            slot,
+            slot_for_at(&b.public(), T),
+            "two identities, two slots"
+        );
+        // A slot decodes to the key the relay authenticates against, and it is *not*
+        // the identity: that is what the relay is prevented from learning.
+        let key = slot_key(&slot).expect("a slot is a key");
+        assert_eq!(key.len(), 32);
+        assert_ne!(key.as_slice(), &a.public().ed_bytes()[..]);
+        // The presence slot stays a plain hash and stays separate from this one.
+        assert_ne!(slot, presence_slot_for(&a.public().to_bytes()));
+    }
+
+    #[test]
     fn inbox_slot_is_stable_within_an_epoch_and_rotates_across_one() {
-        let k = Identity::generate().public().to_bytes();
-        assert_eq!(slot_for_at(&k, T), slot_for_at(&k, T + 60));
+        let id = Identity::generate().public();
+        assert_eq!(slot_for_at(&id, T), slot_for_at(&id, T + 60));
         assert_eq!(
-            slot_for_at(&k, T),
-            slot_for_at(&k, T + INBOX_EPOCH_SECS / 2 - 1),
+            slot_for_at(&id, T),
+            slot_for_at(&id, T + INBOX_EPOCH_SECS / 2 - 1),
             "still the same epoch right up to the boundary"
         );
         assert_ne!(
-            slot_for_at(&k, T),
-            slot_for_at(&k, T + INBOX_EPOCH_SECS),
-            "the whole point: one epoch on, the relay sees a different string"
+            slot_for_at(&id, T),
+            slot_for_at(&id, T + INBOX_EPOCH_SECS),
+            "the whole point: one epoch on, the relay sees a different key"
         );
+    }
+
+    /// Only the owner can authenticate for a slot, and only for *that* slot's epoch.
+    /// This replaces the old check of "does this key hash to this slot", which the
+    /// relay had to do because it was handed the key — the thing it no longer sees.
+    #[test]
+    fn a_slot_can_only_be_signed_for_by_its_owner_and_its_epoch() {
+        let (me, other) = (Identity::generate(), Identity::generate());
+        let epoch = T / INBOX_EPOCH_SECS;
+        let slot = slot_for_at(&me.public(), T);
+        let key = slot_key(&slot).unwrap();
+        let msg = session_signing_input(&slot, b"nonce", 123);
+
+        let sig = crate::crypto::blinded::sign_at(&me, epoch, &msg);
+        assert!(crate::crypto::blinded::verify(&key, &msg, &sig));
+
+        assert!(
+            !crate::crypto::blinded::verify(
+                &key,
+                &msg,
+                &crate::crypto::blinded::sign_at(&other, epoch, &msg)
+            ),
+            "somebody else's signature must not open this inbox"
+        );
+        assert!(
+            !crate::crypto::blinded::verify(
+                &key,
+                &msg,
+                &crate::crypto::blinded::sign_at(&me, epoch + 1, &msg)
+            ),
+            "nor our own from another epoch"
+        );
+    }
+
+    /// Every field of the challenge is bound, so a signature cannot be lifted to
+    /// another slot, nonce or expiry.
+    #[test]
+    fn a_session_signature_is_bound_to_its_whole_challenge() {
+        let me = Identity::generate();
+        let epoch = T / INBOX_EPOCH_SECS;
+        let slot = slot_for_at(&me.public(), T);
+        let key = slot_key(&slot).unwrap();
+        let msg = session_signing_input(&slot, b"nonce", 123);
+        let sig = crate::crypto::blinded::sign_at(&me, epoch, &msg);
+
+        for other in [
+            session_signing_input(&slot, b"nonce", 124),
+            session_signing_input(&slot, b"other-nonce", 123),
+            session_signing_input(
+                &slot_for_at(&me.public(), T - INBOX_EPOCH_SECS),
+                b"nonce",
+                123,
+            ),
+        ] {
+            assert!(
+                !crate::crypto::blinded::verify(&key, &other, &sig),
+                "the signature must not carry to a different challenge"
+            );
+        }
     }
 
     #[test]
@@ -1087,13 +1181,13 @@ mod tests {
         // The invariant that makes rotation safe: post at any moment, read at any
         // later moment while the row can still be alive (TTL is clamped to one
         // epoch), and the slot posted to is in the reader's window.
-        let k = Identity::generate().public().to_bytes();
+        let id = Identity::generate().public();
         for post_offset in [0, 1, INBOX_EPOCH_SECS / 3, INBOX_EPOCH_SECS - 1] {
             let posted_at = T + post_offset;
-            let posted_slot = slot_for_at(&k, posted_at);
+            let posted_slot = slot_for_at(&id, posted_at);
             let ttl = clamp_inbox_ttl(Some(u64::MAX)).unwrap();
             for age in [0, 1, ttl / 2, ttl] {
-                let slots = inbox_slots_at(&k, posted_at + age);
+                let slots = inbox_slots_at(&id, posted_at + age);
                 assert!(
                     slots.contains(&posted_slot),
                     "a row posted at +{post_offset} and read {age}s later fell outside the window"
@@ -1114,43 +1208,13 @@ mod tests {
     }
 
     #[test]
-    fn the_relay_accepts_a_session_for_the_window_and_nothing_else() {
-        let me = Identity::generate();
-        let k = me.public().to_bytes();
-        let other = Identity::generate().public().to_bytes();
-
-        assert!(inbox_slot_matches(&k, &slot_for_at(&k, T), T));
-        assert!(
-            inbox_slot_matches(&k, &slot_for_at(&k, T - INBOX_EPOCH_SECS), T),
-            "the previous epoch's slot must still authenticate, or rows in it are unreachable"
-        );
-        assert!(
-            !inbox_slot_matches(&k, &slot_for_at(&k, T - 2 * INBOX_EPOCH_SECS), T),
-            "but not one older than any row can be"
-        );
-        assert!(
-            inbox_slot_matches(&k, &slot_for_at(&k, T + INBOX_EPOCH_SECS), T),
-            "the *next* epoch must authenticate: a client whose clock is ahead rolls \
-             over first, and refusing it would lock it out of its own inbox entirely"
-        );
-        assert!(
-            !inbox_slot_matches(&k, &slot_for_at(&k, T + 2 * INBOX_EPOCH_SECS), T),
-            "but the tolerance is one epoch, not unbounded"
-        );
-        assert!(
-            !inbox_slot_matches(&k, &slot_for_at(&other, T), T),
-            "and never someone else's"
-        );
-    }
-
-    #[test]
     fn the_read_window_is_two_slots_and_current_first() {
-        let k = Identity::generate().public().to_bytes();
-        let slots = inbox_slots_at(&k, T);
+        let id = Identity::generate().public();
+        let slots = inbox_slots_at(&id, T);
         assert_eq!(slots.len(), 2);
         assert_eq!(
             slots[0],
-            slot_for_at(&k, T),
+            slot_for_at(&id, T),
             "the current slot is read first — it's the one that gets long-polled"
         );
     }
@@ -1159,9 +1223,9 @@ mod tests {
     fn epoch_zero_yields_one_slot_not_the_same_slot_twice() {
         // A clock claiming 1970 (or a test fixture with a small timestamp) must not
         // make the reader ask the relay the same question twice.
-        let k = Identity::generate().public().to_bytes();
-        assert_eq!(inbox_slots_at(&k, 0).len(), 1);
-        assert_eq!(presence_slots_at(&k, 0).len(), 1);
+        let id = Identity::generate();
+        assert_eq!(inbox_slots_at(&id.public(), 0).len(), 1);
+        assert_eq!(presence_slots_at(&id.public().to_bytes(), 0).len(), 1);
     }
 
     #[test]
@@ -1205,13 +1269,17 @@ mod tests {
 
     #[test]
     fn presence_slots_rotate_too_and_stay_separated_from_inbox_slots() {
-        let k = Identity::generate().public().to_bytes();
+        let id = Identity::generate().public();
+        let k = id.to_bytes();
         assert_ne!(
             presence_slot_for_at(&k, T),
             presence_slot_for_at(&k, T + PRESENCE_EPOCH_SECS)
         );
-        // Same key, same instant, both derivations: still unrelated values.
-        assert_ne!(presence_slot_for_at(&k, T), slot_for_at(&k, T));
+        // Same identity, same instant, the two derivations: unrelated values. And
+        // they are not even the same *kind* of thing any more — a presence slot is a
+        // hash of the id, an inbox slot is a blinded key — so a relay seeing both
+        // learns nothing that links them.
+        assert_ne!(presence_slot_for_at(&k, T), slot_for_at(&id, T));
     }
 
     fn test_offer() -> Offer {

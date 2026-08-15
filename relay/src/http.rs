@@ -811,8 +811,9 @@ fn inbox_mac(secret: &[u8; 32], slot: &str, nonce: &[u8], exp: u64) -> [u8; 32] 
     *blake3::keyed_hash(secret, &input).as_bytes()
 }
 
-/// Verify the `Authorization: Bearer <token>` proves ownership of `slot`:
-/// the token's MAC must match one we issued for this slot, and be unexpired.
+/// Verify the `Authorization: Bearer <token>` proves ownership of `slot`: the
+/// token's MAC must match one we issued for this slot and be unexpired, and its
+/// signature must verify against the key the slot itself encodes.
 fn inbox_authorized(headers: &HeaderMap, slot: &str, secret: &[u8; 32]) -> bool {
     let Some(auth) = headers
         .get(axum::http::header::AUTHORIZATION)
@@ -826,45 +827,55 @@ fn inbox_authorized(headers: &HeaderMap, slot: &str, secret: &[u8; 32]) -> bool 
     else {
         return false;
     };
-    let Some((nonce, exp, mac)) = arvolo_core::presence::decode_session_token(token.trim()) else {
+    let Some(t) = arvolo_core::presence::decode_session_token(token.trim()) else {
         return false;
     };
-    if now_unix() >= exp {
+    if now_unix() >= t.exp {
         return false;
     }
-    let expected = inbox_mac(secret, slot, &nonce, exp);
-    mac.len() == expected.len() && constant_time_eq(&mac, &expected)
+    // Two independent checks, and both are needed. The MAC says *we* issued this
+    // nonce, for this slot, with this expiry — it is what makes the session stateless
+    // and unforgeable in its scope. The signature says the presenter owns the slot,
+    // which the MAC cannot say because we hand the challenge to whoever asks.
+    let expected = inbox_mac(secret, slot, &t.nonce, t.exp);
+    if t.mac.len() != expected.len() || !constant_time_eq(&t.mac, &expected) {
+        return false;
+    }
+    let Some(key) = arvolo_core::presence::slot_key(slot) else {
+        return false;
+    };
+    arvolo_core::crypto::blinded::verify(
+        &key,
+        &arvolo_core::presence::session_signing_input(slot, &t.nonce, t.exp),
+        &t.sig,
+    )
 }
 
-/// Issue a proof-of-possession session: seal a random nonce to the presented
-/// public key (only its owner can open it) and return the sealed nonce plus a
-/// MAC binding it to this slot. The client echoes the opened nonce back as a
-/// bearer token on subsequent read/delete requests.
+/// Issue a proof-of-possession challenge: a random nonce plus a MAC binding it to
+/// this slot and an expiry. The client signs it with the slot's blinded secret and
+/// presents the result as a bearer token on subsequent read/delete requests.
+///
+/// Note what this handler no longer takes: a public key. It used to require one, so
+/// it could seal the nonce to it — which is how a relay came to hold the long-term
+/// identity of every reader, and with it every slot that identity would ever have.
+/// A slot now carries its own key, so there is nothing to be told and nothing to
+/// check it against. The epoch window that check needed went with it: the relay has
+/// no opinion about which epoch a slot belongs to, and cannot be wrong about the
+/// time.
 async fn inbox_session_handler(
     State(state): State<AppState>,
     AxumPath(slot): AxumPath<String>,
-    body: Bytes,
 ) -> Result<Bytes, (StatusCode, String)> {
-    let pubid = arvolo_core::crypto::PublicId::from_bytes(&body)
-        .map_err(|_| (StatusCode::BAD_REQUEST, "invalid public id".into()))?;
-    // Bind the request to the slot: only the key whose hash *is* this slot may
-    // authenticate for it. Slots rotate per epoch, so any slot in the readable
-    // window counts — a client polling across a boundary still has rows in the
-    // previous epoch's slot and must be able to authenticate for it.
-    if !arvolo_core::presence::inbox_slot_matches(&body, &slot, now_unix()) {
-        return Err((
-            StatusCode::FORBIDDEN,
-            "public id does not match slot".into(),
-        ));
+    // A slot that is not a key cannot be authenticated for, ever — refuse it here
+    // rather than issue a challenge nobody could answer.
+    if arvolo_core::presence::slot_key(&slot).is_none() {
+        return Err((StatusCode::BAD_REQUEST, "not an inbox slot".into()));
     }
     let nonce: [u8; INBOX_NONCE_LEN] = rand::random();
-    let sealed = arvolo_core::presence::seal_session_nonce(&pubid, &nonce)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let exp = now_unix().saturating_add(INBOX_SESSION_TTL);
     let mac = inbox_mac(&state.auth_secret, &slot, &nonce, exp);
     let challenge = arvolo_core::presence::SessionChallenge {
-        encapped_key: sealed.encapped_key,
-        ciphertext: sealed.ciphertext,
+        nonce: nonce.to_vec(),
         exp,
         mac: mac.to_vec(),
     };

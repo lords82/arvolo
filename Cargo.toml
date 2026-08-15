@@ -3,7 +3,7 @@ resolver = "2"
 members = ["core", "cli", "relay", "arvolo-ipc", "gui/src-tauri"]
 
 [workspace.package]
-version = "0.9.4"
+version = "0.10.0"
 edition = "2021"
 rust-version = "1.88"
 license = "AGPL-3.0-only"
@@ -24,6 +24,6 @@ clap = { version = "4", features = ["derive"] }
 clap_complete = { version = "=4.6.8", features = ["unstable-dynamic"] }
 # Both a path (for local builds) and a version (required so the binary crates
 # can be published to crates.io referencing a released core).
-arvolo-core = { path = "core", version = "0.9.0" }
+arvolo-core = { path = "core", version = "0.10.0" }
 # The IPC wire contract + daemon client, shared by the CLI and the GUI backend.
-arvolo-ipc = { path = "arvolo-ipc", version = "0.9.4" }
+arvolo-ipc = { path = "arvolo-ipc", version = "0.10.0" }

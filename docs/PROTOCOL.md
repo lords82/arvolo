@@ -22,12 +22,12 @@ open core and are out of scope here.
 
 | Term | Meaning |
 |---|---|
-| **Identity** | A long-term X25519 keypair. The public half is your **id** (no PII). |
-| **Contact id** | Another party's X25519 public key, base32-encoded. What you send **to**. |
+| **Identity** | A long-term seed yielding two keypairs: Ed25519 (signing) + X25519 (KEM). The two public halves are your **id** (no PII). |
+| **Contact id** | Another party's two public halves, base32-encoded (64 bytes). What you send **to**. |
 | **Fingerprint** | An eight-word BLAKE3 digest (64 bits) of a public id, for out-of-band verification. |
 | **Ticket** | A self-describing capability string that lets the holder receive a transfer (`arvc…` / `arvm…`). |
 | **Claim** | A random 16-byte capability token addressing one blob on the relay. |
-| **Slot** | An opaque per-identity address on the relay (inbox / presence), derived from a public id so the relay never sees the id. |
+| **Slot** | A per-identity address on the relay. An inbox slot is a per-epoch *blinded public key* (§6.2) — the relay authenticates against it without learning whose it is; a presence slot is a hash. |
 | **Content key** | A fresh random 32-byte AEAD key per transfer; encrypts the chunk stream; travels only in the ticket. |
 | **Relay** | The self-hostable, zero-knowledge store-and-forward + rendezvous server. It only ever sees ciphertext and opaque tokens. |
 
@@ -37,10 +37,31 @@ open core and are out of scope here.
 
 All defined in [`core/src/crypto.rs`](../core/src/crypto.rs).
 
-### 2.1 Identity — X25519
-An identity is an X25519 keypair. The 32-byte public key is the contact id;
-the 32-byte secret is stored locally (0600 on unix). There is no certificate,
-account, or PII — the key **is** the identity.
+### 2.1 Identity — two keypairs from one seed
+An identity is a 32-byte **seed**, stored locally (0600 on unix), from which two
+independent keypairs are derived through separate BLAKE3 contexts:
+
+| half | curve | used for |
+|---|---|---|
+| signing | Ed25519 | naming you, and proving you own your inbox (§6.2, §7.5) |
+| KEM | X25519 | what payloads are encrypted toward (§2.2) |
+
+The **contact id** is the two public halves concatenated, 64 bytes. There is no
+certificate, account, or PII — the keys **are** the identity.
+
+The two could have been one: Ed25519 and X25519 are the same curve in different
+coordinates and converting between them is standard practice. That was declined.
+Sharing a key across a signature scheme and a KEM is believed safe and has been
+analysed as such, but it is an assumption this protocol otherwise never asks anyone
+to accept; and the conversion drops the sign bit, so `A` and `-A` — two distinct
+contact ids — would share one encryption key. The cost of avoiding both is an id of
+64 bytes rather than 32. The eight-word fingerprint people read aloud (§2.7) is
+unchanged, so that cost is paid by clipboards and QR codes, not by users.
+
+Parsing an id validates it: the signing half must be a canonical Edwards point in
+the prime-order subgroup. That check is load-bearing rather than hygienic — the
+per-epoch blinding factor (§6.2) is a full-range scalar and does not clear the
+cofactor the way a clamped X25519 scalar silently did.
 
 ### 2.2 Contact encryption — HPKE auth mode (RFC 9180)
 Sends addressed to a specific recipient use **HPKE** with:
@@ -51,7 +72,7 @@ Sends addressed to a specific recipient use **HPKE** with:
   a wrong recipient cannot open, and tampering is rejected by the AEAD tag.
 - **Info string** `arvolo/hpke/v1` domain-separates the KDF.
 - **Base mode** (`seal_anon`/`open_anon`) is used where no sender identity is
-  proven — currently the inbox proof-of-possession challenge (§7.5).
+  proven — the outer, sealed-sender layer around an inbox offer (§7.5).
 
 On the wire an HPKE output is `(encapped_key, ciphertext)`; the encapsulated key
 travels as a header, the ciphertext as the body (§6.1).
@@ -240,7 +261,7 @@ it checks the relay's version before showing a code, and refuses a half-complete
 trade — while the primitive itself only reports it, leaving the policy to callers
 that may legitimately not need a reply.
 | POST / GET | `/v1/inbox/{slot}` | session (GET) | Post a sealed-sender **offer** to a recipient's inbox / long-poll for offers. |
-| POST | `/v1/inbox/{slot}/session` | proof-of-possession | Start a read session: returns a nonce sealed to the slot owner + a relay MAC over `(slot, nonce, exp)`. |
+| POST | `/v1/inbox/{slot}/session` | none (the challenge is public) | Start a read session: returns a random nonce + a relay MAC over `(slot, nonce, exp)`. Useless to anyone who cannot sign it. |
 | DELETE | `/v1/inbox/{slot}/{id}` | poster token | Retract your own offer. |
 | GET | `/v1/inbox/{slot}/{id}/status` | poster token | How far the offer got: `pending` (no client of theirs has read it) → `fetched` (it reached one of their devices — see below) → `taken` (they fetched the file and acked). `gone` means it ended without being taken: retracted, or lapsed. |
 | POST / GET | `/v1/presence/{slot}` | none | Publish / read a **presence beacon** (is this identity online right now?). Unauthenticated by design; see the presence caveat in §7.5. |
@@ -251,53 +272,56 @@ that may legitimately not need a reply.
 | GET | `/v1/features` | none | Advertise optional features so a client can fail fast: `{"links":true,"rz2":true}`. The two are read with **opposite defaults** on purpose — an unreachable or older relay means "links allowed" (worst case, a deposit is refused later) but "no rz2", because minting a v2 code no relay can host would strand whoever types it. |
 | GET | `/healthz` | none | Liveness. |
 
-### 6.2 Slots (opaque per-identity addresses, rotating)
-So the relay never sees a public id, inbox and presence are addressed by a
-**derived slot**. The derivation takes an **epoch** as well as the key, so the
-value turns over on a fixed schedule:
+### 6.2 Slots (per-epoch blinded keys)
+An inbox slot is not a hash of your public id: it is a **blinded public key**
+derived from the signing half of your identity, one per epoch.
 
 ```
-inbox_slot    = base32( blake3_derive_key("arvolo/inbox/slot/v2",
-                                          pubkey ‖ le64(unix / 604800)) )   # 7 days
+h             = blake3_derive_key("arvolo/inbox/blind/v1", ed_pubkey ‖ le64(epoch))
+inbox_slot    = base32( h · A )          # A = your Ed25519 half; epoch = unix / 604800 (7 days)
 presence_slot = base32( blake3_derive_key("arvolo/presence/slot/v2",
-                                          pubkey ‖ le64(unix / 3600)) )     # 1 hour
+                                          pubkey ‖ le64(unix / 3600)) )   # 1 hour
 ```
 
-Anyone who knows your public id can compute your current slot (to send you an
-offer or check presence) with no coordination, and the relay still cannot invert
-a slot to a public id.
+This is Tor's v3 onion-key blinding. It satisfies two requirements that pull
+against each other: **anyone holding your contact id can compute `h·A`**, so a
+sender can address an inbox it cannot read; and **`h·A` reveals nothing about
+`A`**, so the relay cannot tie one epoch's slot to the next.
+
+The presence beacon keeps a plain hash: it is unauthenticated by design (§7.5),
+so there is nothing for a key to prove there.
 
 **Why it rotates.** A slot appears in the *request path*, so it lands in the
 access log of the relay and of any reverse proxy in front of it — and a client
 polls its own inbox continuously and refreshes a presence beacon every 30s. A
 slot that never changed put one unchanging string in those logs for the life of
 the identity, which groups a user's entire history together for anyone reading
-them, across IP changes, without ever learning who they are. Rotation cuts that
-thread at each boundary.
+them, across IP changes, without ever learning who they are.
 
 **Reading across a boundary.** A reader looks in the current epoch's slot and the
-previous one, current first; the relay grants an inbox session for either and
-refuses anything older or in the future. Inbox row TTLs are clamped client-side
-to one epoch, which makes the guarantee total: a row that is still alive is
-always in a slot its owner reads. Only the current slot is long-polled — older
-slots are drained with `wait=0`, every 5 minutes in a poll loop and always on a
-one-shot read — so steady-state request volume is essentially unchanged. A
-presence check spends a second request only within 120s of a boundary, where a
-beacon published just before it can still be alive.
+previous one, current first, and signs for whichever it is talking to — the
+previous epoch's slot needs the previous epoch's blinded key. Inbox row TTLs are
+clamped client-side to one epoch, which makes the guarantee total: a row that is
+still alive is always in a slot its owner reads. Only the current slot is
+long-polled — older slots are drained with `wait=0`, every 5 minutes in a poll
+loop and always on a one-shot read — so steady-state request volume is
+essentially unchanged. A presence check spends a second request only within 120s
+of a boundary, where a beacon published just before it can still be alive.
 
-**What rotation does not fix.** `POST /v1/inbox/{slot}/session` carries the
-owner's raw public key (the relay seals the challenge nonce to it), so the relay
-*process* still learns the key and could recompute any epoch's slot from it.
-Rotation removes the stable identifier from logs — bodies are not logged, paths
-are — but closing this properly needs the slot to *be* a per-epoch blinded public
-key, so the handshake never carries the long-term one (Tor's v3 onion-key
-blinding is the model). Not implemented.
+**What the relay knows.** Nothing that identifies a reader. It never receives a
+public key (§7.5), and it holds no opinion about which epoch a slot belongs to —
+there is nothing to compare a slot against, so there is no window to be right
+about and no clock skew to tolerate. An earlier design hashed the public id and
+had the reader POST its key so the relay could seal a challenge to it; the relay
+then learned every reader's long-term identity, and with it every slot that
+identity would ever have, which left the rotation protecting the access logs and
+nothing else.
 
-**Upgrade order.** `v2` slots are a different address space from `v1`: the relay
-must be updated **before** the clients, because it is the relay that decides
-which slots a session is granted for. A `v1` client and a `v2` client simply do
-not meet — offers and beacons are missed rather than mis-delivered, and a sealed
-`arvm…` ticket handed over directly still works throughout.
+**Upgrade order.** Blinded slots are a different address space from the hashed
+ones, and the identity format changed with them (§2.1), so clients and relay must
+cross together. A client of the old shape and one of the new simply do not meet —
+offers and beacons are missed rather than mis-delivered, and a sealed `arvm…`
+ticket handed over directly still works throughout.
 
 ### 6.3 Capability tokens
 - **claim** — 16 random bytes; the bearer capability for one blob.
@@ -498,18 +522,31 @@ whether the recipient is online.
 > (there is no beacon delete).
 
 **Inbox read auth (proof of possession).** Reading an inbox must be limited to its
-owner, but the relay has no account for them. Instead of a signature it uses a
-one-time **proof-of-possession** handshake, then a cheap session token:
+owner, but the relay has no account for them — and, deliberately, no way to name
+them either. The slot *is* a public key (§6.2), so a signature settles it:
 
 ```
-1. reader: POST /v1/inbox/{slot}/session with its public id as the body;
-           the relay refuses (403) unless blake3_derive(pubkey) == slot
-2. relay:  seals a random nonce to that public key (base-mode HPKE) and
-           returns it + a MAC over (slot, nonce, exp) + exp   [context arvolo/inbox/session/v1]
-3. reader: HPKE-opens the seal with its identity → recovers the nonce → assembles
-           a session token; only the key owner can do this
-4. reader: long-polls GET /v1/inbox/{slot} with the session token until it expires
+1. reader: POST /v1/inbox/{slot}/session   — no body
+2. relay:  returns a random nonce + exp + a MAC over (slot, nonce, exp)
+           (the challenge is public; the relay hands one to whoever asks)
+3. reader: signs  "arvolo/inbox/session/v2" ‖ slot ‖ nonce ‖ exp
+           with the *blinded* secret for that slot's epoch, and assembles a
+           session token = (nonce, exp, mac, sig)
+4. relay:  MAC → it issued this challenge for this slot; signature verified
+           against the key the slot encodes → the presenter owns it
+5. reader: long-polls GET /v1/inbox/{slot} with the token until it expires
 ```
+
+Two checks doing two different jobs: the MAC makes the session stateless and
+bounded, the signature proves ownership — which the MAC cannot, since step 2 is
+public.
+
+Earlier versions did this with HPKE instead: the reader sent its public key, the
+relay sealed the nonce to it, and opening the seal was the proof. It worked, and it
+handed the relay the long-term identity of every reader — from which every slot
+that identity would ever have could be recomputed, in any epoch. The nonce survives
+for freshness; the part that named you is gone, and with it the relay's need to
+agree with anyone about what time it is.
 
 **Offers (sealed sender).** A sender posts an **offer** to the recipient's
 `inbox_slot`: a record of `{ name, size, chunks, ticket, note, sender_name }`
@@ -694,7 +731,7 @@ TTLs and row caps (abuse/disk-fill guards); see the constants in
 | Presence privacy (opt-in surface) | Running `listen` publishes an online beacon readable by anyone who knows your public id; spoofable "online", unforgeable "offline" — see the caveat in §7.5. |
 | Reorder/truncation resistance | Per-chunk AAD binds `index ‖ total` |
 | Short-code safety | SPAKE2 PAKE — no offline dictionary attack |
-| Inbox read authorization | HPKE proof-of-possession → relay-MAC session token |
+| Inbox read authorization | Signature by the slot's blinded key → relay-MAC session token. The relay never receives a public key, so it cannot link a reader's slots across epochs. |
 | Link-leak resistance (opt-in) | Argon2id password wrap the relay cannot bypass |
 | Revocability | Revoke token (hash-only at the relay), constant-time checked |
 | Data minimization | Dial keys not IPs; random claims; derived slots that **rotate** per epoch (§6.2); TTL auto-expiry; no PII in identities |
@@ -735,13 +772,18 @@ public id (it sees a derived slot). But it unavoidably sees *how big* a blob is,
   at 15:07" and infer activity patterns, without ever reading a byte.
 - *The address is not incidental:* a public relay **must** group requests by
   client IP — that is what the per-IP rate limits are — and any reverse proxy in
-  front logs it besides. Two things reduce it. Slots **rotate** (§6.2), so a
-  request path no longer carries one identifier for the life of an identity. And
-  `proxy` in `config.toml` (or `ARVOLO_PROXY`) routes every relay request through
-  a proxy — `socks5h://127.0.0.1:9050` puts the whole HTTP surface over Tor. Both
-  are partial by construction: rotation does not stop the relay process learning
-  your key at the inbox session handshake, and the proxy cannot carry **P2P**
-  traffic, which is QUIC/UDP.
+  front logs it besides. Two things reduce it. Slots are **per-epoch blinded keys**
+  (§6.2), so a request path carries no identifier that outlives an epoch, and the
+  relay is never told a public key it could use to link them — the handshake that
+  used to carry one is gone (§7.5). And `proxy` in `config.toml` (or
+  `ARVOLO_PROXY`) routes every relay request through a proxy —
+  `socks5h://127.0.0.1:9050` puts the whole HTTP surface over Tor.
+
+  What remains, and it is not small: the relay still sees **when** you poll and
+  **from where**, and one address polling one slot for a week is a thread of its
+  own. Rotation ends that thread at each boundary; the proxy cuts the address; only
+  both together leave the relay with sizes and timing. And the proxy cannot carry
+  **P2P** traffic, which is QUIC/UDP.
 - *The P2P path has its own three knobs,* because a direct transfer reveals your
   address to the peer by construction and no proxy can change that:
   `iroh_relay` (your own NAT relay, or `off` for none), **`iroh_discovery`**, and

@@ -15,6 +15,7 @@
 //! (key, nonce) is never reused — the one invariant AES-GCM depends on.
 
 use anyhow::{anyhow, Context, Result};
+use ed25519_dalek::{SigningKey, VerifyingKey};
 use hpke::{
     aead::AesGcm256, kdf::HkdfSha256, kem::X25519HkdfSha256, Deserializable, Kem as KemTrait,
     OpModeR, OpModeS, Serializable,
@@ -26,16 +27,48 @@ type KdfAlg = HkdfSha256;
 
 const INFO: &[u8] = b"arvolo/hpke/v1";
 
-/// A long-term identity keypair (X25519). No PII; the public part is the
-/// contact id others encrypt toward.
+/// Domain separators deriving the two halves of an identity from its seed. Two
+/// contexts, so the halves are independent: neither can be computed from the other,
+/// and no result about one carries over to the other.
+const ED_CONTEXT: &str = "arvolo/identity/ed25519/v1";
+const X_CONTEXT: &str = "arvolo/identity/x25519/v1";
+
+/// Bytes of one half of a public id.
+const HALF: usize = 32;
+
+/// Marks a stored identity file as holding a seed for the two-key identity.
+const IDENTITY_MAGIC: &[u8] = b"arvolo-identity-v2\n";
+
+/// A long-term identity: **two** keypairs derived from one stored seed.
+///
+/// The signing half (Ed25519) names you and proves you own your inbox; the KEM half
+/// (X25519) is what messages are encrypted toward. They are derived from the seed
+/// through separate KDF contexts and are mathematically unrelated.
+///
+/// They could have been one key — Ed25519 and X25519 are the same curve in different
+/// coordinates, and converting between them is a standard, widely deployed move
+/// (libsodium ships the conversion for exactly this). It was not taken. Sharing a
+/// key across a signature scheme and a KEM is *believed* safe and has been analysed
+/// as such, but "believed safe" is an assumption this product otherwise does not
+/// ask anyone to accept; and the birational map drops the sign bit, so `A` and `-A`
+/// — two distinct contact ids — would share one encryption key. The price of
+/// avoiding both is a contact id of 64 bytes instead of 32. Since the eight-word
+/// fingerprint people actually read aloud is unchanged, that price is paid by
+/// clipboards and QR codes, not by users.
 pub struct Identity {
+    /// The stored secret: everything else here derives from it.
+    seed: [u8; HALF],
+    signing: SigningKey,
     sk: <KemAlg as KemTrait>::PrivateKey,
     pk: <KemAlg as KemTrait>::PublicKey,
 }
 
-/// A contact's public identity (what you encrypt toward / verify as sender).
+/// A contact's public identity: the signing half then the KEM half, 64 bytes.
 #[derive(Clone)]
-pub struct PublicId(<KemAlg as KemTrait>::PublicKey);
+pub struct PublicId {
+    ed: VerifyingKey,
+    x: <KemAlg as KemTrait>::PublicKey,
+}
 
 impl std::fmt::Debug for PublicId {
     /// Debug as the human fingerprint — never dump raw key bytes into logs.
@@ -53,34 +86,65 @@ pub struct Sealed {
 impl Identity {
     /// Generate a fresh random identity.
     pub fn generate() -> Self {
-        let (sk, pk) = KemAlg::gen_keypair(&mut rand::rng());
-        Self { sk, pk }
+        use rand::RngCore;
+        let mut seed = [0u8; HALF];
+        rand::rng().fill_bytes(&mut seed);
+        Self::from_seed(seed)
+    }
+
+    /// Derive both keypairs from `seed`. Total and deterministic: the seed is the
+    /// whole secret, which is what makes the stored file 32 bytes and lets two
+    /// devices share an identity by sharing it.
+    fn from_seed(seed: [u8; HALF]) -> Self {
+        let signing = SigningKey::from_bytes(&blake3::derive_key(ED_CONTEXT, &seed));
+        // `PrivateKey::from_bytes` for this KEM stores the scalar and clamps it where
+        // the curve requires it, so any 32 bytes are a usable secret.
+        let sk =
+            <KemAlg as KemTrait>::PrivateKey::from_bytes(&blake3::derive_key(X_CONTEXT, &seed))
+                .expect("32 bytes is always a valid X25519 secret");
+        let pk = <KemAlg as KemTrait>::sk_to_pk(&sk);
+        Self {
+            seed,
+            signing,
+            sk,
+            pk,
+        }
     }
 
     /// This identity's public id.
     pub fn public(&self) -> PublicId {
-        PublicId(self.pk.clone())
+        PublicId {
+            ed: self.signing.verifying_key(),
+            x: self.pk.clone(),
+        }
     }
 
-    /// Serialize the secret key (32 bytes). Store this securely.
+    /// The signing half, for the inbox proof of possession (see [`blinded`]).
+    pub(crate) fn signing(&self) -> &SigningKey {
+        &self.signing
+    }
+
+    /// Serialize the secret (32 bytes: the seed). Store this securely.
     pub fn secret_bytes(&self) -> Vec<u8> {
-        self.sk.to_bytes().to_vec()
+        self.seed.to_vec()
     }
 
-    /// Restore an identity from its secret-key bytes (public key is derived).
+    /// Restore an identity from its stored secret (both keypairs are re-derived).
     pub fn from_secret_bytes(bytes: &[u8]) -> Result<Self> {
-        let sk = <KemAlg as KemTrait>::PrivateKey::from_bytes(bytes)
-            .map_err(|e| anyhow!("invalid secret key: {e}"))?;
-        let pk = <KemAlg as KemTrait>::sk_to_pk(&sk);
-        Ok(Self { sk, pk })
+        let seed: [u8; HALF] = bytes
+            .try_into()
+            .map_err(|_| anyhow!("invalid identity secret: expected {HALF} bytes"))?;
+        Ok(Self::from_seed(seed))
     }
 
-    /// Write the secret key to `path` (owner-only permissions on unix).
+    /// Write the secret to `path` (owner-only permissions on unix).
     pub fn save(&self, path: &std::path::Path) -> Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).ok();
         }
-        std::fs::write(path, self.secret_bytes())
+        let mut body = IDENTITY_MAGIC.to_vec();
+        body.extend_from_slice(&self.seed);
+        std::fs::write(path, body)
             .with_context(|| format!("write identity to {}", path.display()))?;
         #[cfg(unix)]
         {
@@ -91,10 +155,25 @@ impl Identity {
     }
 
     /// Load an identity from `path`.
+    ///
+    /// The magic prefix exists to make one specific mistake impossible. An identity
+    /// file written before the key change is 32 bare bytes — exactly the shape of a
+    /// seed — so reading it would succeed and hand back a *different* identity, with
+    /// every saved contact silently no longer recognising you and no error anywhere
+    /// to explain it. Refusing it by name costs a dozen bytes on disk.
     pub fn load(path: &std::path::Path) -> Result<Self> {
         let bytes = std::fs::read(path)
             .with_context(|| format!("read identity from {}", path.display()))?;
-        Self::from_secret_bytes(&bytes)
+        let seed = bytes.strip_prefix(IDENTITY_MAGIC).with_context(|| {
+            format!(
+                "{} is not an arvolo identity of this version. An identity from before \
+                 the signing key was added cannot be converted — its id is a different \
+                 id. Delete the file to generate a new identity (you will need to \
+                 re-exchange contacts).",
+                path.display()
+            )
+        })?;
+        Self::from_secret_bytes(seed)
     }
 
     /// Load the identity at `path`, creating and saving a new one if absent.
@@ -110,17 +189,53 @@ impl Identity {
 }
 
 impl PublicId {
-    /// Serialize the public id (32 bytes).
+    /// Serialize the public id (64 bytes: signing half, then KEM half).
     pub fn to_bytes(&self) -> Vec<u8> {
-        self.0.to_bytes().to_vec()
+        let mut out = Vec::with_capacity(2 * HALF);
+        out.extend_from_slice(self.ed.as_bytes());
+        out.extend_from_slice(&self.x.to_bytes());
+        out
+    }
+
+    /// The signing half's bytes — what an inbox slot is derived from.
+    pub fn ed_bytes(&self) -> [u8; HALF] {
+        *self.ed.as_bytes()
+    }
+
+    /// The signing half as a verifying key.
+    pub(crate) fn verifying(&self) -> &VerifyingKey {
+        &self.ed
     }
 
     /// Parse a public id from its bytes.
+    ///
+    /// Stricter than it used to be, and deliberately so. Every 32-byte string is a
+    /// valid X25519 key, so the old parse could not fail on a wrong id; roughly half
+    /// of all strings are not valid Edwards points, so a corrupted or truncated id
+    /// now fails here instead of halfway through a transfer.
+    ///
+    /// The torsion check is load-bearing rather than hygiene. Clamped X25519 scalars
+    /// clear the cofactor on every multiplication, which quietly neutralised
+    /// small-order components; the per-epoch blinding factor is a full-range scalar
+    /// and does no such thing. A key outside the prime-order subgroup has to be
+    /// refused at the door, because nothing downstream will do it for us.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        Ok(PublicId(
-            <KemAlg as KemTrait>::PublicKey::from_bytes(bytes)
-                .map_err(|e| anyhow!("invalid public id: {e}"))?,
-        ))
+        if bytes.len() != 2 * HALF {
+            anyhow::bail!(
+                "invalid public id: expected {} bytes, got {}",
+                2 * HALF,
+                bytes.len()
+            );
+        }
+        let ed_bytes: [u8; HALF] = bytes[..HALF].try_into().expect("checked length");
+        let ed = VerifyingKey::from_bytes(&ed_bytes)
+            .map_err(|e| anyhow!("invalid public id (signing half): {e}"))?;
+        if !ed.to_edwards().is_torsion_free() {
+            anyhow::bail!("invalid public id: signing half is outside the prime-order subgroup");
+        }
+        let x = <KemAlg as KemTrait>::PublicKey::from_bytes(&bytes[HALF..])
+            .map_err(|e| anyhow!("invalid public id (KEM half): {e}"))?;
+        Ok(PublicId { ed, x })
     }
 
     /// Number of words in a fingerprint. Eight words = **64 bits** of the
@@ -151,6 +266,114 @@ impl PublicId {
     }
 }
 
+/// Per-epoch **blinded** keys: how you prove you own an inbox without telling the
+/// relay whose it is.
+///
+/// The proof used to be a round trip through HPKE: you sent the relay your public
+/// key, it sealed a nonce to it, and opening the nonce was the proof. That works,
+/// and it hands the relay your long-term identity on every session — from which it
+/// can recompute every slot you will ever have, in any epoch. Rotating the slots
+/// kept the stable identifier out of the *logs*; it never hid anything from the
+/// relay process itself.
+///
+/// Here the slot **is** a public key: the identity's signing half, blinded for the
+/// epoch. The relay decodes the slot, sends a nonce, and checks a signature. No key
+/// is transmitted, and the relay cannot link one epoch's slot to another's without
+/// already knowing the identity — which is the thing it no longer learns.
+///
+/// The construction is Tor's v3 onion-key blinding:
+///
+/// ```text
+///   h  = H(A, epoch)          the blinding factor, public
+///   A' = h·A                  anyone holding A can compute it → this is the slot
+///   a' = h·a                  only the owner, who has a
+/// ```
+///
+/// `a'` is a product reduced mod ℓ: it is **not** a clamped scalar, and must not be.
+/// Clamping it would break `[a']G = A'` and every signature would fail to verify —
+/// which is why signing goes through `hazmat`, the one API that takes a scalar as
+/// given. That is also why the identity's *other* half stays clamped: it does
+/// Diffie-Hellman against keys strangers choose, where clearing the cofactor is what
+/// keeps small-subgroup attacks out. Two scalars, opposite requirements, and neither
+/// is a matter of taste.
+pub mod blinded {
+    use super::{Identity, PublicId};
+    use curve25519_dalek::scalar::Scalar;
+    use ed25519_dalek::hazmat::{raw_sign, ExpandedSecretKey};
+    use ed25519_dalek::{Sha512, Signature, VerifyingKey};
+
+    /// Domain separator for the blinding factor.
+    const BLIND_CONTEXT: &str = "arvolo/inbox/blind/v1";
+    /// Domain separator for the per-epoch signing nonce prefix.
+    const PREFIX_CONTEXT: &str = "arvolo/inbox/blind-prefix/v1";
+
+    /// Bytes of a blinded public key, i.e. of a slot.
+    pub const KEY_LEN: usize = 32;
+    /// Bytes of a signature.
+    pub const SIG_LEN: usize = 64;
+
+    /// `h` for this identity and epoch. Uniform mod ℓ: 64 hash bytes reduced, rather
+    /// than 32 interpreted, so the factor has no bias a shorter draw would leave.
+    fn factor(ed_pub: &[u8; KEY_LEN], epoch: u64) -> Scalar {
+        let mut h = blake3::Hasher::new_derive_key(BLIND_CONTEXT);
+        h.update(ed_pub);
+        h.update(&epoch.to_le_bytes());
+        let mut wide = [0u8; 64];
+        h.finalize_xof().fill(&mut wide);
+        Scalar::from_bytes_mod_order_wide(&wide)
+    }
+
+    /// The blinded public key of `id` at `epoch` — computable by anyone who knows
+    /// the contact id, which is what lets a sender address an inbox it cannot read.
+    pub fn public_at(id: &PublicId, epoch: u64) -> [u8; KEY_LEN] {
+        let h = factor(&id.ed_bytes(), epoch);
+        (id.verifying().to_edwards() * h).compress().to_bytes()
+    }
+
+    /// Sign `msg` as the owner of this epoch's slot.
+    ///
+    /// The verifying key handed to `raw_sign` is the *blinded* one. Passing the
+    /// long-term key instead would not merely fail to verify: signing against a key
+    /// that does not match the scalar is the documented way to leak the signing key
+    /// outright. The pairing is established here, in one place, and the tests check
+    /// both halves of it.
+    pub fn sign_at(me: &Identity, epoch: u64, msg: &[u8]) -> [u8; SIG_LEN] {
+        let public = me.public();
+        let h = factor(&public.ed_bytes(), epoch);
+        let blinded_point = public.verifying().to_edwards() * h;
+        let vk = VerifyingKey::from(blinded_point);
+
+        // A fresh prefix per epoch rather than the identity's own: it is what seeds
+        // the signature nonce, and there is no reason to carry one value across keys
+        // that are meant to be unlinkable.
+        let mut prefix_input = me.signing().to_bytes().to_vec();
+        prefix_input.extend_from_slice(&epoch.to_le_bytes());
+        let esk = ExpandedSecretKey {
+            scalar: h * me.signing().to_scalar(),
+            hash_prefix: blake3::derive_key(PREFIX_CONTEXT, &prefix_input),
+        };
+        raw_sign::<Sha512>(&esk, msg, &vk).to_bytes()
+    }
+
+    /// Check a signature against a slot. `slot_key` is the blinded public key the
+    /// slot encodes; nothing here needs to know which identity it belongs to.
+    pub fn verify(slot_key: &[u8], msg: &[u8], sig: &[u8]) -> bool {
+        let Ok(key_bytes) = <[u8; KEY_LEN]>::try_from(slot_key) else {
+            return false;
+        };
+        let Ok(sig_bytes) = <[u8; SIG_LEN]>::try_from(sig) else {
+            return false;
+        };
+        let Ok(vk) = VerifyingKey::from_bytes(&key_bytes) else {
+            return false;
+        };
+        // `verify_strict`: rejects small-order keys and non-canonical encodings, so a
+        // slot nobody could own cannot be authenticated for.
+        vk.verify_strict(msg, &Signature::from_bytes(&sig_bytes))
+            .is_ok()
+    }
+}
+
 /// Encrypt `plaintext` toward `recipient`, authenticated as `sender`.
 /// `aad` is authenticated-but-not-encrypted associated data (e.g. a file name).
 pub fn seal(
@@ -162,7 +385,7 @@ pub fn seal(
     let mode = OpModeS::<KemAlg>::Auth((sender.sk.clone(), sender.pk.clone()));
     let (encapped, ciphertext) = hpke::single_shot_seal::<AeadAlg, KdfAlg, KemAlg, _>(
         &mode,
-        &recipient.0,
+        &recipient.x,
         INFO,
         plaintext,
         aad,
@@ -183,7 +406,7 @@ pub fn open(
     sender: &PublicId,
     aad: &[u8],
 ) -> Result<Vec<u8>> {
-    let mode = OpModeR::<KemAlg>::Auth(sender.0.clone());
+    let mode = OpModeR::<KemAlg>::Auth(sender.x.clone());
     let encapped = <KemAlg as KemTrait>::EncappedKey::from_bytes(&sealed.encapped_key)
         .map_err(|e| anyhow!("invalid encapped key: {e}"))?;
     hpke::single_shot_open::<AeadAlg, KdfAlg, KemAlg>(
@@ -198,13 +421,13 @@ pub fn open(
 }
 
 /// Encrypt `plaintext` toward `recipient` **without** authenticating a sender
-/// (HPKE base mode). Used for anonymous challenges — e.g. the relay sealing a
-/// proof-of-possession nonce to an inbox owner it can't (and needn't) identify.
+/// (HPKE base mode). The outer layer of a sealed-sender offer: the relay sees an
+/// opaque blob and cannot tell who deposited it.
 pub fn seal_anon(plaintext: &[u8], recipient: &PublicId, aad: &[u8]) -> Result<Sealed> {
     let mode = OpModeS::<KemAlg>::Base;
     let (encapped, ciphertext) = hpke::single_shot_seal::<AeadAlg, KdfAlg, KemAlg, _>(
         &mode,
-        &recipient.0,
+        &recipient.x,
         INFO,
         plaintext,
         aad,
@@ -218,8 +441,11 @@ pub fn seal_anon(plaintext: &[u8], recipient: &PublicId, aad: &[u8]) -> Result<S
 }
 
 /// Decrypt a base-mode [`Sealed`] addressed to `recipient` (no sender to verify).
-/// Succeeding proves possession of `recipient`'s private key — the basis of the
-/// inbox proof-of-possession handshake.
+///
+/// Now used only for the sealed-sender envelope around an offer. The inbox
+/// proof-of-possession used to run through here too — the relay sealed a nonce to
+/// the reader's key — and that is precisely what carried the reader's identity to
+/// the relay; it is a signature against the slot's own key now (see [`blinded`]).
 pub fn open_anon(sealed: &Sealed, recipient: &Identity, aad: &[u8]) -> Result<Vec<u8>> {
     let mode = OpModeR::<KemAlg>::Base;
     let encapped = <KemAlg as KemTrait>::EncappedKey::from_bytes(&sealed.encapped_key)
@@ -466,6 +692,224 @@ mod tests {
         let id = Identity::generate();
         let restored = Identity::from_secret_bytes(&id.secret_bytes()).unwrap();
         assert_eq!(id.public().to_bytes(), restored.public().to_bytes());
+    }
+
+    // ---- the two-key identity ---------------------------------------------
+
+    /// The seed is the whole secret, and it determines both halves. This is what
+    /// lets two devices share an identity by sharing 32 bytes.
+    #[test]
+    fn the_seed_determines_the_whole_identity() {
+        let a = Identity::generate();
+        let b = Identity::from_secret_bytes(&a.secret_bytes()).unwrap();
+        assert_eq!(
+            a.secret_bytes().len(),
+            32,
+            "the stored secret stays 32 bytes"
+        );
+        assert_eq!(a.public().to_bytes(), b.public().to_bytes());
+        // And the KEM half really is usable by the re-derived copy, not just equal
+        // in bytes: seal to one, open with the other.
+        let sealed = seal(b"hello", &a.public(), &b, b"").unwrap();
+        assert_eq!(open(&sealed, &b, &a.public(), b"").unwrap(), b"hello");
+    }
+
+    /// A public id is the two halves, in order, and nothing else.
+    #[test]
+    fn a_public_id_is_two_halves() {
+        let id = Identity::generate();
+        let bytes = id.public().to_bytes();
+        assert_eq!(bytes.len(), 64);
+        assert_eq!(&bytes[..32], &id.public().ed_bytes());
+        let back = PublicId::from_bytes(&bytes).unwrap();
+        assert_eq!(back.to_bytes(), bytes);
+    }
+
+    /// The property the whole two-key choice was made for: the KEM half is **not**
+    /// the signing half in disguise. If these were ever equal, the identity would be
+    /// back to one key doing two jobs — which is exactly the assumption this design
+    /// declines to make — and the failure would be invisible from the outside.
+    #[test]
+    fn the_kem_half_is_not_derived_from_the_signing_half() {
+        for _ in 0..8 {
+            let id = Identity::generate();
+            let pk = id.public();
+            let converted = pk.verifying().to_montgomery().to_bytes();
+            assert_ne!(
+                converted,
+                pk.to_bytes()[32..],
+                "the KEM half must not be the birational image of the signing half"
+            );
+        }
+    }
+
+    /// Ids are now parsed, not merely accepted. Every 32-byte string was a valid
+    /// X25519 key, so the old id could not be wrong; half of all strings are not
+    /// Edwards points, so a mangled id fails here instead of much later.
+    #[test]
+    fn a_malformed_public_id_is_refused() {
+        let good = Identity::generate().public().to_bytes();
+        assert!(PublicId::from_bytes(&good[..63]).is_err(), "short");
+        assert!(
+            PublicId::from_bytes(&[good.clone(), vec![0u8]].concat()).is_err(),
+            "long"
+        );
+        // Corrupt the signing half until we hit a non-point (most bytes are not).
+        let mut bad = good.clone();
+        let broken = (1u8..=255).any(|b| {
+            bad[31] = b;
+            PublicId::from_bytes(&bad).is_err()
+        });
+        assert!(
+            broken,
+            "no corruption of the signing half was ever rejected"
+        );
+    }
+
+    /// A key outside the prime-order subgroup is refused at the door. It has to be:
+    /// the per-epoch blinding factor is a full-range scalar and does not clear the
+    /// cofactor the way a clamped X25519 scalar silently did.
+    #[test]
+    fn a_small_order_signing_half_is_refused() {
+        // y = 0 decompresses to a point of order 4 — the standard small-order
+        // example, and the exact shape the old X25519 id could not even express.
+        let mut bytes = vec![0u8; 64];
+        bytes[32..].copy_from_slice(&[7u8; 32]); // any KEM half; it is never reached
+        let err = PublicId::from_bytes(&bytes).expect_err("must not accept torsion");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("prime-order") || msg.contains("signing half"),
+            "rejected, but for an unclear reason: {msg}"
+        );
+    }
+
+    // ---- per-epoch blinding -----------------------------------------------
+
+    /// The property the whole construction rests on: what the *sender* computes from
+    /// a contact id and what the *owner* signs with are the same key. If these ever
+    /// drifted apart, every inbox would simply stop authenticating.
+    #[test]
+    fn the_owner_can_sign_for_the_slot_a_sender_computes() {
+        let me = Identity::generate();
+        let slot = blinded::public_at(&me.public(), 42);
+        let sig = blinded::sign_at(&me, 42, b"challenge");
+        assert!(blinded::verify(&slot, b"challenge", &sig));
+    }
+
+    /// Blinding is per epoch, and each epoch's key stands alone: a signature for one
+    /// must not authenticate another. Without this the rotation would be decoration.
+    #[test]
+    fn each_epoch_is_a_separate_key() {
+        let me = Identity::generate();
+        let (a, b) = (
+            blinded::public_at(&me.public(), 1),
+            blinded::public_at(&me.public(), 2),
+        );
+        assert_ne!(a, b, "epochs must not share a slot");
+
+        let sig1 = blinded::sign_at(&me, 1, b"m");
+        assert!(blinded::verify(&a, b"m", &sig1));
+        assert!(
+            !blinded::verify(&b, b"m", &sig1),
+            "a signature must not carry across epochs"
+        );
+    }
+
+    /// Two identities never collide, and the slot is not the identity: a relay
+    /// holding the slot has no way back to the contact id.
+    #[test]
+    fn a_slot_is_neither_shared_nor_the_identity_itself() {
+        let (a, b) = (Identity::generate(), Identity::generate());
+        assert_ne!(
+            blinded::public_at(&a.public(), 7),
+            blinded::public_at(&b.public(), 7)
+        );
+        assert_ne!(
+            blinded::public_at(&a.public(), 7).as_slice(),
+            &a.public().ed_bytes()[..],
+            "the blinded key must not be the long-term key"
+        );
+    }
+
+    /// Somebody else's signature does not open your inbox — the whole point of the
+    /// proof. Checked with a real second identity rather than a mangled signature,
+    /// because that is the attacker who actually exists.
+    #[test]
+    fn another_identity_cannot_sign_for_your_slot() {
+        let (me, other) = (Identity::generate(), Identity::generate());
+        let slot = blinded::public_at(&me.public(), 3);
+        assert!(!blinded::verify(
+            &slot,
+            b"m",
+            &blinded::sign_at(&other, 3, b"m")
+        ));
+    }
+
+    /// The message is bound: a signature over one challenge cannot be replayed for
+    /// another. (The relay issues a fresh nonce each session; this is what makes
+    /// that worth doing.)
+    #[test]
+    fn a_signature_does_not_transfer_to_another_challenge() {
+        let me = Identity::generate();
+        let slot = blinded::public_at(&me.public(), 9);
+        let sig = blinded::sign_at(&me, 9, b"nonce-one");
+        assert!(!blinded::verify(&slot, b"nonce-two", &sig));
+    }
+
+    /// Verification refuses malformed input rather than panicking on it: the slot
+    /// and the signature both arrive from the network.
+    #[test]
+    fn verification_refuses_junk_instead_of_panicking() {
+        let me = Identity::generate();
+        let slot = blinded::public_at(&me.public(), 1);
+        let sig = blinded::sign_at(&me, 1, b"m");
+        assert!(!blinded::verify(&slot[..31], b"m", &sig), "short slot");
+        assert!(!blinded::verify(&slot, b"m", &sig[..63]), "short signature");
+        assert!(!blinded::verify(&[0u8; 32], b"m", &sig), "small-order slot");
+        let mut bent = sig;
+        bent[0] ^= 0xff;
+        assert!(!blinded::verify(&slot, b"m", &bent), "tampered signature");
+    }
+
+    /// Signing is deterministic for a given (identity, epoch, message). Not a
+    /// requirement of the scheme, but it pins that the nonce prefix is derived and
+    /// not drawn at random — a random one would still verify, and would quietly make
+    /// every signature a fresh piece of unlinkable-looking noise nobody audited.
+    #[test]
+    fn signing_is_deterministic() {
+        let me = Identity::generate();
+        assert_eq!(
+            blinded::sign_at(&me, 5, b"m"),
+            blinded::sign_at(&me, 5, b"m")
+        );
+    }
+
+    /// An identity file from before the signing half existed must be refused by
+    /// name. It is 32 bare bytes — the exact shape of a seed — so accepting it would
+    /// hand back a *different* identity with no error anywhere to explain why every
+    /// saved contact stopped recognising you.
+    #[test]
+    fn an_identity_file_from_the_old_format_is_refused_not_reinterpreted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("identity.key");
+
+        std::fs::write(&path, [9u8; 32]).unwrap();
+        // Not `expect_err`: `Identity` has no `Debug` on purpose — it holds a secret
+        // — and a test is not a reason to give a key a way to print itself.
+        let err = match Identity::load(&path) {
+            Ok(_) => panic!("a bare 32-byte file must not load as an identity"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("different id"),
+            "the error must say what happened: {err}"
+        );
+
+        // And the current format round-trips through the file.
+        let id = Identity::generate();
+        id.save(&path).unwrap();
+        let back = Identity::load(&path).unwrap();
+        assert_eq!(id.public().to_bytes(), back.public().to_bytes());
     }
 
     #[test]

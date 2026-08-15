@@ -804,14 +804,22 @@ impl ChunkSender {
     /// The identity matters to the caller: an empty tail means that receiver has a
     /// complete copy, and reporting it as one more delivery has to be done once per
     /// receiver rather than once per session.
+    ///
+    /// Once the channel closes — the handler is gone, i.e. we are shutting down —
+    /// this never resolves again. It is awaited inside a `select!`, so "never" is the
+    /// right answer there: the other arms keep working and the loop exits on its
+    /// cancel. The alternatives were both wrong. Resolving with an empty tail (what
+    /// the pre-tuple version did) reads as "a receiver took the whole file" and
+    /// reports a delivery that never happened; resolving with a fabricated id needs
+    /// an id to fabricate, and the all-zero one had to be parsed back into a curve
+    /// point behind an `expect` — a panic in a shutdown path, guarding a value that
+    /// meant nothing anyway.
     pub async fn receiver_gone(&self) -> (EndpointId, Vec<usize>) {
         let mut rx = self.gone_rx.lock().await;
-        rx.recv().await.unwrap_or_else(|| {
-            (
-                EndpointId::from_bytes(&[0u8; 32]).expect("zero id"),
-                Vec::new(),
-            )
-        })
+        match rx.recv().await {
+            Some(v) => v,
+            None => std::future::pending().await,
+        }
     }
 
     /// Record that `indices` are now on the relay (advertised to receivers on
