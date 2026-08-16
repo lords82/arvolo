@@ -30,8 +30,13 @@ slow-timeout = { period = "120s", terminate-after = 3 }
 [test-groups]
 heavy-transfers = { max-threads = 1 }
 
+# Membership: every binary that moves real bytes over real endpoints. The relay's
+# swarm suites joined late and the omission was visible: on the 2-core mac runner
+# they ran *alongside* the serialized flow tests — swarm_fallback held 193s while
+# flow's resume_mid_transfer starved past its 240s deadline and died as a
+# "failure" that no code change had caused.
 [[profile.default.overrides]]
-filter = 'binary(flow) or binary(code_daemon)'
+filter = 'binary(flow) or binary(code_daemon) or binary(coswarm) or binary(disjoint_swarm) or binary(swarm_fallback) or binary(two_receivers) or binary(manager_resume)'
 test-group = 'heavy-transfers'
 
 [profile.ci]
@@ -41,5 +46,10 @@ slow-timeout = { period = "120s", terminate-after = 2 }
 fail-fast = false
 
 [[profile.ci.overrides]]
-filter = 'binary(flow) or binary(code_daemon)'
+filter = 'binary(flow) or binary(code_daemon) or binary(coswarm) or binary(disjoint_swarm) or binary(swarm_fallback) or binary(two_receivers) or binary(manager_resume)'
 test-group = 'heavy-transfers'
+# The heavy group alone gets the default profile's gentler deadline even in CI:
+# serialized they no longer wedge, but a 128 MiB swarm test on a cold 2-core
+# runner can honestly need more than 240s, and killing honest work re-creates
+# the flake this group exists to end.
+slow-timeout = { period = "120s", terminate-after = 3 }
