@@ -11,7 +11,7 @@ use crate::util::*;
 /// How long one presence probe may take. The probes run concurrently, so this is
 /// also roughly the worst case for the whole listing — where before, a relay that
 /// accepted the connection and then went quiet could hang the command forever,
-/// once per contact, because `reqwest::Client::new()` sets no timeout at all.
+/// once per contact, because the shared client sets no timeout at all.
 const PRESENCE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// One contact, with everything the listing shows about them already gathered.
@@ -86,9 +86,7 @@ async fn probe_presence(rows: &mut [Row]) {
     let Some(relay) = book::default_relay_or_builtin() else {
         return;
     };
-    let Ok(client) = reqwest::Client::builder().timeout(PRESENCE_TIMEOUT).build() else {
-        return;
-    };
+    let client = arvolo_core::http::client_with_timeout(PRESENCE_TIMEOUT);
 
     let mut set = tokio::task::JoinSet::new();
     for (idx, row) in rows.iter().enumerate() {

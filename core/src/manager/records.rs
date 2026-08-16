@@ -146,10 +146,13 @@ pub(super) fn load_sends(dir: &Path) -> Vec<SendRecord> {
 /// purpose, not arrived at by collecting whatever was easy to collect.
 #[derive(Default, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub(super) struct ShareRecord {
-    /// Receivers that disconnected having fetched **every** chunk. Exact: it
-    /// counts [`crate::flow::SendEvent::Delivered`], which is emitted on exactly
-    /// that. Not "people" — one person fetching twice counts twice, and an
-    /// anonymous ticket gives us no way to tell the difference.
+    /// Receivers that fetched **every** chunk: one per distinct receiving node,
+    /// counted from [`crate::flow::SendEvent::Delivered`].
+    ///
+    /// Not "people" — an anonymous ticket carries no identity, so this counts nodes,
+    /// and the same machine coming back to re-fetch is the one it already counted.
+    /// (It used to count at most one per serving session whatever happened, which
+    /// made a `--share-copies` limit above 1 unreachable.)
     pub(super) copies_served: u64,
     /// Bytes uploaded for this file, across every receiver. An **estimate**: the
     /// underlying progress is itself chunks-delivered × chunk size, and with

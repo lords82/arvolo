@@ -146,8 +146,6 @@ export const en = {
   "transfers.openFileFailed": "I can't open the file",
   "transfers.openFolder": "Open the folder",
   "transfers.openFolderFailed": "I can't open the folder",
-  "transfers.moveUp": "Move up",
-  "transfers.moveDown": "Move down",
   "transfers.revokeDeposit": "Withdraw the deposit",
   "transfers.cancel": "Cancel",
   "transfers.removeRow": "Take off the list",
@@ -157,6 +155,8 @@ export const en = {
   "transfers.liveCode": "code live",
   "transfers.review": "Review",
   "transfers.shareDetails": "Sharing details",
+  "transfers.reorder": (name: string) =>
+    `Move ${name}: drag, or use the up and down arrows`,
   "transfers.rowActions": (name: string) => `Actions for ${name}`,
   "transfers.progressOf": (name: string) => `Progress of ${name}`,
   "transfers.confirmRevokeTitle": "Withdraw the deposit?",

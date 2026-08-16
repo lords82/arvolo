@@ -3,6 +3,9 @@
     "externalBin": [
       "binaries/arvolo"
     ],
+    "macOS": {
+      "signingIdentity": "Developer ID Application: CryCatch S.r.l. (D6FKBG7DZF)"
+    },
     "windows": {
       "wix": {
         "fragmentPaths": [

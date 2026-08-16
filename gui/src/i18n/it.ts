@@ -127,8 +127,6 @@ export const it: Dict = {
   "transfers.openFileFailed": "Non riesco ad aprire il file",
   "transfers.openFolder": "Apri la cartella",
   "transfers.openFolderFailed": "Non riesco ad aprire la cartella",
-  "transfers.moveUp": "Sposta su",
-  "transfers.moveDown": "Sposta giù",
   "transfers.revokeDeposit": "Revoca il deposito",
   "transfers.cancel": "Annulla",
   "transfers.removeRow": "Togli dalla lista",
@@ -138,6 +136,8 @@ export const it: Dict = {
   "transfers.liveCode": "codice attivo",
   "transfers.review": "Rivedi",
   "transfers.shareDetails": "Dettagli condivisione",
+  "transfers.reorder": (name) =>
+    `Sposta ${name}: trascina, o usa le frecce su e giù`,
   "transfers.rowActions": (name) => `Azioni per ${name}`,
   "transfers.progressOf": (name) => `Avanzamento di ${name}`,
   "transfers.confirmRevokeTitle": "Revocare il deposito?",

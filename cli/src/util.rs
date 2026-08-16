@@ -112,6 +112,26 @@ pub(crate) fn require_relay(relay: Option<String>, use_http: bool) -> Result<Str
     Ok(resolved)
 }
 
+/// Refuse a command that can only work over a direct P2P transfer when the user has
+/// turned P2P off (`p2p = false` / `ARVOLO_P2P=off`).
+///
+/// The bind itself already refuses (see [`arvolo_core::transfer::p2p_enabled`]), so
+/// this is not what makes the setting hold — it is what makes it *legible*. Without
+/// it the user reads a message about endpoints and mailboxes at the bottom of a
+/// command that never mentioned either. `what` names the thing being refused, e.g.
+/// "a pairing code".
+pub(crate) fn ensure_p2p(what: &str) -> Result<()> {
+    anyhow::ensure!(
+        arvolo_core::transfer::p2p_enabled(),
+        "{what} needs a direct peer-to-peer transfer, and P2P is off \
+         (`p2p = false` in config.toml, or ARVOLO_P2P=off).\n\
+         Go through the relay instead: `arvolo send <who> <paths> --deposit` for a \
+         recipient you have, or `arvolo link <paths>` for a browser link. Both are \
+         plain HTTP, so they also honour `proxy`."
+    );
+    Ok(())
+}
+
 /// Parse a download link (`https://<relay>/dl/<claim>[#key]`) into its relay base
 /// URL and the claim. The `#fragment` (the key) is ignored — revoking needs only
 /// the relay and claim.

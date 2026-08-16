@@ -71,10 +71,10 @@ jobs:
   # The desktop app for Windows. Same three steps as the other two bundles: build
   # the CLI, put it where the bundler expects a sidecar, bundle.
   #
-  # Unsigned, like the .dmg — and with the same consequence under a different
-  # name: SmartScreen shows "Windows protected your PC" and hides the Run button
-  # behind "More info". Signing needs a certificate from a CA, which unlike
-  # Apple's is bought per year from a third party.
+  # Unsigned — the one bundle still shipped that way, now that the .dmg is
+  # signed in CI: SmartScreen shows "Windows protected your PC" and hides the
+  # Run button behind "More info". Signing needs a certificate from a CA, which
+  # unlike Apple's is bought per year from a third party.
   app-windows:
     name: desktop app (msi)
     runs-on: windows-latest
@@ -215,6 +215,20 @@ jobs:
         # one. In the main config it would make `tauri dev` demand a built CLI
         # before it would start, which is a tax on every day of work for the sake
         # of a file that only matters when a release is cut.
+        #
+        # The same config names the Developer ID identity; these secrets are how
+        # the runner comes to hold it. APPLE_CERTIFICATE is the exported .p12,
+        # base64-encoded — the bundler imports it into a throwaway keychain that
+        # dies with the job. The APPLE_ID trio sends the signed app to Apple's
+        # notary and waits for the verdict. There is deliberately no unsigned
+        # fallback for a runner without the secrets: a release .dmg that only
+        # sometimes passes Gatekeeper is worse than a visibly failed job.
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: npm run tauri build -- --target universal-apple-darwin --bundles dmg --config src-tauri/tauri.release.conf.json
       # Asked for rather than assumed: `arvolo-gui` is a workspace member, so its
       # artifacts land in the workspace's target directory and not in the crate's.
@@ -251,6 +265,19 @@ jobs:
           done
           hdiutil detach /tmp/dmg >/dev/null
           exit $status
+      # The app inside was notarized and stapled by the bundler; the disk image
+      # is a separate file with a separate verdict, so it goes to the notary too
+      # and carries its own stapled ticket. That is what lets Gatekeeper clear
+      # the download before it is even opened — and with no network at all.
+      - name: Notarize and staple the .dmg
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          xcrun notarytool submit "arvolo-${{ github.ref_name }}-macos-universal.dmg" \
+            --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID" --wait
+          xcrun stapler staple "arvolo-${{ github.ref_name }}-macos-universal.dmg"
       - uses: actions/upload-artifact@v4
         with:
           name: macos-dmg
@@ -332,22 +359,20 @@ jobs:
           generate_release_notes: true
           draft: false
           make_latest: true
-          # The .dmg is not signed with an Apple Developer ID, so macOS quarantines
-          # it on download and refuses to open it — with a message about the app
-          # being damaged, which is not what is wrong. Whoever downloads it needs
-          # to be told the one gesture that gets past it, in the release itself
-          # rather than in an issue opened three days later.
+          # The .dmg is signed with a Developer ID and notarized, so macOS opens
+          # it without complaint. The .msi still is not signed — so whoever
+          # downloads it needs to be told the one gesture that gets past
+          # SmartScreen, in the release itself rather than in an issue opened
+          # three days later.
           append_body: true
           body: |
-            ### macOS: the .dmg is unsigned
+            ### macOS: signed and notarized
 
-            The first time you open **Arvolo.app**, macOS will say it is damaged
-            or cannot be checked. It is neither — the app is simply not signed
-            with a paid Apple Developer ID. Right-click the app and choose
-            **Open**, then confirm; macOS remembers the choice.
-
-            From a terminal, the equivalent is:
-            `xattr -d com.apple.quarantine /Applications/Arvolo.app`
+            The `.dmg` is signed with an Apple Developer ID (CryCatch S.r.l.)
+            and notarized by Apple — it opens like any other download, nothing
+            to get past. If an earlier release taught you the right-click-Open
+            ritual or `xattr -d com.apple.quarantine`, neither is needed
+            anymore.
 
             ### Windows: the .msi is unsigned
 

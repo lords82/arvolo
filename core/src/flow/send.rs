@@ -23,8 +23,15 @@ pub enum SendEvent {
     /// A receiver's control channel connected — it has started pulling. Lets a
     /// single-recipient sender tell "nobody showed up" from "transfer underway".
     ReceiverConnected,
-    /// Send progress, from the receiver's chunk acks. `transferred` is a byte
-    /// estimate (delivered chunks × chunk size, capped at the total).
+    /// Send progress. `transferred` is the greater of the bytes actually pushed
+    /// onto the wire and the bytes the receiver has acked (delivered chunks ×
+    /// chunk size), capped at the total and never moving backwards.
+    ///
+    /// The wire figure is what makes this move at all early on: acks arrive one
+    /// whole 16 MiB chunk at a time and the receiver pulls several at once, so
+    /// the first of them lands only after four chunks have gone up. It leads
+    /// delivery slightly (by what QUIC keeps in flight) and can't be trusted as
+    /// "arrived" — that is what [`SendEvent::Delivered`] is for.
     Progress { transferred: u64, total: u64 },
     /// A receiver disconnected having fetched **every** chunk — the file reached
     /// it in full. (A ticket may serve several receivers, so this can fire more
@@ -116,7 +123,7 @@ pub async fn prepare_send(
     let sender = ChunkSender::serve(path, relay)
         .await
         .context("start sender")?;
-    let client = reqwest::Client::new();
+    let client = crate::http::client();
 
     // Deliver the content key: sealed to a recipient with `--to`, else in the
     // clear (the ticket itself is the capability).
@@ -223,8 +230,28 @@ pub async fn resume_send(
         has_relay: false,
         sender,
         relay: None,
-        client: reqwest::Client::new(),
+        client: crate::http::client(),
     })
+}
+
+/// The byte figure to report, from the two things the sender knows: `sent`, the
+/// chunk bytes handed to QUIC, and `acked`, the chunks a receiver confirmed.
+///
+/// Both are already "the furthest-along receiver" by their own measure, which for a
+/// shared ticket may be two different receivers — so the result is the best anyone
+/// is doing, not a single receiver's position. That is the only reading of one
+/// progress number that stays meaningful when a ticket is served to several people
+/// at once; per-receiver progress would need per-receiver rows to show it in.
+///
+/// Take whichever is further along. Mid-transfer that is the wire count (acks
+/// land one whole chunk at a time, and the first only after several are in
+/// flight); on a *resumed* send it is the acks, since the receiver confirms
+/// pieces we never re-sent this session. Then cap at the payload — the wire
+/// count sums every receiver and every re-send, so a re-fetched piece would push
+/// it past 100% — and never let the reported value move backwards.
+fn progress_figure(sent: u64, acked_chunks: usize, chunk_size: u64, total: u64, last: u64) -> u64 {
+    let acked = (acked_chunks as u64).saturating_mul(chunk_size);
+    sent.max(acked).min(total).max(last)
 }
 
 impl SendSession {
@@ -242,33 +269,51 @@ impl SendSession {
             has_relay: self.has_relay,
         });
 
-        // Poll the receiver's chunk-ack count and surface byte progress on change.
+        // Poll the bytes on the wire and the receiver's chunk-ack count, and
+        // surface byte progress on change.
         let chunk_size = self.sender.chunk_size() as u64;
-        let mut last_delivered = 0usize;
+        let mut last_progress = 0u64;
         let mut last_peers = 0usize;
-        // Delivery is concluded from the acks, so report it exactly once even
-        // though both the ack count and a later disconnect can prove it.
-        let mut delivered_reported = false;
+        // Delivery is concluded from the acks, and both the ack count and a later
+        // disconnect can prove the same one — so remember *which receivers* have
+        // already been reported, and report each of them once.
+        //
+        // This was a single bool, which is right for one receiver and wrong for a
+        // shared ticket in both directions: the second person to take the file was
+        // never counted (so `copies_served` stuck at one and a `--share-copies`
+        // limit could never be reached), while the ack count it tested was a union
+        // across receivers, so two of them taking complementary halves reported a
+        // delivery neither had.
+        let mut reported: std::collections::HashSet<iroh::EndpointId> =
+            std::collections::HashSet::new();
         let mut ticker = tokio::time::interval(std::time::Duration::from_millis(500));
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => break,
                 _ = ticker.tick() => {
                     let d = self.sender.delivered_count();
-                    if d != last_delivered {
-                        last_delivered = d;
-                        let transferred = (d as u64).saturating_mul(chunk_size).min(self.total_size);
+                    let transferred = progress_figure(
+                        self.sender.sent_bytes(),
+                        d,
+                        chunk_size,
+                        self.total_size,
+                        last_progress,
+                    );
+                    if transferred != last_progress {
+                        last_progress = transferred;
                         on(SendEvent::Progress { transferred, total: self.total_size });
                     }
-                    // Every chunk acked ⇒ they hold the whole file. This — not the
-                    // receiver disconnecting — is what "delivered" means. Waiting for
-                    // the disconnect instead left a finished send Active indefinitely
-                    // whenever the receiver stayed connected (it keepalives, so even
-                    // the idle timeout never fires), which in turn made the manager's
-                    // delivery loop keep re-offering a file that had already arrived.
-                    if !delivered_reported && self.chunks > 0 && d >= self.chunks {
-                        delivered_reported = true;
-                        on(SendEvent::Delivered);
+                    // A receiver that has acked every chunk holds the whole file.
+                    // This — not the receiver disconnecting — is what "delivered"
+                    // means. Waiting for the disconnect instead left a finished send
+                    // Active indefinitely whenever the receiver stayed connected (it
+                    // keepalives, so even the idle timeout never fires), which in
+                    // turn made the manager's delivery loop keep re-offering a file
+                    // that had already arrived.
+                    for peer in self.sender.completed_peers() {
+                        if reported.insert(peer) {
+                            on(SendEvent::Delivered);
+                        }
                     }
                     let p = self.sender.active_peers();
                     if p != last_peers {
@@ -279,13 +324,12 @@ impl SendSession {
                 _ = self.sender.receiver_connected() => {
                     on(SendEvent::ReceiverConnected);
                 }
-                undelivered = self.sender.receiver_gone() => {
+                (peer, undelivered) = self.sender.receiver_gone() => {
                     // Empty tail ⇒ that receiver fetched the whole file. Still the
                     // authoritative signal for an empty (zero-chunk) payload, which
                     // the ack count above can never satisfy.
                     if undelivered.is_empty() {
-                        if !delivered_reported {
-                            delivered_reported = true;
+                        if reported.insert(peer) {
                             on(SendEvent::Delivered);
                         }
                         continue;
@@ -337,5 +381,43 @@ impl SendSession {
         }
         self.sender.shutdown().await;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::progress_figure;
+
+    const CS: u64 = 16 * 1024 * 1024;
+    const TOTAL: u64 = 3 * CS;
+
+    #[test]
+    fn the_wire_count_moves_before_the_first_ack() {
+        // The point of the whole thing: with three chunks in flight and none
+        // acked yet, progress must not still read zero.
+        assert_eq!(progress_figure(5_000_000, 0, CS, TOTAL, 0), 5_000_000);
+    }
+
+    #[test]
+    fn acks_win_when_they_are_further_along() {
+        // A resumed send: the receiver confirms pieces this session never sent.
+        assert_eq!(progress_figure(0, 2, CS, TOTAL, 0), 2 * CS);
+    }
+
+    #[test]
+    fn a_re_sent_piece_cannot_push_it_past_the_payload() {
+        // Two receivers, or one that re-fetched a failed piece: more bytes went
+        // out than the file holds.
+        assert_eq!(progress_figure(TOTAL * 2, 0, CS, TOTAL, 0), TOTAL);
+    }
+
+    #[test]
+    fn the_figure_never_moves_backwards() {
+        assert_eq!(progress_figure(CS, 0, CS, TOTAL, 2 * CS), 2 * CS);
+    }
+
+    #[test]
+    fn an_empty_payload_stays_at_zero() {
+        assert_eq!(progress_figure(0, 0, CS, 0, 0), 0);
     }
 }

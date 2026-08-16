@@ -13,7 +13,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { dto, harness, makeIpcMock, resetHarness } from "./mocks";
+import { dto, harness, makeIpcMock, resetHarness, pick } from "./mocks";
 
 vi.mock("../ipc", () => makeIpcMock());
 vi.mock("@tauri-apps/api/webview", () => ({
@@ -59,7 +59,7 @@ function reset() {
     config: null,
     sync: null,
     pairing: null,
-    sheetPaths: null,
+    sheetPicks: null,
     sheetTo: null,
     incomingOfferId: null,
     personOpen: null,
@@ -157,7 +157,7 @@ describe("every overlay mounts", () => {
   it("the send sheet, in all four modes", async () => {
     harness.snapshot.contacts = [dto.contact({ name: "proj" })];
     render(<App />);
-    useStore.getState().openSheet(["/a.txt"]);
+    useStore.getState().openSheet([pick("a.txt")]);
     await screen.findByText("What you are sending");
     for (const mode of ["Code", "Link", "Ticket", "To a contact"]) {
       fireEvent.click(screen.getByText(mode));

@@ -167,7 +167,7 @@ pub async fn publish_bytes(
     embed_relay: bool,
 ) -> Result<(String, PairComplete)> {
     let relay = relay.trim_end_matches('/').to_string();
-    let client = reqwest::Client::new();
+    let client = crate::http::client();
 
     let (slot, secret, pairing) = loop {
         let (slot, secret) = gen_secret();
@@ -286,7 +286,7 @@ pub async fn exchange_bytes_with(
     // A bare host embedded in the code (`code@host`) means https; `http://…` is
     // kept as-is (see `compact_relay`).
     let relay = normalize_relay(relay.trim_end_matches('/'), false);
-    let client = reqwest::Client::new();
+    let client = crate::http::client();
 
     match detect_version(&client, &relay, &slot, timeout).await? {
         RzVersion::V2 => resolve_v2(&client, &relay, &slot, &secret, timeout, reply).await,
@@ -517,7 +517,7 @@ pub enum Reattach {
 /// strand whoever types it; guessing wrong the other way just falls back.
 pub async fn relay_rz_version(relay: &str) -> RzVersion {
     let url = format!("{}/v1/features", relay.trim_end_matches('/'));
-    let Ok(resp) = reqwest::Client::new().get(&url).send().await else {
+    let Ok(resp) = crate::http::client().get(&url).send().await else {
         return RzVersion::V1;
     };
     if !resp.status().is_success() {
@@ -598,7 +598,7 @@ fn confirm_mac(pake_key: &[u8], slot: &str, sid: &str) -> blake3::Hash {
 /// v1 does. Returns the code to show and the state to keep (and to persist).
 pub async fn claim_code(relay: &str, embed_relay: bool) -> Result<(String, CodeHost)> {
     let relay = relay.trim_end_matches('/').to_string();
-    let client = reqwest::Client::new();
+    let client = crate::http::client();
     let owner_token: [u8; 32] = rand::random();
     // The relay stores only the hash, so a compromised relay database still
     // can't answer sessions in our name.
@@ -648,7 +648,7 @@ impl CodeHost {
     /// I can take the nameplate back" from "someone else has it, this code is
     /// dead", which are the same 404-shaped silence otherwise.
     pub async fn reattach(&self) -> Result<Reattach> {
-        let client = reqwest::Client::new();
+        let client = crate::http::client();
         let resp = client
             .get(rz_url(&self.relay, &self.slot, K_SESSIONS))
             .bearer_auth(self.token())
@@ -667,7 +667,7 @@ impl CodeHost {
     /// already given out keeps working across an outage longer than its lease.
     pub async fn reclaim(&self) -> Result<Reattach> {
         let verifier = blake3::hash(&self.owner_token).as_bytes().to_vec();
-        let resp = reqwest::Client::new()
+        let resp = crate::http::client()
             .post(rz_url(&self.relay, &self.slot, K_OWN))
             .body(verifier)
             .send()
@@ -684,7 +684,7 @@ impl CodeHost {
     /// lease runs out. Best-effort — a failure here costs a nameplate, not
     /// correctness.
     pub async fn close(&self) -> Result<()> {
-        reqwest::Client::new()
+        crate::http::client()
             .delete(rz_url(&self.relay, &self.slot, K_OWN))
             .bearer_auth(self.token())
             .send()
@@ -708,7 +708,7 @@ impl CodeHost {
         mut on_event: impl FnMut(HostEvent) + Send,
         mut on_state: impl FnMut(HostState) + Send,
     ) -> Result<CloseReason> {
-        let client = reqwest::Client::new();
+        let client = crate::http::client();
         // Every PAKE message we have put on the relay. `start_symmetric` uses
         // M=N, so an attacker can echo our own message back as a receiver's and
         // make us derive a key it cannot compute — harmless to the secret, but it

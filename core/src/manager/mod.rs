@@ -279,6 +279,16 @@ pub enum ManagerEvent {
     /// attached front-ends — not a description of the change. The daemon raises it
     /// when it notices the book files move under it, whoever wrote them.
     ContactsChanged,
+    /// Finished rows were dropped from the list by
+    /// [`clear_finished`](TransferManager::clear_finished) — typically an
+    /// `arvolo status clear` in another process while a window is open.
+    ///
+    /// Payload-free like [`ContactsChanged`](ManagerEvent::ContactsChanged), and
+    /// for the same reason: a front-end holds its own copy of the list, and what
+    /// it needs to hear is "drop what you consider finished", not which ids went.
+    /// Raised only when something actually went, so a clear that found nothing
+    /// costs a subscriber no work.
+    FinishedCleared,
 }
 
 /// A persistent, multi-transfer engine bound to one local identity.
@@ -320,7 +330,7 @@ impl TransferManager {
                 events,
                 me,
                 relay,
-                client: reqwest::Client::new(),
+                client: crate::http::client(),
                 download_dir,
                 state_dir,
                 inbox,
@@ -397,7 +407,14 @@ impl TransferManager {
                     | TransferStatus::Paused(_)
             )
         });
-        before - transfers.len()
+        let cleared = before - transfers.len();
+        // Out of the lock before telling anyone: a subscriber that answers by
+        // reading the list back would deadlock against the guard we still hold.
+        drop(transfers);
+        if cleared > 0 {
+            self.inner.emit(ManagerEvent::FinishedCleared);
+        }
+        cleared
     }
 
     /// Drop one **finished** (completed/failed/cancelled) transfer from the list —
@@ -595,7 +612,9 @@ impl TransferManager {
         let (id, cancel) =
             self.register(Direction::Send, Some(recipient.clone()), name.clone(), size);
 
-        let ttl = opts.ttl.unwrap_or(OFFLINE_TTL_SECS);
+        // No local TTL is computed here on purpose: the deadline comes back from the
+        // deposit (`DepositOutcome::ttl_secs`), because only the relay knows how much
+        // of `opts.ttl` it agreed to keep.
         // Selected against the row's own token, or `cancel(id)` would fire a
         // token nothing awaits: the upload would run to completion and the row
         // would flip to Deposited — blob on the relay, offer in the recipient's
@@ -619,7 +638,11 @@ impl TransferManager {
         match outcome {
             Ok(out) => {
                 let ticket = out.ticket.clone();
-                spawn_offline_confirm(&self.inner, id, relay, out, unix_now().saturating_add(ttl));
+                // The relay's granted TTL, not the one `opts` asked for: it clamps to
+                // its own maximum, and a record deadlined off the request would keep
+                // watching (and keep telling the user about) a blob already reaped.
+                let expires = unix_now().saturating_add(out.ttl_secs);
+                spawn_offline_confirm(&self.inner, id, relay, out, expires);
                 Ok((id, ticket))
             }
             Err(e) => {
@@ -826,6 +849,11 @@ impl TransferManager {
                 // when it has it — so a restored row shows the default here
                 // rather than losing a live deposit across an upgrade.
                 max: OFFLINE_MAX_DOWNLOADS,
+                // What is left of the original TTL. A restore must never extend a
+                // deadline, so the absolute `expires` below — read straight from the
+                // record — is the authority; this is only here to keep the two
+                // consistent for anything that reads a duration.
+                ttl_secs: rec.expires.saturating_sub(unix_now()),
             },
             rec.expires,
         );
@@ -1324,6 +1352,29 @@ impl TransferManager {
             }
         }
 
+        // A live (`arvc…`) offer can only be taken by connecting to the sender. With
+        // P2P off, refuse here — before the offer is removed and acked below — so it
+        // stays in the inbox and the sender can be asked to deposit it instead. The
+        // same reasoning as the password check above: a refusal after the ack would
+        // destroy the only handle on the transfer.
+        if !crate::transfer::p2p_enabled() {
+            let live = self
+                .inner
+                .pending
+                .lock()
+                .unwrap()
+                .get(offer_id)
+                .map(|o| crate::chunked::ChunkTicket::looks_like(&o.offer.ticket))
+                .unwrap_or(false);
+            if live {
+                anyhow::bail!(
+                    "this offer is a direct transfer and P2P is off — ask the sender to \
+                     deposit it instead (`arvolo send <you> <file> --deposit`). The offer \
+                     is left where it is."
+                );
+            }
+        }
+
         let offer = self
             .inner
             .pending
@@ -1767,6 +1818,41 @@ mod clear_finished_tests {
 
         // Idempotent: nothing left to take.
         assert_eq!(m.clear_finished(), 0);
+    }
+
+    /// A clear is the one list change nobody watching can infer: no row moved, no
+    /// status changed — rows simply stop existing. An attached front-end that is
+    /// not told keeps drawing what the daemon has already forgotten, which is
+    /// exactly what an open window did while `arvolo status clear` ran beside it.
+    #[tokio::test]
+    async fn a_clear_that_took_something_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = TransferManager::with_state_dir(
+            Identity::generate(),
+            None,
+            dir.path().to_path_buf(),
+            Some(dir.path().to_path_buf()),
+        );
+        let (id, _c) = m.register(Direction::Send, None, "f.bin".into(), 1);
+        m.inner.cancels.lock().unwrap().remove(&id);
+        m.inner.set_status(id, TransferStatus::Completed);
+
+        // Subscribe after the setup, so the only events in the channel are the
+        // clear's own.
+        let mut events = m.subscribe();
+        assert_eq!(m.clear_finished(), 1);
+        assert!(
+            matches!(events.try_recv(), Ok(ManagerEvent::FinishedCleared)),
+            "a clear that dropped a row must announce it"
+        );
+
+        // And a clear that found nothing stays quiet: a front-end has nothing to
+        // redraw, and this one runs on every press of a button.
+        assert_eq!(m.clear_finished(), 0);
+        assert!(
+            events.try_recv().is_err(),
+            "an empty clear must not wake every subscriber"
+        );
     }
 }
 

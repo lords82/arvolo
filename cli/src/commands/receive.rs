@@ -290,7 +290,7 @@ pub(crate) async fn listen_attached(
             _ = cancel.cancelled() => break,
             ev = events.next() => {
                 match ev {
-                    Ok(Some(EventDto::OfferReceived { id, from, name, size, note, sender_name })) => {
+                    Ok(Some(EventDto::OfferReceived { id, from, name, size, note, sender_name, .. })) => {
                         handle_attached_offer(
                             &mut client,
                             OfferDto { id, from, name, size, note, sender_name },
@@ -363,6 +363,10 @@ pub(crate) async fn recv_ticket(
     {
         return recv_offline(ticket, out, password).await;
     }
+    // Everything past here connects to the sender. Refuse before the rendezvous, not
+    // after: resolving a code consumes it, and burning someone's code to then say we
+    // can't fetch would cost them a second one.
+    ensure_p2p("this ticket")?;
     if password.is_some() {
         eprintln!("note: --password applies only to an offline (arvm…) ticket — ignoring it here.");
     }

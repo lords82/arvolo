@@ -320,7 +320,7 @@ async fn wrong_recipient_sees_nothing_in_its_own_inbox() {
 async fn unauthenticated_read_and_delete_are_rejected() {
     let relay = spawn_relay().await;
     let recipient = Identity::generate();
-    let slot = slot_for(&recipient.public().to_bytes());
+    let slot = slot_for(&recipient.public());
     let client = reqwest::Client::new();
 
     // GET without a session token → 401 (a stranger can't enumerate presence).
@@ -339,14 +339,145 @@ async fn unauthenticated_read_and_delete_are_rejected() {
         .expect("delete");
     assert_eq!(del.status(), reqwest::StatusCode::UNAUTHORIZED);
 
-    // A session for a *different* identity can't authenticate this slot: its
-    // pubkey doesn't hash to `slot`, so /session is forbidden.
-    let stranger = Identity::generate();
+    // A challenge, on the other hand, is free: the relay hands one to whoever asks,
+    // because there is nothing secret in it and nothing to check the asker against —
+    // it no longer learns who owns a slot. What it costs a stranger is nothing,
+    // because the challenge is only useful to whoever can sign it.
     let sess = client
         .post(format!("{relay}/v1/inbox/{slot}/session"))
-        .body(stranger.public().to_bytes())
         .send()
         .await
         .expect("session");
-    assert_eq!(sess.status(), reqwest::StatusCode::FORBIDDEN);
+    assert_eq!(sess.status(), reqwest::StatusCode::OK);
+}
+
+/// The rotation contract, end to end: a row deposited in the *previous* epoch's
+/// slot — which is what every row posted before a boundary becomes — is still
+/// found, and acking it deletes it where it actually lives.
+///
+/// A sync note rather than an offer, because a note is exactly the long-lived row
+/// this has to hold for, and because `poll_wait` deliberately leaves notes alone
+/// (so this exercises the read path without the offer-decode path acking it).
+#[tokio::test]
+async fn a_row_left_in_the_previous_epochs_slot_is_still_read_and_acked() {
+    use arvolo_core::presence::{encode_sync_note, slot_for_at, INBOX_EPOCH_SECS};
+    use arvolo_core::sync::SyncNote;
+
+    let relay = spawn_relay().await;
+    let me = Identity::generate();
+    let client = reqwest::Client::new();
+
+    let old_slot = slot_for_at(&me.public(), now_unix().saturating_sub(INBOX_EPOCH_SECS));
+    let body = encode_sync_note(&SyncNote::Snapshot {
+        blob: vec![7u8; 32],
+    })
+    .expect("encode note");
+    let id = client
+        .post(format!("{relay}/v1/inbox/{old_slot}?ttl=3600"))
+        .body(body)
+        .send()
+        .await
+        .expect("post")
+        .text()
+        .await
+        .expect("id")
+        .trim()
+        .to_string();
+    assert!(!id.is_empty());
+
+    let sub = InboxSubscription::new(relay.clone(), &me);
+    let items = sub.raw_items(0).await.expect("read inbox");
+    assert_eq!(
+        items.len(),
+        1,
+        "a row one epoch old must still be inside the read window"
+    );
+    assert_eq!(items[0].id, id);
+
+    // The ack has to go to the old slot. Sent to the current one the relay would
+    // answer 204 and delete nothing, and the row would come back forever.
+    sub.ack(&id).await.expect("ack");
+    assert!(
+        sub.raw_items(0).await.expect("re-read").is_empty(),
+        "the ack landed in the wrong slot: the row is still there"
+    );
+}
+
+/// The proof, end to end and against the attacker who exists: a stranger who wants
+/// somebody's inbox can ask the relay for a challenge — it will give them one — and
+/// still cannot read a thing, because the token has to carry a signature that
+/// verifies against the key the slot itself encodes.
+///
+/// This replaces a test of the old handshake, which asked whether the relay refused
+/// a *public key* that did not match the slot. It had to ask that because the key
+/// was handed over; the relay knowing every reader's identity was the price, and
+/// removing it is what this change is for.
+#[tokio::test]
+async fn a_stranger_can_get_a_challenge_and_still_cannot_read_the_inbox() {
+    let relay = spawn_relay().await;
+    let owner = Identity::generate();
+    let stranger = Identity::generate();
+    let slot = slot_for(&owner.public());
+    let client = reqwest::Client::new();
+
+    // The challenge is public.
+    let bytes = client
+        .post(format!("{relay}/v1/inbox/{slot}/session"))
+        .send()
+        .await
+        .expect("session")
+        .bytes()
+        .await
+        .expect("challenge");
+    let challenge: arvolo_core::presence::SessionChallenge =
+        postcard::from_bytes(&bytes).expect("decode challenge");
+
+    // Signing it as somebody else buys nothing.
+    let epoch = now_unix() / arvolo_core::presence::INBOX_EPOCH_SECS;
+    let msg = arvolo_core::presence::session_signing_input(&slot, &challenge.nonce, challenge.exp);
+    let forged = arvolo_core::presence::SessionToken {
+        nonce: challenge.nonce.clone(),
+        exp: challenge.exp,
+        mac: challenge.mac.clone(),
+        sig: arvolo_core::crypto::blinded::sign_at(&stranger, epoch, &msg).to_vec(),
+    };
+    let bearer = |t: &arvolo_core::presence::SessionToken| {
+        data_encoding::BASE32_NOPAD
+            .encode(&postcard::to_allocvec(t).unwrap())
+            .to_lowercase()
+    };
+    let resp = client
+        .get(format!("{relay}/v1/inbox/{slot}?wait=0"))
+        .bearer_auth(bearer(&forged))
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::UNAUTHORIZED,
+        "a signature from the wrong identity must not authenticate"
+    );
+
+    // The owner's signature over the same challenge does.
+    let real = arvolo_core::presence::SessionToken {
+        nonce: challenge.nonce,
+        exp: challenge.exp,
+        mac: challenge.mac,
+        sig: arvolo_core::crypto::blinded::sign_at(&owner, epoch, &msg).to_vec(),
+    };
+    let resp = client
+        .get(format!("{relay}/v1/inbox/{slot}?wait=0"))
+        .bearer_auth(bearer(&real))
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+}
+
+/// Current unix seconds, as the slot derivation counts them.
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }

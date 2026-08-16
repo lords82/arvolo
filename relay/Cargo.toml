@@ -31,6 +31,9 @@ blake3 = "1"
 
 [dev-dependencies]
 arvolo-core.workspace = true
+# The inbox tests assemble a session token by hand, to check that a signature from
+# the wrong identity is refused.
+postcard = { version = "1", features = ["alloc"] }
 tempfile = "3"
 tokio = { workspace = true }
 tower = { version = "0.5", features = ["util"] }

@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use arvolo_core::backfill::BlobNode;
 use arvolo_core::crypto::Identity;
-use arvolo_core::presence::{check_online, presence_slot_for, publish_beacon};
+use arvolo_core::presence::{check_online, publish_beacon};
 use arvolo_core::transfer::RelayChoice;
 use arvolo_relay::{now_unix, router, AppState, Mailbox};
 
@@ -40,8 +40,11 @@ async fn beacon_makes_a_contact_appear_online() {
 
     // Once the beacon expires and is reaped, the contact is offline again.
     // (Reap with a far-future "now" to force expiry without waiting the TTL.)
-    let slot = presence_slot_for(&me.public().to_bytes());
-    assert!(mailbox.beacon_alive(&slot, now_unix()));
+    // Ask about the whole readable window, not one computed slot: presence slots
+    // rotate hourly, and a test that publishes microseconds before a boundary and
+    // derives the slot microseconds after it would fail for no reason at all.
+    let slots = arvolo_core::presence::presence_slots_at(&me.public().to_bytes(), now_unix());
+    assert!(slots.iter().any(|s| mailbox.beacon_alive(s, now_unix())));
     mailbox.beacon_reap(now_unix() + 10 * 24 * 3600);
     assert!(!check_online(&client, &relay, &me.public()).await.unwrap());
 }

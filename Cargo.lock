@@ -197,7 +197,7 @@ checksum = "f02882884d3e1bc524fb12c79f107f6ad0e1cfd498c536ffb494301740995dfe"
 
 [[package]]
 name = "arvolo-cli"
-version = "0.9.4"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "arvolo-core",
@@ -224,16 +224,18 @@ dependencies = [
 
 [[package]]
 name = "arvolo-core"
-version = "0.9.4"
+version = "0.10.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
  "argon2",
  "async-stream",
  "blake3",
+ "curve25519-dalek 5.0.0-pre.1",
  "data-encoding",
  "der 0.8.0-rc.9",
  "ed25519",
+ "ed25519-dalek",
  "hpke",
  "iroh",
  "iroh-quinn-proto",
@@ -252,15 +254,23 @@ dependencies = [
  "tokio-util",
  "tracing",
  "windows-sys 0.61.2",
+ "zeroize",
 ]
 
 [[package]]
 name = "arvolo-gui"
-version = "0.9.4"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "arvolo-ipc",
+ "block2",
+ "data-encoding",
  "libc",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
+ "objc2-user-notifications",
+ "rand 0.9.4",
  "serde",
  "serde_json",
  "tauri",
@@ -275,7 +285,7 @@ dependencies = [
 
 [[package]]
 name = "arvolo-ipc"
-version = "0.9.4"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "arvolo-core",
@@ -288,7 +298,7 @@ dependencies = [
 
 [[package]]
 name = "arvolo-relay"
-version = "0.9.4"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "arvolo-core",
@@ -297,6 +307,7 @@ dependencies = [
  "data-encoding",
  "futures-util",
  "http-body-util",
+ "postcard",
  "rand 0.9.4",
  "reqwest 0.12.28",
  "rusqlite",
@@ -3070,6 +3081,7 @@ dependencies = [
  "byteorder-lite",
  "moxcms",
  "num-traits",
+ "png 0.18.1",
 ]
 
 [[package]]
@@ -4320,6 +4332,8 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9df9128cbbfef73cda168416ccf7f837b62737d748333bfe9ab71c245d76613e"
 dependencies = [
+ "bitflags 2.13.0",
+ "block2",
  "objc2",
  "objc2-foundation",
 ]
@@ -5936,6 +5950,9 @@ name = "signature"
 version = "3.0.0-rc.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39195ff4c0dc41c93e123825ca1f0d11b856df8b26d5fe140a522355632c4345"
+dependencies = [
+ "digest 0.11.0-rc.3",
+]
 
 [[package]]
 name = "simd-adler32"
@@ -6342,6 +6359,7 @@ dependencies = [
  "gtk",
  "heck 0.5.0",
  "http",
+ "image",
  "jni 0.21.1",
  "libc",
  "log",

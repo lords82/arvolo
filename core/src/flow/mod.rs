@@ -19,6 +19,9 @@ pub use offline::{
     claim_info, claim_status, deposit_offline, fetch_offline, revoke_offline, ClaimInfo,
     ClaimStatus, DepositError, Deposited,
 };
+// Shared with the link path, which deposits through its own request but has to read
+// the same granted-TTL answer off it.
+pub(crate) use offline::granted_ttl;
 pub use recv::{
     default_out, discard_incomplete, recv_chunked, safe_download_name, ChunkSource, RecvEvent,
     RecvOutcome,

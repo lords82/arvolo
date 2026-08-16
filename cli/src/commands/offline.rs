@@ -10,6 +10,24 @@ use crate::output::vprintln;
 use crate::ui::*;
 use crate::util::*;
 
+/// Say so when the relay kept the file for less time than was asked.
+///
+/// Worth a line of its own rather than only quoting the real deadline further down:
+/// a relay's `ARVOLO_MAX_TTL` is invisible from the outside, so someone who passed
+/// `--ttl` and reads a smaller number back has no way to tell a typo from a policy.
+/// It is not an error — the deposit is placed and the file is deliverable — so it
+/// prints and carries on.
+fn note_shortened_ttl(asked: u64, granted: u64) {
+    if granted < asked {
+        eprintln!(
+            "note: this relay keeps deposits for at most {} — you asked for {}, \
+             and that is what it will honour.",
+            human_duration(granted),
+            human_duration(asked)
+        );
+    }
+}
+
 /// Deposit `paths` on the relay mailbox (or as a `--link`). Internal helper for
 /// the unified `send`: `link` → public browser URL; otherwise HPKE-sealed to
 /// `to`, and if `offer` is set an inbox offer is posted too so the recipient's
@@ -79,6 +97,11 @@ pub(crate) async fn send_offline(
         if let Some(t) = &temp {
             let _ = std::fs::remove_file(t);
         }
+        // The relay's answer, not our request, from here on: the local record's
+        // deadline has to match the one the relay will actually enforce, or
+        // `arvolo status` keeps listing a link that stopped working days ago.
+        note_shortened_ttl(ttl, out.ttl_secs);
+        let ttl = out.ttl_secs;
         let rec = deposits::save(
             deposits::KIND_LINK,
             &relay,
@@ -175,6 +198,12 @@ pub(crate) async fn send_offline(
         let _ = std::fs::remove_file(t);
     }
     let encoded = deposited.ticket.encode();
+    // Everything below deadlines off what the relay granted, not what we asked for.
+    // The inbox offer especially: given the requested TTL it would sit in the
+    // recipient's list long after the relay reaped the blob, and they would find out
+    // by accepting an arrival that 404s.
+    note_shortened_ttl(ttl, deposited.ttl_secs);
+    let ttl = deposited.ttl_secs;
 
     // Also drop an inbox offer so the recipient's daemon can auto-fetch it (the
     // offer carries this same arvm ticket; best-effort — the printed ticket still
@@ -196,7 +225,7 @@ pub(crate) async fn send_offline(
             sender_name: book::my_display_name(),
         };
         match arvolo_core::presence::post_offer(
-            &reqwest::Client::new(),
+            &arvolo_core::http::client(),
             &relay,
             &recipient,
             &me,

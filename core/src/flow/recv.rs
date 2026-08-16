@@ -161,6 +161,28 @@ pub(crate) fn seeding_enabled() -> bool {
 /// `SWARM_PEER_TTL_SECS`) and refreshes its peer list.
 const SWARM_ANNOUNCE_SECS: u64 = 20;
 
+/// The announce interval, with `ARVOLO_SWARM_ANNOUNCE_SECS` allowed to shorten it.
+///
+/// This interval is also how long it takes a peer to *learn* what another peer has:
+/// a member announces its bitfield on the same timer. Twenty seconds is right for a
+/// real transfer, where it is noise against the download, and wrong for anything
+/// that finishes faster than one tick — two peers pulling a file over loopback both
+/// complete while still believing the other holds nothing, and never trade a piece.
+/// That is a property of the interval, not of the swarm, so the interval is
+/// adjustable and the tests that exercise peer-to-peer exchange turn it down.
+///
+/// Clamped to 1..=30s: the relay expires a member after `SWARM_PEER_TTL_SECS` (60),
+/// so an interval anywhere near it would let a live peer drop out of the tracker
+/// between announces.
+fn swarm_announce_interval() -> std::time::Duration {
+    let secs = std::env::var("ARVOLO_SWARM_ANNOUNCE_SECS")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(SWARM_ANNOUNCE_SECS)
+        .clamp(1, 30);
+    std::time::Duration::from_secs(secs)
+}
+
 /// Whether to join the peer swarm for shared tickets. On by default. Set
 /// `ARVOLO_SWARM=off` (or `relay-only`) for the privacy escape hatch: don't
 /// announce our address to the tracker and don't seed to peers — fetch only from
@@ -178,14 +200,18 @@ fn seed_after_complete() -> std::time::Duration {
 }
 
 fn swarm_enabled() -> bool {
-    !matches!(
-        std::env::var("ARVOLO_SWARM")
-            .unwrap_or_default()
-            .trim()
-            .to_ascii_lowercase()
-            .as_str(),
-        "off" | "0" | "false" | "no" | "relay-only" | "relay_only"
-    )
+    // P2P off implies swarm off: announcing our address to the tracker is exactly
+    // what that setting is refusing, and it would be announced before any bind
+    // refused. One switch, not two to remember.
+    crate::transfer::p2p_enabled()
+        && !matches!(
+            std::env::var("ARVOLO_SWARM")
+                .unwrap_or_default()
+                .trim()
+                .to_ascii_lowercase()
+                .as_str(),
+            "off" | "0" | "false" | "no" | "relay-only" | "relay_only"
+        )
 }
 
 /// Shared list of known swarm peers: each entry is a peer's serving address and
@@ -207,7 +233,6 @@ pub(crate) fn spawn_swarm_coordinator(
     peers: SwarmPeers,
     cancel: CancellationToken,
 ) {
-    use std::time::Duration;
     let url = format!(
         "{}/v1/swarm/{}/announce",
         relay_http.trim_end_matches('/'),
@@ -250,7 +275,7 @@ pub(crate) fn spawn_swarm_coordinator(
             }
             tokio::select! {
                 _ = cancel.cancelled() => break,
-                _ = tokio::time::sleep(Duration::from_secs(SWARM_ANNOUNCE_SECS)) => {}
+                _ = tokio::time::sleep(swarm_announce_interval()) => {}
             }
         }
         // Best-effort deregister.
@@ -572,7 +597,7 @@ pub async fn recv_chunked(
     });
 
     let receiver = ChunkReceiver::open(relay.clone()).await?;
-    let client = reqwest::Client::new();
+    let client = crate::http::client();
 
     // Control channel to the sender. Patience scales with fallback availability:
     // one short attempt if a relay can finish the job, three for pure P2P.
@@ -745,6 +770,11 @@ pub async fn recv_chunked(
             // lacks, so rarest-first already steers each device toward pieces its
             // peers are missing; the random tie-break stops two devices in identical
             // state from picking the same piece, spreading distinct pieces faster.
+            //
+            // Ahead of that, `prefer_offloadable` takes the origin's load into
+            // account: while a request to it is already in flight, only pieces
+            // somebody else can serve are considered. See that function for why the
+            // gate is there rather than a blanket preference.
             let fresh = {
                 use rand::Rng;
                 let cands: Vec<(usize, Vec<(String, iroh::EndpointAddr)>)> = remaining
@@ -756,6 +786,12 @@ pub async fn recv_chunked(
                         (!p.is_empty()).then_some((i, p))
                     })
                     .collect();
+                let origin_busy = sender_id
+                    .as_deref()
+                    .map(|id| in_flight.get(id).copied().unwrap_or(0) > 0)
+                    .unwrap_or(false);
+                let cands =
+                    super::schedule::prefer_offloadable(cands, sender_id.as_deref(), origin_busy);
                 // Rarest-first: among the pieces with the fewest providers, pick one
                 // at random so two peers in the same state don't grab the same piece.
                 let mut rare = super::schedule::rarest_set(cands);

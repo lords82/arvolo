@@ -1,0 +1,13 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "declaration": true,
+    "emitDeclarationOnly": true,
+    "noUnusedLocals": false,
+    "noUnusedParameters": false,
+    "rootDir": "../src",
+    "outDir": "../.ds-types"
+  },
+  "include": ["../src/ui", "../src/format.ts", "../src/i18n", "../src/types.ts"]
+}

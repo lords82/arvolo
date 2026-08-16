@@ -1,3 +1,4 @@
+import type { PickedItem } from "./types";
 // Typed wrappers over the Tauri command bridge + the engine event channel.
 
 import { invoke } from "@tauri-apps/api/core";
@@ -23,13 +24,16 @@ export const api = {
   listTransfers: () => invoke<TransferDto[]>("list_transfers"),
   listPending: () => invoke<OfferDto[]>("list_pending"),
   listContacts: () => invoke<ContactDto[]>("list_contacts"),
-  sendTo: (to: string, paths: string[], note: string) =>
-    invoke<number>("send_to", { to, paths, note }),
+  /** Open the native picker; resolves to registered items (empty = cancelled). */
+  pickFiles: (directory: boolean) =>
+    invoke<PickedItem[]>("pick_files", { directory }),
+  sendTo: (to: string, items: string[], note: string) =>
+    invoke<number>("send_to", { to, items, note }),
   /** `send --deposit`: skip the live attempt, leave it in their mailbox. Returns
    *  the `arvm…` ticket too, so it can also be handed over by other means. */
   depositTo: (
     to: string,
-    paths: string[],
+    items: string[],
     note: string,
     ttl: number | null,
     max: number | null,
@@ -37,25 +41,25 @@ export const api = {
   ) =>
     invoke<{ id: number; ticket: string }>("deposit_to", {
       to,
-      paths,
+      items,
       note,
       ttl,
       max,
       password,
     }),
-  serveTicket: (paths: string[], seedRelay: string | null) =>
+  serveTicket: (items: string[], seedRelay: string | null) =>
     invoke<{ id: number; ticket: string }>("serve_ticket", {
-      paths,
+      items,
       seedRelay,
     }),
-  serveCode: (paths: string[], relay: string | null, keep: boolean) =>
-    invoke<{ id: number; code: string }>("serve_code", { paths, relay, keep }),
-  createLink: (path: string, ttl: number | null, max: number | null) =>
-    invoke<string>("create_link", { path, ttl, max }),
-  recv: (ticket: string, out: string | null, password: string | null) =>
-    invoke<number>("recv", { ticket, out, password }),
-  acceptOffer: (offerId: string, out: string | null, password?: string | null) =>
-    invoke<number>("accept_offer", { offerId, out, password: password ?? null }),
+  serveCode: (items: string[], relay: string | null, keep: boolean) =>
+    invoke<{ id: number; code: string }>("serve_code", { items, relay, keep }),
+  createLink: (item: string, ttl: number | null, max: number | null) =>
+    invoke<string>("create_link", { item, ttl, max }),
+  recv: (ticket: string, outItem: string | null, password: string | null) =>
+    invoke<number>("recv", { ticket, outItem, password }),
+  acceptOffer: (offerId: string, outItem: string | null, password?: string | null) =>
+    invoke<number>("accept_offer", { offerId, outItem, password: password ?? null }),
   rejectOffer: (offerId: string) =>
     invoke<void>("reject_offer", { offerId }),
   pause: (id: number) => invoke<void>("pause", { id }),
@@ -104,9 +108,12 @@ export const api = {
   /** Read/write a single file the user picked in a native dialog — the whole of
    *  the app's filesystem access from the frontend, used by address-book
    *  import/export. */
-  readTextFile: (path: string) => invoke<string>("read_text_file", { path }),
-  writeTextFile: (path: string, contents: string) =>
-    invoke<void>("write_text_file", { path, contents }),
+  /** Native open dialog + read, on the Rust side: the webview never sees a path.
+   *  Resolves to the file's text, or null if the user cancelled. */
+  importContacts: () => invoke<string | null>("import_contacts"),
+  /** Native save dialog + write. Resolves to the chosen file name, or null. */
+  exportContacts: (defaultName: string, contents: string) =>
+    invoke<string | null>("export_contacts", { defaultName, contents }),
   guiVersion: () => invoke<string>("gui_version"),
 };
 
@@ -118,6 +125,16 @@ export function onEngineEvent(cb: (ev: EngineEvent) => void): Promise<UnlistenFn
     const ev = normalizeEvent(e.payload);
     if (ev) cb(ev);
   });
+}
+
+/** Files just dropped on the window, already registered on the Rust side. */
+export function onPickedFiles(cb: (items: PickedItem[]) => void): Promise<UnlistenFn> {
+  return listen<PickedItem[]>("files://picked", (e) => cb(e.payload));
+}
+
+/** Subscribe to *why* the daemon would not start, when it would not start. */
+export function onDaemonError(cb: (reason: string) => void): Promise<UnlistenFn> {
+  return listen<string>("engine://daemon-error", (e) => cb(e.payload));
 }
 
 /** Subscribe to the connected/disconnected heartbeat. */

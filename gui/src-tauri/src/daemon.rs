@@ -106,5 +106,55 @@ pub async fn ensure_running() -> Result<()> {
             return Ok(());
         }
     }
-    anyhow::bail!("the daemon did not come up in time")
+    anyhow::bail!("the daemon did not come up in time{}", last_words())
+}
+
+/// How much of the daemon's log to quote when it fails to start.
+const TAIL_LINES: usize = 6;
+const TAIL_BYTES: u64 = 16 * 1024;
+
+/// The last thing the daemon said before failing to come up, as a suffix for the
+/// error above — or nothing, if it said nothing.
+///
+/// Without this the UI can only report that the daemon "did not answer", which is
+/// the one thing the user already knows. The daemon has no terminal here, so its
+/// explanation goes to the log and nowhere else: an identity file it refuses to
+/// load, a relay URL it cannot parse, a port already taken. Those are all things
+/// with an obvious fix and no way to discover it.
+fn last_words() -> String {
+    use std::io::{Read, Seek, SeekFrom};
+    let path = arvolo_ipc::log_path();
+    let Ok(mut f) = std::fs::File::open(&path) else {
+        return String::new();
+    };
+    // Only the tail: this log is capped but still long, and the interesting part is
+    // always at the end.
+    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+    if f.seek(SeekFrom::Start(len.saturating_sub(TAIL_BYTES)))
+        .is_err()
+    {
+        return String::new();
+    }
+    let mut buf = String::new();
+    if f.read_to_string(&mut buf).is_err() {
+        // A non-UTF8 tail (we may have cut a character in half) is not worth a
+        // second attempt.
+        return String::new();
+    }
+    let tail: Vec<&str> = buf
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .rev()
+        .take(TAIL_LINES)
+        .collect();
+    if tail.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from(". Ultime righe del daemon:\n");
+    for line in tail.into_iter().rev() {
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.trim_end().to_string()
 }

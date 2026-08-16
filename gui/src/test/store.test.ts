@@ -28,7 +28,7 @@ async function boot(expectConnected = true) {
     transfers: {},
     search: "",
     pauseAll: false,
-    sheetPaths: null,
+    sheetPicks: null,
     incomingOfferId: null,
   });
   const dispose = await useStore.getState().init();
@@ -82,6 +82,27 @@ describe("snapshot seeding", () => {
       },
       { timeout: 5000, interval: 100 }
     );
+  });
+
+  it("a daemon that refuses to start says why, instead of just going quiet", async () => {
+    // The failure mode an upgrade creates: the daemon exits on an identity file it
+    // will not load, and — spawned by the GUI, with no terminal — its explanation
+    // goes to a log nobody opens. The window would otherwise show "disconnesso"
+    // and nothing else, which is the one thing the user can already see.
+    await boot();
+    harness.setConnected(false);
+    harness.failDaemon(
+      "the daemon did not come up in time. Ultime righe del daemon:\n" +
+        "identity.key is not an arvolo identity of this version"
+    );
+    await vi.waitFor(() =>
+      expect(useStore.getState().loadError).toContain("not an arvolo identity")
+    );
+
+    // And the explanation does not outlive the problem: once the daemon is up, a
+    // stale reason on screen would be its own kind of lie.
+    harness.setConnected(true);
+    await vi.waitFor(() => expect(useStore.getState().loadError).toBeNull());
   });
 
   it("3. a reconnect re-seeds the board", async () => {
@@ -440,19 +461,40 @@ describe("list housekeeping", () => {
     expect(harness.recorder.clearFinished).toBe(1);
   });
 
-  it("23. moveItem swaps a row with its neighbour, and stops at the edges", async () => {
+  it("164. a clear done elsewhere reaches this window too", async () => {
+    await boot();
+    harness.emit({ started: { id: 1, direction: "send", name: "live", total_size: 1 } });
+    harness.emit({ started: { id: 2, direction: "send", name: "done", total_size: 1 } });
+    harness.emit({ completed: { id: 2, path: null } });
+    harness.emit({ started: { id: 3, direction: "send", name: "held", total_size: 1 } });
+    harness.emit({ deposited: { id: 3 } });
+
+    // `arvolo status clear` in another process: the daemon has already dropped
+    // the row and only says so on the event stream. Without this the board goes
+    // on drawing rows nothing behind it still knows about.
+    harness.emit("finished_cleared");
+
+    await vi.waitFor(() => expect(row("t2")).toBeUndefined());
+    expect(row("t1")).toBeTruthy();
+    expect(row("t3")).toBeTruthy(); // still awaiting pickup, still not finished
+    // Nothing was asked of the daemon: it is the one that told us.
+    expect(harness.recorder.clearFinished).toBe(0);
+  });
+
+  it("23. reorderItems reshuffles the rows it is given, and nothing else", async () => {
     await boot();
     harness.emit({ started: { id: 1, direction: "send", name: "first", total_size: 1 } });
     harness.emit({ started: { id: 2, direction: "send", name: "second", total_size: 1 } });
 
-    const order = () =>
-      Object.values(useStore.getState().transfers)
-        .sort((a, b) => b.rank - a.rank)
-        .map((t) => t.name);
+    const rows = () =>
+      Object.values(useStore.getState().transfers).sort((a, b) => b.rank - a.rank);
+    const order = () => rows().map((t) => t.name);
     const before = order();
+    const keys = rows().map((t) => t.key);
 
-    useStore.getState().moveItem("t1", -1); // already at an edge for its direction
-    useStore.getState().moveItem(before[0] === "first" ? "t1" : "t2", 1);
+    useStore.getState().reorderItems(keys); // the order it already has: a no-op
+    expect(order()).toEqual(before);
+    useStore.getState().reorderItems([...keys].reverse());
     expect(order()).toEqual([...before].reverse());
   });
 

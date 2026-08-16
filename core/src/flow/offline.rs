@@ -19,10 +19,64 @@ use super::MAILBOX_KEY_AAD;
 pub struct Deposited {
     pub ticket: OfflineTicket,
     pub revoke_token: String,
+    /// Seconds the relay actually granted, which may be **less than asked**: it
+    /// clamps to its own `ARVOLO_MAX_TTL`. Everything downstream must deadline off
+    /// this and not off the request — the inbox offer's own TTL above all, or the
+    /// recipient keeps an offer whose blob the relay has already reaped.
+    ///
+    /// A relay too old to report it answers with the requested TTL, which is what
+    /// that relay's behaviour was assumed to be anyway.
+    pub ttl_secs: u64,
 }
 
 /// HTTP header carrying the base32 revoke-hash at deposit / revoke-token at revoke.
 const REVOKE_HASH_HEADER: &str = "x-arvolo-revoke-hash";
+
+/// Response header on a deposit: the TTL in seconds the relay granted.
+pub(crate) const GRANTED_TTL_HEADER: &str = "x-arvolo-ttl";
+
+/// Why the relay wouldn't serve a deposit, in words the holder of the ticket can
+/// act on.
+///
+/// It used to be one line for every status — "expired or already claimed?" — which
+/// guessed out loud and then left the reader with no next step. The relay does
+/// distinguish the two (`410` for an entry it still has and refuses, `404` once the
+/// row is gone), and either way the answer is the same: nothing local will fix it,
+/// the file has to be sent again. Say that.
+fn fetch_refusal(status: reqwest::StatusCode) -> String {
+    match status {
+        reqwest::StatusCode::NOT_FOUND => "the relay no longer holds this deposit — it expired, \
+             or it was already collected (a sealed deposit is burn-after-read). Nothing on your \
+             side can recover it: ask the sender to send it again."
+            .to_string(),
+        reqwest::StatusCode::GONE => "the relay is holding this deposit for nobody: it has \
+             expired or hit its download limit. Ask the sender to send it again."
+            .to_string(),
+        other => format!("the relay refused to serve this deposit ({other})"),
+    }
+}
+
+/// Read the granted TTL off a deposit response, falling back to `asked` when the
+/// relay doesn't report one (pre-header relay) or reports something unreadable.
+pub(crate) fn granted_ttl(resp: &reqwest::Response, asked: u64) -> u64 {
+    granted_ttl_from(
+        resp.headers()
+            .get(GRANTED_TTL_HEADER)
+            .and_then(|v| v.to_str().ok()),
+        asked,
+    )
+}
+
+/// The rule [`granted_ttl`] applies, split out from the HTTP plumbing so it can be
+/// tested on its own.
+fn granted_ttl_from(raw: Option<&str>, asked: u64) -> u64 {
+    raw.and_then(|s| s.trim().parse::<u64>().ok())
+        // A relay may only ever grant *less*. A larger number is a broken or hostile
+        // relay talking the sender into a deadline it hasn't promised to honour, and
+        // trusting it would recreate exactly the bug this header exists to close.
+        .map(|granted| granted.min(asked))
+        .unwrap_or(asked)
+}
 
 const REVOKE_TOKEN_HEADER: &str = "x-arvolo-revoke-token";
 
@@ -164,7 +218,7 @@ pub async fn deposit_offline(
         }
     });
 
-    let result = reqwest::Client::new()
+    let result = crate::http::client()
         .post(&url)
         .header(
             "x-arvolo-encapped-key",
@@ -198,12 +252,14 @@ pub async fn deposit_offline(
             "relay returned {status}"
         )));
     }
+    let ttl_secs = granted_ttl(&resp, ttl);
     let claim = resp
         .text()
         .await
         .map_err(|e| DepositError::Unavailable(e.to_string()))?;
 
     Ok(Deposited {
+        ttl_secs,
         ticket: OfflineTicket {
             relay,
             claim: claim.trim().to_string(),
@@ -226,7 +282,7 @@ pub async fn deposit_offline(
 /// as already gone.
 pub async fn revoke_offline(relay: &str, claim: &str, revoke_token: &str) -> Result<()> {
     let url = format!("{}/v1/entry/{}", relay.trim_end_matches('/'), claim);
-    let resp = reqwest::Client::new()
+    let resp = crate::http::client()
         .delete(&url)
         .header(REVOKE_TOKEN_HEADER, revoke_token)
         .send()
@@ -271,7 +327,7 @@ struct ClaimStatusBody {
 /// `None` but presence still resolves.
 pub async fn claim_info(relay: &str, claim: &str) -> Result<ClaimInfo> {
     let url = format!("{}/v1/entry/{}/status", relay.trim_end_matches('/'), claim);
-    let resp = reqwest::Client::new()
+    let resp = crate::http::client()
         .get(&url)
         .send()
         .await
@@ -356,13 +412,15 @@ pub async fn fetch_offline(
     }
 
     let url = format!("{}/v1/fetch/{}", t.relay.trim_end_matches('/'), t.claim);
-    let resp = reqwest::Client::new()
+    let resp = crate::http::client()
         .get(&url)
         .send()
         .await
-        .context("fetch request")?
-        .error_for_status()
-        .context("relay rejected fetch (expired or already claimed?)")?;
+        .context("fetch request")?;
+    let resp = match resp.error_for_status_ref() {
+        Ok(_) => resp,
+        Err(e) => return Err(anyhow::Error::from(e).context(fetch_refusal(resp.status()))),
+    };
 
     let encapped = resp
         .headers()
@@ -505,5 +563,50 @@ mod mailbox_out_tests {
             mailbox_out(Some(dir.path()), &t),
             dir.path().join(default_out(&t.claim))
         );
+    }
+}
+
+/// How much of the requested TTL the sender may believe it got.
+///
+/// Every case here has to end in a number no larger than what was asked, because
+/// that number becomes the inbox offer's own lifetime: whatever the sender
+/// over-estimates, the recipient pays for as an arrival that 404s.
+#[cfg(test)]
+mod granted_ttl_tests {
+    use super::granted_ttl_from;
+
+    const WEEK: u64 = 7 * 24 * 3600;
+
+    #[test]
+    fn a_reported_shorter_ttl_is_what_we_got() {
+        assert_eq!(granted_ttl_from(Some("86400"), WEEK), 86_400);
+    }
+
+    #[test]
+    fn a_relay_that_reports_nothing_is_taken_at_its_word() {
+        // A relay older than the header. Assuming the request was honoured is what
+        // every client did before it existed, so nothing regresses for those relays.
+        assert_eq!(granted_ttl_from(None, WEEK), WEEK);
+    }
+
+    #[test]
+    fn a_ttl_longer_than_asked_is_not_believed() {
+        // A relay cannot extend a deadline on the sender's behalf: acting on the
+        // larger number is precisely how an offer outlives its blob.
+        assert_eq!(granted_ttl_from(Some("999999999"), 3600), 3600);
+    }
+
+    #[test]
+    fn an_unreadable_ttl_falls_back_instead_of_failing() {
+        // A deposit is already placed by the time this is read; a junk header is no
+        // reason to fail the send.
+        assert_eq!(granted_ttl_from(Some("soon"), 3600), 3600);
+        assert_eq!(granted_ttl_from(Some(""), 3600), 3600);
+        assert_eq!(granted_ttl_from(Some("-1"), 3600), 3600);
+    }
+
+    #[test]
+    fn whitespace_around_the_number_is_tolerated() {
+        assert_eq!(granted_ttl_from(Some("  600 "), 3600), 600);
     }
 }

@@ -66,8 +66,11 @@ docker run -d --name arvolo-relay -p 6282:6282 -v arvolo-data:/data \
   ghcr.io/lords82/arvolo-relay:latest
 ```
 
-**Desktop app** — built from source for now (no prebuilt bundle yet), needs Node
-≥ 18 and the platform WebView:
+**Desktop app** — prebuilt bundles are on the
+[latest release](https://github.com/lords82/arvolo/releases): a universal
+`.dmg` for macOS (signed with a Developer ID and notarized), an `.msi` for
+Windows and an `.AppImage` for Linux. Or build from source, with Node ≥ 18 and
+the platform WebView:
 
 ```sh
 cargo build -p arvolo-cli      # the daemon the app drives
@@ -303,12 +306,16 @@ Everything below is **optional** (defaults shown).
 | `ARVOLO_SEED` | `1` (on) | Keep seeding a completed file into the swarm. Set `0`/`false`/`no`/`off` to opt out. |
 | `ARVOLO_SEED_AFTER` | `0` (off) | Seconds to keep backfilling the relay after a transfer completes. |
 | `ARVOLO_SHARE_DAYS` | unset | Stop a share (ticket, code, or the seeding a finished download becomes) after N days. Unset = it lasts until you stop it by hand, so every file you receive leaves a share that comes back at each restart. |
-| `ARVOLO_SHARE_COPIES` | unset | The same bound, counted in copies taken. Either or both may be set. |
-| `ARVOLO_SWARM` | on | BitTorrent-style swarm for shared `arvc…` tickets. Set `off`/`0`/`relay-only` to disable (privacy escape hatch). |
+| `ARVOLO_SHARE_COPIES` | unset | The same bound, counted in copies taken — one per distinct receiving node that fetched the whole file. Either or both may be set. |
+| `ARVOLO_SWARM` | on | BitTorrent-style swarm for shared `arvc…` tickets. Set `off`/`0`/`relay-only` to disable (privacy escape hatch). Implied off when `ARVOLO_P2P=off`. |
+| `ARVOLO_SWARM_ANNOUNCE_SECS` | `20` | How often a swarm member re-publishes its piece bitfield to the tracker — hence also how long it takes one peer to learn what another holds. Clamped to 1–30 (the relay drops a member after 60s). Lower it only for tests: at the default, two peers on a fast link can finish a small file before either hears about the other. |
 | `ARVOLO_CONCURRENCY` | `4` | Parallel chunk fetches (clamped to 1–16). |
 | `ARVOLO_IPV4_ONLY` | auto | `1` forces IPv4-only (auto-detected when there's no IPv6 route). |
 | `ARVOLO_CC` | `bbr` | QUIC congestion controller. `cubic` restores quinn's default — the way back if BBR misbehaves on a path we haven't measured. |
-| `ARVOLO_IROH_RELAY` | n0 public | Self-hosted **iroh** NAT relay for P2P hole-punching. |
+| `ARVOLO_IROH_RELAY` | n0 public | Self-hosted **iroh** NAT relay for P2P hole-punching. `off` uses none at all (direct/LAN only). |
+| `ARVOLO_IROH_DISCOVERY` | follows `ARVOLO_IROH_RELAY` | iroh peer discovery. `n0` publishes a signed record mapping your node's public key to your current addresses into n0's DNS **and** resolves others' the same way; `resolve` looks others up but never publishes yours; `off` neither. Unset keeps what the relay choice implied on its own (n0 relays published, anything else didn't), so nothing changes until you ask. Cost of `resolve`: a ticket you re-serve after changing network is reconnectable through a NAT relay but not by node lookup. |
+| `ARVOLO_P2P` | `1` (on) | `off` disables direct transfers: everything goes through the relay's mailbox. Slower and it touches the relay, but the mailbox is plain HTTP, so it's the only setting where **neither the relay nor the recipient** learns your address (a direct transfer always shows it to the peer, and QUIC can't cross a SOCKS proxy). Implies no swarm; `code`, `ticket` and receiving an `arvc…` ticket are refused while it's off. Never set it on a relay — it needs an endpoint for backfill and will refuse to start. |
+| `ARVOLO_PROXY` | unset (direct) | Route **every relay request** through a proxy, so the relay sees the proxy's address instead of yours. `socks5h://127.0.0.1:9050` sends it over Tor (`h` = resolve the relay's hostname at the exit). Covers the whole HTTP surface — deposits, fetches, codes, inbox, presence — but **not** direct P2P, which is QUIC and cannot cross a SOCKS proxy. If the value is unusable, relay requests fail rather than silently going direct. |
 | `ARVOLO_DEBUG` | off | Extra diagnostics. |
 | `RUST_LOG` | `info` | `tracing` log level. |
 

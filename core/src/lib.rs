@@ -15,6 +15,7 @@ pub mod code;
 pub mod crypto;
 pub mod flow;
 pub mod hash;
+pub mod http;
 pub mod link;
 pub mod manager;
 pub mod node;

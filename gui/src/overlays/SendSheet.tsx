@@ -13,7 +13,7 @@
 // live P2P send would promise a protection that is not being applied.
 
 import { useEffect, useMemo, useState } from "react";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { api } from "../ipc";
 import { useStore } from "../store";
 import type { SendMode } from "../store";
 import { useT } from "../i18n";
@@ -31,7 +31,7 @@ import {
 import { Avatar, CodeHero } from "../ui/Bits";
 import { Sheet } from "../ui/Sheet";
 import { toast } from "../ui/Toasts";
-import type { ContactDto } from "../types";
+import type { ContactDto, PickedItem } from "../types";
 
 /** Re-exported name for the store's `SendMode`, so the switch below and the
  *  callers that preselect it can never drift apart. */
@@ -66,10 +66,6 @@ interface Result {
   kind: "code" | "link" | "ticket" | "deposit" | "sent";
   value: string;
   detail?: string;
-}
-
-function basename(p: string): string {
-  return p.split(/[/\\]/).pop() || p;
 }
 
 function ContactPicker({
@@ -157,7 +153,7 @@ function ContactPicker({
 
 export function SendSheet() {
   const t = useT();
-  const paths = useStore((s) => s.sheetPaths);
+  const picks = useStore((s) => s.sheetPicks);
   const presetTo = useStore((s) => s.sheetTo);
   const presetMode = useStore((s) => s.sheetMode);
   const close = useStore((s) => s.closeSheet);
@@ -170,7 +166,7 @@ export function SendSheet() {
   const relay = useStore((s) => s.status?.relay ?? null);
 
   const [mode, setMode] = useState<Mode>("contact");
-  const [files, setFiles] = useState<string[]>([]);
+  const [files, setFiles] = useState<PickedItem[]>([]);
   const [to, setTo] = useState("");
   const [note, setNote] = useState("");
   const [asDeposit, setAsDeposit] = useState(false);
@@ -181,14 +177,14 @@ export function SendSheet() {
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<Result | null>(null);
 
-  const open = paths !== null;
+  const open = picks !== null;
 
   // Reopening must not inherit the last send's answers — least of all its
   // password, which would silently protect a different file for a different
   // person. Everything resets except the files the sheet was opened with.
   useEffect(() => {
     if (!open) return;
-    setFiles(paths ?? []);
+    setFiles(picks ?? []);
     setTo(presetTo ?? "");
     // Opened from a section that already means one way of sending — honour it.
     setMode(presetMode ?? "contact");
@@ -200,13 +196,17 @@ export function SendSheet() {
     setKeepCode(false);
     setMaxDl("1");
     setTtl(7 * 24 * 3600);
-  }, [open, paths, presetTo, presetMode]);
+  }, [open, picks, presetTo, presetMode]);
 
   const pick = async (directory: boolean) => {
-    const picked = await openDialog({ multiple: true, directory });
-    if (!picked) return;
-    const list = Array.isArray(picked) ? picked : [picked];
-    setFiles((f) => Array.from(new Set([...f, ...list])));
+    // The dialog is native and Rust-side; what comes back are registered ids
+    // plus display names — never paths (see `bridge::PickedFiles`).
+    const picked = await api.pickFiles(directory);
+    if (picked.length === 0) return;
+    setFiles((f) => {
+      const seen = new Set(f.map((x: PickedItem) => x.id));
+      return [...f, ...picked.filter((x) => !seen.has(x.id))];
+    });
   };
 
   const canSubmit =
@@ -224,7 +224,7 @@ export function SendSheet() {
           const max = maxDl.trim() === "" ? null : Number(maxDl);
           const r = await depositAction(
             to,
-            files,
+            files.map((f) => f.id),
             note,
             ttl,
             Number.isFinite(max as number) && max !== null ? max : null,
@@ -236,12 +236,12 @@ export function SendSheet() {
             detail: t("send.depositResult", to),
           });
         } else {
-          await send(to, files, note);
+          await send(to, files.map((f) => f.id), note);
           toast.ok(t("send.onItsWay", to), t("send.onItsWayDetail"));
           close();
         }
       } else if (mode === "code") {
-        const r = await code(files, keepCode);
+        const r = await code(files.map((f) => f.id), keepCode);
         setResult({
           kind: "code",
           value: r.code,
@@ -252,7 +252,7 @@ export function SendSheet() {
       } else if (mode === "link") {
         const max = maxDl.trim() === "" ? null : Number(maxDl);
         const url = await link(
-          files[0],
+          files[0].id,
           ttl,
           Number.isFinite(max as number) && max !== null ? max : null
         );
@@ -262,7 +262,7 @@ export function SendSheet() {
           detail: t("send.linkDetail"),
         });
       } else {
-        const r = await ticket(files);
+        const r = await ticket(files.map((f) => f.id));
         setResult({
           kind: "ticket",
           value: r.ticket,
@@ -351,19 +351,19 @@ export function SendSheet() {
                   <div className="card rows" style={{ maxHeight: 160, overflowY: "auto" }}>
                     {files.map((p) => (
                       <div
-                        key={p}
+                        key={p.id}
                         className="hstack"
                         style={{ padding: "8px 11px" }}
                       >
                         <Icon.Folder size={14} className="t-mut" />
-                        <span className="grow truncate t-sm" title={p}>
-                          {basename(p)}
+                        <span className="grow truncate t-sm" title={p.name}>
+                          {p.name}
                         </span>
                         <button
                           className="icon-btn"
-                          aria-label={t("send.filesRemove", basename(p))}
+                          aria-label={t("send.filesRemove", p.name)}
                           onClick={() =>
-                            setFiles((f) => f.filter((x) => x !== p))
+                            setFiles((f) => f.filter((x) => x.id !== p.id))
                           }
                         >
                           <Icon.Close size={13} />

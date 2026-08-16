@@ -18,8 +18,7 @@ import type {
   PairKind,
   StatusDto,
   SyncDto,
-  TransferDto,
-} from "../types";
+  TransferDto, PickedItem,} from "../types";
 
 /** Calls the store made, so a test can assert the daemon was actually told. */
 export interface Recorder {
@@ -67,6 +66,10 @@ export interface Harness {
   emit: (wire: WireEvent) => void;
   /** Flip the connected heartbeat. */
   setConnected: (c: boolean) => void;
+  /** Report why the daemon would not start (see `onDaemonError`). */
+  failDaemon: (reason: string) => void;
+  /** Deliver a registered drop, as the Rust window handler would. */
+  dropFiles: (items: PickedItem[]) => void;
   /** What `reload()` will find on the daemon. */
   snapshot: {
     status: StatusDto | null;
@@ -174,6 +177,8 @@ export const harness: Harness = {
   recorder: freshRecorder(),
   emit: () => {},
   setConnected: () => {},
+  failDaemon: () => {},
+  dropFiles: () => {},
   snapshot: freshSnapshot(),
   fail: new Set(),
 };
@@ -248,8 +253,9 @@ export function makeIpcMock() {
         harness.recorder.cancelPairing.push(session);
         return guard("cancelPairing", undefined);
       },
-      readTextFile: () => guard("readTextFile", "[]"),
-      writeTextFile: () => guard("writeTextFile", undefined),
+      pickFiles: () => guard("pickFiles", [] as PickedItem[]),
+      importContacts: () => guard("importContacts", "[]"),
+      exportContacts: () => guard("exportContacts", "contacts.json"),
       serveCode: (paths: string[], _relay: string | null, keep: boolean) => {
         harness.recorder.serveCode.push([paths, keep]);
         return guard("serveCode", { id: 1, code: "4821-crater-mango" });
@@ -376,7 +382,24 @@ export function makeIpcMock() {
       harness.setConnected = cb;
       return Promise.resolve(() => {});
     },
+    // Why the daemon would not start. Exposed on the harness so a test can put the
+    // store in the state a user hits after an upgrade: no daemon, and a reason.
+    onDaemonError: (cb: (reason: string) => void) => {
+      harness.failDaemon = cb;
+      return Promise.resolve(() => {});
+    },
+    // The registered result of a drop, as the Rust window handler would emit it.
+    onPickedFiles: (cb: (items: PickedItem[]) => void) => {
+      harness.dropFiles = cb;
+      return Promise.resolve(() => {});
+    },
   };
+}
+
+/** A picked file as the backend would register it, with a deterministic id so
+ *  tests can assert on what a send received. */
+export function pick(name: string, over: Partial<PickedItem> = {}): PickedItem {
+  return { id: `pick:${name}`, name, size: 1, isDir: false, ...over };
 }
 
 export const dto = {

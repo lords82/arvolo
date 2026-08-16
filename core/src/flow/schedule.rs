@@ -9,6 +9,9 @@
 //!   result is empty and the caller backs the piece off until a source returns.
 //! - [`rarest_set`] — *which* piece to fetch next (the rarest — fewest providers),
 //!   the deterministic half of rarest-first; the caller random-tie-breaks.
+//! - [`prefer_offloadable`] — applied before it: while a request to the origin is
+//!   already outstanding, restrict the choice to pieces somebody else can serve, so
+//!   the source is not asked twice for what a peer is holding.
 //! - [`choose_provider`] — *from which* of a piece's providers to fetch: prefer a
 //!   peer/relay over the origin (offload the source) and, within a tier, the one
 //!   with the lowest estimated time-to-serve (faster + less loaded first).
@@ -90,6 +93,52 @@ pub(crate) fn rarest_set<A>(mut candidates: Vec<(usize, Vec<A>)>) -> Vec<(usize,
             candidates
         }
         None => candidates,
+    }
+}
+
+/// Narrow the candidates to pieces somebody *other than the origin* can serve —
+/// but only while we already have a fetch outstanding to the origin.
+///
+/// This is the piece-side half of offloading the source, and without it the
+/// provider-side half ([`choose_provider`]) almost never gets a case to decide.
+/// [`rarest_set`] counts the origin among a piece's providers, so a piece a peer
+/// already holds looks *less* rare than one only the origin has and is drained last:
+/// two receivers downloading the same file at once therefore spend the whole
+/// transfer asking the origin for pieces neither of them has, each sitting on a
+/// piece the other needs. Measured on a four-piece file: the origin uploaded eight
+/// pieces where five would have done, and a piece crossed between the two receivers
+/// in one run out of four.
+///
+/// The gate is what keeps that fix from costing what rarest-first buys. Draining the
+/// scarce source first is why the swarm survives the origin leaving; always
+/// preferring what peers hold would instead let two receivers converge on the same
+/// pieces and leave the rest held by nobody. So the deviation happens only when the
+/// alternative is to *queue a second request on the origin* — at which point taking
+/// the peer's copy costs the origin nothing and costs us no latency either. A
+/// receiver alone in a swarm, or one whose origin is idle, picks exactly as before.
+///
+/// `origin` is the sender's provider id (`None` when the origin is not live).
+/// Anything that is not the origin counts as offloadable, the relay included — it is
+/// the same distinction [`choose_provider`] draws with `is_origin`.
+pub(crate) fn prefer_offloadable<A>(
+    candidates: Vec<(usize, Vec<(String, A)>)>,
+    origin: Option<&str>,
+    origin_busy: bool,
+) -> Vec<(usize, Vec<(String, A)>)> {
+    if !origin_busy {
+        return candidates;
+    }
+    let offloadable =
+        |provs: &Vec<(String, A)>| provs.iter().any(|(id, _)| Some(id.as_str()) != origin);
+    if candidates.iter().any(|(_, p)| offloadable(p)) {
+        candidates
+            .into_iter()
+            .filter(|(_, p)| offloadable(p))
+            .collect()
+    } else {
+        // Nothing to offload onto: the origin is the only source for everything we
+        // still need, so queueing on it is the only way forward.
+        candidates
     }
 }
 
@@ -406,6 +455,84 @@ mod tests {
     fn rarest_of_nothing_is_nothing() {
         let cands: Vec<(usize, Vec<&str>)> = Vec::new();
         assert!(rarest_set(cands).is_empty());
+    }
+
+    // ---- prefer_offloadable: don't ask the origin twice for what a peer holds ----
+
+    /// Candidates as the picker builds them: `(piece, [(provider id, addr)])`.
+    fn cands(spec: &[(usize, &[&str])]) -> Vec<(usize, Vec<(String, &'static str)>)> {
+        spec.iter()
+            .map(|(i, provs)| {
+                (
+                    *i,
+                    provs
+                        .iter()
+                        .map(|id| (id.to_string(), "addr"))
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect()
+    }
+
+    fn pieces_of<A>(c: &[(usize, Vec<(String, A)>)]) -> HashSet<usize> {
+        c.iter().map(|(i, _)| *i).collect()
+    }
+
+    /// The case this exists for. Two pieces only the origin has, one a peer also
+    /// holds; a request to the origin is already in flight. Rarest-first on its own
+    /// would take one of the origin-only pieces — the origin is a provider of every
+    /// piece, so the peer's piece looks *less* rare — and queue a second upload on a
+    /// source that is already busy while the peer sits idle.
+    #[test]
+    fn a_busy_origin_narrows_the_choice_to_what_others_can_serve() {
+        let c = cands(&[(0, &["origin"]), (1, &["origin", "B"]), (2, &["origin"])]);
+        let out = prefer_offloadable(c, Some("origin"), true);
+        assert_eq!(pieces_of(&out), [1].into_iter().collect::<HashSet<_>>());
+        // And rarest-first then runs *within* that set, so scarcity still decides
+        // among the offloadable pieces rather than being discarded.
+        let c = cands(&[(1, &["origin", "B"]), (2, &["origin", "B", "C"])]);
+        let out = rarest_set(prefer_offloadable(c, Some("origin"), true));
+        assert_eq!(pieces_of(&out), [1].into_iter().collect::<HashSet<_>>());
+    }
+
+    /// An idle origin changes nothing: taking a piece from it costs no queueing, and
+    /// draining the scarce source first is exactly what keeps the swarm alive if the
+    /// origin leaves. This is the half of the rule that protects rarest-first.
+    #[test]
+    fn an_idle_origin_leaves_rarest_first_alone() {
+        let c = cands(&[(0, &["origin"]), (1, &["origin", "B"])]);
+        let out = prefer_offloadable(c, Some("origin"), false);
+        assert_eq!(pieces_of(&out), [0, 1].into_iter().collect::<HashSet<_>>());
+    }
+
+    /// A receiver alone in the swarm is untouched however busy the origin is: there
+    /// is nothing to offload onto, and refusing to queue would mean refusing to
+    /// download.
+    #[test]
+    fn with_no_other_source_the_origin_is_still_the_answer() {
+        let c = cands(&[(0, &["origin"]), (1, &["origin"])]);
+        let out = prefer_offloadable(c, Some("origin"), true);
+        assert_eq!(pieces_of(&out), [0, 1].into_iter().collect::<HashSet<_>>());
+    }
+
+    /// The relay counts as somebody else — the same line `choose_provider` draws
+    /// with `is_origin`. A piece the relay has backfilled is one the origin need not
+    /// send again.
+    #[test]
+    fn the_relay_is_offloadable_too() {
+        let c = cands(&[(0, &["origin"]), (1, &["origin", "relay"])]);
+        let out = prefer_offloadable(c, Some("origin"), true);
+        assert_eq!(pieces_of(&out), [1].into_iter().collect::<HashSet<_>>());
+    }
+
+    /// With the origin gone every provider is somebody else, so the filter has
+    /// nothing to say and rarest-first decides alone — which is the behaviour the
+    /// origin-absent swarm tests rely on.
+    #[test]
+    fn a_dead_origin_leaves_every_candidate_standing() {
+        let c = cands(&[(0, &["B"]), (1, &["C", "D"])]);
+        let out = prefer_offloadable(c, None, true);
+        assert_eq!(pieces_of(&out), [0, 1].into_iter().collect::<HashSet<_>>());
     }
 
     // ---- choose_provider: offload the origin, weigh speed & load ---------------

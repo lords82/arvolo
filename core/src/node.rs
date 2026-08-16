@@ -20,19 +20,29 @@ pub struct Node {
 }
 
 impl Node {
-    /// Bind with n0 defaults (relay + discovery) so the node is dialable by id
-    /// over the internet.
+    /// Bind a node dialable over the internet, honouring the configured relay and
+    /// discovery.
+    ///
+    /// It used to call `Endpoint::builder()` directly, which is n0's preset: n0
+    /// relays *and* the pkarr publisher, whatever the user had configured. Nothing
+    /// but the ping test reaches this today, so it leaked nothing in practice — but a
+    /// binding function that quietly ignores the settings every other binding
+    /// function honours is a trap for whoever wires it into a real path next.
     pub async fn bind() -> Result<Self> {
-        let endpoint = Endpoint::builder()
-            .secret_key(generate_secret_key())
-            .alpns(vec![PING_ALPN.to_vec()])
-            .bind()
-            .await
-            .map_err(|e| anyhow::anyhow!("bind endpoint: {e}"))?;
+        let relay = crate::transfer::RelayChoice::from_env();
+        let discovery = crate::transfer::DiscoveryChoice::from_env(&relay);
+        let endpoint = crate::transfer::bind_endpoint_full(
+            relay,
+            discovery,
+            generate_secret_key(),
+            Some(vec![PING_ALPN.to_vec()]),
+        )
+        .await?;
         Ok(Self { endpoint })
     }
 
-    /// Bind for local/direct use only (relay disabled). Used by tests and LAN.
+    /// Bind for local/direct use only (relay and discovery both off). Used by tests
+    /// and LAN.
     pub async fn bind_local() -> Result<Self> {
         let endpoint = Endpoint::empty_builder(RelayMode::Disabled)
             .secret_key(generate_secret_key())

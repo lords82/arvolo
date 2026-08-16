@@ -17,7 +17,6 @@
 // that would be a key change nobody asked about.
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { save as saveDialog, open as openDialog } from "@tauri-apps/plugin-dialog";
 import { fire, useStore } from "../store";
 import { api } from "../ipc";
 import { useT } from "../i18n";
@@ -570,13 +569,13 @@ export function PeopleView() {
       verified: c.verified,
       trusted: c.trusted,
     }));
-    const path = await saveDialog({
-      defaultPath: t("people.exportFilename"),
-      filters: [{ name: "JSON", extensions: ["json"] }],
-    });
-    if (!path) return;
     try {
-      await api.writeTextFile(path, JSON.stringify(rows, null, 2));
+      // The dialog happens on the native side; cancelling resolves to null.
+      const saved = await api.exportContacts(
+        t("people.exportFilename"),
+        JSON.stringify(rows, null, 2)
+      );
+      if (saved === null) return;
       toast.ok(
         rows.length === 1
           ? t("people.exportedOne")
@@ -590,15 +589,11 @@ export function PeopleView() {
 
   const doImport = async () => {
     if (busyRef.current) return;
-    const path = await openDialog({
-      multiple: false,
-      filters: [{ name: "JSON", extensions: ["json"] }],
-    });
-    if (typeof path !== "string") return;
+    const text = await api.importContacts();
+    if (text === null) return; // cancelled in the native dialog
     busyRef.current = true;
     setImporting(true);
     try {
-      const text = await api.readTextFile(path);
       const rows = JSON.parse(text);
       if (!Array.isArray(rows)) throw new Error(t("people.importNotAList"));
 

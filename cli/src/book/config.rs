@@ -12,6 +12,9 @@ pub(crate) struct Config {
     pub(crate) temp_dir: Option<String>,
     pub(crate) identity: Option<String>,
     pub(crate) iroh_relay: Option<String>,
+    pub(crate) iroh_discovery: Option<String>,
+    pub(crate) proxy: Option<String>,
+    pub(crate) p2p: Option<bool>,
     pub(crate) seed: Option<bool>,
     pub(crate) seed_after: Option<u64>,
     pub(crate) share_days: Option<u64>,
@@ -201,10 +204,24 @@ pub fn apply_config_to_env() {
     // the env expects (or `None` to leave the env untouched). `debug` maps to "1"
     // only when on, since core treats *any* value of ARVOLO_DEBUG as enabled.
     // Bridged with env > config > default precedence via `set_if_unset`.
-    let bridges: [(&str, Option<String>); 12] = [
+    let bridges: [(&str, Option<String>); 15] = [
         ("ARVOLO_TEMP_DIR", cfg.temp_dir.and_then(nonempty)),
         ("ARVOLO_IDENTITY", cfg.identity.and_then(nonempty)),
         ("ARVOLO_IROH_RELAY", cfg.iroh_relay.and_then(nonempty)),
+        (
+            "ARVOLO_IROH_DISCOVERY",
+            cfg.iroh_discovery.and_then(nonempty),
+        ),
+        // `p2p = false` is the whole point of the key; `true` is the default, so it
+        // maps to nothing rather than pinning the env for child processes.
+        (
+            "ARVOLO_P2P",
+            cfg.p2p.filter(|&b| !b).map(|_| "off".to_string()),
+        ),
+        (
+            arvolo_core::http::PROXY_ENV,
+            cfg.proxy.and_then(nonempty).map(|p| p.trim().to_string()),
+        ),
         ("ARVOLO_SEED", cfg.seed.map(bool_env)),
         ("ARVOLO_SEED_AFTER", cfg.seed_after.map(|n| n.to_string())),
         ("ARVOLO_SHARE_DAYS", cfg.share_days.map(|n| n.to_string())),
@@ -270,7 +287,34 @@ pub fn write_default_config(relay: Option<&str>) -> Result<()> {
 #identity = "{identity}"
 
 # Self-hosted iroh NAT relay for P2P hole-punching (default: n0 public relays).
+# "off" uses no NAT relay at all — direct/LAN only.
 #iroh_relay = ""
+
+# iroh peer discovery. "n0" publishes a signed record mapping your node's public
+# key to your current addresses into n0's DNS, and resolves others' the same way.
+# "resolve" looks others up but never publishes your own — the private setting; the
+# cost is that a ticket you re-serve after changing network can only be reconnected
+# through a NAT relay, not by looking your node up. "off" is neither.
+# Unset keeps what iroh_relay implies on its own: n0 relays publish, any other
+# choice doesn't.
+#iroh_discovery = "n0"
+
+# Direct peer-to-peer transfers. false sends everything through the relay's mailbox
+# instead — slower and it touches the relay, but it is the only configuration where
+# neither the relay nor the person you are sending to learns your address, because
+# the mailbox is plain HTTP and therefore goes through `proxy` above. A direct
+# transfer always shows your address to the peer, and QUIC cannot cross a SOCKS
+# proxy. Implies no swarm. `code`, `ticket` and receiving an arvc… ticket are
+# refused while this is off.
+#p2p = true
+
+# Route every relay request through a proxy, so the relay sees the proxy's address
+# instead of yours. "socks5h://127.0.0.1:9050" sends it over Tor (the `h` resolves
+# the relay's hostname at the exit, not here). Applies to the whole HTTP surface —
+# deposits, fetches, codes, inbox, presence — but NOT to direct P2P transfers,
+# which are QUIC and cannot cross a SOCKS proxy. If the value is unusable, relay
+# requests fail rather than silently going direct.
+#proxy = ""
 
 # Keep seeding a completed file into the swarm.
 #seed = true

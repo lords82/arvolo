@@ -129,8 +129,6 @@ export const de: Dict = {
   "transfers.openFileFailed": "Ich kann die Datei nicht öffnen",
   "transfers.openFolder": "Ordner öffnen",
   "transfers.openFolderFailed": "Ich kann den Ordner nicht öffnen",
-  "transfers.moveUp": "Nach oben",
-  "transfers.moveDown": "Nach unten",
   "transfers.revokeDeposit": "Ablage zurückziehen",
   "transfers.cancel": "Abbrechen",
   "transfers.removeRow": "Von der Liste nehmen",
@@ -140,6 +138,8 @@ export const de: Dict = {
   "transfers.liveCode": "Code aktiv",
   "transfers.review": "Ansehen",
   "transfers.shareDetails": "Details zum Teilen",
+  "transfers.reorder": (name) =>
+    `${name} verschieben: ziehen oder die Pfeiltasten hoch/runter benutzen`,
   "transfers.rowActions": (name) => `Aktionen für ${name}`,
   "transfers.progressOf": (name) => `Fortschritt von ${name}`,
   "transfers.confirmRevokeTitle": "Ablage zurückziehen?",

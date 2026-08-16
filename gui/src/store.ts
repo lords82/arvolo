@@ -2,7 +2,7 @@
 // snapshot and then mutated purely by pushed engine events (no polling).
 
 import { create } from "zustand";
-import { api, onConnected, onEngineEvent } from "./ipc";
+import { api, onConnected, onDaemonError, onEngineEvent } from "./ipc";
 import { shortId } from "./format";
 import { t } from "./i18n";
 import { toast } from "./ui/Toasts";
@@ -21,6 +21,7 @@ import type {
   TransferDto,
   UIStatus,
   UITransfer,
+  PickedItem,
 } from "./types";
 
 /** The six places the app can be. One at a time, always — the previous model
@@ -79,6 +80,7 @@ export interface PairingState {
 }
 
 const THEME_KEY = "arvolo.theme";
+const ORDER_KEY = "arvolo.order";
 
 /** Pairing events that arrived before their session handle did.
  *
@@ -111,12 +113,87 @@ function now(): number {
   return Date.now();
 }
 
+/** The order the user dragged the board into, last time they dragged it: row key
+ *  → rank. Kept here rather than in the daemon on purpose. The daemon knows what
+ *  the transfers are; the order you like to look at them in is a property of this
+ *  window, the same kind of thing as the theme and the language, and `arvolo
+ *  status` has its own ordering that has no reason to inherit this one. The cost
+ *  is that it does not follow you to another machine — that would mean putting it
+ *  in the daemon and through identity sync, which is a lot of machinery for the
+ *  order of a list.
+ *
+ *  Keys are daemon-local ids (`t7`, `o3`). Point the GUI at a *different* daemon
+ *  and the ids will collide with somebody else's numbering: the worst that
+ *  happens is an arbitrary order, which is what you would have had anyway. */
+function readOrder(): Record<string, number> {
+  try {
+    const raw = localStorage.getItem(ORDER_KEY);
+    if (!raw) return {};
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    const out: Record<string, number> = {};
+    for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+      if (typeof v === "number" && Number.isFinite(v)) out[k] = v;
+    }
+    return out;
+  } catch {
+    // A refusing localStorage, or something else's key at ours. Neither is worth
+    // failing to boot over: an unremembered order is the state we shipped with.
+    return {};
+  }
+}
+
+const savedRanks = readOrder();
+
 /** Strictly increasing list position. `Date.now()` is not usable here: two rows
  *  created in the same millisecond would tie, leaving their order ambiguous and
- *  making "Move up/down" swap two equal ranks — a move that changes nothing. */
-let rankSeq = 0;
+ *  making a reorder shuffle two equal ranks — a move that changes nothing.
+ *
+ *  It starts above every remembered rank so that a row nobody has placed by hand
+ *  still arrives at the top of the board, remembered order or not. */
+let rankSeq = Math.max(0, ...Object.values(savedRanks));
 function nextRank(): number {
   return ++rankSeq;
+}
+
+/** The rank a row should carry: the one it already has, else the one it was left
+ *  at in a previous run, else a fresh one at the top. */
+function rankFor(key: string, prev?: UITransfer): number {
+  return prev?.rank ?? savedRanks[key] ?? nextRank();
+}
+
+/** Drop the rows that will never change again, keeping everything that still has
+ *  a future — the daemon's own rule, which is why a deposit awaiting pickup stays
+ *  (it reads as done and isn't: it can still be withdrawn, or picked up).
+ *
+ *  Shared by the button and by the `finished_cleared` event, so a clear done from
+ *  the CLI leaves this window showing exactly what a clear done here would. */
+function dropFinished(s: { transfers: Record<string, UITransfer> }): {
+  transfers: Record<string, UITransfer>;
+} {
+  const kept: Record<string, UITransfer> = {};
+  for (const [k, tx] of Object.entries(s.transfers)) {
+    const finished =
+      tx.status === "completed" ||
+      tx.status === "failed" ||
+      tx.status === "cancelled";
+    if (!finished) kept[k] = tx;
+  }
+  return { transfers: kept };
+}
+
+/** Remember the order of the rows on the board right now.
+ *
+ *  Written only when the user reorders, which is also what prunes it: rows that
+ *  have since left the board are simply not in the map that gets written. */
+function saveOrder(transfers: Record<string, UITransfer>) {
+  try {
+    const out: Record<string, number> = {};
+    for (const t of Object.values(transfers)) out[t.key] = t.rank;
+    localStorage.setItem(ORDER_KEY, JSON.stringify(out));
+  } catch {
+    // Same as reading it: the board still works, it just forgets.
+  }
 }
 
 /** Last progress sample per transfer id, for throughput estimation. Kept outside
@@ -233,7 +310,7 @@ interface State {
   search: string;
   pauseAll: boolean;
   paletteOpen: boolean;
-  sheetPaths: string[] | null; // send sheet open when non-null
+  sheetPicks: PickedItem[] | null; // send sheet open when non-null
   /** Recipient the send sheet should open on, when it was opened *from* someone —
    *  a person card, or "Invia a X" in the palette. Without this, choosing a
    *  person and then having to choose them again is the app forgetting what the
@@ -270,7 +347,7 @@ interface State {
   go: (r: Route) => void;
   setTheme: (choice: ThemeChoice) => void;
   setPaletteOpen: (v: boolean) => void;
-  openSheet: (paths: string[], to?: string, mode?: SendMode) => void;
+  openSheet: (picks: PickedItem[], to?: string, mode?: SendMode) => void;
   closeSheet: () => void;
   openIncoming: (offerId: string) => void;
   closeIncoming: () => void;
@@ -308,20 +385,20 @@ interface State {
   clearPairing: () => void;
 
   // actions (forward to the daemon, then let events reconcile)
-  send: (to: string, paths: string[], note: string) => Promise<number>;
+  send: (to: string, items: string[], note: string) => Promise<number>;
   /** `send --deposit`: skip the live attempt entirely. Returns the `arvm…`
    *  ticket, which is the sender's copy for hand-delivery. */
   deposit: (
     to: string,
-    paths: string[],
+    items: string[],
     note: string,
     ttl: number | null,
     max: number | null,
     password: string | null
   ) => Promise<{ id: number; ticket: string }>;
-  ticket: (paths: string[]) => Promise<{ id: number; ticket: string }>;
+  ticket: (items: string[]) => Promise<{ id: number; ticket: string }>;
   /** Host a short pairing code in the daemon (keep = serve every receiver). */
-  code: (paths: string[], keep: boolean) => Promise<{ id: number; code: string }>;
+  code: (items: string[], keep: boolean) => Promise<{ id: number; code: string }>;
   link: (path: string, ttl: number | null, max: number | null) => Promise<string>;
   /** Receive from a pasted arvc… ticket, pairing code or arvm… offline ticket. */
   receive: (ticket: string, out: string | null, password: string | null) => Promise<number>;
@@ -355,8 +432,9 @@ interface State {
   setMyName: (name: string) => Promise<void>;
   /** Stop the stale daemon; the event pump respawns a fresh one. */
   restartDaemon: () => Promise<void>;
-  /** "Move up/down": swap the row's rank with its neighbour (same direction). */
-  moveItem: (key: string, delta: 1 | -1) => void;
+  /** Reorder a list of rows: the keys, top to bottom, take the ranks those same
+   *  rows already held. Rows outside the list keep their place. */
+  reorderItems: (keys: string[]) => void;
   togglePauseAll: () => Promise<void>;
   /** Drop every finished row, daemon-side first — a local-only clear would just
    *  see them all come back with the next snapshot. */
@@ -423,7 +501,7 @@ export const useStore = create<State>((set, get) => {
       // yesterday's. `created` is 0 only from a daemon that predates the field —
       // then, and only then, fall back to when we noticed it.
       firstSeen: d.created > 0 ? d.created * 1000 : (prev?.firstSeen ?? now()),
-      rank: prev?.rank ?? nextRank(),
+      rank: rankFor(`t${d.id}`, prev),
       rate: prev?.rate,
       code: d.code ?? prev?.code,
       offerStatus: d.offer_status ?? undefined,
@@ -454,7 +532,7 @@ export const useStore = create<State>((set, get) => {
     downloadPeers: 0,
     files: 1,
     firstSeen: prev?.firstSeen ?? now(),
-    rank: prev?.rank ?? nextRank(),
+    rank: rankFor(`o${o.id}`, prev),
     copiesServed: 0,
     bytesServed: 0,
     lastPickup: 0,
@@ -483,7 +561,7 @@ export const useStore = create<State>((set, get) => {
           downloadPeers: 0,
           files: 1,
           firstSeen: now(),
-          rank: nextRank(),
+          rank: rankFor(key),
         } as UITransfer);
       return { transfers: { ...s.transfers, [key]: fn(existing) } };
     });
@@ -502,7 +580,7 @@ export const useStore = create<State>((set, get) => {
     search: "",
     pauseAll: false,
     paletteOpen: false,
-    sheetPaths: null,
+    sheetPicks: null,
     sheetTo: null,
     sheetMode: null,
     incomingOfferId: null,
@@ -546,7 +624,18 @@ export const useStore = create<State>((set, get) => {
       const unlistenEv = await onEngineEvent((ev) => get().applyEvent(ev));
       const unlistenConn = await onConnected((c) => {
         set({ connected: c });
-        if (c) get().reload();
+        // A daemon that came up explains itself by existing: drop any stale
+        // reason so the banner does not outlive the problem it described.
+        if (c) {
+          set({ loadError: null });
+          get().reload();
+        }
+      });
+      // The daemon has no terminal when the GUI spawns it, so without this its
+      // reason for not starting — an identity file it refuses, a relay it cannot
+      // reach — reaches nobody, and the window shows only "disconnesso".
+      const unlistenDaemonErr = await onDaemonError((reason) => {
+        if (!get().connected) set({ loadError: reason });
       });
 
       // Seed the snapshot, retrying until it lands. The backend pump emits
@@ -569,6 +658,7 @@ export const useStore = create<State>((set, get) => {
         stopped = true;
         unlistenEv();
         unlistenConn();
+        unlistenDaemonErr();
       };
     },
 
@@ -719,6 +809,12 @@ export const useStore = create<State>((set, get) => {
           // `arvolo contacts …` run in another process.
           void get().refreshContacts();
           break;
+        case "finished_cleared":
+          // Somebody else cleared the list — `arvolo status clear`, or another
+          // window. Without this the board keeps drawing rows the daemon has
+          // already forgotten, and goes on offering to clear them.
+          set(dropFinished);
+          break;
 
         // Pairing runs as a session, not a request/reply: these three events are
         // the only way its progress reaches the UI. Each is ignored unless it
@@ -797,15 +893,15 @@ export const useStore = create<State>((set, get) => {
       set({ theme: choice });
     },
     setPaletteOpen: (v) => set({ paletteOpen: v }),
-    openSheet: (paths, to, mode) =>
+    openSheet: (picks, to, mode) =>
       set({
-        sheetPaths: paths,
+        sheetPicks: picks,
         sheetTo: to ?? null,
         sheetMode: mode ?? null,
         incomingOfferId: null,
       }),
     closeSheet: () =>
-      set({ sheetPaths: null, sheetTo: null, sheetMode: null }),
+      set({ sheetPicks: null, sheetTo: null, sheetMode: null }),
     openIncoming: (offerId) => set({ incomingOfferId: offerId }),
     closeIncoming: () => set({ incomingOfferId: null }),
     openShare: (id) => set({ shareOpen: id }),
@@ -1020,32 +1116,32 @@ export const useStore = create<State>((set, get) => {
     },
     clearPairing: () => set({ pairing: null }),
 
-    send: async (to, paths, note) => {
+    send: async (to, items, note) => {
       const id = await act(t("store.errSend", to), () =>
-        api.sendTo(to, paths, note)
+        api.sendTo(to, items, note)
       );
-      set({ sheetPaths: null, sheetTo: null, sheetMode: null });
+      set({ sheetPicks: null, sheetTo: null, sheetMode: null });
       return id;
     },
-    deposit: async (to, paths, note, ttl, max, password) => {
+    deposit: async (to, items, note, ttl, max, password) => {
       // Unlike `send`, this does NOT close the send sheet. A deposit hands back
       // an `arvm…` ticket — the sender's own copy, for when the inbox route is
       // not wanted or is not working — and closing the panel on success would
       // destroy it the instant it was produced. The panel closes when the user
       // says so, exactly as it does for a code, a link or a ticket.
       const r = await act(t("store.errDeposit", to), () =>
-        api.depositTo(to, paths, note, ttl, max, password)
+        api.depositTo(to, items, note, ttl, max, password)
       );
       refreshDeposits();
       return r;
     },
-    ticket: async (paths) =>
-      act(t("store.errTicket"), () => api.serveTicket(paths, null)),
-    code: async (paths, keep) =>
-      act(t("store.errCode"), () => api.serveCode(paths, null, keep)),
-    link: async (path, ttl, max) => {
+    ticket: async (items) =>
+      act(t("store.errTicket"), () => api.serveTicket(items, null)),
+    code: async (items, keep) =>
+      act(t("store.errCode"), () => api.serveCode(items, null, keep)),
+    link: async (item, ttl, max) => {
       const url = await act(t("store.errLink"), () =>
-        api.createLink(path, ttl, max)
+        api.createLink(item, ttl, max)
       );
       refreshDeposits();
       return url;
@@ -1174,26 +1270,25 @@ export const useStore = create<State>((set, get) => {
       // The event pump notices the drop and respawns; the connected heartbeat
       // and the seed-retry loop take it from there.
     },
-    moveItem: (key, delta) =>
+    reorderItems: (keys) =>
       set((s) => {
-        const me = s.transfers[key];
-        if (!me) return {};
-        // Neighbours = same direction, ordered exactly as the board renders
-        // (rank descending). delta -1 = up (towards higher rank).
-        const siblings = Object.values(s.transfers)
-          .filter((tx) => tx.dir === me.dir)
-          .sort((a, b) => b.rank - a.rank);
-        const i = siblings.findIndex((tx) => tx.key === key);
-        const j = i + delta;
-        if (i < 0 || j < 0 || j >= siblings.length) return {};
-        const other = siblings[j];
-        return {
-          transfers: {
-            ...s.transfers,
-            [me.key]: { ...me, rank: other.rank },
-            [other.key]: { ...other, rank: me.rank },
-          },
-        };
+        const rows = keys.map((k) => s.transfers[k]).filter(Boolean);
+        if (rows.length < 2) return {};
+        // The list keeps the slots it already occupies and only the occupants
+        // change places. That is what lets a section be reordered on its own:
+        // rows in the other sections — and in the other column — hold ranks
+        // outside this set and never move relative to it.
+        const slots = rows.map((r) => r.rank).sort((a, b) => b - a);
+        if (rows.every((r, i) => r.rank === slots[i])) return {};
+        const transfers = { ...s.transfers };
+        rows.forEach((r, i) => {
+          transfers[r.key] = { ...r, rank: slots[i] };
+        });
+        // Persisted here and nowhere else: a reorder is the only moment the order
+        // is something the *user* said rather than the order rows happened to
+        // arrive in, and it is the only one worth carrying to the next run.
+        saveOrder(transfers);
+        return { transfers };
       }),
     togglePauseAll: async () => {
       const rows = Object.values(get().transfers);
@@ -1219,17 +1314,7 @@ export const useStore = create<State>((set, get) => {
       // the next snapshot. Its ClearFinished applies the same definition of
       // "finished" (a deposit awaiting pickup is NOT finished — still cancellable).
       await act(t("store.errClearFinished"), () => api.clearFinished());
-      set((s) => {
-        const kept: Record<string, UITransfer> = {};
-        for (const [k, tx] of Object.entries(s.transfers)) {
-          const finished =
-            tx.status === "completed" ||
-            tx.status === "failed" ||
-            tx.status === "cancelled";
-          if (!finished) kept[k] = tx;
-        }
-        return { transfers: kept };
-      });
+      set(dropFinished);
     },
   };
 });

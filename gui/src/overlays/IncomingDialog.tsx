@@ -17,7 +17,8 @@
 // deciding without it is deciding blind.
 
 import { useMemo, useState } from "react";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { api } from "../ipc";
+import type { PickedItem } from "../types";
 import { useStore } from "../store";
 import { fmtBytes } from "../format";
 import { useT } from "../i18n";
@@ -39,7 +40,7 @@ export function IncomingDialog() {
   const blockContact = useStore((s) => s.blockContact);
   const downloadDir = useStore((s) => s.status?.download_dir ?? "");
 
-  const [out, setOut] = useState<string | null>(null);
+  const [out, setOut] = useState<PickedItem | null>(null);
   const [password, setPassword] = useState("");
   // A deposit sealed with a password looks exactly like any other offer until the
   // fetch refuses it — nothing in the offer says so. So the field appears only
@@ -66,7 +67,7 @@ export function IncomingDialog() {
   const doAccept = async () => {
     setBusy("accept");
     try {
-      await accept(offerId, out, password || null);
+      await accept(offerId, out?.id ?? null, password || null);
       toast.ok(t("incoming.started"), tx.name);
     } catch (e) {
       // The store already reported it. The one refusal worth reacting to here is
@@ -231,15 +232,17 @@ export function IncomingDialog() {
           <div className="hstack-sm">
             <TextInput
               readOnly
-              value={out ?? ""}
+              value={out?.name ?? ""}
               placeholder={downloadDir}
               aria-label={t("receive.whereAria")}
             />
             <Button
               size="sm"
               onClick={async () => {
-                const picked = await openDialog({ directory: true });
-                if (typeof picked === "string") setOut(picked);
+                // Native, Rust-side: what comes back is an id + folder name,
+                // never a path (see `bridge::PickedFiles`).
+                const picked = await api.pickFiles(true);
+                if (picked.length > 0) setOut(picked[0]);
               }}
             >
               <Icon.Folder size={13} /> {t("receive.choose")}

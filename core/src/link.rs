@@ -58,6 +58,10 @@ pub struct LinkOutcome {
     pub size: u64,
     /// Sender-only secret to later revoke the link via [`crate::flow::revoke_offline`].
     pub revoke_token: String,
+    /// Seconds the relay actually granted, which may be less than asked (it clamps
+    /// to its own `ARVOLO_MAX_TTL`). The link the sender is about to paste into a
+    /// message dies at *this* deadline, so this is the one to quote back to them.
+    pub ttl_secs: u64,
 }
 
 /// A fresh sender-held secret (16 random bytes, base32) whose BLAKE3 hash the
@@ -187,7 +191,7 @@ pub fn decrypt_link(blob: &[u8], key: &[u8; CHUNK_KEY_LEN]) -> Result<(String, V
 /// feature flag; a relay that explicitly reports `"links":false` disables them.
 pub async fn relay_allows_links(relay: &str) -> Result<bool> {
     let url = format!("{}/v1/features", relay.trim_end_matches('/'));
-    let resp = match reqwest::Client::new().get(&url).send().await {
+    let resp = match crate::http::client().get(&url).send().await {
         Ok(r) if r.status().is_success() => r,
         _ => return Ok(true),
     };
@@ -222,7 +226,7 @@ pub async fn deposit_link(path: &Path, relay: &str, ttl: u64, max: u32) -> Resul
 
     let relay = relay.trim_end_matches('/').to_string();
     let url = format!("{relay}/v1/deposit?ttl={ttl}&max={max}");
-    let claim = reqwest::Client::new()
+    let resp = crate::http::client()
         .post(&url)
         // No HPKE on the link path → empty encapped key (decodes to no bytes).
         .header("x-arvolo-encapped-key", "")
@@ -235,10 +239,9 @@ pub async fn deposit_link(path: &Path, relay: &str, ttl: u64, max: u32) -> Resul
         .await
         .context("deposit request")?
         .error_for_status()
-        .context("relay rejected deposit")?
-        .text()
-        .await
-        .context("read claim")?;
+        .context("relay rejected deposit")?;
+    let ttl_secs = crate::flow::granted_ttl(&resp, ttl);
+    let claim = resp.text().await.context("read claim")?;
     let claim = claim.trim().to_string();
 
     let link = format!("{relay}/dl/{claim}#{}", encode_key(&key));
@@ -248,6 +251,7 @@ pub async fn deposit_link(path: &Path, relay: &str, ttl: u64, max: u32) -> Resul
         name,
         size,
         revoke_token,
+        ttl_secs,
     })
 }
 

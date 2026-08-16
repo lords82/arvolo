@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::{Context, Result};
 use arvolo_core::manager::{ManagerEvent, TransferManager};
@@ -158,10 +159,16 @@ pub(crate) async fn daemon(
     let pending: Arc<Mutex<HashMap<String, ipc::protocol::OfferDto>>> =
         Arc::new(Mutex::new(HashMap::new()));
 
+    // How many front-ends hold an event subscription open. Shared with the IPC
+    // server, which maintains it, and read here to decide whether this daemon
+    // should raise the desktop notification itself or leave it to the UI.
+    let front_ends: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
+
     // Engine task: park incoming offers and persist finished transfers to history,
     // whether or not a front-end is attached.
     {
         let mut events = manager.subscribe();
+        let front_ends = front_ends.clone();
         let manager = manager.clone();
         let pending = pending.clone();
         tokio::spawn(async move {
@@ -215,8 +222,11 @@ pub(crate) async fn daemon(
                                 sanitize_display(&name)
                             );
                             // Auto-accept, but still surface a notification so the
-                            // user knows a trusted download is happening.
-                            notify::auto_downloading(&name, &who, &size_h);
+                            // user knows a trusted download is happening — unless a
+                            // front-end is attached and will say so itself.
+                            if !front_ends.load(Ordering::SeqCst) > 0 {
+                                notify::auto_downloading(&name, &who, &size_h);
+                            }
                             if let Err(e) = manager.accept_offer(&id, None).await {
                                 eprintln!("   ✗ could not auto-accept: {e:#}");
                             }
@@ -241,8 +251,11 @@ pub(crate) async fn daemon(
                                     "📨 offer parked: {name} ({size_h}) from {who} — approve with `arvolo accept {id}`"
                                 );
                                 // Nudge the user with a desktop notification (best-effort;
-                                // no-op on headless hosts, where the log line above stands in).
-                                notify::offer_awaiting(&name, &who, &size_h);
+                                // no-op on headless hosts, where the log line above stands
+                                // in). A attached front-end does its own, in its own words.
+                                if !front_ends.load(Ordering::SeqCst) > 0 {
+                                    notify::offer_awaiting(&name, &who, &size_h);
+                                }
                             }
                             pending.lock().unwrap().insert(
                                 id.clone(),
@@ -313,7 +326,7 @@ pub(crate) async fn daemon(
     }
 
     let shutdown = daemon_shutdown_signal();
-    let daemon = ipc::server::Daemon::new(manager, Some(relay), download_dir, pending);
+    let daemon = ipc::server::Daemon::new(manager, Some(relay), download_dir, pending, front_ends);
     let pairings = daemon.pairings.clone();
     let result = ipc::server::run(daemon, listener, shutdown).await;
     // A hosted `device pair` offers this device's identity secret for its whole
