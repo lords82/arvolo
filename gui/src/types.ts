@@ -330,3 +330,12 @@ export interface UITransfer {
   lastPickup: number;
   fromDownload: number;
 }
+
+/** One picked file as the backend registers it: an opaque id plus display
+ *  metadata. Deliberately no path — see `bridge::PickedFiles`. */
+export interface PickedItem {
+  id: string;
+  name: string;
+  size: number;
+  isDir: boolean;
+}

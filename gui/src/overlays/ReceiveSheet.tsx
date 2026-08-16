@@ -10,7 +10,8 @@
 // so the button is never a leap of faith.
 
 import { useEffect, useState } from "react";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { api } from "../ipc";
+import type { PickedItem } from "../types";
 import { useStore } from "../store";
 import { useT } from "../i18n";
 import { Icon } from "../ui/Icons";
@@ -53,7 +54,7 @@ export function ReceiveSheet() {
   const downloadDir = useStore((s) => s.status?.download_dir ?? "");
 
   const [value, setValue] = useState("");
-  const [out, setOut] = useState<string | null>(null);
+  const [out, setOut] = useState<PickedItem | null>(null);
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -73,7 +74,7 @@ export function ReceiveSheet() {
   const submit = async () => {
     setBusy(true);
     try {
-      await receive(value.trim(), out, password || null);
+      await receive(value.trim(), out?.id ?? null, password || null);
       toast.ok(t("receive.started"), t("receive.startedDetail"));
     } catch {
       // The store's `act` already reported it.
@@ -151,15 +152,17 @@ export function ReceiveSheet() {
           <div className="hstack-sm">
             <TextInput
               readOnly
-              value={out ?? ""}
+              value={out?.name ?? ""}
               placeholder={downloadDir}
               aria-label={t("receive.whereAria")}
             />
             <Button
               size="sm"
               onClick={async () => {
-                const picked = await openDialog({ directory: true });
-                if (typeof picked === "string") setOut(picked);
+                // Native, Rust-side: what comes back is an id + folder name,
+                // never a path (see `bridge::PickedFiles`).
+                const picked = await api.pickFiles(true);
+                if (picked.length > 0) setOut(picked[0]);
               }}
             >
               <Icon.Folder size={13} /> {t("receive.choose")}

@@ -29,6 +29,8 @@ const EV_ENGINE: &str = "engine://event";
 const EV_CONNECTED: &str = "engine://connected";
 /// Why the daemon would not start, when it would not start.
 const EV_DAEMON_ERROR: &str = "engine://daemon-error";
+/// Files just dropped on the window, already registered: `[PickedItemDto]`.
+const EV_FILES_PICKED: &str = "files://picked";
 
 /// Whether the system tray icon actually got created. Hiding the window on close
 /// is only safe if there is a tray to get back from: on Linux desktops without a
@@ -85,6 +87,7 @@ fn main() {
             bridge::cancel_pairing,
             bridge::import_contacts,
             bridge::export_contacts,
+            bridge::pick_files,
             bridge::gui_version,
         ])
         .setup(|app| {
@@ -97,6 +100,7 @@ fn main() {
             };
             app.manage(HasTray(has_tray));
             app.manage(attention::State::default());
+            app.manage(bridge::PickedFiles::new());
             // Ask now, not at the first arrival: a permission prompt that appears
             // the moment somebody sends you a file is in the way of the thing you
             // wanted to see. No-op when there is no bundle to ask for.
@@ -111,6 +115,18 @@ fn main() {
         // the tray only — off the Dock on macOS, off the taskbar elsewhere.
         // "Esci" in the tray menu quits.
         .on_window_event(|window, event| {
+            // A drop is handled HERE, on the window, and only the registered ids
+            // reach the frontend. The webview still receives its own drag-drop
+            // event with the raw paths — that cannot be turned off without losing
+            // the hover states — but those strings are inert: no command accepts a
+            // path any more, so knowing one buys nothing.
+            if let WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
+                let app = window.app_handle();
+                let items = bridge::register_paths(&app.state::<bridge::PickedFiles>(), paths);
+                if !items.is_empty() {
+                    let _ = app.emit(EV_FILES_PICKED, items);
+                }
+            }
             if let WindowEvent::CloseRequested { api, .. } = event {
                 let app = window.app_handle();
                 // No tray to restore from: let the close through, which quits.

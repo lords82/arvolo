@@ -5,7 +5,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, render, screen } from "@testing-library/react";
-import { dto, harness, makeIpcMock, resetHarness } from "./mocks";
+import { dto, harness, makeIpcMock, resetHarness, pick } from "./mocks";
 
 vi.mock("../ipc", () => makeIpcMock());
 
@@ -50,7 +50,7 @@ function reset() {
     transfers: {},
     search: "",
     pauseAll: false,
-    sheetPaths: null,
+    sheetPicks: null,
     incomingOfferId: null,
     personOpen: null,
     paletteOpen: false,
@@ -82,7 +82,7 @@ describe("the window survives what the user does to it", () => {
     expect(screen.queryByText("What you are sending")).toBeNull(); // closed
 
     await act(async () => {
-      useStore.getState().openSheet(["/Users/ls/Scrivania/relazione.pdf"]);
+      useStore.getState().openSheet([pick("relazione.pdf")]);
     });
 
     expect(screen.queryByText(/broke in the interface/i), "the tree must not crash").toBeNull();
@@ -93,21 +93,21 @@ describe("the window survives what the user does to it", () => {
   it("39. dropping a file opens the send panel without blanking the window", () => {
     // The exact gesture: a real OS drop hands the store a path, which mounts the
     // send sheet. If that render throws, the tree unmounts and the window goes white.
-    useStore.getState().openSheet(["/Users/ls/Scrivania/relazione.pdf"]);
+    useStore.getState().openSheet([pick("relazione.pdf")]);
     render(<SendSheet />);
     expect(screen.getByText("What you are sending")).toBeDefined();
     expect(screen.getByText("relazione.pdf")).toBeDefined();
   });
 
   it("40. dropping several files at once still renders", () => {
-    useStore.getState().openSheet(["/a/one.txt", "/a/two.txt", "/a/three.txt"]);
+    useStore.getState().openSheet([pick("one.txt"), pick("two.txt"), pick("three.txt")]);
     render(<SendSheet />);
     expect(screen.getByText("one.txt")).toBeDefined();
     expect(screen.getByText(/3 items/)).toBeDefined();
   });
 
   it("41. a path with no extension, spaces or unicode does not break the chip", () => {
-    useStore.getState().openSheet(["/Users/ls/Scrivania/Relazione finale — 2026"]);
+    useStore.getState().openSheet([pick("Relazione finale — 2026")]);
     render(<SendSheet />);
     expect(screen.getByText("Relazione finale — 2026")).toBeDefined();
   });
@@ -226,7 +226,7 @@ describe("the window survives what the user does to it", () => {
   it("45. the send panel lists saved contacts to send to", async () => {
     harness.snapshot.contacts = [dto.contact({ name: "proj" })];
     useStore.setState({ contacts: [dto.contact({ name: "proj" })] });
-    useStore.getState().openSheet(["/a.txt"]);
+    useStore.getState().openSheet([pick("a.txt")]);
     render(<SendSheet />);
     expect(screen.getByText("proj")).toBeDefined();
   });

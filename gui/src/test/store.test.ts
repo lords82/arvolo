@@ -28,7 +28,7 @@ async function boot(expectConnected = true) {
     transfers: {},
     search: "",
     pauseAll: false,
-    sheetPaths: null,
+    sheetPicks: null,
     incomingOfferId: null,
   });
   const dispose = await useStore.getState().init();

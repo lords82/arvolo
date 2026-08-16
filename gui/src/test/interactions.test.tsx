@@ -19,7 +19,7 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
-import { dto, harness, makeIpcMock, resetHarness } from "./mocks";
+import { dto, harness, makeIpcMock, resetHarness, pick } from "./mocks";
 
 vi.mock("../ipc", () => makeIpcMock());
 vi.mock("@tauri-apps/api/webview", () => ({
@@ -65,7 +65,7 @@ function fresh() {
     transfers: {},
     search: "",
     pauseAll: false,
-    sheetPaths: null,
+    sheetPicks: null,
     sheetTo: null,
     incomingOfferId: null,
     personOpen: null,
@@ -247,19 +247,25 @@ describe("an incoming offer", () => {
   });
 
   it("133. Accetta uses the folder the user picked", async () => {
-    dialogOpen.mockImplementation(() => Promise.resolve("/tmp/qui" as unknown));
+    // The folder arrives from the native Rust-side picker as an id plus a display
+    // name; what the accept command receives is the id, and resolving it back to
+    // a path happens where the webview cannot reach.
+    const { api } = await import("../ipc");
+    const dir = pick("qui", { isDir: true });
+    const spy = vi.spyOn(api, "pickFiles").mockResolvedValue([dir]);
     await renderAppWithOffer();
     fireEvent.click(screen.getByText("arrivo.zip"));
     fireEvent.click(await screen.findByText("Choose…"));
+    await waitFor(() => expect(spy).toHaveBeenCalledWith(true));
     await waitFor(() =>
       expect(
         (screen.getByLabelText("Destination folder") as HTMLInputElement)
           .value
-      ).toBe("/tmp/qui")
+      ).toBe("qui")
     );
     fireEvent.click(screen.getByText("Accept and download"));
     await waitFor(() =>
-      expect(harness.recorder.accept).toEqual([["o1", "/tmp/qui", null]])
+      expect(harness.recorder.accept).toEqual([["o1", dir.id, null]])
     );
   });
 });
@@ -460,15 +466,59 @@ describe("the send panel", () => {
     return screen.findByText("What you are sending");
   };
 
-  it("124. Files… opens the OS picker", async () => {
+  it("124. Files… asks the backend to open the native picker", async () => {
+    // The picker moved to the Rust side on purpose: the webview asks for "a
+    // pick" and gets back opaque ids, never paths. What this pins is that the
+    // button reaches that command — and that what it returns lands in the list
+    // under the display name the backend chose.
+    const { api } = await import("../ipc"); // the mocked module
+    const spy = vi
+      .spyOn(api, "pickFiles")
+      .mockResolvedValue([pick("scelto.txt")]);
     await openSend();
     fireEvent.click(screen.getByText("Files…"));
-    await waitFor(() => expect(dialogOpen).toHaveBeenCalled());
+    await waitFor(() => expect(spy).toHaveBeenCalledWith(false));
+    expect(await screen.findByText("scelto.txt")).toBeDefined();
+  });
+
+  it("a drop arrives as registered items from the window, and opens the sheet", async () => {
+    // The webview's own drag-drop payload is ignored by design: what opens the
+    // sheet is the `files://picked` event the Rust window handler emits after
+    // registering the paths. This drives that exact channel.
+    render(<App />);
+    await act(async () => {
+      harness.dropFiles([pick("lanciato.pdf")]);
+    });
+    expect(await screen.findByText("What you are sending")).toBeDefined();
+    expect(screen.getByText("lanciato.pdf")).toBeDefined();
+  });
+
+  it("a send hands the daemon registry ids, never paths", async () => {
+    // The whole point of the picked-file registry: the only thing the webview can
+    // name is an id the backend minted. If a path ever shows up here again, the
+    // boundary has moved back to the wrong side.
+    harness.snapshot.contacts = [dto.contact({ name: "proj" })];
+    useStore.setState({ sheetPicks: [pick("a.txt"), pick("b.txt")] });
+    render(<App />);
+    fireEvent.click(await screen.findByText("proj"));
+    fireEvent.click(
+      within(document.querySelector(".sheet-foot") as HTMLElement).getByText(
+        "Send"
+      )
+    );
+    await waitFor(() =>
+      expect(harness.recorder.sendTo).toEqual([
+        ["proj", [pick("a.txt").id, pick("b.txt").id], ""],
+      ])
+    );
+    for (const sent of harness.recorder.sendTo[0][1]) {
+      expect(sent).not.toContain("/");
+    }
   });
 
   it("125. picking a contact and sending reaches the daemon", async () => {
     harness.snapshot.contacts = [dto.contact({ name: "proj" })];
-    useStore.setState({ sheetPaths: ["/a.txt"] });
+    useStore.setState({ sheetPicks: [pick("a.txt")] });
     render(<App />);
     fireEvent.click(await screen.findByText("proj"));
     // "Send" is also the header's own send button; the one under test is the
@@ -485,7 +535,7 @@ describe("the send panel", () => {
 
   it("126. the note typed in rides along with the send", async () => {
     harness.snapshot.contacts = [dto.contact({ name: "proj" })];
-    useStore.setState({ sheetPaths: ["/a.txt"] });
+    useStore.setState({ sheetPicks: [pick("a.txt")] });
     render(<App />);
     fireEvent.click(await screen.findByText("proj"));
     fireEvent.change(
@@ -505,7 +555,7 @@ describe("the send panel", () => {
   it("127. a refused send says why instead of closing silently", async () => {
     harness.snapshot.contacts = [dto.contact({ name: "proj" })];
     harness.fail = new Set(["sendTo"]);
-    useStore.setState({ sheetPaths: ["/a.txt"] });
+    useStore.setState({ sheetPicks: [pick("a.txt")] });
     render(<App />);
     fireEvent.click(await screen.findByText("proj"));
     fireEvent.click(
@@ -515,11 +565,11 @@ describe("the send panel", () => {
     );
     await waitFor(() => expect(toastText()).toBeTruthy());
     // Still open, so the user can change something and retry.
-    expect(useStore.getState().sheetPaths).not.toBeNull();
+    expect(useStore.getState().sheetPicks).not.toBeNull();
   });
 
   it("129. the Ticket mode mints a ticket and shows it", async () => {
-    useStore.setState({ sheetPaths: ["/a.txt"] });
+    useStore.setState({ sheetPicks: [pick("a.txt")] });
     render(<App />);
     fireEvent.click(await screen.findByText("Ticket"));
     fireEvent.click(screen.getByText("Create the ticket"));
@@ -527,7 +577,7 @@ describe("the send panel", () => {
   });
 
   it("130. the Link mode creates a link and shows it", async () => {
-    useStore.setState({ sheetPaths: ["/a.txt"] });
+    useStore.setState({ sheetPicks: [pick("a.txt")] });
     render(<App />);
     fireEvent.click(await screen.findByText("Link"));
     fireEvent.click(screen.getByText("Create the link"));
@@ -538,7 +588,7 @@ describe("the send panel", () => {
 
   it("131. a relay that refuses links says so instead of showing nothing", async () => {
     harness.fail = new Set(["createLink"]);
-    useStore.setState({ sheetPaths: ["/a.txt"] });
+    useStore.setState({ sheetPicks: [pick("a.txt")] });
     render(<App />);
     fireEvent.click(await screen.findByText("Link"));
     fireEvent.click(screen.getByText("Create the link"));
@@ -546,7 +596,7 @@ describe("the send panel", () => {
   });
 
   it("the Code mode shows a code to read out", async () => {
-    useStore.setState({ sheetPaths: ["/a.txt"] });
+    useStore.setState({ sheetPicks: [pick("a.txt")] });
     render(<App />);
     fireEvent.click(await screen.findByText("Code"));
     fireEvent.click(screen.getByText("Generate the code"));
@@ -555,7 +605,7 @@ describe("the send panel", () => {
 
   it("mailbox options only appear once the send is a deposit", async () => {
     harness.snapshot.contacts = [dto.contact({ name: "proj" })];
-    useStore.setState({ sheetPaths: ["/a.txt"] });
+    useStore.setState({ sheetPicks: [pick("a.txt")] });
     render(<App />);
     await screen.findByText("proj");
     // TTL and password protect a *deposit*; offering them on a live send would
@@ -567,7 +617,7 @@ describe("the send panel", () => {
 
   it("a deposit send carries its ttl, cap and password to the daemon", async () => {
     harness.snapshot.contacts = [dto.contact({ name: "proj" })];
-    useStore.setState({ sheetPaths: ["/a.txt"] });
+    useStore.setState({ sheetPicks: [pick("a.txt")] });
     render(<App />);
     fireEvent.click(await screen.findByText("proj"));
     fireEvent.click(screen.getByLabelText("Leave it in the mailbox"));
@@ -585,7 +635,7 @@ describe("the send panel", () => {
 
   it("a deposit hands back the arvm… ticket for hand-delivery", async () => {
     harness.snapshot.contacts = [dto.contact({ name: "proj" })];
-    useStore.setState({ sheetPaths: ["/a.txt"] });
+    useStore.setState({ sheetPicks: [pick("a.txt")] });
     render(<App />);
     fireEvent.click(await screen.findByText("proj"));
     fireEvent.click(screen.getByLabelText("Leave it in the mailbox"));
@@ -595,7 +645,7 @@ describe("the send panel", () => {
 
   it("reopening the panel never inherits the last send's password", async () => {
     harness.snapshot.contacts = [dto.contact({ name: "proj" })];
-    useStore.setState({ sheetPaths: ["/a.txt"] });
+    useStore.setState({ sheetPicks: [pick("a.txt")] });
     render(<App />);
     fireEvent.click(await screen.findByText("proj"));
     fireEvent.click(screen.getByLabelText("Leave it in the mailbox"));
@@ -603,7 +653,7 @@ describe("the send panel", () => {
       target: { value: "segreto" },
     });
     useStore.getState().closeSheet();
-    useStore.getState().openSheet(["/b.txt"]);
+    useStore.getState().openSheet([pick("b.txt")]);
     fireEvent.click(await screen.findByText("proj"));
     fireEvent.click(screen.getByLabelText("Leave it in the mailbox"));
     // A password carried over would silently protect a different file for a
@@ -616,10 +666,10 @@ describe("the send panel", () => {
   });
 
   it("132. the ✕ closes the panel without sending", async () => {
-    useStore.setState({ sheetPaths: ["/a.txt"] });
+    useStore.setState({ sheetPicks: [pick("a.txt")] });
     render(<App />);
     fireEvent.click(await screen.findByLabelText("Close"));
-    expect(useStore.getState().sheetPaths).toBeNull();
+    expect(useStore.getState().sheetPicks).toBeNull();
     expect(harness.recorder.sendTo).toEqual([]);
   });
 });
@@ -751,7 +801,7 @@ describe("the address book", () => {
       document.querySelector(".sheet-foot") as HTMLElement
     ).getByText("Send").closest("button") as HTMLButtonElement;
     expect(submit.disabled).toBe(true);
-    useStore.getState().openSheet(["/a.txt"], "proj");
+    useStore.getState().openSheet([pick("a.txt")], "proj");
     await waitFor(() => expect(submit.disabled).toBe(false));
     fireEvent.click(submit);
     await waitFor(() => expect(harness.recorder.sendTo[0]?.[0]).toBe("proj"));

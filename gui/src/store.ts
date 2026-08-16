@@ -21,6 +21,7 @@ import type {
   TransferDto,
   UIStatus,
   UITransfer,
+  PickedItem,
 } from "./types";
 
 /** The six places the app can be. One at a time, always — the previous model
@@ -309,7 +310,7 @@ interface State {
   search: string;
   pauseAll: boolean;
   paletteOpen: boolean;
-  sheetPaths: string[] | null; // send sheet open when non-null
+  sheetPicks: PickedItem[] | null; // send sheet open when non-null
   /** Recipient the send sheet should open on, when it was opened *from* someone —
    *  a person card, or "Invia a X" in the palette. Without this, choosing a
    *  person and then having to choose them again is the app forgetting what the
@@ -346,7 +347,7 @@ interface State {
   go: (r: Route) => void;
   setTheme: (choice: ThemeChoice) => void;
   setPaletteOpen: (v: boolean) => void;
-  openSheet: (paths: string[], to?: string, mode?: SendMode) => void;
+  openSheet: (picks: PickedItem[], to?: string, mode?: SendMode) => void;
   closeSheet: () => void;
   openIncoming: (offerId: string) => void;
   closeIncoming: () => void;
@@ -384,20 +385,20 @@ interface State {
   clearPairing: () => void;
 
   // actions (forward to the daemon, then let events reconcile)
-  send: (to: string, paths: string[], note: string) => Promise<number>;
+  send: (to: string, items: string[], note: string) => Promise<number>;
   /** `send --deposit`: skip the live attempt entirely. Returns the `arvm…`
    *  ticket, which is the sender's copy for hand-delivery. */
   deposit: (
     to: string,
-    paths: string[],
+    items: string[],
     note: string,
     ttl: number | null,
     max: number | null,
     password: string | null
   ) => Promise<{ id: number; ticket: string }>;
-  ticket: (paths: string[]) => Promise<{ id: number; ticket: string }>;
+  ticket: (items: string[]) => Promise<{ id: number; ticket: string }>;
   /** Host a short pairing code in the daemon (keep = serve every receiver). */
-  code: (paths: string[], keep: boolean) => Promise<{ id: number; code: string }>;
+  code: (items: string[], keep: boolean) => Promise<{ id: number; code: string }>;
   link: (path: string, ttl: number | null, max: number | null) => Promise<string>;
   /** Receive from a pasted arvc… ticket, pairing code or arvm… offline ticket. */
   receive: (ticket: string, out: string | null, password: string | null) => Promise<number>;
@@ -579,7 +580,7 @@ export const useStore = create<State>((set, get) => {
     search: "",
     pauseAll: false,
     paletteOpen: false,
-    sheetPaths: null,
+    sheetPicks: null,
     sheetTo: null,
     sheetMode: null,
     incomingOfferId: null,
@@ -892,15 +893,15 @@ export const useStore = create<State>((set, get) => {
       set({ theme: choice });
     },
     setPaletteOpen: (v) => set({ paletteOpen: v }),
-    openSheet: (paths, to, mode) =>
+    openSheet: (picks, to, mode) =>
       set({
-        sheetPaths: paths,
+        sheetPicks: picks,
         sheetTo: to ?? null,
         sheetMode: mode ?? null,
         incomingOfferId: null,
       }),
     closeSheet: () =>
-      set({ sheetPaths: null, sheetTo: null, sheetMode: null }),
+      set({ sheetPicks: null, sheetTo: null, sheetMode: null }),
     openIncoming: (offerId) => set({ incomingOfferId: offerId }),
     closeIncoming: () => set({ incomingOfferId: null }),
     openShare: (id) => set({ shareOpen: id }),
@@ -1115,32 +1116,32 @@ export const useStore = create<State>((set, get) => {
     },
     clearPairing: () => set({ pairing: null }),
 
-    send: async (to, paths, note) => {
+    send: async (to, items, note) => {
       const id = await act(t("store.errSend", to), () =>
-        api.sendTo(to, paths, note)
+        api.sendTo(to, items, note)
       );
-      set({ sheetPaths: null, sheetTo: null, sheetMode: null });
+      set({ sheetPicks: null, sheetTo: null, sheetMode: null });
       return id;
     },
-    deposit: async (to, paths, note, ttl, max, password) => {
+    deposit: async (to, items, note, ttl, max, password) => {
       // Unlike `send`, this does NOT close the send sheet. A deposit hands back
       // an `arvm…` ticket — the sender's own copy, for when the inbox route is
       // not wanted or is not working — and closing the panel on success would
       // destroy it the instant it was produced. The panel closes when the user
       // says so, exactly as it does for a code, a link or a ticket.
       const r = await act(t("store.errDeposit", to), () =>
-        api.depositTo(to, paths, note, ttl, max, password)
+        api.depositTo(to, items, note, ttl, max, password)
       );
       refreshDeposits();
       return r;
     },
-    ticket: async (paths) =>
-      act(t("store.errTicket"), () => api.serveTicket(paths, null)),
-    code: async (paths, keep) =>
-      act(t("store.errCode"), () => api.serveCode(paths, null, keep)),
-    link: async (path, ttl, max) => {
+    ticket: async (items) =>
+      act(t("store.errTicket"), () => api.serveTicket(items, null)),
+    code: async (items, keep) =>
+      act(t("store.errCode"), () => api.serveCode(items, null, keep)),
+    link: async (item, ttl, max) => {
       const url = await act(t("store.errLink"), () =>
-        api.createLink(path, ttl, max)
+        api.createLink(item, ttl, max)
       );
       refreshDeposits();
       return url;

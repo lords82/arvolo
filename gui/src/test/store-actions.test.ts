@@ -4,7 +4,7 @@
 // on a refusal, a click that reported success the daemon never gave).
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { dto, harness, makeIpcMock, resetHarness } from "./mocks";
+import { dto, harness, makeIpcMock, resetHarness, pick } from "./mocks";
 
 vi.mock("../ipc", () => makeIpcMock());
 
@@ -23,7 +23,7 @@ async function boot(expectConnected = true) {
     transfers: {},
     search: "",
     pauseAll: false,
-    sheetPaths: null,
+    sheetPicks: null,
     incomingOfferId: null,
   });
   const dispose = await useStore.getState().init();
@@ -147,25 +147,25 @@ describe("navigation", () => {
 });
 
 describe("send panel", () => {
-  it("71. openSheet carries the dropped paths", async () => {
+  it("71. openSheet carries the registered picks", async () => {
     await boot();
-    s().openSheet(["/a.txt", "/b.txt"]);
-    expect(s().sheetPaths).toEqual(["/a.txt", "/b.txt"]);
+    s().openSheet([pick("a.txt"), pick("b.txt")]);
+    expect(s().sheetPicks).toEqual([pick("a.txt"), pick("b.txt")]);
   });
 
   it("72. opening the panel dismisses the dialog underneath it", async () => {
     await boot();
     s().openIncoming("o1");
-    s().openSheet(["/a.txt"]);
+    s().openSheet([pick("a.txt")]);
     // Two overlays at once is a UI that fights itself.
     expect(s().incomingOfferId).toBeNull();
   });
 
   it("73. closeSheet clears the paths so a stale file cannot be re-sent", async () => {
     await boot();
-    s().openSheet(["/a.txt"]);
+    s().openSheet([pick("a.txt")]);
     s().closeSheet();
-    expect(s().sheetPaths).toBeNull();
+    expect(s().sheetPicks).toBeNull();
   });
 });
 

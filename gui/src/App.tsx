@@ -8,6 +8,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { onPickedFiles } from "./ipc";
 import { fire, TITLE_KEY, useStore, type Route } from "./store";
 import { useT } from "./i18n";
 import { Icon } from "./ui/Icons";
@@ -170,22 +171,16 @@ export function App() {
     };
   }, []);
 
-  // Drag and drop, window-wide. Tauri delivers real filesystem paths here, which
-  // is the whole reason sending works by dropping: a browser File object would
-  // have no path for the daemon to read.
+  // Drag and drop, window-wide. The webview's own event is used ONLY for the
+  // hover visuals: the payload it carries on drop is ignored, because the drop
+  // itself is handled on the Rust side of the window, which registers the paths
+  // and emits `files://picked` with opaque ids (see `bridge::PickedFiles` — no
+  // command accepts a filesystem path from this webview any more).
   useEffect(() => {
     let un: (() => void) | undefined;
     getCurrentWebview()
       .onDragDropEvent((e) => {
-        if (e.payload.type === "over" || e.payload.type === "enter") {
-          setDragging(true);
-        } else if (e.payload.type === "drop") {
-          setDragging(false);
-          const paths = e.payload.paths ?? [];
-          if (paths.length) openSheet(paths);
-        } else {
-          setDragging(false);
-        }
+        setDragging(e.payload.type === "over" || e.payload.type === "enter");
       })
       .then((f) => {
         un = f;
@@ -193,6 +188,19 @@ export function App() {
       .catch(() => {
         // No drag-drop in this webview build; the picker still works.
       });
+    return () => un?.();
+  }, []);
+
+  // The registered result of a drop, from the window handler in Rust.
+  useEffect(() => {
+    let un: (() => void) | undefined;
+    onPickedFiles((items) => {
+      if (items.length) openSheet(items);
+    })
+      .then((f) => {
+        un = f;
+      })
+      .catch(() => {});
     return () => un?.();
   }, [openSheet]);
 
