@@ -8,6 +8,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { enable as autostartEnable } from "@tauri-apps/plugin-autostart";
 import { onPickedFiles } from "./ipc";
 import { fire, TITLE_KEY, useStore, type Route } from "./store";
 import { useT } from "./i18n";
@@ -94,6 +95,28 @@ export function App() {
       cleanup?.();
     };
   }, [init]);
+
+  // Receive-first default: the very first launch registers the login entry, so
+  // Arvolo is already there the day somebody sends a file. Applied exactly
+  // once — the marker, not the OS state, is what makes this a default rather
+  // than a rule: after it is set, the switch in Settings is the only thing
+  // that touches autostart again, so "off" stays off. Not in dev, where the
+  // entry would point at a debug binary.
+  useEffect(() => {
+    if (import.meta.env.DEV) return;
+    try {
+      if (localStorage.getItem("arvolo.autostartDefault")) return;
+      localStorage.setItem("arvolo.autostartDefault", "applied");
+    } catch {
+      // A refusing localStorage cannot remember "once": better no default than
+      // one that re-applies — and re-overrides the user — on every launch.
+      return;
+    }
+    autostartEnable().catch(() => {
+      // The platform said no (no autostart dir, an odd install). Not worth a
+      // banner at first boot; the switch in Settings still works.
+    });
+  }, []);
 
   // Native feel: no webview context menu (right-click → Reload/Inspect), and in
   // production also swallow the reload / devtools keyboard shortcuts. Text inputs
