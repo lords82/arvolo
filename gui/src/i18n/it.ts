@@ -406,6 +406,11 @@ export const it: Dict = {
   "settings.languageAuto": "Sistema",
   "settings.languageHint":
     "«Sistema» segue la lingua impostata sul computer, e ripiega sull'inglese quando è una che Arvolo non parla.",
+  "settings.startup": "Avvio",
+  "settings.autostartTitle": "Avvia all'accesso",
+  "settings.autostartDesc":
+    "All'accesso al sistema Arvolo parte nascosto nella tray, pronto a ricevere senza aprire finestre. Su Linux il collegamento punta alla posizione attuale dell'AppImage: se sposti il file, spegni e riaccendi l'interruttore.",
+  "settings.autostartFailed": "Impossibile cambiare l'avvio automatico",
   "settings.network": "Rete",
   "settings.relayOn": "Relay attivo",
   "settings.relayOff": "Nessun relay",

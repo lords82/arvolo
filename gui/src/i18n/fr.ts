@@ -419,6 +419,11 @@ export const fr: Dict = {
   "settings.languageAuto": "Système",
   "settings.languageHint":
     "« Système » suit la langue de votre ordinateur, et retombe sur l'anglais quand c'en est une qu'Arvolo ne parle pas.",
+  "settings.startup": "Démarrage",
+  "settings.autostartTitle": "Lancer à l'ouverture de session",
+  "settings.autostartDesc":
+    "À l'ouverture de session, Arvolo démarre caché dans la zone de notification, prêt à recevoir sans ouvrir de fenêtre. Sous Linux, l'entrée pointe vers l'emplacement actuel de l'AppImage : si vous déplacez le fichier, désactivez puis réactivez l'interrupteur.",
+  "settings.autostartFailed": "Impossible de modifier le lancement automatique",
   "settings.network": "Réseau",
   "settings.relayOn": "Relais actif",
   "settings.relayOff": "Aucun relais",

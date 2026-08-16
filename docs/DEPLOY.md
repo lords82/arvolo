@@ -62,6 +62,18 @@ Point two names at the VPS, e.g.:
 
 `arvolo-relay` speaks plain HTTP; put a TLS reverse proxy (Caddy) in front.
 
+**Installed from the .deb/.rpm?** The unit is already on disk
+(`/usr/lib/systemd/system/arvolo-relay.service`, data under
+`/var/lib/arvolo-relay`), present but not enabled. Edit
+`/etc/default/arvolo-relay` (listen address, proxy trust, size caps — the file
+documents itself), then:
+
+```sh
+sudo systemctl enable --now arvolo-relay
+```
+
+The unit below is the copy-and-edit version for a from-source install.
+
 `/etc/systemd/system/arvolo-relay.service`:
 
 ```ini

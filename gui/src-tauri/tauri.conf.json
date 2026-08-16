@@ -19,7 +19,8 @@
         "minWidth": 820,
         "minHeight": 560,
         "resizable": true,
-        "dragDropEnabled": true
+        "dragDropEnabled": true,
+        "visible": false
       }
     ],
     "security": {

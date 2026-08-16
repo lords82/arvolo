@@ -429,6 +429,11 @@ export const en = {
   "settings.languageAuto": "System",
   "settings.languageHint":
     "“System” follows the language your computer is set to, falling back to English when it is one Arvolo does not speak.",
+  "settings.startup": "Startup",
+  "settings.autostartTitle": "Start at login",
+  "settings.autostartDesc":
+    "When you sign in, Arvolo starts hidden in the tray, ready to receive without opening a window. On Linux the login entry points at the AppImage's current location: if you move the file, switch this off and on again.",
+  "settings.autostartFailed": "Could not change the login setting",
   "settings.network": "Network",
   "settings.relayOn": "Relay live",
   "settings.relayOff": "No relay",

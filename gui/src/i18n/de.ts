@@ -414,6 +414,11 @@ export const de: Dict = {
   "settings.languageAuto": "System",
   "settings.languageHint":
     "„System“ folgt der Sprache Ihres Rechners und fällt auf Englisch zurück, wenn es eine ist, die Arvolo nicht spricht.",
+  "settings.startup": "Start",
+  "settings.autostartTitle": "Beim Anmelden starten",
+  "settings.autostartDesc":
+    "Beim Anmelden startet Arvolo verborgen im Infobereich, empfangsbereit ohne offenes Fenster. Unter Linux zeigt der Eintrag auf den aktuellen Ort des AppImage: Wird die Datei verschoben, den Schalter einmal aus- und wieder einschalten.",
+  "settings.autostartFailed": "Automatischer Start ließ sich nicht ändern",
   "settings.network": "Netzwerk",
   "settings.relayOn": "Relay aktiv",
   "settings.relayOff": "Kein Relay",

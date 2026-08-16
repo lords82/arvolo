@@ -13,6 +13,11 @@
 // them.
 
 import { useEffect, useState } from "react";
+import {
+  disable as autostartDisable,
+  enable as autostartEnable,
+  isEnabled as autostartIsEnabled,
+} from "@tauri-apps/plugin-autostart";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { openPath } from "@tauri-apps/plugin-opener";
 import { fire, useStore, type ThemeChoice } from "../store";
@@ -63,6 +68,15 @@ export function SettingsView() {
   const [dirty, setDirty] = useState<{ name?: boolean; relay?: boolean }>({});
   const [busy, setBusy] = useState(false);
   const [confirmRestart, setConfirmRestart] = useState(false);
+
+  // Asked of the OS, not of our config: the login entry lives in the platform's
+  // own registry (Login Items, the Run key, ~/.config/autostart), so the OS is
+  // the only honest answer. `null` = the answer has not arrived (or the
+  // platform refused) — the switch stays disabled rather than guessing.
+  const [autostart, setAutostart] = useState<boolean | null>(null);
+  useEffect(() => {
+    autostartIsEnabled().then(setAutostart).catch(() => setAutostart(null));
+  }, []);
 
   // Reset the drafts whenever a fresh config lands, but never clobber a field
   // the user is mid-edit in: a background refresh must not eat what they typed.
@@ -216,6 +230,29 @@ export function SettingsView() {
             />
           )}
         </Field>
+      </div>
+
+      {/* ---- startup --------------------------------------------------- */}
+      <div className="card card-pad stack">
+        <div className="t-head">{t("settings.startup")}</div>
+        <SwitchRow
+          title={t("settings.autostartTitle")}
+          desc={t("settings.autostartDesc")}
+          checked={autostart ?? false}
+          disabled={autostart === null}
+          onChange={(v) => {
+            // Optimistic, then verified: the OS call can refuse (no autostart
+            // dir, a sandboxed install), and on refusal the switch snaps back
+            // and the reason lands in a toast instead of nowhere.
+            setAutostart(v);
+            void (v ? autostartEnable() : autostartDisable()).catch(
+              (e: unknown) => {
+                setAutostart(!v);
+                toast.bad(t("settings.autostartFailed"), String(e));
+              }
+            );
+          }}
+        />
       </div>
 
       {/* ---- rete ----------------------------------------------------- */}
