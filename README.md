@@ -66,8 +66,11 @@ docker run -d --name arvolo-relay -p 6282:6282 -v arvolo-data:/data \
   ghcr.io/lords82/arvolo-relay:latest
 ```
 
-**Desktop app** — built from source for now (no prebuilt bundle yet), needs Node
-≥ 18 and the platform WebView:
+**Desktop app** — prebuilt bundles are on the
+[latest release](https://github.com/lords82/arvolo/releases): a universal
+`.dmg` for macOS (signed with a Developer ID and notarized), an `.msi` for
+Windows and an `.AppImage` for Linux. Or build from source, with Node ≥ 18 and
+the platform WebView:
 
 ```sh
 cargo build -p arvolo-cli      # the daemon the app drives
