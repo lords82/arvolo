@@ -1,0 +1,43 @@
+# systemd *system* unit shipped inside the .deb / .rpm.
+#
+# Installed to /usr/lib/systemd/system/arvolo-relay.service by the package, so
+# it may not be edited in place — operator settings belong in
+# /etc/default/arvolo-relay, which this unit reads last (so its values win).
+#
+# Deliberately NOT enabled or started on install: a relay is a public server
+# with a domain and a TLS reverse proxy in front, and until those exist it has
+# nothing useful to do. When they do:
+#
+#   $EDITOR /etc/default/arvolo-relay
+#   sudo systemctl enable --now arvolo-relay
+#
+# Logs: journalctl -u arvolo-relay -f
+# The full walk-through: /usr/share/doc/arvolo-relay/DEPLOY.md
+
+[Unit]
+Description=Arvolo relay (mailbox, rendezvous, swarm tracker)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# An unprivileged user that exists only while the service runs, plus a state
+# directory that outlives it: /var/lib/arvolo-relay, owned by that user.
+# DynamicUser also brings the sandbox along — read-only /usr and /etc, no
+# /home, private /tmp — without spelling each setting out here.
+DynamicUser=yes
+StateDirectory=arvolo-relay
+WorkingDirectory=/var/lib/arvolo-relay
+# Loopback by default: the expected shape is a TLS reverse proxy on the same
+# host. Anything an operator wants different goes in /etc/default/arvolo-relay.
+Environment=ARVOLO_RELAY_ADDR=127.0.0.1:6282
+Environment=ARVOLO_RELAY_DB=/var/lib/arvolo-relay/relay.db
+Environment=ARVOLO_RELAY_BLOBS=/var/lib/arvolo-relay/blobs
+Environment=ARVOLO_RELAY_BLOBSTORE=/var/lib/arvolo-relay/blobstore
+EnvironmentFile=-/etc/default/arvolo-relay
+ExecStart=/usr/bin/arvolo-relay
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

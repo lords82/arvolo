@@ -45,12 +45,14 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 
 # ---- distro packages -------------------------------------------------------
 #
-# The binary and nothing else, deliberately. A package that also installed a
-# system service would have to decide which user it runs as, where its data
-# lives, and how it is configured — decisions this project makes in its Docker
-# deployment (see docs/DEPLOY.md), and which would be quietly contradicted by a
-# unit file shipped here. Install the binary, then run it however you run
-# services.
+# The binary plus a systemd unit that is present but NOT enabled. Shipping a
+# service means answering three questions — which user, where the data lives,
+# how it is configured — and the unit answers them without deciding anything
+# for the operator: DynamicUser (a user that exists only while it runs),
+# StateDirectory=/var/lib/arvolo-relay, and /etc/default/arvolo-relay for
+# everything an operator would want different. Nothing starts on install: a
+# relay with no domain and no TLS proxy in front has nothing useful to do, so
+# enabling it is left as the operator's explicit `systemctl enable --now`.
 
 [package.metadata.deb]
 name = "arvolo-relay"
@@ -63,6 +65,9 @@ tracker. It never sees plaintext or keys — only ciphertext and opaque tokens."
 depends = "$auto"
 assets = [
     ["target/release/arvolo-relay", "usr/bin/", "755"],
+    ["../packaging/arvolo-relay.packaged.service", "usr/lib/systemd/system/arvolo-relay.service", "644"],
+    # Under /etc, so cargo-deb marks it a conffile: operator edits survive upgrades.
+    ["../packaging/arvolo-relay.default", "etc/default/arvolo-relay", "644"],
     ["../docs/DEPLOY.md", "usr/share/doc/arvolo-relay/DEPLOY.md", "644"],
 ]
 
@@ -70,5 +75,7 @@ assets = [
 name = "arvolo-relay"
 assets = [
     { source = "target/release/arvolo-relay", dest = "/usr/bin/arvolo-relay", mode = "755" },
+    { source = "packaging/arvolo-relay.packaged.service", dest = "/usr/lib/systemd/system/arvolo-relay.service", mode = "644" },
+    { source = "packaging/arvolo-relay.default", dest = "/etc/default/arvolo-relay", mode = "644", config = true },
     { source = "docs/DEPLOY.md", dest = "/usr/share/doc/arvolo-relay/DEPLOY.md", mode = "644" },
 ]

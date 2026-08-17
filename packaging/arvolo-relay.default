@@ -1,0 +1,26 @@
+# /etc/default/arvolo-relay — operator settings for the packaged relay unit.
+# Values here override the defaults baked into the unit. After editing:
+#   sudo systemctl restart arvolo-relay
+# The full deployment guide: /usr/share/doc/arvolo-relay/DEPLOY.md
+
+# Where to listen. The unit's default is loopback, on the expectation of a TLS
+# reverse proxy (nginx, Caddy) on the same host terminating HTTPS.
+#ARVOLO_RELAY_ADDR=127.0.0.1:6282
+
+# Behind a reverse proxy, rate-limit by the real client IP (X-Forwarded-For)
+# instead of by the proxy's own address — without this every client shares one
+# rate-limit bucket.
+#ARVOLO_TRUST_PROXY=1
+
+# TLS terminates at the proxy, so the relay itself speaks plaintext on purpose;
+# set this to acknowledge that and silence the startup warning about it.
+#ARVOLO_INSECURE=1
+
+# Size caps — unset means unlimited, which on a public relay is an invitation.
+# The "Abuse hardening" section of DEPLOY.md has the full list and defaults.
+#ARVOLO_MAX_BLOB_BYTES=536870912           # 512 MiB per blob
+#ARVOLO_MAX_TOTAL_BLOB_BYTES=53687091200   # 50 GiB across all blobs
+#ARVOLO_MAX_SESSION_RELAY_BYTES=536870912  # 512 MiB seed offload per transfer
+
+# New rendezvous (short-code) slots per IP per hour; 0 turns the limit off.
+#ARVOLO_RZ_CLAIMS_PER_HOUR=10

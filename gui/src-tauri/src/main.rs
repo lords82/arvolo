@@ -39,7 +39,17 @@ const EV_FILES_PICKED: &str = "files://picked";
 struct HasTray(bool);
 
 fn main() {
+    // `--autostart` is what the login entry passes (see the autostart plugin
+    // registration below): the app was started by the OS, not by a person, so
+    // it should come up hidden in the tray rather than with a window in the
+    // face of someone who just signed in.
+    let autostarted = std::env::args().any(|a| a == "--autostart");
+
     let app = tauri::Builder::default()
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            Some(vec!["--autostart"]),
+        ))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
@@ -90,7 +100,7 @@ fn main() {
             bridge::pick_files,
             bridge::gui_version,
         ])
-        .setup(|app| {
+        .setup(move |app| {
             let has_tray = match setup_tray(app.handle()) {
                 Ok(()) => true,
                 Err(e) => {
@@ -99,6 +109,18 @@ fn main() {
                 }
             };
             app.manage(HasTray(has_tray));
+            // The window is declared hidden (`visible: false` in the config)
+            // and shown from here, so there is nothing to hide and no flash: a
+            // login launch with a tray to live in stays out of sight — the same
+            // resting state as a window closed to the tray — and every other
+            // launch (including a login launch on a desktop with no tray, which
+            // would otherwise be unreachable) shows the window at once.
+            if autostarted && has_tray {
+                #[cfg(target_os = "macos")]
+                let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+            } else {
+                show_main_window(app.handle());
+            }
             app.manage(attention::State::default());
             app.manage(bridge::PickedFiles::new());
             // Ask now, not at the first arrival: a permission prompt that appears
