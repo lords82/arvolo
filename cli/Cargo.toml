@@ -77,6 +77,7 @@ assets = [
     ["target/release/arvolo", "usr/bin/", "755"],
     ["../packaging/arvolo.packaged.service", "usr/lib/systemd/user/arvolo.service", "644"],
     ["../README.md", "usr/share/doc/arvolo/README.md", "644"],
+    ["../docs/MANUAL.md", "usr/share/doc/arvolo/MANUAL.md", "644"],
     ["../docs/QUICKSTART.md", "usr/share/doc/arvolo/QUICKSTART.md", "644"],
 ]
 
@@ -86,5 +87,6 @@ assets = [
     { source = "target/release/arvolo", dest = "/usr/bin/arvolo", mode = "755" },
     { source = "packaging/arvolo.packaged.service", dest = "/usr/lib/systemd/user/arvolo.service", mode = "644" },
     { source = "README.md", dest = "/usr/share/doc/arvolo/README.md", mode = "644" },
+    { source = "docs/MANUAL.md", dest = "/usr/share/doc/arvolo/MANUAL.md", mode = "644" },
     { source = "docs/QUICKSTART.md", dest = "/usr/share/doc/arvolo/QUICKSTART.md", mode = "644" },
 ]

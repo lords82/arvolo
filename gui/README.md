@@ -99,8 +99,9 @@ app can spawn the daemon on a clean machine.
 ## Platform status
 
 * **macOS / Linux** — supported (the daemon IPC uses a unix socket).
-* **Windows** — deferred: needs a named-pipe transport behind the same protocol
-  in `arvolo-ipc` (the app opens but shows "Disconnesso" until then).
+* **Windows** — supported: `arvolo-ipc` speaks the same protocol over a named
+  pipe, and the release ships an `.msi` (unsigned for now, so SmartScreen asks
+  for a "Run anyway").
 
 ## Extra behaviours
 
