@@ -59,7 +59,12 @@ arvolo recv 4821-crater-mango
 ```
 
 Nothing installed on the other side? `arvolo link ./report.pdf` prints a URL
-that downloads and decrypts in any browser — no install, no account.
+that downloads and decrypts in any browser — no install, no account. This is
+what whoever opens it sees:
+
+![Opening an Arvolo link in a browser: the file decrypts right there — the
+decryption key lives only in the link's #fragment, which browsers never send
+to the server](docs/assets/arvolo-link-browser.png)
 
 ## Where to go next
 

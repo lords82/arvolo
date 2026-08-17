@@ -60,7 +60,11 @@ arvolo recv 4821-crater-mango
 
 Dall'altra parte non c'è niente di installato? `arvolo link ./report.pdf`
 stampa un URL che scarica e decifra in qualsiasi browser — senza installare,
-senza account.
+senza account. Ecco cosa vede chi lo apre:
+
+![Un link Arvolo aperto nel browser: il file si decifra lì — la chiave vive
+solo nel #fragment del link, che i browser non mandano mai al
+server](docs/assets/arvolo-link-browser.it.png)
 
 ## Per proseguire
 
