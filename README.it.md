@@ -1,6 +1,7 @@
 # Arvolo
 
-*Read it in [English](README.md).*
+*Read it in [English](README.md) · Lisez-le en [français](README.fr.md) ·
+Lies es auf [Deutsch](README.de.md).*
 
 **Manda file a chiunque — cifrati end-to-end, senza account, anche se il
 destinatario è offline.**

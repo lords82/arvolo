@@ -1,6 +1,7 @@
 # Arvolo
 
-*Leggilo in [italiano](README.it.md).*
+*Leggilo in [italiano](README.it.md) · Lisez-le en [français](README.fr.md) ·
+Lies es auf [Deutsch](README.de.md).*
 
 **Send files to anyone — end-to-end encrypted, no account, even if they're
 offline.**
