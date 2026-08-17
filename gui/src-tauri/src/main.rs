@@ -117,7 +117,7 @@ fn main() {
             // would otherwise be unreachable) shows the window at once.
             if autostarted && has_tray {
                 #[cfg(target_os = "macos")]
-                let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+                app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             } else {
                 show_main_window(app.handle());
             }
