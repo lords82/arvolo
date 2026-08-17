@@ -369,10 +369,7 @@ jobs:
             ### macOS: signed and notarized
 
             The `.dmg` is signed with an Apple Developer ID (CryCatch S.r.l.)
-            and notarized by Apple — it opens like any other download, nothing
-            to get past. If an earlier release taught you the right-click-Open
-            ritual or `xattr -d com.apple.quarantine`, neither is needed
-            anymore.
+            and notarized by Apple — it opens like any other download.
 
             ### Windows: the .msi is unsigned
 
