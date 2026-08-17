@@ -1,0 +1,114 @@
+<!-- @dsCard group="Mobile" -->
+<!doctype html>
+<html lang="it"><head><meta charset="utf-8">
+  <link rel="stylesheet" href="../styles.css">
+  <link rel="stylesheet" href="../_ds_bundle.css">
+  <style>
+    body{margin:0;padding:28px;background:#fff;font-family:var(--font,-apple-system,system-ui)}
+    .phone{width:390px;height:844px;border-radius:46px;border:10px solid #1c1917;background:var(--canvas);
+      overflow:hidden;display:flex;flex-direction:column;box-shadow:0 24px 60px rgba(0,0,0,.18)}
+    .sbar{height:44px;display:flex;align-items:center;justify-content:space-between;padding:0 22px;
+      font-size:14px;font-weight:600;color:var(--ink)}
+    .topbar{display:flex;align-items:center;gap:10px;padding:8px 16px 4px}
+    .me{width:38px;height:38px;border-radius:50%;background:var(--out);color:#fff;display:flex;
+      align-items:center;justify-content:center;font-size:13px;font-weight:700}
+    .mename{font-weight:650;color:var(--ink);font-size:15px}
+    .mefpr{font-size:11px;color:var(--ink-mut);font-family:var(--mono,ui-monospace)}
+    .topico{width:38px;height:38px;border-radius:50%;background:var(--surface);border:1px solid var(--line);
+      display:flex;align-items:center;justify-content:center;font-size:16px;color:var(--ink-sec)}
+    .screen{flex:1;overflow:hidden;padding:4px 14px 12px;display:flex;flex-direction:column;gap:10px}
+    .verbs{display:flex;gap:10px;margin-top:4px}
+    .verb{flex:1;border-radius:18px;padding:18px 15px;display:flex;flex-direction:column;gap:6px}
+    .verb .glyph{font-size:26px}
+    .verb .lbl{font-size:16.5px;font-weight:680}
+    .verb .sub{font-size:11.5px;opacity:.82;line-height:1.35}
+    .vsend{background:var(--out);color:var(--on-fill,#fff);box-shadow:0 10px 22px rgba(239,98,67,.32)}
+    .vrecv{background:var(--in);color:#fff;box-shadow:0 10px 22px rgba(10,107,161,.28)}
+    .seclbl{font-size:11px;font-weight:700;letter-spacing:.07em;color:var(--ink-mut);padding:6px 4px 0}
+    .mcard{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-lg,14px);padding:13px 14px}
+    .frow{display:flex;gap:11px;align-items:center}
+    .fico{width:42px;height:42px;border-radius:11px;display:flex;align-items:center;justify-content:center;
+      font-size:10.5px;font-weight:700;flex:none}
+    .fname{font-weight:640;color:var(--ink);font-size:15px}
+    .fmeta{font-size:12.5px;color:var(--ink-sec);margin-top:2px}
+    .bigbtns{display:flex;gap:9px;margin-top:11px}
+    .bigbtns .btn{flex:1;height:40px;font-size:14.5px}
+    .rrow{display:flex;gap:11px;align-items:center;padding:9px 4px;border-bottom:1px solid var(--line)}
+    .rrow:last-child{border-bottom:none}
+    .rico{width:34px;height:34px;border-radius:9px;display:flex;align-items:center;justify-content:center;
+      font-size:9px;font-weight:700;flex:none}
+    .caption{max-width:390px;margin:18px auto 0;text-align:center}
+    .caption b{font-size:14px;color:#111827}
+    .caption p{font-size:12.5px;color:#6b7280;margin:4px 0 0;line-height:1.5}
+  </style>
+</head><body>
+  <div class="phone">
+    <div class="sbar"><span>9:41</span><span style="font-size:12px;letter-spacing:1px">5G ▮▮▮</span></div>
+    <div class="topbar">
+      <div class="me">LO</div>
+      <div style="flex:1;min-width:0">
+        <div class="mename">Lorenzo</div>
+        <div class="mefpr">horn-ginger-coral-bloom…</div>
+      </div>
+      <div class="topico">◎</div>
+      <div class="topico">✦</div>
+    </div>
+    <div class="screen">
+      <div class="verbs">
+        <div class="verb vsend"><div class="glyph">↗</div><div class="lbl">Invia</div>
+          <div class="sub">foto, file, cartelle — a un contatto o con un codice</div></div>
+        <div class="verb vrecv"><div class="glyph">↙</div><div class="lbl">Ricevi</div>
+          <div class="sub">incolla un codice o inquadra un QR</div></div>
+      </div>
+
+      <div class="seclbl">TI ASPETTA</div>
+      <div class="mcard" style="border-left:3px solid var(--in)">
+        <div class="frow">
+          <div class="fico" style="background:var(--in-soft,#e3eef5);color:var(--in)">ZIP</div>
+          <div style="min-width:0">
+            <div class="fname">berlin-trip-photos.zip</div>
+            <div class="fmeta">da <b>giulia</b> ✓ · 48 MB · «le foto di Berlino!»</div>
+          </div>
+        </div>
+        <div class="bigbtns">
+          <button class="btn btn-primary">Accetta</button>
+          <button class="btn">Rifiuta</button>
+        </div>
+      </div>
+
+      <div class="seclbl">DI RECENTE</div>
+      <div class="mcard" style="padding:5px 14px">
+        <div class="rrow">
+          <div class="rico" style="background:var(--out-soft,#fdeae4);color:var(--out)">KEY</div>
+          <div style="min-width:0;flex:1">
+            <div class="fname" style="font-size:14px">keynote-final.key</div>
+            <div class="fmeta">codice attivo · ⠿ 8428-bear-lantern</div>
+          </div>
+          <span style="color:var(--ink-mut);font-size:17px">›</span>
+        </div>
+        <div class="rrow">
+          <div class="rico" style="background:var(--green-soft,#e2f2e6);color:var(--green,#1e7d3c)">MP4</div>
+          <div style="min-width:0;flex:1">
+            <div class="fname" style="font-size:14px">demo-reel.mp4</div>
+            <div class="fmeta">completato · da giulia ✓ · 64 MB</div>
+          </div>
+          <span style="color:var(--ink-mut);font-size:17px">›</span>
+        </div>
+        <div class="rrow">
+          <div class="rico" style="background:var(--in-soft,#e3eef5);color:var(--in)">PDF</div>
+          <div style="min-width:0;flex:1">
+            <div class="fname" style="font-size:14px">q3-report.pdf</div>
+            <div class="fmeta">deposito per giulia · non ancora ritirato</div>
+          </div>
+          <span style="color:var(--ink-mut);font-size:17px">›</span>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="caption">
+    <b>C · Prima i verbi</b>
+    <p>Niente tab bar: la home è fatta dei due gesti — Invia e Ricevi, grandi, coi colori
+    direzionali del design system — poi ciò che ti aspetta e il resto in una lista. Persone
+    e Impostazioni stanno in alto. L'app come utility: apri, agisci, esci.</p>
+  </div>
+</body></html>

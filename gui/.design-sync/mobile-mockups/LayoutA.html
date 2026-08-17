@@ -1,0 +1,101 @@
+<!-- @dsCard group="Mobile" -->
+<!doctype html>
+<html lang="it"><head><meta charset="utf-8">
+  <link rel="stylesheet" href="../styles.css">
+  <link rel="stylesheet" href="../_ds_bundle.css">
+  <style>
+    body{margin:0;padding:28px;background:#fff;font-family:var(--font,-apple-system,system-ui)}
+    .phone{width:390px;height:844px;border-radius:46px;border:10px solid #1c1917;background:var(--canvas);
+      overflow:hidden;display:flex;flex-direction:column;box-shadow:0 24px 60px rgba(0,0,0,.18)}
+    .sbar{height:44px;display:flex;align-items:center;justify-content:space-between;padding:0 22px;
+      font-size:14px;font-weight:600;color:var(--ink)}
+    .screen{flex:1;overflow:hidden;padding:4px 14px 0;display:flex;flex-direction:column;gap:10px}
+    .htitle{font-size:26px;font-weight:700;color:var(--ink);padding:6px 4px 2px}
+    .mcard{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-lg,14px);padding:13px 14px}
+    .frow{display:flex;gap:11px;align-items:center}
+    .fico{width:42px;height:42px;border-radius:11px;display:flex;align-items:center;justify-content:center;
+      font-size:10.5px;font-weight:700;flex:none}
+    .fname{font-weight:640;color:var(--ink);font-size:15px}
+    .fmeta{font-size:12.5px;color:var(--ink-sec);margin-top:2px}
+    .codechip{margin-top:10px;background:var(--surface-sunk,#f1ede9);border:1px dashed var(--line-strong,var(--line));
+      border-radius:9px;padding:7px 10px;font-family:var(--mono,ui-monospace);font-size:12px;color:var(--ink)}
+    .bigbtns{display:flex;gap:9px;margin-top:11px}
+    .bigbtns .btn{flex:1;height:40px;font-size:14.5px}
+    .track{height:5px;border-radius:3px;background:var(--track,#e8e3de);margin-top:10px;overflow:hidden}
+    .fill{height:100%;border-radius:3px}
+    .tabbar{height:82px;background:var(--surface);border-top:1px solid var(--line);display:flex;
+      align-items:flex-start;padding:7px 6px 0}
+    .tab{flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;font-size:10.5px;
+      color:var(--ink-mut);padding-top:5px}
+    .tab.on{color:var(--out)}
+    .tico{width:24px;height:24px;display:flex;align-items:center;justify-content:center;font-size:17px}
+    .sendtab{flex:1.2;display:flex;justify-content:center;margin-top:-21px}
+    .sendbtn{width:58px;height:58px;border-radius:50%;background:var(--out);color:var(--on-fill,#fff);
+      display:flex;flex-direction:column;align-items:center;justify-content:center;font-size:21px;
+      box-shadow:0 8px 18px rgba(239,98,67,.4);border:4px solid var(--canvas)}
+    .caption{max-width:390px;margin:18px auto 0;text-align:center}
+    .caption b{font-size:14px;color:#111827}
+    .caption p{font-size:12.5px;color:#6b7280;margin:4px 0 0;line-height:1.5}
+    .seclbl{font-size:11px;font-weight:700;letter-spacing:.07em;color:var(--ink-mut);padding:4px 4px 0}
+  </style>
+</head><body>
+  <div class="phone">
+    <div class="sbar"><span>9:41</span><span style="font-size:12px;letter-spacing:1px">5G ▮▮▮</span></div>
+    <div class="screen">
+      <div class="htitle">Trasferimenti</div>
+
+      <div class="seclbl">DA CONFERMARE</div>
+      <div class="mcard" style="border-left:3px solid var(--in)">
+        <div class="frow">
+          <div class="fico" style="background:var(--in-soft,#e3eef5);color:var(--in)">ZIP</div>
+          <div style="min-width:0">
+            <div class="fname">berlin-trip-photos.zip</div>
+            <div class="fmeta">da <b>giulia</b> ✓ · 48 MB · «le foto di Berlino!»</div>
+          </div>
+        </div>
+        <div class="bigbtns">
+          <button class="btn btn-primary">Accetta</button>
+          <button class="btn">Rifiuta</button>
+        </div>
+      </div>
+
+      <div class="seclbl">IN CORSO</div>
+      <div class="mcard" style="border-left:3px solid var(--out)">
+        <div class="frow">
+          <div class="fico" style="background:var(--out-soft,#fdeae4);color:var(--out)">KEY</div>
+          <div style="min-width:0">
+            <div class="fname">keynote-final.key</div>
+            <div class="fmeta">Condiviso · 21 MB · nessuno sta scaricando</div>
+          </div>
+        </div>
+        <div class="codechip">⠿ 8428-bear-lantern <span style="color:var(--ink-mut)">· codice attivo — tocca per il QR</span></div>
+        <div class="track"><div class="fill" style="width:4%;background:var(--out)"></div></div>
+      </div>
+
+      <div class="seclbl">OGGI</div>
+      <div class="mcard">
+        <div class="frow">
+          <div class="fico" style="background:var(--green-soft,#e2f2e6);color:var(--green,#1e7d3c)">MP4</div>
+          <div style="min-width:0">
+            <div class="fname">demo-reel.mp4</div>
+            <div class="fmeta" style="color:var(--green,#1e7d3c)">Completato · da giulia ✓ · 64 MB</div>
+          </div>
+        </div>
+        <div class="track"><div class="fill" style="width:100%;background:var(--green,#1e7d3c)"></div></div>
+      </div>
+    </div>
+    <div class="tabbar">
+      <div class="tab on"><div class="tico">⇄</div>Trasferimenti</div>
+      <div class="tab"><div class="tico">◎</div>Persone</div>
+      <div class="sendtab"><div class="sendbtn">↗</div></div>
+      <div class="tab"><div class="tico">≡</div>Cronologia</div>
+      <div class="tab"><div class="tico">✦</div>Impostazioni</div>
+    </div>
+  </div>
+  <div class="caption">
+    <b>A · Tab bar, il verbo al centro</b>
+    <p>Cinque posti come sul desktop, ma Invia è il bottone fisico al centro della barra —
+    sempre a portata di pollice. Ricevi vive nella schermata Trasferimenti. La più vicina
+    all'app desktop: chi conosce una impara l'altra.</p>
+  </div>
+</body></html>
