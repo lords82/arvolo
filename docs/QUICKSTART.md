@@ -219,4 +219,4 @@ Track everything with `arvolo status` (add `--watch` for a live view).
 - [ ] A test `arvolo code ./file` + `arvolo recv <code>` round-trips.
 
 For the full environment-variable reference and every command, see the
-[README](../README.md); for production hardening, [`DEPLOY.md`](DEPLOY.md).
+[manual](MANUAL.md); for production hardening, [`DEPLOY.md`](DEPLOY.md).
