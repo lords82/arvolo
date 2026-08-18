@@ -17,12 +17,7 @@ use crate::args::HistoryAction;
 use crate::commands::status::print_history_row;
 use crate::history;
 
-/// How many records `arvolo history` shows before you have to ask for `--all`.
-/// Enough to cover "what did I do today" without turning into the wall this
-/// command exists to undo.
-const RECENT: usize = 20;
-
-pub(crate) fn history_cmd(all: bool, action: Option<HistoryAction>) -> Result<()> {
+pub(crate) fn history_cmd(action: Option<HistoryAction>) -> Result<()> {
     if let Some(HistoryAction::Clear) = action {
         let n = history::clear()?;
         println!(
@@ -32,27 +27,17 @@ pub(crate) fn history_cmd(all: bool, action: Option<HistoryAction>) -> Result<()
         return Ok(());
     }
 
-    // Newest first, per `history::list`.
+    // Newest first, per `history::list` — all of it. There used to be a 20-row
+    // cap with an `--all` to undo it, i.e. a flag to undo a truncation this
+    // command applied to itself; the pipe is the pager (`arvolo history | head`
+    // works — SIGPIPE is restored at startup for exactly this).
     let list = history::list();
     if list.is_empty() {
         println!("history: (none)");
         return Ok(());
     }
-    let total = list.len();
-    let shown: &[_] = if all || total <= RECENT {
-        &list
-    } else {
-        &list[..RECENT]
-    };
-    if shown.len() < total {
-        println!(
-            "history: {} most recent of {total} — `--all` for the rest:",
-            shown.len()
-        );
-    } else {
-        println!("history: {total} record(s):");
-    }
-    for rec in shown {
+    println!("history: {} record(s):", list.len());
+    for rec in &list {
         print_history_row(rec);
     }
     Ok(())

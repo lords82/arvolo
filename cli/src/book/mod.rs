@@ -32,26 +32,16 @@ mod tests {
 
     #[test]
     fn relay_scheme_defaults_to_https() {
-        // Bare host → https, unless --use-http is asked for.
+        // Bare host → https; a plaintext relay is written with its scheme.
         assert_eq!(
-            normalize_relay("relay.example.com", false),
+            normalize_relay("relay.example.com"),
             "https://relay.example.com"
         );
+        assert_eq!(normalize_relay("  relay:8787 "), "https://relay:8787");
+        // An explicit scheme is never rewritten.
+        assert_eq!(normalize_relay("http://relay.local"), "http://relay.local");
         assert_eq!(
-            normalize_relay("relay.example.com", true),
-            "http://relay.example.com"
-        );
-        assert_eq!(
-            normalize_relay("  relay:8787 ", false),
-            "https://relay:8787"
-        );
-        // An explicit scheme always wins over the flag.
-        assert_eq!(
-            normalize_relay("http://relay.local", false),
-            "http://relay.local"
-        );
-        assert_eq!(
-            normalize_relay("https://relay.example.com", true),
+            normalize_relay("https://relay.example.com"),
             "https://relay.example.com"
         );
     }
@@ -558,14 +548,15 @@ mod tests {
         assert!(accept_name("nobody").is_err());
         assert!(accept_name("not-valid-base32!!").is_err());
 
-        // Two pending names → accept_all approves both at once.
+        // Two pending names → each is approved by its own accept.
         observe_advertised_name(&id1, "Alice");
         observe_advertised_name(&id2, "Bob");
-        assert_eq!(accept_all_names().unwrap(), 2);
+        assert_eq!(accept_name(&id1).unwrap(), "Alice");
+        assert_eq!(accept_name(&id2).unwrap(), "Bob");
         assert_eq!(display_name_of(&id1).as_deref(), Some("Alice"));
         assert_eq!(display_name_of(&id2).as_deref(), Some("Bob"));
-        // Nothing left pending → accept_all is a no-op returning 0.
-        assert_eq!(accept_all_names().unwrap(), 0);
+        // Nothing left pending → another accept has nothing to approve.
+        assert!(accept_name(&id1).is_err());
 
         std::env::remove_var("ARVOLO_CONFIG_DIR");
     }

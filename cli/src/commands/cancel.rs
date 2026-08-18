@@ -9,11 +9,11 @@
 //!   send), whose id is 8 hex chars ([`crate::deposits::id_for`]);
 //! * a **resumable send** — an interrupted P2P send saved locally, whose id is
 //!   also 8 hex chars ([`crate::sessions::id_for`]);
-//! * the **`arvm…` ticket or download link itself** — for withdrawing something
-//!   sent from *another* machine, where there is no local record and so no local
-//!   copy of the revoke token. That one case is why `--token` exists, and it is
-//!   the only case that needs it. This used to be a separate `arvolo revoke`
-//!   verb; it was never a separate intention.
+//! * the **`arvm…` ticket or download link itself** — accepted so the thing you
+//!   are holding can be pasted straight back; it resolves to this machine's own
+//!   deposit record. (The old `--token` flag for withdrawing from *another*
+//!   machine is gone: the token it asked for was never printed anywhere, so no
+//!   user could ever have had one to give.)
 //!
 //! The ids don't fall into tidy disjoint shapes, so **presence in a store decides**
 //! — the stores are asked first, and only an id nothing on disk claims is read as a
@@ -26,15 +26,19 @@
 //! transfer number would have to reach ~73 million — from a per-process counter
 //! that starts at 1 — before it could shadow one.
 //!
+//! A **unique prefix** of an 8-hex id works too, under the same store-first rule,
+//! once it is 4+ chars — shorter would shadow too many plain transfer numbers.
+//!
 //! Only a transfer needs a daemon. A deposit or a session can be taken back from a
 //! bare CLI on any platform, which is why this module isn't unix-gated.
 
 use anyhow::{bail, Result};
 
 use crate::commands::offline;
+use crate::handles::{self, Match};
 use crate::{deposits, sessions};
 
-pub(crate) async fn cancel_cmd(id: String, token: Option<String>) -> Result<()> {
+pub(crate) async fn cancel_cmd(id: String) -> Result<()> {
     if deposits::load(&id).is_some() {
         return cancel_deposit(&id).await;
     }
@@ -44,7 +48,33 @@ pub(crate) async fn cancel_cmd(id: String, token: Option<String>) -> Result<()> 
         println!("Dropped resumable send '{id}' — the ticket you shared no longer works.");
         return Ok(());
     }
-    if let Some((relay, claim)) = offline::withdrawal_target(&id) {
+    // A unique prefix over the two 8-hex stores (4+ chars: see the module doc).
+    if handles::looks_like_handle(&id) && (4..8).contains(&id.len()) {
+        let candidates = deposits::list()
+            .into_iter()
+            .map(|d| (d.id.clone(), Cancelable::Deposit(d.id)))
+            .chain(
+                sessions::list()
+                    .into_iter()
+                    .map(|s| (s.id.clone(), Cancelable::Session(s.id))),
+            );
+        match handles::resolve_prefix(&id, candidates) {
+            Match::One(Cancelable::Deposit(full)) => return cancel_deposit(&full).await,
+            Match::One(Cancelable::Session(full)) => {
+                sessions::remove(&full)?;
+                println!(
+                    "Dropped resumable send '{full}' — the ticket you shared no longer works."
+                );
+                return Ok(());
+            }
+            Match::Many(hs) => bail!(
+                "'{id}' matches more than one id ({}) — type more of it",
+                hs.join(", ")
+            ),
+            Match::None => {}
+        }
+    }
+    if let Some((_relay, claim)) = offline::withdrawal_target(&id) {
         // A ticket for something we deposited ourselves: the local record holds
         // the token already, so don't make the user find it — and the local path
         // also retracts the offer pointing at the blob, which a bare token
@@ -53,31 +83,41 @@ pub(crate) async fn cancel_cmd(id: String, token: Option<String>) -> Result<()> 
         if deposits::load(&local).is_some() {
             return cancel_deposit(&local).await;
         }
-        let Some(token) = token else {
-            bail!(
-                "this machine has no record of that ticket, so withdrawing it needs \
-                 `--token <t>` — the revoke token printed when you sent it. (From the \
-                 machine that sent it, `arvolo cancel <id>` needs no token; the id is \
-                 in `arvolo status`.)"
-            )
-        };
-        return offline::revoke_by_token(&relay, &claim, &token).await;
+        bail!(
+            "this machine has no record of that ticket — withdraw it from the machine \
+             that sent it: `arvolo status` there lists it, `arvolo cancel <id>` takes it back"
+        );
     }
-    if let Ok(tid) = id.parse::<u64>() {
-        return cancel_transfer(tid).await;
+    // A transfer the daemon holds: a plain number, or an 8-hex handle nothing on
+    // disk claimed above. Handle-shaped input with no daemon around falls through
+    // to the final error instead of failing on "no daemon".
+    let digitish = id.parse::<u64>().is_ok();
+    if digitish || handles::looks_like_handle(&id) {
+        let daemon_up = crate::commands::daemon::daemon_client().await.is_some();
+        if daemon_up || digitish {
+            return cancel_transfer(&id).await;
+        }
     }
     bail!("no transfer, deposit or resumable send with id '{id}' — see `arvolo status`")
 }
 
+/// What a resolved prefix turned out to name.
+enum Cancelable {
+    Deposit(String),
+    Session(String),
+}
+
 /// A live transfer: only the daemon can stop one, since only the daemon is running it.
-async fn cancel_transfer(id: u64) -> Result<()> {
+async fn cancel_transfer(input: &str) -> Result<()> {
     use anyhow::Context;
 
     let mut client = crate::commands::daemon::daemon_client()
         .await
-        .context("no daemon running (start `arvolo daemon`)")?;
+        .context("no daemon running (start `arvolo daemon start`)")?;
+    let id = crate::commands::daemon::resolve_transfer_id(&mut client, input).await?;
+    let shown = crate::commands::daemon::handle_for(&mut client, id).await;
     client.cancel(id).await?;
-    eprintln!("cancelled transfer {id}.");
+    eprintln!("cancelled transfer {shown}.");
     Ok(())
 }
 
@@ -86,7 +126,6 @@ async fn cancel_transfer(id: u64) -> Result<()> {
 /// ends the live row it is still holding open. Without a daemon (or for a deposit no
 /// engine ever knew about), [`deposits::withdraw`] does the same job from the record.
 async fn cancel_deposit(id: &str) -> Result<()> {
-    #[cfg(unix)]
     if let Some(mut client) = crate::commands::daemon::daemon_client().await {
         client.revoke_deposit(id.to_string()).await?;
         println!("Revoked on the relay — the link/ticket no longer works.");
@@ -126,7 +165,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("ARVOLO_CONFIG_DIR", dir.path());
 
-        let err = cancel_cmd("00ff00ff".into(), None)
+        let err = cancel_cmd("00ff00ff".into())
             .await
             .unwrap_err()
             .to_string();
@@ -169,7 +208,7 @@ expires = 1700003600
 
         // Long expired, so the relay is never dialled: this returns on the deposit
         // path alone. Down the transfer path it would say "no daemon"/"no transfer".
-        cancel_cmd("73406183".into(), None)
+        cancel_cmd("73406183".into())
             .await
             .expect("an all-digit id must reach the deposit it names");
         assert!(deposits::load("73406183").is_none(), "must be withdrawn");
@@ -201,28 +240,31 @@ expires = 1700003600
         assert!(sessions::load(&rec.id).is_ok());
         assert!(deposits::load(&rec.id).is_none(), "not a deposit id");
 
-        cancel_cmd(rec.id.clone(), None).await.unwrap();
+        cancel_cmd(rec.id.clone()).await.unwrap();
         assert!(sessions::load(&rec.id).is_err(), "session must be gone");
 
         std::env::remove_var("ARVOLO_CONFIG_DIR");
     }
 
-    /// A link this machine never sent can only be withdrawn with its token, and
-    /// the error has to name the flag — this is the one case where `cancel` needs
-    /// something the user has to go and find.
+    /// A link this machine never sent can't be withdrawn from here (the revoke
+    /// token lives in the sender's record) — the error has to send the user to
+    /// the machine that holds it, not fail bare.
     #[tokio::test]
-    async fn a_foreign_link_without_a_token_names_the_flag() {
+    async fn a_foreign_link_points_at_the_sending_machine() {
         let _guard = crate::testlock::ENV
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("ARVOLO_CONFIG_DIR", dir.path());
 
-        let err = cancel_cmd("https://relay.example.com/dl/someclaim#k".into(), None)
+        let err = cancel_cmd("https://relay.example.com/dl/someclaim#k".into())
             .await
             .unwrap_err()
             .to_string();
-        assert!(err.contains("--token"), "got: {err}");
+        assert!(
+            err.contains("machine that sent it"),
+            "the error must point at the sender's machine, got: {err}"
+        );
 
         std::env::remove_var("ARVOLO_CONFIG_DIR");
     }
@@ -259,7 +301,7 @@ expires = 1700003600
         std::fs::create_dir_all(&deposits_dir).unwrap();
         std::fs::write(deposits_dir.join(format!("{id}.toml")), toml).unwrap();
 
-        cancel_cmd("https://192.0.2.1:1/dl/someclaim#k".into(), None)
+        cancel_cmd("https://192.0.2.1:1/dl/someclaim#k".into())
             .await
             .expect("a ticket we hold the record for must withdraw without a token");
         assert!(deposits::load(&id).is_none(), "must be withdrawn");

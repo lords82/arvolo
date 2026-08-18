@@ -149,7 +149,7 @@ async fn run(
 }
 
 fn resolve_relay(relay: Option<String>) -> Result<String> {
-    match relay.map(|r| book::normalize_relay(&r, false)) {
+    match relay.map(|r| book::normalize_relay(&r)) {
         Some(r) => Ok(r),
         None => book::default_relay_or_builtin().context(
             "no relay configured — set one in settings, or pass one with the pairing request",

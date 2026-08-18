@@ -109,6 +109,16 @@ impl DaemonClient {
         }
     }
 
+    /// Ask the daemon to exit cleanly. The daemon answers before it goes; an
+    /// older daemon that predates the request answers with an error instead,
+    /// which the caller treats as "fall back to the pidfile".
+    pub async fn shutdown(&mut self) -> Result<()> {
+        match self.request(Request::Shutdown).await? {
+            Response::Ok => Ok(()),
+            other => unexpected(other),
+        }
+    }
+
     pub async fn list(&mut self) -> Result<Vec<TransferDto>> {
         match self.request(Request::ListTransfers).await? {
             Response::Transfers(v) => Ok(v),

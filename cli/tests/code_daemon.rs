@@ -69,12 +69,19 @@ async fn run(cfg: &Path, relay: &str, args: &[&str]) -> (bool, String, String) {
 /// Start a daemon and wait until it answers, so a following command doesn't race
 /// the socket into existence.
 async fn start_daemon(cfg: &Path, relay: &str) -> Child {
-    let child = arvolo(cfg, relay, &["daemon"])
+    let child = arvolo(cfg, relay, &["daemon", "run"])
         .spawn()
         .expect("spawn daemon");
     for _ in 0..100 {
         tokio::time::sleep(Duration::from_millis(100)).await;
-        if run(cfg, relay, &["status"]).await.0 {
+        // `status` (and `daemon status`) exit 0 with or without a daemon, so
+        // readiness has to come from *what* they print, not that they printed:
+        // the transfer count only appears when a daemon answered.
+        if run(cfg, relay, &["daemon", "status"])
+            .await
+            .1
+            .contains("transfers:")
+        {
             return child;
         }
     }
@@ -110,7 +117,7 @@ async fn code_is_hosted_by_the_daemon_and_the_command_returns() {
     // The whole point: this returns instead of blocking until someone shows up.
     let (ok, stdout, stderr) = tokio::time::timeout(
         Duration::from_secs(30),
-        run(cfg_a.path(), &relay, &["code", file.to_str().unwrap()]),
+        run(cfg_a.path(), &relay, &["send", "--code", file.to_str().unwrap()]),
     )
     .await
     .expect("`arvolo code` must not block when a daemon is running");
@@ -158,7 +165,7 @@ async fn a_kept_code_survives_the_daemon_restarting() {
     let (ok, stdout, stderr) = run(
         cfg_a.path(),
         &relay,
-        &["code", "--keep", file.to_str().unwrap()],
+        &["send", "--code", "--keep", file.to_str().unwrap()],
     )
     .await;
     assert!(ok, "code --keep failed: {stderr}");
@@ -223,7 +230,7 @@ async fn an_interrupted_download_resumes_without_the_code() {
     let file = write_payload(cfg_a.path(), "big.bin", 24 * 1024 * 1024);
 
     let _daemon = start_daemon(cfg_a.path(), &relay).await;
-    let (ok, stdout, stderr) = run(cfg_a.path(), &relay, &["code", file.to_str().unwrap()]).await;
+    let (ok, stdout, stderr) = run(cfg_a.path(), &relay, &["send", "--code", file.to_str().unwrap()]).await;
     assert!(ok, "code failed: {stderr}");
     let code = scrape_code(&stdout);
 

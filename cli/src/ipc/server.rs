@@ -58,6 +58,9 @@ pub struct Daemon {
     /// checked, so a running GUI got two notifications for every offer: one from
     /// here and one of its own.
     pub front_ends: Arc<AtomicUsize>,
+    /// The same token the accept loop selects on: cancelling it is how
+    /// [`Request::Shutdown`] turns into a clean exit.
+    pub shutdown: CancellationToken,
 }
 
 /// The outcome of the most recent sync round, for [`Request::SyncStatus`].
@@ -78,6 +81,7 @@ impl Daemon {
         download_dir: PathBuf,
         pending: Arc<Mutex<HashMap<String, OfferDto>>>,
         front_ends: Arc<AtomicUsize>,
+        shutdown: CancellationToken,
     ) -> Self {
         Daemon {
             manager,
@@ -90,6 +94,7 @@ impl Daemon {
             pairings: Sessions::default(),
             sync_state: Arc::new(Mutex::new(SyncState::default())),
             front_ends,
+            shutdown,
         }
     }
 }
@@ -216,6 +221,13 @@ async fn dispatch(d: &Daemon, cmd: Request) -> Response {
     match cmd {
         Request::Ping => Response::Pong,
         Request::Status => Response::Status(status(d)),
+        // Answer first, then go: the reply is already queued on this connection
+        // when the accept loop sees the cancelled token.
+        Request::Shutdown => {
+            tracing::info!("shutdown requested over IPC");
+            d.shutdown.cancel();
+            Response::Ok
+        }
         Request::ListTransfers => {
             let mut v: Vec<TransferDto> = d.manager.list().iter().map(TransferDto::from).collect();
             v.sort_by_key(|t| t.id);

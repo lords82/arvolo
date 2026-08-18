@@ -101,9 +101,9 @@ pub(crate) fn human_duration(secs: u64) -> String {
 }
 
 /// Resolve the relay to use for presence, requiring one (offers can't work P2P).
-pub(crate) fn require_relay(relay: Option<String>, use_http: bool) -> Result<String> {
+pub(crate) fn require_relay(relay: Option<String>) -> Result<String> {
     let resolved = relay
-        .map(|r| book::normalize_relay(&r, use_http))
+        .map(|r| book::normalize_relay(&r))
         .or_else(book::default_relay_or_builtin)
         .context(
             "a relay is required: pass --relay <host>, set ARVOLO_RELAY, or configure `relay`",
@@ -149,8 +149,7 @@ pub(crate) fn identity_path() -> PathBuf {
     if let Ok(p) = std::env::var("ARVOLO_IDENTITY") {
         return PathBuf::from(p);
     }
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join(".config/arvolo/identity.key")
+    crate::book::config_dir().join("identity.key")
 }
 
 pub(crate) fn my_identity() -> Result<Identity> {

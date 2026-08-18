@@ -46,8 +46,8 @@ fn arvolo(cfg: &Path, relay: &str, args: &[&str]) -> Command {
     let mut c = Command::new(env!("CARGO_BIN_EXE_arvolo"));
     c.args(args)
         .env("ARVOLO_CONFIG_DIR", cfg)
-        // Its own identity: the path does not follow ARVOLO_CONFIG_DIR, so without
-        // this both sides would load the same key and "pairing" would be a mirror.
+        // Its own identity: follows ARVOLO_CONFIG_DIR now, pinned anyway so the
+        // two sides can never share a key and turn "pairing" into a mirror.
         .env("ARVOLO_IDENTITY", cfg.join("identity.key"))
         .env("ARVOLO_RELAY", relay)
         .env("ARVOLO_NO_WIZARD", "1")
@@ -85,7 +85,7 @@ async fn pairing_saves_and_verifies_both_sides() {
     let mut host = arvolo(
         cfg_a.path(),
         &relay,
-        &["contacts", "pair", "--name", "bob", "--use-http"],
+        &["contacts", "add", "bob"],
     )
     .stdout(Stdio::piped())
     .stderr(Stdio::null())
@@ -110,7 +110,7 @@ async fn pairing_saves_and_verifies_both_sides() {
     let (ok, out, err) = run(
         cfg_b.path(),
         &relay,
-        &["contacts", "pair", &code, "--name", "alice"],
+        &["contacts", "add", "alice", &code],
     )
     .await;
     assert!(ok, "the joining side failed: {err}");
@@ -166,7 +166,7 @@ async fn a_wrong_code_saves_nobody() {
     let mut host = arvolo(
         cfg_a.path(),
         &relay,
-        &["contacts", "pair", "--name", "bob", "--use-http"],
+        &["contacts", "add", "bob"],
     )
     .stdout(Stdio::piped())
     .stderr(Stdio::null())
@@ -195,7 +195,7 @@ async fn a_wrong_code_saves_nobody() {
     let (ok, _, _) = run(
         cfg_b.path(),
         &relay,
-        &["contacts", "pair", &wrong, "--name", "alice"],
+        &["contacts", "add", "alice", &wrong],
     )
     .await;
     assert!(!ok, "a wrong code must fail, not save a contact");

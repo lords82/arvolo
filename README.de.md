@@ -52,14 +52,18 @@ und die Datei kommt an. Dasselbe im Terminal:
 
 ```sh
 # du
-arvolo code ./foto.jpg
+arvolo send --code ./foto.jpg
 #   ->  4821-crater-mango
 
 # die andere Person
 arvolo recv 4821-crater-mango
 ```
 
-Drüben ist nichts installiert? `arvolo link ./bericht.pdf` druckt eine URL,
+Ein `arvolo send ./foto.jpg` ohne Flags schreibt stattdessen eine kleine
+Ticket-Datei `foto.jpg.arvolo` — teile sie über einen beliebigen Kanal, wie
+eine .torrent-Datei; drüben genügt `arvolo recv foto.jpg.arvolo`.
+
+Drüben ist nichts installiert? `arvolo send --link ./bericht.pdf` druckt eine URL,
 die in jedem Browser herunterlädt und entschlüsselt — ohne Installation, ohne
 Konto. Das sieht, wer sie öffnet:
 

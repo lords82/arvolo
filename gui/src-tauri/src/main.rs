@@ -276,6 +276,20 @@ fn restore_dock_icon(app: &AppHandle) {
 /// UI recovers on its own after a daemon restart.
 async fn event_pump(app: AppHandle) {
     loop {
+        // `arvolo daemon stop` leaves a marker: the user asked for it to be down,
+        // and this loop must not win the argument by respawning it every two
+        // seconds. Report disconnected and wait for the marker to go (a `daemon
+        // start`/`run` removes it; so does the in-app restart below).
+        if arvolo_ipc::stop_marker_path().exists() && !daemon::is_running().await {
+            let _ = app.emit(
+                EV_DAEMON_ERROR,
+                "fermato con `arvolo daemon stop` — riavvialo da qui o con `arvolo daemon start`"
+                    .to_string(),
+            );
+            let _ = app.emit(EV_CONNECTED, false);
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            continue;
+        }
         // Make sure a daemon exists; if we can't bring one up, report disconnected
         // and retry shortly.
         if let Err(e) = daemon::ensure_running().await {

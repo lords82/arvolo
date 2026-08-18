@@ -34,6 +34,8 @@ toml = "0.8"
 # (D-Bus/macOS/WinRT); best-effort — degrades to a log line when unavailable.
 notify-rust = "4"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+# TTY password prompt for the bare `--password` form (never a plaintext argv).
+rpassword = "7"
 
 # flock(2) for the daemon's kernel-enforced single-instance lock (unix only).
 [target.'cfg(unix)'.dependencies]

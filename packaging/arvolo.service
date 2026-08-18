@@ -19,7 +19,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 # Absolute path to the installed binary (e.g. ~/.local/bin/arvolo).
-ExecStart=%h/.local/bin/arvolo daemon
+ExecStart=%h/.local/bin/arvolo daemon run
 Restart=on-failure
 RestartSec=5
 # Point clients + daemon at your relay (or set it in ~/.config/arvolo/config.toml).

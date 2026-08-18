@@ -43,6 +43,7 @@ async fn spawn_test_daemon() -> (CancellationToken, tempfile::TempDir) {
         dir.path().join("downloads"),
         Arc::new(Mutex::new(HashMap::new())),
         Arc::new(AtomicUsize::new(0)),
+        shutdown.clone(),
     );
     let stop = shutdown.clone();
     tokio::spawn(async move {
@@ -295,6 +296,7 @@ async fn revoking_a_deposit_the_engine_made_goes_through_the_engine() {
         dir.path().join("downloads"),
         Arc::new(Mutex::new(HashMap::new())),
         Arc::new(AtomicUsize::new(0)),
+        shutdown.clone(),
     );
     let stop = shutdown.clone();
     tokio::spawn(async move {

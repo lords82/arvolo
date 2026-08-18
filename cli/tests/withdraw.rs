@@ -86,10 +86,10 @@ async fn cancelling_a_mailbox_send_also_retracts_the_recipients_offer() {
         &relay,
         &[
             "send",
-            "bob",
             file.to_str().unwrap(),
-            "--deposit",
-            "--use-http",
+            "--to",
+            "bob",
+            "--mailbox",
         ],
     )
     .await;

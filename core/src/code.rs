@@ -46,15 +46,14 @@ pub fn parse_code(code: &str) -> Result<(String, String, Option<String>)> {
 }
 
 /// Ensure a relay base URL carries a scheme. A bare host (`relay.example.com`)
-/// gets `https://` — or `http://` when `use_http` is set (LAN / dev / plaintext).
-/// An address that already has an explicit scheme is left untouched.
-pub fn normalize_relay(raw: &str, use_http: bool) -> String {
+/// gets `https://`; write `http://host:port` explicitly for a LAN / dev /
+/// plaintext relay. An address that already has a scheme is left untouched.
+pub fn normalize_relay(raw: &str) -> String {
     let r = raw.trim();
     if r.contains("://") {
         return r.to_string();
     }
-    let scheme = if use_http { "http" } else { "https" };
-    format!("{scheme}://{r}")
+    format!("https://{r}")
 }
 
 /// The compact form embedded in a pairing code: `https://` (the default) is
@@ -285,7 +284,7 @@ pub async fn exchange_bytes_with(
         })?;
     // A bare host embedded in the code (`code@host`) means https; `http://…` is
     // kept as-is (see `compact_relay`).
-    let relay = normalize_relay(relay.trim_end_matches('/'), false);
+    let relay = normalize_relay(relay.trim_end_matches('/'));
     let client = crate::http::client();
 
     match detect_version(&client, &relay, &slot, timeout).await? {
@@ -1168,22 +1167,20 @@ mod tests {
     fn relay_scheme_roundtrips_through_a_code() {
         // Bare host defaults to https; the code embeds the compact form, and the
         // receiver normalizes it back to the same URL.
-        let full = normalize_relay("relay.example.com", false);
+        let full = normalize_relay("relay.example.com");
         assert_eq!(full, "https://relay.example.com");
         assert_eq!(compact_relay(&full), "relay.example.com");
-        assert_eq!(normalize_relay(&compact_relay(&full), false), full);
+        assert_eq!(normalize_relay(&compact_relay(&full)), full);
 
-        // A plaintext relay keeps its scheme both in the code and after resolve.
-        let http = normalize_relay("relay.local:8787", true);
+        // A plaintext relay keeps its explicit scheme both in the code and
+        // after resolve.
+        let http = normalize_relay("http://relay.local:8787");
         assert_eq!(http, "http://relay.local:8787");
         assert_eq!(compact_relay(&http), "http://relay.local:8787");
-        assert_eq!(normalize_relay(&compact_relay(&http), false), http);
+        assert_eq!(normalize_relay(&compact_relay(&http)), http);
 
-        // An explicit scheme is never rewritten by the flag.
-        assert_eq!(
-            normalize_relay("http://relay.local", false),
-            "http://relay.local"
-        );
+        // An explicit scheme is never rewritten.
+        assert_eq!(normalize_relay("http://relay.local"), "http://relay.local");
     }
 
     #[test]

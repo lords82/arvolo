@@ -52,14 +52,18 @@ file lands. Same thing from the terminal:
 
 ```sh
 # you
-arvolo code ./photo.jpg
+arvolo send --code ./photo.jpg
 #   ->  4821-crater-mango
 
 # them
 arvolo recv 4821-crater-mango
 ```
 
-Nothing installed on the other side? `arvolo link ./report.pdf` prints a URL
+A bare `arvolo send ./photo.jpg` writes a small `photo.jpg.arvolo` ticket file
+instead — share it over any channel, like a .torrent, and the other side runs
+`arvolo recv photo.jpg.arvolo`.
+
+Nothing installed on the other side? `arvolo send --link ./report.pdf` prints a URL
 that downloads and decrypts in any browser — no install, no account. This is
 what whoever opens it sees:
 

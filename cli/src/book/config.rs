@@ -22,7 +22,6 @@ pub(crate) struct Config {
     pub(crate) swarm: Option<String>,
     pub(crate) concurrency: Option<u32>,
     ipv4_only: Option<bool>,
-    pub(crate) debug: Option<bool>,
     pub(crate) log: Option<String>,
     pub(crate) sync: Option<bool>,
     pub(crate) display_name: Option<String>,
@@ -201,10 +200,9 @@ pub fn apply_config_to_env() {
     }
 
     // One row per config key → its ARVOLO_* env var, each normalized to the string
-    // the env expects (or `None` to leave the env untouched). `debug` maps to "1"
-    // only when on, since core treats *any* value of ARVOLO_DEBUG as enabled.
-    // Bridged with env > config > default precedence via `set_if_unset`.
-    let bridges: [(&str, Option<String>); 15] = [
+    // the env expects (or `None` to leave the env untouched). Bridged with
+    // env > config > default precedence via `set_if_unset`.
+    let bridges: [(&str, Option<String>); 14] = [
         ("ARVOLO_TEMP_DIR", cfg.temp_dir.and_then(nonempty)),
         ("ARVOLO_IDENTITY", cfg.identity.and_then(nonempty)),
         ("ARVOLO_IROH_RELAY", cfg.iroh_relay.and_then(nonempty)),
@@ -232,10 +230,6 @@ pub fn apply_config_to_env() {
         ("ARVOLO_SWARM", cfg.swarm.and_then(nonempty)),
         ("ARVOLO_CONCURRENCY", cfg.concurrency.map(|n| n.to_string())),
         ("ARVOLO_IPV4_ONLY", cfg.ipv4_only.map(bool_env)),
-        (
-            "ARVOLO_DEBUG",
-            cfg.debug.filter(|&b| b).map(|_| "1".to_string()),
-        ),
         ("RUST_LOG", cfg.log.and_then(nonempty)),
     ];
     for (key, val) in bridges {
@@ -272,9 +266,9 @@ pub fn write_default_config(relay: Option<&str>) -> Result<()> {
 # shown below commented at its default. Uncomment a line to change it.
 # Environment variables (ARVOLO_*) always override these keys.
 
-# Relay URL — brokers pairing codes, `send --to`, the mailbox, download links and
-# the swarm. A bare host assumes https://; for a plaintext/LAN relay write the
-# scheme and port, e.g. "http://relay.local:6282".
+# Relay URL — brokers pairing codes, sends to a contact (`send --to`), the
+# mailbox, download links and the swarm. A bare host assumes https://; for a
+# plaintext/LAN relay write the scheme and port, e.g. "http://relay.local:6282".
 {relay_line}
 
 # Where received files are saved.
@@ -339,9 +333,6 @@ pub fn write_default_config(relay: Option<&str>) -> Result<()> {
 # Force IPv4-only transport (default: auto-detected).
 #ipv4_only = false
 
-# Extra diagnostics.
-#debug = false
-
 # Log level (tracing / RUST_LOG syntax).
 #log = "info"
 
@@ -373,7 +364,7 @@ pub fn default_relay() -> Option<String> {
         .ok()
         .filter(|s| !s.trim().is_empty())
         .or_else(|| load_config().relay.filter(|s| !s.trim().is_empty()))?;
-    Some(normalize_relay(&raw, false))
+    Some(normalize_relay(&raw))
 }
 
 /// The compiled-in public default relay, so a fresh install works with zero
@@ -393,7 +384,7 @@ pub const BUILTIN_RELAY: &str = match option_env!("ARVOLO_DEFAULT_RELAY") {
 pub fn default_relay_or_builtin() -> Option<String> {
     default_relay().or_else(|| {
         let b = BUILTIN_RELAY.trim();
-        (!b.is_empty()).then(|| normalize_relay(b, false))
+        (!b.is_empty()).then(|| normalize_relay(b))
     })
 }
 

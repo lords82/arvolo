@@ -1,13 +1,12 @@
 //! arvolo CLI.
 //!
-//! Sending splits on one question — *do I know who gets this?* If you do, `send`
-//! delivers to them; if you don't, you name the artefact you want to hand around:
-//!   arvolo send <who> <file>       to a contact: live if online, else mailbox + `arvm…`
-//!   arvolo link <file>             public browser download link
-//!   arvolo code <file>             short pairing code to read out loud
-//!   arvolo ticket <file>           self-contained `arvc…` ticket to paste
-//!   arvolo recv <arvc…|arvm…|code|link>   fetch — one verb, auto-detects which
-//!   arvolo recv                    with nothing to paste: what's waiting for you
+//! One verb sends, one verb receives:
+//!   arvolo send <file>                 writes <file>.arvolo — share it like a .torrent
+//!   arvolo send <file> --to alice      to a contact: live if online, else mailbox + `arvm…`
+//!   arvolo send <file> --link          public browser download URL
+//!   arvolo send <file> --code          short code to read out loud (payload stays P2P)
+//!   arvolo recv <.arvolo|arvc…|arvm…|code|link|handle>   fetch — auto-detects which
+//!   arvolo recv                        with nothing to paste: what's waiting for you
 //!
 //! P2P transport is encrypted by QUIC and each chunk is end-to-end encrypted;
 //! the offline path is end-to-end encrypted with HPKE. The relay only ever sees
@@ -22,6 +21,7 @@ use clap::FromArgMatches;
 
 mod book;
 mod deposits;
+mod handles;
 mod history;
 // The daemon speaks over a local control channel: a Unix-domain socket where
 // there is one, a named pipe on Windows. Which of the two is decided inside
@@ -42,15 +42,15 @@ pub(crate) mod testlock;
 mod ui;
 mod util;
 
-use args::{build_cli, Cli, Command, DeviceAction, MeAction};
+use args::{build_cli, Cli, Command, DaemonAction, DeviceAction, MeAction};
 use commands::cancel::cancel_cmd;
 use commands::contacts::contacts_cmd;
-use commands::daemon::{accept_cmd, daemon, pause_cmd, reject_cmd};
+use commands::daemon::{daemon, daemon_start, daemon_status_cmd, daemon_stop_cmd, pause_cmd};
 use commands::history::history_cmd;
 use commands::identity::{me, name_cmd};
-use commands::receive::{listen, recv};
+use commands::receive::{decline_cmd, listen, recv};
 use commands::resume::resume_cmd;
-use commands::send::{code_cmd, link, send_to, ticket_cmd};
+use commands::send::{send_cmd, SendOpts};
 use commands::status::status_cmd;
 use output::{init_tracing, VERBOSITY};
 use ui::*;
@@ -104,51 +104,45 @@ async fn run() -> Result<()> {
 
     match cli.command {
         Command::Send {
-            who,
             paths,
-            deposit,
+            to,
+            mailbox,
+            link,
+            code,
+            ticket,
             note,
-            relay,
-            use_http,
             ttl,
             max,
             password,
-            qr,
-        } => {
-            send_to(
-                who, paths, deposit, note, relay, use_http, ttl, max, password, qr,
-            )
-            .await
-        }
-        Command::Link {
-            paths,
-            relay,
-            use_http,
-            ttl,
-            max,
-            password,
-            qr,
-        } => link(paths, relay, use_http, ttl, max, password, qr).await,
-        Command::Code {
-            paths,
-            relay,
-            use_http,
             keep,
             foreground,
             qr,
-        } => code_cmd(paths, relay, use_http, keep, foreground, qr).await,
-        Command::Ticket {
-            paths,
             relay,
-            use_http,
-            foreground,
-            qr,
-        } => ticket_cmd(paths, relay, use_http, foreground, qr).await,
+        } => {
+            send_cmd(SendOpts {
+                paths,
+                to,
+                mailbox,
+                link,
+                code,
+                ticket,
+                note,
+                ttl,
+                max,
+                password,
+                keep,
+                foreground,
+                qr,
+                relay: relay.relay,
+            })
+            .await
+        }
         Command::Recv {
-            ticket,
+            what,
             out,
             password,
-        } => recv(ticket, out, password).await,
+        } => recv(what, out, password).await,
+        Command::Decline { handle } => decline_cmd(handle).await,
         Command::Me { action } => match action {
             None => me(),
             Some(MeAction::Name { name }) => name_cmd(name),
@@ -156,48 +150,35 @@ async fn run() -> Result<()> {
         Command::Completions { shell } => completions::completions_cmd(shell),
         Command::Contacts { action } => contacts_cmd(action).await,
         Command::Device { action } => match action {
-            DeviceAction::Pair {
-                relay,
-                use_http,
-                qr,
-            } => sync::device_pair(relay, use_http, qr).await,
+            DeviceAction::Pair { qr, relay } => sync::device_pair(relay.relay, qr).await,
             DeviceAction::Join { code, yes } => sync::device_join(code, yes).await,
             DeviceAction::Sync => sync::sync_now(None, false).await,
             DeviceAction::Status => sync::sync_status().await,
         },
         Command::Status { watch, action } => status_cmd(watch, action).await,
-        Command::History { all, action } => history_cmd(all, action),
+        Command::History { action } => history_cmd(action),
         Command::Listen {
-            download_dir,
-            relay,
-            use_http,
-            auto_accept_contacts,
-            auto_accept_verified,
-            yes,
+            accept,
             no_sync,
-        } => {
-            listen(
+            relay,
+        } => listen(accept, no_sync, relay.relay).await,
+        Command::Daemon { action } => match action {
+            DaemonAction::Run {
                 download_dir,
-                relay,
-                use_http,
-                auto_accept_contacts,
-                auto_accept_verified,
-                yes,
                 no_sync,
-            )
-            .await
-        }
-        Command::Daemon {
-            download_dir,
-            relay,
-            use_http,
-            no_sync,
-        } => daemon(download_dir, relay, use_http, no_sync).await,
-        Command::Accept { offer_id, out } => accept_cmd(offer_id, out).await,
-        Command::Reject { offer_id } => reject_cmd(offer_id).await,
-        Command::Cancel { id, token } => cancel_cmd(id, token).await,
+                relay,
+            } => daemon(download_dir, relay.relay, no_sync).await,
+            DaemonAction::Start {
+                download_dir,
+                no_sync,
+                relay,
+            } => daemon_start(download_dir, relay.relay, no_sync).await,
+            DaemonAction::Stop => daemon_stop_cmd().await,
+            DaemonAction::Status => daemon_status_cmd().await,
+        },
+        Command::Cancel { id } => cancel_cmd(id).await,
         Command::Pause { id } => pause_cmd(id).await,
-        Command::Resume { id, path, qr } => resume_cmd(id, path, qr).await,
+        Command::Resume { id, path } => resume_cmd(id, path).await,
     }
 }
 
@@ -240,6 +221,14 @@ fn maybe_first_run_wizard() {
             println!("\n✓ Saved {}", book::config_path().display());
             match relay {
                 Some(r) => println!("  relay = {r}\n"),
+                // Skipping is not a degraded state: relay-requiring features fall
+                // back to the compiled-in default. Say which host that is — it's
+                // a third-party server this install will now talk to.
+                None if !book::BUILTIN_RELAY.trim().is_empty() => println!(
+                    "  No relay set — codes/mailbox/links use the built-in default \
+                     ({}).\n  Set `relay` in the file (or pass --relay) to use your own.\n",
+                    book::BUILTIN_RELAY
+                ),
                 None => println!(
                     "  No relay set — codes/mailbox/links need one. Edit the file or \
                      pass --relay.\n"
@@ -254,12 +243,16 @@ fn maybe_first_run_wizard() {
 fn prompt_relay() -> Option<String> {
     use std::io::Write;
     println!("\nWelcome to Arvolo — no configuration found, quick one-time setup.\n");
-    println!("Relay URL: brokers pairing codes, `send --to`, the mailbox, download");
-    println!("links and the swarm. Leave empty to skip (plain P2P `arvc…` tickets");
-    println!("still work without a relay).");
+    println!("Relay URL: brokers pairing codes, sends to a contact, the mailbox,");
+    println!("download links and the swarm. Leave empty to use the built-in default");
+    if book::BUILTIN_RELAY.trim().is_empty() {
+        println!("(none in this build — plain P2P `arvc…` tickets still work).");
+    } else {
+        println!("({}) — plain P2P `arvc…` tickets work without any.", book::BUILTIN_RELAY);
+    }
     println!("  • Production (TLS):  just the hostname, e.g. relay.example.com");
     println!("  • LAN/dev (no TLS):  http://host:6282");
-    print!("Relay [none]: ");
+    print!("Relay [built-in]: ");
     let _ = std::io::stdout().flush();
     let mut line = String::new();
     if std::io::stdin().read_line(&mut line).is_err() {

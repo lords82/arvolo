@@ -471,11 +471,20 @@ pub async fn set_my_name(name: String) -> Result<(), String> {
     c.set_my_name(name).await.or_else(err)
 }
 
-/// Stop a (stale) daemon by its pid file. The event pump's `ensure_running` then
-/// brings a fresh one up — which is the whole point: the pair is a restart the
-/// user doesn't have to open a terminal for.
+/// Stop the daemon so the event pump's `ensure_running` brings a fresh one up —
+/// which is the whole point: the pair is a restart the user doesn't have to open
+/// a terminal for. Asked politely over IPC first (`Request::Shutdown`); the pid
+/// file is only the fallback for a daemon too old or too wedged to answer. A
+/// leftover `daemon stop` marker is cleared: an in-app restart is the user
+/// asking for it to be up again.
 #[tauri::command]
 pub async fn restart_daemon() -> Result<(), String> {
+    let _ = std::fs::remove_file(arvolo_ipc::stop_marker_path());
+    if let Ok(mut c) = client().await {
+        if c.shutdown().await.is_ok() {
+            return Ok(());
+        }
+    }
     let pid = std::fs::read_to_string(arvolo_ipc::pid_path())
         .map_err(|e| format!("pid file: {e}"))?
         .trim()

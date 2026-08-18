@@ -21,6 +21,9 @@ export type UIStatus =
 
 export interface TransferDto {
   id: number;
+  // The 8-hex handle the CLI shows and takes (`arvolo cancel <handle>`).
+  // Restart-stable, unlike `id`. Optional: absent from an older daemon.
+  handle?: string;
   direction: "send" | "recv";
   peer: string | null;
   name: string;

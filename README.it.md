@@ -52,14 +52,18 @@ arriva. Stessa cosa dal terminale:
 
 ```sh
 # tu
-arvolo code ./foto.jpg
+arvolo send --code ./foto.jpg
 #   ->  4821-crater-mango
 
 # l'altra persona
 arvolo recv 4821-crater-mango
 ```
 
-Dall'altra parte non c'è niente di installato? `arvolo link ./report.pdf`
+Un `arvolo send ./foto.jpg` senza flag scrive invece un piccolo file-ticket
+`foto.jpg.arvolo` — condividilo su qualsiasi canale, come un .torrent, e
+dall'altra parte basta `arvolo recv foto.jpg.arvolo`.
+
+Dall'altra parte non c'è niente di installato? `arvolo send --link ./report.pdf`
 stampa un URL che scarica e decifra in qualsiasi browser — senza installare,
 senza account. Ecco cosa vede chi lo apre:
 

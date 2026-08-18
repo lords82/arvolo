@@ -7,7 +7,7 @@
 //! device can open files sent to you. Address-book changes then ride the inbox as
 //! encrypted CRDT snapshots.
 
-use std::io::{IsTerminal, Write};
+use std::io::IsTerminal;
 
 use anyhow::{anyhow, bail, Context, Result};
 use arvolo_core::code;
@@ -29,28 +29,18 @@ const AUTO_SYNC_SECS: u64 = 300;
 /// (identity secret + full book snapshot) comfortably under it.
 const MAX_PAIR_PAYLOAD: usize = 60 * 1024;
 
-fn resolve_relay(relay: Option<String>, use_http: bool) -> Result<String> {
+fn resolve_relay(relay: Option<String>) -> Result<String> {
     match relay {
-        Some(r) => Ok(book::normalize_relay(&r, use_http)),
+        Some(r) => Ok(book::normalize_relay(&r)),
         None => book::default_relay_or_builtin()
             .context("no relay configured (pass --relay or set ARVOLO_RELAY / config `relay`)"),
     }
 }
 
-fn confirm(prompt: &str) -> Result<bool> {
-    eprint!("{prompt}");
-    std::io::stderr().flush().ok();
-    let mut line = String::new();
-    std::io::stdin()
-        .read_line(&mut line)
-        .context("read confirmation")?;
-    Ok(matches!(line.trim().to_lowercase().as_str(), "y" | "yes"))
-}
-
 /// `arvolo device pair` — on an existing device: publish a pairing code and, once
 /// the new device connects, hand it this device's identity + address book.
-pub async fn device_pair(relay: Option<String>, use_http: bool, qr: bool) -> Result<()> {
-    let relay = resolve_relay(relay, use_http)?;
+pub async fn device_pair(relay: Option<String>, qr: bool) -> Result<()> {
+    let relay = resolve_relay(relay)?;
     let me = crate::my_identity()?;
     let identity_secret: [u8; 32] = me
         .secret_bytes()
@@ -153,7 +143,7 @@ pub async fn device_join(code: String, yes: bool) -> Result<()> {
                 if !std::io::stderr().is_terminal() {
                     bail!("refusing to overwrite the identity without --yes in a non-interactive shell");
                 }
-                if !confirm("Replace this device's identity? [y/N] ")? {
+                if !crate::ui::confirm_blocking("Replace this device's identity?") {
                     eprintln!("Aborted — nothing changed.");
                     return Ok(());
                 }
@@ -216,7 +206,7 @@ pub async fn sync_now(relay: Option<String>, quiet: bool) -> Result<()> {
 /// Split out from [`sync_now`] because the daemon runs this for a GUI that reports
 /// the outcome in a panel, and a `println!` from inside a daemon goes nowhere.
 pub async fn sync_round(relay: Option<String>) -> Result<usize> {
-    let relay = resolve_relay(relay, false)?;
+    let relay = resolve_relay(relay)?;
     let me = crate::my_identity()?;
     let key = sync::snapshot_key(&me.secret_bytes());
     let sub = InboxSubscription::new(relay, &me);
@@ -256,6 +246,17 @@ pub async fn sync_round(relay: Option<String>) -> Result<usize> {
     // 3. Cleanup: delete the notes we merged (we are the slot owner). Best-effort.
     for id in to_clear {
         let _ = sub.ack(&id).await;
+    }
+
+    // A merge is the one path that can orphan advertised-name records (a device
+    // that removed the contact synced its deletion here). Sweep them now, so no
+    // separate `contacts prune` chore exists. Best-effort, like the acks.
+    if merged > 0 {
+        if let Ok(n) = book::prune_orphan_names() {
+            if n > 0 {
+                tracing::debug!("pruned {n} orphan advertised-name record(s) after merge");
+            }
+        }
     }
 
     Ok(merged)

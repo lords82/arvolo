@@ -20,9 +20,16 @@ socket. It needs a relay (`--relay` / `ARVOLO_RELAY` / config `relay`).
 ## Run it
 
 ```sh
-arvolo daemon                       # foreground; Ctrl-C or SIGTERM to stop
-arvolo daemon --download-dir ~/Downloads/arvolo
+arvolo daemon start                 # spawn in the background and return
+arvolo daemon run                   # foreground; Ctrl-C or SIGTERM to stop (systemd/launchd)
+arvolo daemon stop                  # shut it down — and keep it down
+arvolo daemon status                # is it up, and what is it doing
+arvolo daemon start --download-dir ~/Downloads/arvolo
 ```
+
+`stop` leaves a marker so nothing respawns the daemon behind your back (the
+desktop app supervises it and would otherwise bring it right back); the next
+`start`/`run` — or the app's own restart button — clears it.
 
 Downloads default to `~/Arvolo`. Change the folder with the
 `--download-dir` flag, the `ARVOLO_DOWNLOAD_DIR` env var, or a `download_dir` key
@@ -35,7 +42,7 @@ relay = "https://mailbox.example.com"
 download_dir = "/srv/arvolo/incoming"
 ```
 
-A second `arvolo daemon` refuses to start while one is already running
+A second daemon refuses to start while one is already running
 (single-instance guard).
 
 Then, from any terminal (or a second machine's account):
@@ -44,18 +51,18 @@ Then, from any terminal (or a second machine's account):
 arvolo status                 # is the daemon up? live transfers (→ out, ← in) + pending offers
 arvolo status --watch         # redraw as things progress
 arvolo history                # what already happened (the log)
-arvolo accept <offer-id>      # download a parked offer (id from `arvolo status`)
-arvolo reject <offer-id>      # decline it
+arvolo recv <handle>          # download a parked offer (handle from `arvolo status`)
+arvolo decline <handle>       # decline it
 arvolo cancel <transfer-id>   # stop a running transfer
-arvolo send bob <file>        # hand a send to the daemon (live if online, else mailbox)
-arvolo ticket <file>          # plain P2P ticket, served by the daemon in the background
-arvolo code <file>            # short dictatable code, hosted by the daemon
+arvolo send <file> --to bob   # hand a send to the daemon (live if online, else mailbox)
+arvolo send <file>            # .arvolo ticket file, served by the daemon in the background
+arvolo send <file> --code     # short dictatable code, hosted by the daemon
 arvolo listen                 # attach as an interactive approver (Ctrl-C detaches)
 ```
 
-`arvolo ticket <file>` hands its `arvc…` ticket to the daemon by default: it
+A bare `arvolo send <file>` hands its ticket to the daemon by default: it
 serves in the background and you watch it (who's pulling, %, delivered) with
-`arvolo status`, surviving your terminal. `arvolo ticket <file> --foreground`
+`arvolo status`, surviving your terminal. `--foreground`
 keeps the inline behavior (serve here, Ctrl-C to stop).
 
 `arvolo code <file>` does the same for a short code. It prints the code and
@@ -89,7 +96,7 @@ code — a code is consumed on use, so it is not the way back:
 arvolo resume ~/Arvolo/holiday.zip
 ```
 
-With no daemon running, `send`/`listen`/`code` fall back to their in-process
+With no daemon running, `send`/`listen` fall back to their in-process
 behavior, so nothing you already do breaks.
 
 ## Trust: auto-download vs. ask
@@ -102,7 +109,7 @@ trust to skip the prompt:
 arvolo contacts add bob <bob-id>
 arvolo contacts verify bob      # compare fingerprints out-of-band first
 arvolo contacts trust bob       # now bob's files auto-download, no prompt
-arvolo contacts untrust bob     # back to asking
+arvolo contacts trust bob --undo   # back to asking
 ```
 
 `contacts list` shows `⬇trusted` next to trusted contacts. Trust is separate from

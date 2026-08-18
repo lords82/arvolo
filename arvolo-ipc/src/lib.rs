@@ -109,6 +109,16 @@ pub fn pid_path() -> PathBuf {
     config_dir().join("daemon.pid")
 }
 
+/// Path to the `daemon stop` marker (honors `ARVOLO_CONFIG_DIR`).
+///
+/// `arvolo daemon stop` writes it before the daemon goes down; `daemon run`
+/// removes it on startup. Every supervisor loop that would respawn a dead daemon
+/// — the GUI's event pump above all — must check it first: a stop the user asked
+/// for has to stay stopped, not come back within seconds.
+pub fn stop_marker_path() -> PathBuf {
+    config_dir().join("daemon.stopped")
+}
+
 /// Path to the daemon's log (honors `ARVOLO_CONFIG_DIR`).
 ///
 /// Here rather than in whoever launches the daemon, because the two must agree:

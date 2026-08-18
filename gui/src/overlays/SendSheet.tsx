@@ -1,11 +1,12 @@
 // Sending, in one panel with four answers to "who is this for?".
 //
-// The CLI has four verbs here — `send --to`, `code`, `link`, `ticket` — and they
-// are genuinely different things, not options on one thing: one needs a saved
-// contact, one needs the other person present *now*, one needs nothing but a
-// browser, one needs no relay at all. Presenting them as a mode switch rather
-// than as four buttons on the rail makes the choice visible without making it
-// four separate places to learn.
+// The CLI has one verb with four modes here — `send --to`, `send --code`,
+// `send --link`, and the bare `send` that writes a `.arvolo` ticket file — and
+// they are genuinely different things, not options on one thing: one needs a
+// saved contact, one needs the other person present *now*, one needs nothing
+// but a browser, one needs no relay at all. Presenting them as a mode switch
+// rather than as four buttons on the rail makes the choice visible without
+// making it four separate places to learn.
 //
 // The mailbox options (scadenza, download, password) appear only under "a un
 // contatto", and only once "lascia in casella" is on. That is not tidiness: TTL

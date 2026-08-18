@@ -37,7 +37,7 @@ docker run -d --name arvolo-relay -p 6282:6282 -v arvolo-data:/data \
   ghcr.io/lords82/arvolo-relay:latest
 ```
 
-Clients then use `--relay <host>:6282 --use-http` (see §3). **Do not** expose
+Clients then use `--relay http://<host>:6282` (see §3). **Do not** expose
 plain HTTP to the public internet — it's for LAN/dev only.
 
 ### B. Production — behind nginx with TLS (recommended)
@@ -125,12 +125,12 @@ relay and writes `~/.config/arvolo/config.toml`:
 ```text
 Welcome to Arvolo — no configuration found, quick one-time setup.
 
-Relay URL: brokers pairing codes, `arvolo send`, the mailbox, download
-links and the swarm. Leave empty to skip (plain P2P `arvc…` tickets
-still work without a relay).
+Relay URL: brokers pairing codes, sends to a contact, the mailbox,
+download links and the swarm. Leave empty to use the built-in default
+(arvolo.duckdns.org) — plain P2P `arvc…` tickets work without any.
   • Production (TLS):  just the hostname, e.g. relay.example.com
   • LAN/dev (no TLS):  http://host:6282
-Relay [none]: relay.example.com
+Relay [built-in]: relay.example.com
 ```
 
 The generated file has your `relay` set and **every other option listed,
@@ -164,31 +164,31 @@ arvolo me               # show your public id
 
 ```sh
 # sender
-arvolo code ./photo.jpg
+arvolo send --code ./photo.jpg
 #   ->  4821-crater-mango          (with a configured relay; else @<relay>)
 
 # receiver
 arvolo recv 4821-crater-mango
 ```
 
-**No relay at all** — `arvolo ticket ./file` prints a self-contained `arvc…`
-P2P ticket; the receiver runs `arvolo recv arvc…`.
+**No relay at all** — a bare `arvolo send ./file` writes a self-contained
+`file.arvolo` P2P ticket file; the receiver runs `arvolo recv file.arvolo`.
 
 **Send to a known contact** — the tool picks the channel (live if they're online,
 mailbox if not):
 
 ```sh
 # receiver stays online
-arvolo listen --auto-accept-contacts
+arvolo listen --accept contacts
 
 # sender
-arvolo send alice ./photo.jpg
+arvolo send ./photo.jpg --to alice
 ```
 
 **Offline mailbox** — leave an encrypted file on the relay until they fetch it:
 
 ```sh
-arvolo send <id-or-contact> ./report.pdf --deposit   # prints an arvm… ticket
+arvolo send ./report.pdf --to <id-or-contact> --mailbox   # prints an arvm… ticket
 arvolo recv arvm…                                         # fetches + decrypts (burns on read)
 ```
 
@@ -203,7 +203,7 @@ arvolo recv                                               # what's waiting for y
 lives only in the URL `#fragment`, so the relay stays zero-knowledge:
 
 ```sh
-arvolo link ./report.pdf
+arvolo send --link ./report.pdf
 #   ->  https://relay.example.com/dl/<claim>#<key>
 ```
 
@@ -216,7 +216,7 @@ Track everything with `arvolo status` (add `--watch` for a live view).
 - [ ] Relay reachable over HTTPS (`curl https://relay.example.com/healthz` → `ok`).
 - [ ] Client `relay` set in `config.toml` (or `ARVOLO_RELAY`).
 - [ ] `arvolo me` prints your public id.
-- [ ] A test `arvolo code ./file` + `arvolo recv <code>` round-trips.
+- [ ] A test `arvolo send --code ./file` + `arvolo recv <code>` round-trips.
 
 For the full environment-variable reference and every command, see the
 [manual](MANUAL.md); for production hardening, [`DEPLOY.md`](DEPLOY.md).

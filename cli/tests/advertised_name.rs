@@ -106,7 +106,7 @@ async fn advertised_name_shown_and_approved_end_to_end() {
     let mut listen = arvolo(
         cfg_recv.path(),
         &relay,
-        &["listen", "--auto-accept-contacts"],
+        &["listen", "--accept", "contacts"],
     )
     .stderr(Stdio::piped())
     .stdout(Stdio::null())
@@ -120,7 +120,7 @@ async fn advertised_name_shown_and_approved_end_to_end() {
     let (ok, out) = run(
         cfg_send.path(),
         &relay,
-        &["send", &recv_id, file.to_str().unwrap(), "--deposit"],
+        &["send", file.to_str().unwrap(), "--to", &recv_id, "--mailbox"],
     )
     .await;
     assert!(ok, "send --deposit failed: {out}");
@@ -143,7 +143,7 @@ async fn advertised_name_shown_and_approved_end_to_end() {
     let (ok, out) = run(
         cfg_recv.path(),
         &relay,
-        &["contacts", "accept-name", &send_id],
+        &["contacts", "rename", &send_id],
     )
     .await;
     assert!(ok, "accept-name: {out}");

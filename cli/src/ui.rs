@@ -5,6 +5,64 @@ use crate::book;
 
 use crate::util::encode_id;
 
+/// The one yes/no answer rule: `y`/`yes` in any case; everything else —
+/// including EOF and read errors — means no.
+fn is_yes(line: &str) -> bool {
+    matches!(line.trim().to_lowercase().as_str(), "y" | "yes")
+}
+
+/// Ask the user a yes/no question: prompt on stderr (stdout stays data-only),
+/// `[y/N]` suffix appended here so every prompt reads the same.
+pub(crate) fn confirm_blocking(prompt: &str) -> bool {
+    use std::io::Write;
+    eprint!("{prompt} [y/N] ");
+    let _ = std::io::stderr().flush();
+    let mut line = String::new();
+    if std::io::stdin().read_line(&mut line).is_err() {
+        return false;
+    }
+    is_yes(&line)
+}
+
+/// `confirm_blocking` for async contexts: the stdin read moves off the runtime.
+pub(crate) async fn confirm(prompt: String) -> bool {
+    tokio::task::spawn_blocking(move || confirm_blocking(&prompt))
+        .await
+        .unwrap_or(false)
+}
+
+/// Read a password off the TTY, echo off — what a bare `--password` asks for.
+/// Never take one on argv by default: it would land in shell history and `ps`.
+pub(crate) fn prompt_password() -> anyhow::Result<String> {
+    use std::io::{IsTerminal, Write};
+    anyhow::ensure!(
+        std::io::stdin().is_terminal(),
+        "--password with no value prompts on a terminal — in a script, pass --password=<pw>"
+    );
+    eprint!("Password: ");
+    let _ = std::io::stderr().flush();
+    let pw = rpassword::read_password().map_err(anyhow::Error::from)?;
+    anyhow::ensure!(!pw.is_empty(), "empty password — nothing set");
+    Ok(pw)
+}
+
+#[cfg(test)]
+mod confirm_tests {
+    use super::is_yes;
+
+    // Regression: one hand-rolled prompt accepted only `y|Y|yes|YES`, so a
+    // user typing "Yes" was silently declined.
+    #[test]
+    fn yes_in_any_case_means_yes() {
+        for ok in ["y", "Y", "yes", "YES", "Yes", " yes ", "yEs"] {
+            assert!(is_yes(ok), "{ok:?} must mean yes");
+        }
+        for no in ["", "n", "no", "si", "yep", "y e s"] {
+            assert!(!is_yes(no), "{no:?} must mean no");
+        }
+    }
+}
+
 /// A cancellation token that fires on Ctrl-C.
 pub(crate) fn cancel_on_ctrl_c() -> CancellationToken {
     let token = CancellationToken::new();

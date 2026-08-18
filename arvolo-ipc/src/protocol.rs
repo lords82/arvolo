@@ -225,6 +225,10 @@ pub enum Request {
     /// sends when its pairing sheet is closed: an unattended `device pair` would
     /// otherwise keep offering this device's identity secret for its full window.
     CancelPairing { session: String },
+    /// Ask the daemon to exit cleanly → [`Response::Ok`] (sent before it goes).
+    /// What `arvolo daemon stop` and the GUI's restart use, instead of hunting
+    /// the pidfile for a process to signal.
+    Shutdown,
     /// Turn this connection into an event stream (no further requests on it).
     Subscribe,
 }
@@ -365,6 +369,12 @@ pub struct StatusDto {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TransferDto {
     pub id: u64,
+    /// The 8-hex handle a person types (`arvolo pause/resume/cancel <handle>`).
+    /// Derived from what the engine persists (`created`, direction, name, size),
+    /// so — unlike `id`, a per-process counter — it survives a daemon restart.
+    /// `#[serde(default)]` so an older peer's DTO still decodes (empty = absent).
+    #[serde(default)]
+    pub handle: String,
     /// "send" or "recv".
     pub direction: String,
     pub peer: Option<String>,
@@ -794,10 +804,26 @@ fn status_str(s: &TransferStatus) -> String {
     }
 }
 
+/// The visible handle of a transfer: first 4 bytes of a BLAKE3 over the fields
+/// the engine persists, hex. Restart-stable where `id` is not — a restored share
+/// keeps its `created`/name/size, so it keeps its handle too.
+pub fn transfer_handle(t: &Transfer) -> String {
+    use arvolo_core::reexport::Hash;
+    let seed = format!(
+        "{}-{}-{}-{}",
+        t.created,
+        direction_str(t.direction),
+        t.name,
+        t.total_size
+    );
+    data_encoding::HEXLOWER.encode(&Hash::new(seed.as_bytes()).as_bytes()[..4])
+}
+
 impl From<&Transfer> for TransferDto {
     fn from(t: &Transfer) -> Self {
         TransferDto {
             id: t.id,
+            handle: transfer_handle(t),
             direction: direction_str(t.direction).into(),
             peer: t.peer.as_ref().map(encode_id),
             name: t.name.clone(),

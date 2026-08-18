@@ -32,16 +32,17 @@ use anyhow::{bail, Result};
 use arvolo_core::chunked::ChunkTicket;
 
 use crate::commands::send::{resume_by_id, resume_by_ticket};
+use crate::handles::{self, Match};
 use crate::sessions;
 
-pub(crate) async fn resume_cmd(id: String, path: Option<PathBuf>, qr: bool) -> Result<()> {
+pub(crate) async fn resume_cmd(id: String, path: Option<PathBuf>) -> Result<()> {
     // `sessions::load` 404s with its own message; we only want to know if it's there.
     if sessions::load(&id).is_ok() {
         anyhow::ensure!(
             path.is_none(),
             "resuming session '{id}' takes no file — the saved session remembers what it was sending"
         );
-        return resume_by_id(&id, qr).await;
+        return resume_by_id(&id).await;
     }
     if ChunkTicket::looks_like(&id) {
         let Some(path) = path else {
@@ -50,14 +51,51 @@ pub(crate) async fn resume_cmd(id: String, path: Option<PathBuf>, qr: bool) -> R
                  `arvolo resume <ticket> <file>`"
             )
         };
-        return resume_by_ticket(&id, &path, qr).await;
+        return resume_by_ticket(&id, &path).await;
     }
-    if let Ok(tid) = id.parse::<u64>() {
-        anyhow::ensure!(
-            path.is_none(),
-            "resuming transfer {tid} takes no file — the daemon still has it"
-        );
-        return resume_transfer(tid).await;
+    // A `.arvolo` ticket file: the ticket is its content, and — like the raw
+    // ticket above — it needs the original file alongside.
+    if let Some(ticket) = read_arvolo(&id)? {
+        let Some(path) = path else {
+            bail!(
+                "resuming from a `.arvolo` file needs the file it was serving: \
+                 `arvolo resume {id} <file>`"
+            )
+        };
+        return resume_by_ticket(&ticket, &path).await;
+    }
+    // A unique prefix of a saved session id (4+ chars; same rule as `cancel`).
+    if handles::looks_like_handle(&id) && (4..8).contains(&id.len()) {
+        let candidates = sessions::list().into_iter().map(|s| (s.id.clone(), s.id));
+        match handles::resolve_prefix(&id, candidates) {
+            Match::One(full) => {
+                anyhow::ensure!(
+                    path.is_none(),
+                    "resuming session '{full}' takes no file — the saved session remembers what it was sending"
+                );
+                return resume_by_id(&full).await;
+            }
+            Match::Many(hs) => bail!(
+                "'{id}' matches more than one resumable send ({}) — type more of it",
+                hs.join(", ")
+            ),
+            Match::None => {}
+        }
+    }
+    // A transfer the daemon holds: a plain number, or an 8-hex handle no local
+    // store claimed above (the daemon resolves that shape itself). Handle-shaped
+    // input with no daemon around falls through to the final error instead of
+    // failing on "no daemon" for what may just be a typo'd session id.
+    let digitish = id.parse::<u64>().is_ok();
+    if digitish || handles::looks_like_handle(&id) {
+        let daemon_up = crate::commands::daemon::daemon_client().await.is_some();
+        if daemon_up || digitish {
+            anyhow::ensure!(
+                path.is_none(),
+                "resuming transfer {id} takes no file — the daemon still has it"
+            );
+            return crate::commands::daemon::resume_cmd(&id).await;
+        }
     }
     // A path to a partial download: the receiving side. Checked last, and only
     // when the path actually exists, so it can never shadow the id shapes above.
@@ -71,6 +109,20 @@ pub(crate) async fn resume_cmd(id: String, path: Option<PathBuf>, qr: bool) -> R
         return resume_download(&partial).await;
     }
     bail!("no paused transfer or resumable send with id '{id}' — see `arvolo status`")
+}
+
+/// If `id` names a `.arvolo` file, the ticket inside it.
+fn read_arvolo(id: &str) -> Result<Option<String>> {
+    use anyhow::Context;
+    let p = std::path::Path::new(id);
+    if p.extension().and_then(|e| e.to_str()) != Some("arvolo") {
+        return Ok(None);
+    }
+    let content = std::fs::read_to_string(p)
+        .with_context(|| format!("read ticket file {}", p.display()))?;
+    let t = content.trim();
+    anyhow::ensure!(!t.is_empty(), "{} is empty — not a ticket file", p.display());
+    Ok(Some(t.to_string()))
 }
 
 /// Finish a partial download from the ticket recorded next to it.
@@ -91,11 +143,6 @@ async fn resume_download(partial: &std::path::Path) -> Result<()> {
     crate::commands::receive::recv_ticket(ticket, Some(partial.to_path_buf()), None).await
 }
 
-/// A paused transfer: only the daemon can restart one, since only the daemon is
-/// running it.
-async fn resume_transfer(id: u64) -> Result<()> {
-    crate::commands::daemon::resume_cmd(id).await
-}
 
 #[cfg(test)]
 mod tests {
@@ -139,7 +186,7 @@ ticket = "arvc-not-a-real-ticket"
         // *message* is what proves the dispatch: only `resume_by_id` reads a saved
         // ticket. Down the transfer path this id would produce "no daemon" or "no
         // such transfer" instead, which is the regression being pinned.
-        let err = resume_cmd("73406183".into(), None, false)
+        let err = resume_cmd("73406183".into(), None)
             .await
             .unwrap_err()
             .to_string();
@@ -161,7 +208,7 @@ ticket = "arvc-not-a-real-ticket"
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("ARVOLO_CONFIG_DIR", dir.path());
 
-        let err = resume_cmd("arvc-not-a-real-ticket".into(), None, false)
+        let err = resume_cmd("arvc-not-a-real-ticket".into(), None)
             .await
             .unwrap_err()
             .to_string();
@@ -179,7 +226,7 @@ ticket = "arvc-not-a-real-ticket"
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("ARVOLO_CONFIG_DIR", dir.path());
 
-        let err = resume_cmd("zzzznotanid".into(), None, false)
+        let err = resume_cmd("zzzznotanid".into(), None)
             .await
             .unwrap_err()
             .to_string();

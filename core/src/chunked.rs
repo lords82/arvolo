@@ -500,17 +500,12 @@ struct CtrlHandler {
 
 impl ProtocolHandler for CtrlHandler {
     async fn accept(&self, conn: Connection) -> std::result::Result<(), AcceptError> {
-        let dbg = std::env::var("ARVOLO_DEBUG").is_ok();
         let peer = conn.remote_id();
         let Ok((mut send, mut recv)) = conn.accept_bi().await else {
-            if dbg {
-                eprintln!("[ctrl] accept_bi failed");
-            }
+            tracing::debug!("ctrl: accept_bi failed");
             return Ok(());
         };
-        if dbg {
-            eprintln!("[ctrl] receiver connected");
-        }
+        tracing::debug!("ctrl: receiver connected");
         let _ = self.connected_tx.send(());
         // On connect, tell the receiver which chunks are already on the relay.
         let snapshot: Vec<u32> = self.on_relay.lock().unwrap().iter().copied().collect();
@@ -556,13 +551,11 @@ impl ProtocolHandler for CtrlHandler {
         let undelivered: Vec<usize> = (0..self.total)
             .filter(|i| !mine.contains(&(*i as u32)))
             .collect();
-        if dbg {
-            eprintln!(
-                "[ctrl] receiver gone ({reason}); delivered={} undelivered={}",
-                mine.len(),
-                undelivered.len()
-            );
-        }
+        tracing::debug!(
+            "ctrl: receiver gone ({reason}); delivered={} undelivered={}",
+            mine.len(),
+            undelivered.len()
+        );
         let _ = self.gone_tx.send((peer, undelivered));
         // Acknowledge the clean shutdown. We have read the receiver's stream to EOF,
         // so every `Have` it sent is already counted above; closing now lets its

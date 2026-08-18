@@ -53,14 +53,18 @@ colle dans son Arvolo et le fichier arrive. Pareil depuis le terminal :
 
 ```sh
 # vous
-arvolo code ./photo.jpg
+arvolo send --code ./photo.jpg
 #   ->  4821-crater-mango
 
 # l'autre personne
 arvolo recv 4821-crater-mango
 ```
 
-Rien d'installé en face ? `arvolo link ./rapport.pdf` imprime une URL qui
+Un `arvolo send ./photo.jpg` sans drapeau écrit plutôt un petit fichier-ticket
+`photo.jpg.arvolo` — partagez-le par n'importe quel canal, comme un .torrent,
+et en face il suffit de `arvolo recv photo.jpg.arvolo`.
+
+Rien d'installé en face ? `arvolo send --link ./rapport.pdf` imprime une URL qui
 télécharge et déchiffre dans n'importe quel navigateur — sans installation,
 sans compte. Voici ce que voit celui qui l'ouvre :
 

@@ -32,10 +32,9 @@ const PAIR_WAIT: std::time::Duration = std::time::Duration::from_secs(300);
 pub(crate) async fn pair_host(
     name: Option<String>,
     relay: Option<String>,
-    use_http: bool,
     qr: bool,
 ) -> Result<()> {
-    let relay = require_relay(relay, use_http)?;
+    let relay = require_relay(relay)?;
     let me = my_identity()?;
     let my_id = encode_id(&me.public());
 

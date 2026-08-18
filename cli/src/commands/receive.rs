@@ -13,7 +13,6 @@ use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::{book, history, sync};
 
-#[cfg(unix)]
 use crate::ipc;
 
 use crate::output::{vprintln, vvprintln};
@@ -21,61 +20,32 @@ use crate::output::{vprintln, vvprintln};
 use crate::ui::*;
 use crate::util::*;
 
-#[cfg(unix)]
 use crate::commands::daemon::{daemon_client, daemon_events};
 use crate::commands::offline::recv_offline;
 use crate::output::verbosity;
 
-/// Ask the user y/n on stdin (blocking), defaulting to no on EOF/error.
-pub(crate) async fn confirm(prompt: String) -> bool {
-    tokio::task::spawn_blocking(move || {
-        use std::io::Write;
-        eprint!("{prompt} [y/N] ");
-        let _ = std::io::stderr().flush();
-        let mut line = String::new();
-        if std::io::stdin().read_line(&mut line).is_err() {
-            return false;
-        }
-        matches!(line.trim(), "y" | "Y" | "yes" | "YES")
-    })
-    .await
-    .unwrap_or(false)
-}
-
 pub(crate) async fn listen(
-    download_dir: Option<PathBuf>,
-    relay: Option<String>,
-    use_http: bool,
-    auto_accept_contacts: bool,
-    auto_accept_verified: bool,
-    yes: bool,
+    accept: Option<crate::args::AcceptWho>,
     no_sync: bool,
+    relay: Option<String>,
 ) -> Result<()> {
+    let policy = AcceptPolicy::from(accept);
     // If a daemon is already receiving, attach to it as a viewer/approver instead
     // of standing up a second engine (which would fight over presence/inbox).
-    #[cfg(unix)]
     {
         if let Some(client) = daemon_client().await {
             // Say so. Two different things happen under one verb depending on
             // what else is running, and a user who can't tell which one they got
             // can't explain the difference in behaviour they're about to see.
             eprintln!("(a daemon is already listening — attaching to it as the approver)");
-            if download_dir.is_some() {
-                eprintln!(
-                    "note: --download-dir is ignored when attaching to the daemon \
-                     (it saves to its own configured dir)."
-                );
-            }
-            return listen_attached(client, auto_accept_contacts, auto_accept_verified, yes).await;
+            return listen_attached(client, policy).await;
         }
     }
 
-    let relay = require_relay(relay, use_http)?;
+    let relay = require_relay(relay)?;
     let me = my_identity()?;
     let my_id = encode_id(&me.public());
-    let download_dir = download_dir
-        .or_else(book::default_download_dir)
-        .unwrap_or_else(book::default_home_downloads);
+    let download_dir = book::default_download_dir().unwrap_or_else(book::default_home_downloads);
 
     let manager = TransferManager::new(me, Some(relay.clone()), download_dir.clone());
     let mut events = manager.subscribe();
@@ -86,11 +56,11 @@ pub(crate) async fn listen(
         vprintln!("multi-device address-book sync enabled");
     }
     vprintln!("inbox poller started — publishing presence and watching for offers on the relay");
-    if yes {
-        vprintln!("auto-accepting ALL offers (--yes)");
-    } else if auto_accept_verified {
+    if policy.yes {
+        vprintln!("auto-accepting ALL offers (--accept all)");
+    } else if policy.auto_accept_verified {
         vprintln!("auto-accepting offers from verified contacts only");
-    } else if auto_accept_contacts {
+    } else if policy.auto_accept_contacts {
         vprintln!("auto-accepting offers from saved contacts");
     }
 
@@ -140,12 +110,12 @@ pub(crate) async fn listen(
                         let accept = if status.trusted {
                             eprintln!("   ⬇ auto-downloading: trusted contact");
                             true
-                        } else if yes {
+                        } else if policy.yes {
                             true
-                        } else if auto_accept_verified && status.verified {
+                        } else if policy.auto_accept_verified && status.verified {
                             eprintln!("   (auto-accepting: verified contact)");
                             true
-                        } else if auto_accept_contacts && status.name.is_some() {
+                        } else if policy.auto_accept_contacts && status.name.is_some() {
                             eprintln!("   (auto-accepting: saved contact)");
                             true
                         } else {
@@ -188,8 +158,8 @@ pub(crate) async fn listen(
     Ok(())
 }
 
-/// How an attached `listen` decides whether to auto-accept an incoming offer.
-#[cfg(unix)]
+/// How `listen` decides whether to auto-accept an incoming offer (both
+/// standalone and attached to a daemon).
 #[derive(Clone, Copy)]
 pub(crate) struct AcceptPolicy {
     pub(crate) auto_accept_contacts: bool,
@@ -197,8 +167,18 @@ pub(crate) struct AcceptPolicy {
     pub(crate) yes: bool,
 }
 
+impl From<Option<crate::args::AcceptWho>> for AcceptPolicy {
+    fn from(accept: Option<crate::args::AcceptWho>) -> Self {
+        use crate::args::AcceptWho;
+        AcceptPolicy {
+            auto_accept_contacts: matches!(accept, Some(AcceptWho::Contacts)),
+            auto_accept_verified: matches!(accept, Some(AcceptWho::Verified)),
+            yes: matches!(accept, Some(AcceptWho::All)),
+        }
+    }
+}
+
 /// Decide + act on one offer over the daemon IPC.
-#[cfg(unix)]
 pub(crate) async fn handle_attached_offer(
     client: &mut ipc::client::DaemonClient,
     offer: ipc::protocol::OfferDto,
@@ -258,20 +238,11 @@ pub(crate) async fn handle_attached_offer(
     }
 }
 
-#[cfg(unix)]
 pub(crate) async fn listen_attached(
     mut client: ipc::client::DaemonClient,
-    auto_accept_contacts: bool,
-    auto_accept_verified: bool,
-    yes: bool,
+    policy: AcceptPolicy,
 ) -> Result<()> {
     use ipc::protocol::{EventDto, OfferDto};
-
-    let policy = AcceptPolicy {
-        auto_accept_contacts,
-        auto_accept_verified,
-        yes,
-    };
 
     let st = client.status().await?;
     eprintln!("Attached to daemon {}", st.public_id);
@@ -334,16 +305,150 @@ pub(crate) fn record_history(manager: &TransferManager, id: u64, status: &str) {
     );
 }
 
-/// `arvolo recv` — with something to paste, fetch it; with nothing, show what is
-/// waiting for you and take one from the list.
+/// `arvolo recv` — with something to paste (or a `.arvolo` file, or a waiting
+/// offer's handle), fetch it; with nothing, show what is waiting for you and
+/// take one from the list.
 pub(crate) async fn recv(
-    ticket: Option<String>,
+    what: Option<String>,
     out: Option<PathBuf>,
     password: Option<String>,
 ) -> Result<()> {
-    match ticket {
-        Some(t) => recv_ticket(t, out, password).await,
-        None => recv_waiting(out, password).await,
+    // `--password` with no value means "prompt me" (clap stores the empty string).
+    let password = match password {
+        Some(p) if p.is_empty() => Some(prompt_password()?),
+        other => other,
+    };
+    let Some(what) = what else {
+        return recv_waiting(out, password).await;
+    };
+    // A `.arvolo` ticket file: the ticket is its content.
+    if let Some(ticket) = read_arvolo_file(&what)? {
+        return recv_ticket(ticket, out, password).await;
+    }
+    // The 8-hex handle of a waiting offer (any unique prefix). Nothing else recv
+    // takes has this shape: tickets carry their prefix, codes their dashes.
+    if crate::handles::looks_like_handle(&what) {
+        return take_offer_by_handle(&what, out, password, Decision::Accept).await;
+    }
+    recv_ticket(what, out, password).await
+}
+
+/// If `what` names a `.arvolo` file, the ticket inside it. Only the extension
+/// makes a string a path — a ticket or code can never look like one.
+fn read_arvolo_file(what: &str) -> Result<Option<String>> {
+    let p = std::path::Path::new(what);
+    if p.extension().and_then(|e| e.to_str()) != Some("arvolo") {
+        return Ok(None);
+    }
+    let content = std::fs::read_to_string(p)
+        .with_context(|| format!("read ticket file {}", p.display()))?;
+    let t = content.trim();
+    anyhow::ensure!(
+        !t.is_empty(),
+        "{} is empty — not a ticket file",
+        p.display()
+    );
+    Ok(Some(t.to_string()))
+}
+
+/// What to do with the offer a handle resolves to.
+pub(crate) enum Decision {
+    Accept,
+    Decline,
+}
+
+/// `arvolo decline <handle>` — drop a waiting offer without fetching it.
+pub(crate) async fn decline_cmd(handle: String) -> Result<()> {
+    take_offer_by_handle(&handle, None, None, Decision::Decline).await
+}
+
+/// Resolve a typed handle (unique prefix) against the waiting offers — the
+/// daemon's parked list when one runs, the relay inbox otherwise — and accept or
+/// decline the one it names.
+async fn take_offer_by_handle(
+    prefix: &str,
+    out: Option<PathBuf>,
+    password: Option<String>,
+    decision: Decision,
+) -> Result<()> {
+    use crate::handles::{resolve_prefix, short, Match};
+
+    if let Some(mut client) = daemon_client().await {
+        let pending = client.list_pending().await?;
+        match resolve_prefix(prefix, pending.iter().map(|o| (short(&o.id), o.clone()))) {
+            Match::One(offer) => match decision {
+                Decision::Accept => {
+                    note_advertised_name(&offer.from, &offer.sender_name);
+                    let id = client
+                        .accept_with_password(offer.id.clone(), out, password)
+                        .await?;
+                    let shown = crate::commands::daemon::handle_for(&mut client, id).await;
+                    println!(
+                        "Accepted {} — the daemon is downloading it (transfer {shown}). \
+                         Follow it with `arvolo status --watch`.",
+                        sanitize_display(&offer.name)
+                    );
+                    Ok(())
+                }
+                Decision::Decline => {
+                    client.reject(offer.id.clone()).await?;
+                    println!(
+                        "Declined {} — it's off your list.",
+                        sanitize_display(&offer.name)
+                    );
+                    Ok(())
+                }
+            },
+            Match::Many(hs) => anyhow::bail!(
+                "'{prefix}' matches more than one waiting offer ({}) — type more of it",
+                hs.join(", ")
+            ),
+            Match::None => anyhow::bail!(
+                "no waiting offer matches '{prefix}' — `arvolo recv` lists what's waiting"
+            ),
+        }
+    } else {
+        use arvolo_core::presence::InboxSubscription;
+        let relay = require_relay(None)?;
+        let me = my_identity()?;
+        let inbox = InboxSubscription::new(relay, &me);
+        let offers = read_inbox(&inbox).await?;
+        match resolve_prefix(
+            prefix,
+            offers.iter().enumerate().map(|(i, o)| (short(&o.id), i)),
+        ) {
+            Match::One(i) => {
+                let chosen = &offers[i];
+                match decision {
+                    Decision::Accept => {
+                        note_advertised_name(&encode_id(&chosen.sender), &chosen.offer.sender_name);
+                        recv_ticket(chosen.offer.ticket.clone(), out, password).await?;
+                        // Saved, so it can be let go of; see `waiting_from_relay`.
+                        if let Err(e) = inbox.ack(&chosen.id).await {
+                            eprintln!(
+                                "(the file is saved, but the relay still lists the offer: {e:#})"
+                            );
+                        }
+                        Ok(())
+                    }
+                    Decision::Decline => {
+                        inbox.ack(&chosen.id).await.context("decline the offer")?;
+                        println!(
+                            "Declined {} — it won't be offered again.",
+                            sanitize_display(&chosen.offer.name)
+                        );
+                        Ok(())
+                    }
+                }
+            }
+            Match::Many(hs) => anyhow::bail!(
+                "'{prefix}' matches more than one waiting offer ({}) — type more of it",
+                hs.join(", ")
+            ),
+            Match::None => anyhow::bail!(
+                "no waiting offer matches '{prefix}' — `arvolo recv` lists what's waiting"
+            ),
+        }
     }
 }
 
@@ -567,8 +672,13 @@ pub(crate) fn waiting_row(o: &arvolo_core::presence::ReceivedOffer) -> Waiting {
         } else {
             "live — the sender has to be online"
         },
-        hint: None,
+        hint: Some(offer_hint(&crate::handles::short(&o.id))),
     }
+}
+
+/// The copy-pasteable pair of commands a waiting offer's row carries.
+pub(crate) fn offer_hint(handle: &str) -> String {
+    format!("arvolo recv {handle}   ·   arvolo decline {handle}")
 }
 
 /// One non-destructive read of our own inbox slot, with blocked senders dropped.
@@ -722,18 +832,14 @@ async fn recv_waiting(out: Option<PathBuf>, password: Option<String>) -> Result<
     // A running daemon already drains the inbox into its own parked list, so its
     // view is the authoritative one — reading the relay behind its back would show
     // an inbox it has emptied and hide the offers it is holding.
-    #[cfg(unix)]
-    {
-        if let Some(client) = daemon_client().await {
-            return waiting_from_daemon(client, out, password).await;
-        }
+    if let Some(client) = daemon_client().await {
+        return waiting_from_daemon(client, out, password).await;
     }
     waiting_from_relay(out, password).await
 }
 
 /// With a daemon: the offers it has parked awaiting approval — the same rows
 /// `arvolo status` shows, with the choice attached.
-#[cfg(unix)]
 async fn waiting_from_daemon(
     mut client: ipc::client::DaemonClient,
     out: Option<PathBuf>,
@@ -755,17 +861,14 @@ async fn waiting_from_daemon(
             // The daemon holds the ticket and drives the fetch either way, so
             // which kind it is changes nothing about what accepting does here.
             kind: "held by the daemon, awaiting you",
-            hint: Some(format!(
-                "arvolo accept {}   ·   arvolo reject {}",
-                o.id, o.id
-            )),
+            hint: Some(offer_hint(&crate::handles::short(&o.id))),
         })
         .collect();
     println!("Waiting for you ({}):\n", rows.len());
     print_waiting(&rows);
 
     let Some(pick) = pick_one(rows.len()).await else {
-        eprintln!("(nothing taken — they stay parked; `arvolo accept <id>` takes one later.)");
+        eprintln!("(nothing taken — they stay parked; `arvolo recv <handle>` takes one later.)");
         return Ok(());
     };
     let n = match pick {
@@ -785,8 +888,9 @@ async fn waiting_from_daemon(
     let id = client
         .accept_with_password(offer.id.clone(), out, password)
         .await?;
+    let shown = crate::commands::daemon::handle_for(&mut client, id).await;
     println!(
-        "Accepted — the daemon is downloading it (transfer {id}). \
+        "Accepted — the daemon is downloading it (transfer {shown}). \
          Follow it with `arvolo status --watch`."
     );
     Ok(())
@@ -802,7 +906,7 @@ async fn waiting_from_daemon(
 async fn waiting_from_relay(out: Option<PathBuf>, password: Option<String>) -> Result<()> {
     use arvolo_core::presence::InboxSubscription;
 
-    let relay = require_relay(None, false)?;
+    let relay = require_relay(None)?;
     let me = my_identity()?;
     let inbox = InboxSubscription::new(relay.clone(), &me);
     vprintln!("reading your inbox slot on {relay} (one round trip, no waiting)…");

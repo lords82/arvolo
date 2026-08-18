@@ -20,15 +20,94 @@ use crate::util::*;
 use crate::commands::daemon::{
     daemon_client, push_via_daemon, serve_code_via_daemon, serve_ticket_via_daemon,
 };
-use crate::commands::offline::send_offline;
+use crate::commands::offline::{send_link, send_sealed};
 use crate::commands::receive::record_history;
 use crate::output::verbosity;
+
+/// The unified `arvolo send`: one verb, four shapes. Which one runs is decided
+/// here, from flags clap has already checked for consistency — by the time this
+/// is called the combination is known to make sense.
+pub(crate) struct SendOpts {
+    pub(crate) paths: Vec<PathBuf>,
+    pub(crate) to: Option<String>,
+    pub(crate) mailbox: bool,
+    pub(crate) link: bool,
+    pub(crate) code: bool,
+    pub(crate) ticket: bool,
+    pub(crate) note: Option<String>,
+    pub(crate) ttl: u64,
+    pub(crate) max: Option<u32>,
+    pub(crate) password: Option<String>,
+    pub(crate) keep: bool,
+    pub(crate) foreground: bool,
+    pub(crate) qr: bool,
+    pub(crate) relay: Option<String>,
+}
+
+pub(crate) async fn send_cmd(opts: SendOpts) -> Result<()> {
+    guard_contact_in_path_slot(&opts.paths, opts.to.is_some())?;
+    // `--password` with no value means "prompt me" (clap stores the empty
+    // string); resolve it before anything leaves the machine.
+    let password = match opts.password {
+        Some(p) if p.is_empty() => Some(prompt_password()?),
+        other => other,
+    };
+    if let Some(who) = opts.to {
+        return send_to(
+            who,
+            opts.paths,
+            opts.mailbox,
+            opts.note,
+            opts.relay,
+            opts.ttl,
+            opts.max,
+            password,
+        )
+        .await;
+    }
+    if opts.link {
+        return send_link(opts.paths, opts.relay, opts.ttl, opts.max, opts.qr).await;
+    }
+    if opts.code {
+        return code_cmd(opts.paths, opts.relay, opts.keep, opts.foreground, opts.qr).await;
+    }
+    // Default: a `.arvolo` ticket file, like a .torrent — `--ticket` skips the
+    // file and prints the raw ticket for scripts.
+    let out = if opts.ticket {
+        TicketOut::Raw
+    } else {
+        TicketOut::File
+    };
+    ticket_cmd(opts.paths, opts.relay, opts.foreground, out).await
+}
+
+/// The habit guard for the old `send <who> <paths…>` shape: with `--to` gone
+/// missing, a contact name lands in the *paths* and the natural failure would be
+/// "file does not exist" — true, useless. Say what actually happened.
+fn guard_contact_in_path_slot(paths: &[PathBuf], has_to: bool) -> Result<()> {
+    if has_to {
+        return Ok(());
+    }
+    let Some(first) = paths.first() else {
+        return Ok(());
+    };
+    if first.exists() {
+        return Ok(());
+    }
+    let s = first.to_string_lossy();
+    if book::resolve_recipient(&s).is_ok() {
+        anyhow::bail!(
+            "'{s}' is a contact, not a file. The recipient is a flag now:\n\n    \
+             arvolo send <files…> --to {s}\n"
+        );
+    }
+    Ok(())
+}
 
 pub(crate) async fn push(
     paths: Vec<PathBuf>,
     to: String,
     relay: Option<String>,
-    use_http: bool,
     note: &str,
 ) -> Result<()> {
     anyhow::ensure!(
@@ -44,7 +123,7 @@ pub(crate) async fn push(
         }
     }
 
-    let relay = require_relay(relay, use_http)?;
+    let relay = require_relay(relay)?;
     let recipient = book::resolve_recipient(&to)?;
     vprintln!(
         "recipient {to} resolved (fingerprint {})",
@@ -177,35 +256,33 @@ fn announce_payload(paths: &[PathBuf]) -> Result<(PathBuf, String, bool, Option<
     Ok((payload, name, archive, temp))
 }
 
-/// `arvolo send <who> <paths…>` — deliver to a known recipient.
+/// `arvolo send <paths…> --to <who>` — deliver to a known recipient.
 ///
-/// Online (their daemon is reachable) → delivered live; offline, or `--deposit`
+/// Online (their daemon is reachable) → delivered live; offline, or `--mailbox`
 /// → left on the mailbox as an inbox offer, with an `arvm…` ticket printed so
 /// the sender can hand it over by another route too.
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn send_to(
+async fn send_to(
     who: String,
     paths: Vec<PathBuf>,
-    deposit: bool,
+    mailbox: bool,
     note: Option<String>,
     relay: Option<String>,
-    use_http: bool,
     ttl: u64,
     max: Option<u32>,
     password: Option<String>,
-    qr: bool,
 ) -> Result<()> {
     // The note rides inside the sealed offer; cap it so it fits comfortably.
     let note = note.unwrap_or_default();
     anyhow::ensure!(note.len() <= 4096, "--note is too long (max 4096 bytes)");
 
-    let relay_url = require_relay(relay, use_http)?;
+    let relay_url = require_relay(relay)?;
     let recipient = book::resolve_recipient(&who)?;
     book::warn_if_unverified(&who, &encode_id(&recipient));
     // With P2P off there is nothing to gain from the probe: a live delivery is not
     // available whatever it answers, so don't spend the request — and say why, or the
     // sudden absence of the live path looks like the recipient never being online.
-    let online = if deposit {
+    let online = if mailbox {
         false
     } else if !arvolo_core::transfer::p2p_enabled() {
         vprintln!("P2P is off — depositing on the relay instead of probing presence");
@@ -221,57 +298,36 @@ pub(crate) async fn send_to(
         // presence probe, so this can only be found out here.
         if max.is_some() || password.is_some() {
             eprintln!(
-                "note: --max/--password apply to a deposited send; ignored for a live delivery."
+                "note: --max/--password apply to a mailbox send; ignored for a live delivery."
             );
         }
-        return push(paths, who, Some(relay_url), use_http, &note).await;
+        return push(paths, who, Some(relay_url), &note).await;
     }
-    send_offline(
+    send_sealed(
         paths,
-        Some(who),
-        false,
+        who,
         Some(relay_url),
-        use_http,
         ttl,
         max,
         password,
-        qr,
         true,
         &note,
     )
     .await
 }
 
-/// `arvolo link <paths…>` — a public, browser-openable download URL.
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn link(
+/// `arvolo send --code` — hand the ticket over as a short pairing code.
+async fn code_cmd(
     paths: Vec<PathBuf>,
     relay: Option<String>,
-    use_http: bool,
-    ttl: u64,
-    max: Option<u32>,
-    password: Option<String>,
-    qr: bool,
-) -> Result<()> {
-    send_offline(
-        paths, None, true, relay, use_http, ttl, max, password, qr, false, "",
-    )
-    .await
-}
-
-/// `arvolo code <paths…>` — hand the ticket over as a short pairing code.
-pub(crate) async fn code_cmd(
-    paths: Vec<PathBuf>,
-    relay: Option<String>,
-    use_http: bool,
     keep: bool,
     foreground: bool,
     qr: bool,
 ) -> Result<()> {
     // A code brokers a *direct* transfer: the rendezvous only carries the ticket.
     ensure_p2p("a pairing code")?;
-    // A bare relay host gets a scheme (https by default, http with --use-http).
-    let relay = relay.map(|r| book::normalize_relay(&r, use_http));
+    // A bare relay host gets a scheme (https unless written explicitly).
+    let relay = relay.map(|r| book::normalize_relay(&r));
 
     // By default hand the code to a running daemon: it hosts the rendezvous in
     // the background, survives this terminal *and* a daemon restart, and shows up
@@ -301,19 +357,55 @@ pub(crate) async fn code_cmd(
     send_with_code(payload, name, archive, temp, relay, None, qr).await
 }
 
-/// `arvolo ticket <paths…>` — a self-contained `arvc…` ticket to share.
-pub(crate) async fn ticket_cmd(
+/// Where the `arvc…` ticket of a serve ends up.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TicketOut {
+    /// The raw ticket alone on stdout — for scripts and pipes (`--ticket`).
+    Raw,
+    /// A `<name>.arvolo` file in the current directory, its path alone on
+    /// stdout — the default: share the file like a .torrent.
+    File,
+}
+
+/// Deliver a ready ticket the way [`TicketOut`] asks: stdout carries exactly the
+/// artefact (the ticket, or the path of the `.arvolo` file it was written to);
+/// everything else goes to stderr.
+fn emit_ticket(out: TicketOut, base_name: &str, ticket: &str) {
+    match out {
+        TicketOut::Raw => {
+            println!("{ticket}");
+            eprintln!("\nOn the other device:  arvolo recv <the ticket above>");
+        }
+        TicketOut::File => match write_arvolo_file(base_name, ticket) {
+            Ok(path) => {
+                println!("{}", path.display());
+                eprintln!("\nTicket file written. Share it over any channel; on the other device:\n");
+                eprintln!("    arvolo recv {}\n", path.display());
+            }
+            // The send is already serving — a file that can't be written must
+            // not kill it. Fall back to the raw ticket, and say why.
+            Err(e) => {
+                eprintln!("(could not write the .arvolo file: {e:#} — printing the ticket instead)");
+                println!("{ticket}");
+                eprintln!("\nOn the other device:  arvolo recv <the ticket above>");
+            }
+        },
+    }
+}
+
+/// `arvolo send` (default) / `arvolo send --ticket` — a self-contained `arvc…`
+/// ticket, as a shareable `.arvolo` file or raw on stdout.
+async fn ticket_cmd(
     paths: Vec<PathBuf>,
     relay: Option<String>,
-    use_http: bool,
     foreground: bool,
-    qr: bool,
+    out: TicketOut,
 ) -> Result<()> {
     // An `arvc…` ticket is an invitation to connect to this node directly; the
     // relay can only ever backfill chunks behind it.
     ensure_p2p("an arvc… ticket")?;
-    // A bare relay host gets a scheme (https by default, http with --use-http).
-    let relay = relay.map(|r| book::normalize_relay(&r, use_http));
+    // A bare relay host gets a scheme (https unless written explicitly).
+    let relay = relay.map(|r| book::normalize_relay(&r));
     // Swarm is the norm: embed the configured relay in every arvc… ticket so the
     // recipient can backfill from it AND the relay acts as the swarm tracker
     // (peers seed to each other). Best-effort in the core — if the relay is
@@ -329,7 +421,14 @@ pub(crate) async fn ticket_cmd(
     {
         if !foreground {
             if let Some(client) = daemon_client().await {
-                return serve_ticket_via_daemon(client, paths, seed_relay, qr).await;
+                let base = arvolo_base_name(&paths);
+                let (id, ticket) = serve_ticket_via_daemon(client, paths, seed_relay).await?;
+                emit_ticket(out, &base, &ticket);
+                eprintln!(
+                    "Serving via the daemon — follow it with `arvolo status`, stop it with \
+                     `arvolo cancel {id}`."
+                );
+                return Ok(());
             }
         }
     }
@@ -362,7 +461,7 @@ pub(crate) async fn ticket_cmd(
     ) {
         eprintln!("(note: could not save resumable session: {e:#})");
     }
-    let result = serve_session(session, qr).await;
+    let result = serve_session(session, Some((out, name))).await;
     // The payload (a packed archive) had to stay readable for the whole session,
     // since chunks are produced on the fly; clean it up now that serving ended.
     if let Some(t) = &temp {
@@ -371,9 +470,53 @@ pub(crate) async fn ticket_cmd(
     result
 }
 
-/// Drive a prepared/resumed [`flow::SendSession`] to completion, printing the
-/// ticket when it's ready. Shared by fresh sends and both resume paths.
-pub(crate) async fn serve_session(session: flow::SendSession, qr: bool) -> Result<()> {
+/// The stem the `.arvolo` file is named after: the first path's file name, the
+/// same rule [`resolve_payload`] uses for the payload's suggested name.
+fn arvolo_base_name(paths: &[PathBuf]) -> String {
+    paths
+        .first()
+        .and_then(|p| p.file_name())
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "bundle".into())
+}
+
+/// Write `<base>.arvolo` in the current directory, never clobbering: an existing
+/// file gets ` (1)`, ` (2)`, … appended, the same rule downloads use.
+fn write_arvolo_file(base: &str, ticket: &str) -> Result<PathBuf> {
+    use std::io::Write;
+    let mut n = 0u32;
+    loop {
+        let candidate = if n == 0 {
+            PathBuf::from(format!("{base}.arvolo"))
+        } else {
+            PathBuf::from(format!("{base} ({n}).arvolo"))
+        };
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(mut f) => {
+                f.write_all(ticket.as_bytes()).context("write ticket file")?;
+                f.write_all(b"\n").context("write ticket file")?;
+                return Ok(candidate);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => n += 1,
+            Err(e) => {
+                return Err(e).with_context(|| format!("create {}", candidate.display()))
+            }
+        }
+    }
+}
+
+/// Drive a prepared/resumed [`flow::SendSession`] to completion, emitting the
+/// ticket when it's ready. Shared by fresh sends and both resume paths;
+/// `emit` is `None` when the caller already announced the artefact (resume
+/// reprints it itself).
+pub(crate) async fn serve_session(
+    session: flow::SendSession,
+    emit: Option<(TicketOut, String)>,
+) -> Result<()> {
     let cancel = cancel_on_ctrl_c();
     // Last progress percent we narrated, so `-v` shows a few milestones instead
     // of one line per ack. Shared because `serve`'s callback is `Fn`, not `FnMut`.
@@ -386,19 +529,23 @@ pub(crate) async fn serve_session(session: flow::SendSession, qr: bool) -> Resul
                 ticket,
                 has_relay,
             } => {
-                println!("\nFile ready ({chunks} chunks). On the other device:\n");
-                println!("    arvolo recv {ticket}\n");
-                if qr {
-                    print_qr(&ticket);
+                match &emit {
+                    Some((out, base)) => emit_ticket(*out, base, &ticket),
+                    None => {
+                        // A resume: the caller said what's happening; reprint the
+                        // ticket bare so it can be piped like a fresh one.
+                        println!("{ticket}");
+                        eprintln!("\nOn the other device:  arvolo recv <the ticket above>");
+                    }
                 }
                 if has_relay {
-                    println!("P2P-first; if the receiver drops, only the missing chunks are backfilled to the relay.");
+                    eprintln!("P2P-first; if the receiver drops, only the missing chunks are backfilled to the relay.");
                 }
                 vprintln!(
                     "serving {chunks} chunk(s), {} total; waiting for a receiver to connect",
                     human_size(total_size)
                 );
-                println!("Ctrl-C to stop.");
+                eprintln!("Ctrl-C to stop.");
             }
             SendEvent::ReceiverConnected => vprintln!("receiver connected — chunk pull started"),
             SendEvent::Progress { transferred, total } if total > 0 => {
@@ -434,7 +581,7 @@ pub(crate) async fn serve_session(session: flow::SendSession, qr: bool) -> Resul
 /// ticket so it stays valid after the sender restarted. The key rides in the
 /// ticket, so no saved session is needed. Tickets sealed to a recipient resume
 /// by session id instead (`arvolo resume <id>`).
-pub(crate) async fn resume_by_ticket(ticket: &str, path: &Path, qr: bool) -> Result<()> {
+pub(crate) async fn resume_by_ticket(ticket: &str, path: &Path) -> Result<()> {
     let expected = ChunkTicket::decode(ticket).context("parse ticket")?;
     let key: [u8; 32] = match &expected.key {
         KeyDelivery::Plain(bytes) => bytes
@@ -455,13 +602,13 @@ pub(crate) async fn resume_by_ticket(ticket: &str, path: &Path, qr: bool) -> Res
          start sends normally and resume by session id: `arvolo resume <id>`."
     );
     let session = flow::resume_send(path, key, None, &expected, RelayChoice::from_env()).await?;
-    serve_session(session, qr).await
+    serve_session(session, None).await
 }
 
 /// `arvolo resume <id>`: replay a saved session (covers deliveries to a contact
 /// too, which is why it needs no file). A
 /// single file is re-served in place; an archive is repacked deterministically.
-pub(crate) async fn resume_by_id(id: &str, qr: bool) -> Result<()> {
+pub(crate) async fn resume_by_id(id: &str) -> Result<()> {
     let rec = sessions::load(id)?;
     let expected = ChunkTicket::decode(&rec.ticket).context("parse saved ticket")?;
     let key = rec.key()?;
@@ -495,15 +642,16 @@ pub(crate) async fn resume_by_id(id: &str, qr: bool) -> Result<()> {
         RelayChoice::from_env(),
     )
     .await?;
-    let result = serve_session(session, qr).await;
+    let result = serve_session(session, None).await;
     if let Some(t) = &temp {
         let _ = std::fs::remove_file(t);
     }
     result
 }
 
-/// `arvolo code`: hand the ticket to the receiver via a short pairing code over a
-/// relay rendezvous, serving the file (and using the relay for backfill) meanwhile.
+/// `arvolo send --code`: hand the ticket to the receiver via a short pairing code
+/// over a relay rendezvous, serving the file (and using the relay for backfill)
+/// meanwhile.
 pub(crate) async fn send_with_code(
     payload: PathBuf,
     name: String,

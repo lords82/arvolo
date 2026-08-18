@@ -103,22 +103,6 @@ pub fn accept_name(who: &str) -> Result<String> {
     Ok(approved)
 }
 
-/// Approve every pending advertised name. Returns the count approved.
-pub fn accept_all_names() -> Result<usize> {
-    let mut names = load_names();
-    let mut n = 0;
-    for row in names.names.values_mut() {
-        if let Some(p) = row.pending.take() {
-            row.pinned = p;
-            n += 1;
-        }
-    }
-    if n > 0 {
-        save_names(&names)?;
-    }
-    Ok(n)
-}
-
 /// The approved (pinned) advertised name for an id, if any.
 pub fn display_name_of(id_b32: &str) -> Option<String> {
     load_names()

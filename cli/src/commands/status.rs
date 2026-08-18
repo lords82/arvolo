@@ -42,7 +42,7 @@ pub(crate) async fn status_cmd(watch: bool, action: Option<StatusAction>) -> Res
     // what's missing, too: the live rows below aren't absent because nothing is
     // happening, they're absent because nobody is watching.
     println!(
-        "daemon: not running — `arvolo daemon` starts it (no live transfers below; \
+        "daemon: not running — `arvolo daemon start` starts it (no live transfers below; \
          what's waiting for you is read straight from the relay)."
     );
 
@@ -72,6 +72,12 @@ pub(crate) async fn status_cmd(watch: bool, action: Option<StatusAction>) -> Res
 /// other half lives on local disk and is perfectly readable.
 async fn waiting_on_relay() -> Option<(String, Result<Vec<Waiting>>)> {
     let relay = book::default_relay_or_builtin()?;
+    // An install that never configured a relay is about to talk to the compiled-in
+    // default — a third-party host. Name it up front (stderr: it's narration, not
+    // a row), so its first appearance isn't buried inside a section heading.
+    if book::default_relay().is_none() {
+        eprintln!("relay: {relay} (built-in default — set `relay` in config.toml to use your own)");
+    }
     // No identity yet ⇒ nobody can have addressed anything to us. Checked rather
     // than created: `status` is the one command that must not bring something into
     // existence as a side effect of being asked what's going on.
@@ -410,11 +416,11 @@ pub(crate) async fn show_transfers_live(
             for o in pending {
                 let who = book::resolve_name(&o.from).unwrap_or_else(|| o.from.clone());
                 println!(
-                    "  ? {}  {} ({})  — arvolo accept {}",
+                    "  ? {}  {} ({})  — {}",
                     who,
                     o.name,
                     human_size(o.size),
-                    o.id
+                    crate::commands::receive::offer_hint(&crate::handles::short(&o.id))
                 );
             }
         }
