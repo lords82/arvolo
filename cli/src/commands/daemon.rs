@@ -262,7 +262,7 @@ pub(crate) async fn daemon(
                                 );
                             } else {
                                 eprintln!(
-                                    "📨 offer parked: {name} ({size_h}) from {who} — take it with `arvolo recv {}`",
+                                    "📨 offer waiting: {name} ({size_h}) from {who} — take it with `arvolo recv {}`",
                                     crate::handles::short(&id)
                                 );
                                 // Nudge the user with a desktop notification (best-effort;
@@ -493,14 +493,26 @@ pub(crate) async fn daemon_stop_cmd() -> Result<()> {
 }
 
 /// `arvolo daemon status` — is it running, and what is it doing.
-pub(crate) async fn daemon_status_cmd() -> Result<()> {
+pub(crate) async fn daemon_status_cmd(json: bool) -> Result<()> {
     match daemon_client().await {
         None => {
-            eprintln!("not running — start it with `arvolo daemon start`.");
+            if json {
+                println!("{{\"running\": false}}");
+            } else {
+                eprintln!("not running — start it with `arvolo daemon start`.");
+            }
             Ok(())
         }
         Some(mut client) => {
             let s = client.status().await?;
+            if json {
+                let mut v = serde_json::to_value(&s)?;
+                if let Some(obj) = v.as_object_mut() {
+                    obj.insert("running".into(), serde_json::Value::Bool(true));
+                }
+                println!("{}", serde_json::to_string_pretty(&v)?);
+                return Ok(());
+            }
             println!("version:       {}", s.version);
             println!("id:            {}", s.public_id);
             println!("fingerprint:   {}", s.fingerprint);
@@ -918,18 +930,20 @@ pub(crate) async fn serve_code_via_daemon(
         .await
         .context("daemon refused to host the code")?;
     let shown = handle_for(&mut client, id).await;
-    println!("\nOn the other device:\n");
-    println!("    arvolo recv {code}\n");
+    // The artefact alone on stdout; the words around it go to stderr.
+    println!("{code}");
+    eprintln!("\nOn the other device:\n");
+    eprintln!("    arvolo recv {code}\n");
     if qr {
         print_qr(&code);
     }
     if keep {
-        println!(
+        eprintln!(
             "Serving via the daemon, for anyone with the code. Tracked as transfer {shown} — \
              follow it with `arvolo status`, stop it with `arvolo cancel {shown}`."
         );
     } else {
-        println!(
+        eprintln!(
             "Serving via the daemon. The code works once; the transfer keeps going after that. \
              Tracked as {shown} — follow it with `arvolo status`, stop it with `arvolo cancel {shown}`."
         );

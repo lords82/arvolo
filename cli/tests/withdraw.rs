@@ -56,9 +56,16 @@ async fn run(cfg: &Path, relay: &str, args: &[&str]) -> (bool, String) {
         .output()
         .await
         .expect("run arvolo");
+    // stdout carries the artefact alone; the narration — including the
+    // deposit id the user is told to cancel with — lives on stderr. Tests read
+    // both, the way a person watching the terminal sees both.
     (
         out.status.success(),
-        String::from_utf8_lossy(&out.stdout).into_owned(),
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        ),
     )
 }
 

@@ -22,9 +22,12 @@ use crate::util::*;
 ///
 /// What already finished is [`crate::commands::history`], not this — the split is
 /// exactly "can I still do something about it?".
-pub(crate) async fn status_cmd(watch: bool, action: Option<StatusAction>) -> Result<()> {
+pub(crate) async fn status_cmd(watch: bool, json: bool, action: Option<StatusAction>) -> Result<()> {
     if let Some(StatusAction::Clear) = action {
         return clear_finished().await;
+    }
+    if json {
+        return status_json().await;
     }
 
     if let Some(client) = daemon_client().await {
@@ -153,6 +156,73 @@ async fn clear_finished() -> Result<()> {
     Ok(())
 }
 
+/// `arvolo status --json` — the same actionable state as the human view, as one
+/// JSON object on stdout. Handles are the ids to act on; the raw 26-char offer
+/// ids and every secret (content keys, revoke tokens) stay out on purpose.
+async fn status_json() -> Result<()> {
+    use serde_json::json;
+
+    let mut daemon_running = false;
+    let mut transfers = serde_json::Value::Array(vec![]);
+    let mut waiting: Vec<serde_json::Value> = Vec::new();
+
+    if let Some(mut client) = daemon_client().await {
+        daemon_running = true;
+        transfers = serde_json::to_value(client.list().await.unwrap_or_default())?;
+        for o in client.list_pending().await.unwrap_or_default() {
+            waiting.push(json!({
+                "handle": crate::handles::short(&o.id),
+                "from": o.from,
+                "name": o.name,
+                "size": o.size,
+                "note": o.note,
+                "sender_name": o.sender_name,
+            }));
+        }
+    } else if let Some((_relay, Ok(rows))) = waiting_on_relay().await {
+        // No daemon: same shape, read straight from the relay inbox. `Waiting`
+        // rows don't carry the raw id, and the hint already encodes the handle —
+        // rebuild it from the same inbox read instead of leaking internals.
+        for r in rows {
+            waiting.push(json!({
+                "handle": r.handle,
+                "from": r.from,
+                "name": r.name,
+                "size": r.size,
+                "note": r.note,
+                "sender_name": r.sender_name,
+            }));
+        }
+    }
+
+    // Resumable sends: the fields a script can act on — never the content key or
+    // the node seed, which live in the record for resuming, not for reading.
+    let resumable: Vec<serde_json::Value> = crate::sessions::list()
+        .into_iter()
+        .map(|s| {
+            json!({
+                "id": s.id,
+                "name": s.name,
+                "total_size": s.total_size,
+                "chunks": s.chunks,
+                "created": s.created,
+                "archive": s.archive,
+                "sources": s.sources,
+            })
+        })
+        .collect();
+
+    let out = json!({
+        "daemon_running": daemon_running,
+        "transfers": transfers,
+        "waiting": waiting,
+        "deposits": deposits::list_dtos().await,
+        "resumable": resumable,
+    });
+    println!("{}", serde_json::to_string_pretty(&out)?);
+    Ok(())
+}
+
 /// The "left on relay" section: files parked on a relay — public links and sealed
 /// mailbox deposits — that can still be withdrawn. Silent when there are none, so
 /// the common case adds no noise.
@@ -165,7 +235,7 @@ fn print_deposits(list: &[DepositDto]) {
         let kind = if d.kind == deposits::KIND_LINK {
             "link"
         } else {
-            "sealed"
+            "mailbox"
         };
         let to = if d.recipient.is_empty() {
             String::new()
@@ -252,12 +322,19 @@ fn print_resumable() {
     }
     println!("resumable sends — `arvolo resume <id>`:");
     for rec in list {
+        // Same row grammar as the deposits above: bullet, id, kind, name (size).
+        // "chunks" was an internal unit nobody needed to read here. A record
+        // whose sources are gone is flagged now, not when `resume` fails late.
         let kind = if rec.archive { "archive" } else { "file" };
+        let missing = if rec.sources.iter().any(|s| !s.exists()) {
+            "  ⚠ source missing — cannot resume"
+        } else {
+            ""
+        };
         println!(
-            "  {}  {}  {} chunk(s), {}  [{kind}]",
+            "  ● {}  [{kind}]  {} ({}){missing}",
             rec.id,
             rec.name,
-            rec.chunks,
             human_size(rec.total_size)
         );
     }

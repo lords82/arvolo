@@ -178,11 +178,28 @@ pub fn spawn_auto_sync(relay: String) -> tokio::task::JoinHandle<()> {
     })
 }
 
-/// `arvolo sync status` — a quick read-only summary of the sync state.
-pub async fn sync_status() -> Result<()> {
+/// `arvolo device status` — a quick read-only summary of the sync state.
+pub async fn sync_status(json: bool) -> Result<()> {
     let me = crate::my_identity()?;
+    if json {
+        let v = serde_json::json!({
+            "fingerprint": me.public().fingerprint(),
+            "contacts": book::contact_list().len(),
+            "sync_enabled": book::sync_enabled(),
+        });
+        println!("{}", serde_json::to_string_pretty(&v)?);
+        return Ok(());
+    }
     println!("identity:  {}", me.public().fingerprint());
     println!("contacts:  {}", book::contact_list().len());
+    println!(
+        "sync:      {}",
+        if book::sync_enabled() {
+            "on (rides listen/daemon; run one round now with `arvolo device sync`)"
+        } else {
+            "off (config `sync = false`)"
+        }
+    );
     Ok(())
 }
 

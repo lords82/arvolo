@@ -63,6 +63,77 @@ mod confirm_tests {
     }
 }
 
+/// One voice for "the file is on disk": the path alone on stdout — the artefact
+/// of a receive, so `arvolo recv … | xargs open` works — and the human line,
+/// with a human size, on stderr.
+pub(crate) fn saved(path: &std::path::Path, bytes: u64) {
+    println!("{}", path.display());
+    eprintln!(
+        "✓ saved {} ({})",
+        path.display(),
+        crate::util::human_size(bytes)
+    );
+}
+
+/// One progress voice for a transfer: an indicatif bar when stderr is a
+/// terminal, milestone lines (one per ~10%) when it's piped or a log — so no
+/// path is ever silent until the end, and none smears `\r` into a file.
+pub(crate) struct Progress {
+    bar: Option<indicatif::ProgressBar>,
+    last_decile: std::sync::atomic::AtomicU8,
+    label: &'static str,
+    total: u64,
+}
+
+impl Progress {
+    pub(crate) fn new(label: &'static str, total: u64) -> Self {
+        use std::io::IsTerminal;
+        let bar = (std::io::stderr().is_terminal() && total > 0).then(|| {
+            let pb = indicatif::ProgressBar::new(total);
+            pb.set_style(
+                indicatif::ProgressStyle::with_template(
+                    "{spinner} {bytes}/{total_bytes} ({bytes_per_sec}, ETA {eta}) {msg}",
+                )
+                .expect("static template"),
+            );
+            pb.set_message(label);
+            pb
+        });
+        Progress {
+            bar,
+            last_decile: std::sync::atomic::AtomicU8::new(u8::MAX),
+            label,
+            total,
+        }
+    }
+
+    pub(crate) fn update(&self, done: u64) {
+        if let Some(pb) = &self.bar {
+            pb.set_position(done.min(self.total));
+            return;
+        }
+        if self.total == 0 {
+            return;
+        }
+        let decile = (done.min(self.total) * 10 / self.total) as u8;
+        if decile != self.last_decile.swap(decile, std::sync::atomic::Ordering::Relaxed) {
+            eprintln!(
+                "{}: {}% ({}/{})",
+                self.label,
+                decile * 10,
+                crate::util::human_size(done),
+                crate::util::human_size(self.total)
+            );
+        }
+    }
+
+    pub(crate) fn finish(&self) {
+        if let Some(pb) = &self.bar {
+            pb.finish_and_clear();
+        }
+    }
+}
+
 /// A cancellation token that fires on Ctrl-C.
 pub(crate) fn cancel_on_ctrl_c() -> CancellationToken {
     let token = CancellationToken::new();
@@ -179,9 +250,11 @@ pub(crate) fn print_qr(data: &str) {
                 .render::<qrcode::render::unicode::Dense1x2>()
                 .quiet_zone(true)
                 .build();
-            println!("{art}");
+            // stderr: the QR is a rendering of the artefact, not the artefact —
+            // stdout stays exactly the thing a pipe wants.
+            eprintln!("{art}");
         }
-        Err(e) => eprintln!("(could not render QR: {e})"),
+        Err(e) => eprintln!("(could not render QR: {e} — use the printed text instead)"),
     }
 }
 

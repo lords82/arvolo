@@ -324,8 +324,12 @@ pub(crate) enum Command {
     /// history`.
     Status {
         /// Keep the view open and redraw as transfers progress (needs a daemon).
-        #[arg(long)]
+        #[arg(long, conflicts_with = "json")]
         watch: bool,
+        /// Print as JSON instead of the human view, for scripts. Handles are the
+        /// ids to act on; secrets (content keys, revoke tokens) never appear.
+        #[arg(long)]
+        json: bool,
         #[command(subcommand)]
         action: Option<StatusAction>,
     },
@@ -336,6 +340,9 @@ pub(crate) enum Command {
     /// still be acted on, which is exactly what separates it from `arvolo status`.
     /// Prints the whole log; pipe it (`arvolo history | head`) to trim.
     History {
+        /// Print as JSON instead of the human view, for scripts.
+        #[arg(long)]
+        json: bool,
         #[command(subcommand)]
         action: Option<HistoryAction>,
     },
@@ -492,7 +499,11 @@ pub(crate) enum DaemonAction {
     /// Stop the running daemon.
     Stop,
     /// Is it running, and what is it doing: version, identity, relay, transfers.
-    Status,
+    Status {
+        /// Print as JSON instead of the human view, for scripts.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 // `clear` means one thing in both places it appears — *get rid of what this view
@@ -674,8 +685,12 @@ pub(crate) enum DeviceAction {
     },
     /// Publish this device's address book and merge any pending updates now.
     Sync,
-    /// Show sync state (identity fingerprint, contact count, last sync).
-    Status,
+    /// Show sync state: identity fingerprint, contact count, auto-sync on/off.
+    Status {
+        /// Print as JSON instead of the human view, for scripts.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// The shells `arvolo completions` can emit integration for. These are the five

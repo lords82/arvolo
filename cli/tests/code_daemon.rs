@@ -88,13 +88,15 @@ async fn start_daemon(cfg: &Path, relay: &str) -> Child {
     panic!("daemon never came up");
 }
 
-/// The code out of `arvolo code`'s output: it prints the line a user copies.
+/// The code out of `arvolo send --code`'s output: stdout carries the artefact
+/// alone (the words around it live on stderr), so the code is the first — and
+/// only — non-empty line.
 fn scrape_code(stdout: &str) -> String {
     stdout
         .lines()
-        .find_map(|l| l.trim().strip_prefix("arvolo recv "))
-        .unwrap_or_else(|| panic!("no `arvolo recv <code>` line in:\n{stdout}"))
-        .trim()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or_else(|| panic!("no code on stdout:\n{stdout}"))
         .to_string()
 }
 

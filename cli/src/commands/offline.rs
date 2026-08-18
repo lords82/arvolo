@@ -105,26 +105,28 @@ pub(crate) async fn send_link(
     } else {
         format!("{max} download(s)")
     };
-    println!(
+    // The URL alone on stdout (`arvolo send --link f | pbcopy` copies just the
+    // address); everything around it is narration and goes to stderr.
+    println!("{}", out.link);
+    eprintln!(
         "\nEncrypted and deposited ({}, expires in {}). File: {} ({}).",
         cap,
         human_duration(ttl),
         out.name,
         human_size(out.size),
     );
-    println!("Anyone with this link can download it in a browser — no arvolo needed:\n");
-    println!("    {}\n", out.link);
-    // Say that the *address* is kept, not only the row. A link scrolled out
-    // of the terminal is otherwise assumed lost, and the file gets sent a
-    // second time rather than the URL handed over again.
-    println!(
-        "Listed as '{}' in `arvolo status`, which prints this address again\nwhenever you need it — cancel the link (and delete it from the relay) with:\n",
-        rec.id
-    );
-    println!("    arvolo cancel {}\n", rec.id);
+    eprintln!("Anyone with the link above can download it in a browser — no arvolo needed.");
     if qr {
         print_qr(&out.link);
     }
+    // Say that the *address* is kept, not only the row. A link scrolled out
+    // of the terminal is otherwise assumed lost, and the file gets sent a
+    // second time rather than the URL handed over again.
+    eprintln!(
+        "Listed as '{}' in `arvolo status`, which prints this address again\nwhenever you need it — cancel the link (and delete it from the relay) with:\n",
+        rec.id
+    );
+    eprintln!("    arvolo cancel {}", rec.id);
     Ok(())
 }
 
@@ -261,24 +263,28 @@ pub(crate) async fn send_sealed(
         None,
         posted.as_ref(),
     )?;
-    println!(
+    // The `arvm…` ticket alone on stdout; the words around it go to stderr.
+    println!("{encoded}");
+    eprintln!(
         "\nEncrypted and deposited ({max} download(s), expires in {}).",
         human_duration(ttl)
     );
     if password.is_some() {
-        println!("Password-protected — share the password out-of-band (not with the ticket).");
+        eprintln!("Password-protected — share the password out-of-band (not with the ticket).");
     }
     if offer {
-        println!("The recipient's daemon will fetch it automatically. To hand it over instead:\n");
+        eprintln!(
+            "The recipient's daemon will fetch it automatically. To hand it over instead:\n"
+        );
     } else {
-        println!("Send this ticket to the recipient:\n");
+        eprintln!("Send this ticket to the recipient:\n");
     }
-    println!("    arvolo recv {encoded}\n");
-    println!(
+    eprintln!("    arvolo recv {encoded}\n");
+    eprintln!(
         "Listed as '{}' in `arvolo status` — cancel the delivery (and delete it\nfrom the relay) with:\n",
         rec.id
     );
-    println!("    arvolo cancel {}\n", rec.id);
+    eprintln!("    arvolo cancel {}", rec.id);
     Ok(())
 }
 
@@ -298,13 +304,23 @@ pub(crate) async fn recv_offline(
         vprintln!("deriving the decryption key from the supplied password");
     }
     // A successful fetch means HPKE auth passed, so the sender in the ticket is
-    // genuine — surface it (offline tickets are always sealed to a recipient).
-    let (path, n) = flow::fetch_offline(&ticket, out, &me, password.as_deref()).await?;
+    // genuine — surface it (mailbox tickets are always sealed to a recipient).
+    // The chunk loop reports progress: a mailbox fetch used to be silent until
+    // the end, which on a big file reads as a hang.
+    let total = arvolo_core::offline::OfflineTicket::decode(&ticket)
+        .map(|t| t.total_size)
+        .unwrap_or(0);
+    let progress = crate::ui::Progress::new("downloading from the mailbox", total);
+    let (path, n) = flow::fetch_offline_with_progress(&ticket, out, &me, password.as_deref(), |done, _| {
+        progress.update(done);
+    })
+    .await?;
+    progress.finish();
     vprintln!("HPKE authentication passed — the sender in the ticket is genuine");
     if let Ok(t) = arvolo_core::offline::OfflineTicket::decode(&ticket) {
         print_sender_banner(Some(&t.sender));
     }
-    println!("Saved {n} bytes to {}", path.display());
+    crate::ui::saved(&path, n as u64);
     Ok(())
 }
 

@@ -400,6 +400,19 @@ pub async fn fetch_offline(
     me: &Identity,
     password: Option<&str>,
 ) -> Result<(PathBuf, usize)> {
+    fetch_offline_with_progress(ticket, out, me, password, |_, _| {}).await
+}
+
+/// Like [`fetch_offline`], reporting `(bytes_on_disk, total_bytes)` after every
+/// decrypted chunk lands. The mailbox fetch used to be silent until the end,
+/// which on a big file is indistinguishable from a hang.
+pub async fn fetch_offline_with_progress(
+    ticket: &str,
+    out: Option<PathBuf>,
+    me: &Identity,
+    password: Option<&str>,
+    on_progress: impl Fn(u64, u64),
+) -> Result<(PathBuf, usize)> {
     use tokio::io::AsyncWriteExt;
     let t = OfflineTicket::decode(ticket)?;
     anyhow::ensure!(
@@ -493,6 +506,10 @@ pub async fn fetch_offline(
         let ct: Vec<u8> = carry.drain(..ct_len).collect();
         let plain = open_chunk(&key, idx, total_chunks, &ct).context("decrypt chunk")?;
         outfile.write_all(&plain).await.context("write chunk")?;
+        on_progress(
+            (idx as u64 * CHUNK_SIZE as u64).saturating_add(plain_len),
+            total_size,
+        );
     }
     outfile.flush().await.context("flush output")?;
     Ok((out, total_size as usize))

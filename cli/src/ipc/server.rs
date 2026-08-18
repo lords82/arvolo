@@ -910,7 +910,7 @@ async fn recv_ticket(
     } else {
         return Response::Error(
             "not a ticket this daemon understands — paste an arvc… ticket, a pairing \
-             code (like 4821-crater-mango), or an arvm… offline ticket"
+             code (like 4821-crater-mango), or an arvm… mailbox ticket"
                 .into(),
         );
     };

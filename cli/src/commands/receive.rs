@@ -473,7 +473,7 @@ pub(crate) async fn recv_ticket(
     // can't fetch would cost them a second one.
     ensure_p2p("this ticket")?;
     if password.is_some() {
-        eprintln!("note: --password applies only to an offline (arvm…) ticket — ignoring it here.");
+        eprintln!("note: --password applies only to a mailbox (arvm…) ticket — ignoring it here.");
     }
 
     // A short pairing code is resolved to the real ticket over a rendezvous first.
@@ -602,7 +602,8 @@ pub(crate) async fn recv_ticket(
                     if let Some(pb) = slot.take() {
                         pb.finish_and_clear();
                     }
-                    println!("Saved to {}", path.display());
+                    let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                    crate::ui::saved(&path, bytes);
                 }
                 RecvEvent::Swarm {
                     peers,
@@ -639,16 +640,18 @@ pub(crate) async fn recv_ticket(
 pub(crate) struct Waiting {
     /// The sender's base32 public id. Always the key, never a display name: every
     /// trust question below is answered from this and nothing else.
-    from: String,
-    name: String,
-    size: u64,
-    note: String,
+    pub(crate) from: String,
+    pub(crate) name: String,
+    pub(crate) size: u64,
+    pub(crate) note: String,
     /// The sender's self-chosen name — a petname *claim*. Attacker-controlled text
     /// that rides inside the sealed offer: shown as unverified, never in place of
     /// the fingerprint, and never for someone we already have a name for.
-    sender_name: String,
+    pub(crate) sender_name: String,
     /// What taking this row will actually do.
     kind: &'static str,
+    /// The 8-hex handle `recv`/`decline` take, when the row has one.
+    pub(crate) handle: Option<String>,
     /// Trailing hint, where the row has an id another command takes.
     hint: Option<String>,
 }
@@ -672,6 +675,7 @@ pub(crate) fn waiting_row(o: &arvolo_core::presence::ReceivedOffer) -> Waiting {
         } else {
             "live — the sender has to be online"
         },
+        handle: Some(crate::handles::short(&o.id)),
         hint: Some(offer_hint(&crate::handles::short(&o.id))),
     }
 }
@@ -861,6 +865,7 @@ async fn waiting_from_daemon(
             // The daemon holds the ticket and drives the fetch either way, so
             // which kind it is changes nothing about what accepting does here.
             kind: "held by the daemon, awaiting you",
+            handle: Some(crate::handles::short(&o.id)),
             hint: Some(offer_hint(&crate::handles::short(&o.id))),
         })
         .collect();

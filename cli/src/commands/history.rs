@@ -17,13 +17,18 @@ use crate::args::HistoryAction;
 use crate::commands::status::print_history_row;
 use crate::history;
 
-pub(crate) fn history_cmd(action: Option<HistoryAction>) -> Result<()> {
+pub(crate) fn history_cmd(json: bool, action: Option<HistoryAction>) -> Result<()> {
     if let Some(HistoryAction::Clear) = action {
         let n = history::clear()?;
         println!(
             "Forgot {n} history record(s) — the live list, your relay deposits and your \
              resumable sends are untouched."
         );
+        return Ok(());
+    }
+    if json {
+        // The records as they are on disk: no secrets live in them.
+        println!("{}", serde_json::to_string_pretty(&history::list())?);
         return Ok(());
     }
 

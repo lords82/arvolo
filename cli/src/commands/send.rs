@@ -164,7 +164,8 @@ pub(crate) async fn push(
         })?;
 
     let cancel = cancel_on_ctrl_c();
-    let mut last_pct = u64::MAX;
+    // Built on the first Progress event, which is what carries the total.
+    let mut progress: Option<Progress> = None;
     loop {
         tokio::select! {
             _ = cancel.cancelled() => {
@@ -174,22 +175,20 @@ pub(crate) async fn push(
             ev = events.recv() => {
                 match ev {
                     Ok(ManagerEvent::Progress { id: eid, transferred, total_size }) if eid == id && total_size > 0 => {
-                        let pct = transferred * 100 / total_size;
-                        if pct != last_pct {
-                            last_pct = pct;
-                            eprint!("\r  {pct}% ({}/{})   ", human_size(transferred), human_size(total_size));
-                            use std::io::Write;
-                            let _ = std::io::stderr().flush();
-                        }
+                        progress
+                            .get_or_insert_with(|| Progress::new("sending", total_size))
+                            .update(transferred);
                     }
                     Ok(ManagerEvent::Completed { id: eid, .. }) if eid == id => {
                         // The offline path emits Deposited first (handled below); a
                         // Completed here is a live P2P delivery.
-                        eprintln!("\n✓ delivered.");
+                        if let Some(p) = progress.take() { p.finish(); }
+                        eprintln!("✓ delivered.");
                         record_history(&manager, id, "completed");
                         break;
                     }
                     Ok(ManagerEvent::Deposited { id: eid, info }) if eid == id => {
+                        if let Some(p) = progress.take() { p.finish(); }
                         eprintln!("✓ deposited to the mailbox (delivered when they return).");
                         record_history(&manager, id, "deposited");
                         // This manager has no state_dir, so the engine keeps no record
@@ -205,7 +204,8 @@ pub(crate) async fn push(
                         break;
                     }
                     Ok(ManagerEvent::Waiting { id: eid, reason }) if eid == id => {
-                        eprintln!("\n⏳ held: {reason}");
+                        if let Some(p) = progress.take() { p.finish(); }
+                        eprintln!("⏳ held: {reason}");
                         eprintln!(
                             "   The daemon keeps trying in the background — see `arvolo status`."
                         );
@@ -213,13 +213,15 @@ pub(crate) async fn push(
                         break;
                     }
                     Ok(ManagerEvent::Paused { id: eid, reason }) if eid == id => {
-                        eprintln!("\n⏸  paused: {reason}");
+                        if let Some(p) = progress.take() { p.finish(); }
+                        eprintln!("⏸  paused: {reason}");
                         eprintln!("   `arvolo resume {id}` to continue, or `arvolo cancel {id}`.");
                         record_history(&manager, id, &format!("paused: {reason}"));
                         break;
                     }
                     Ok(ManagerEvent::Failed { id: eid, error }) if eid == id => {
-                        eprintln!("\n✗ failed: {error}");
+                        if let Some(p) = progress.take() { p.finish(); }
+                        eprintln!("✗ failed: {error}");
                         record_history(&manager, id, &format!("failed: {error}"));
                         break;
                     }
@@ -698,12 +700,15 @@ pub(crate) async fn send_with_code(
         .await
         .context("start pairing")?;
 
-    println!("\nOn the other device:\n");
-    println!("    arvolo recv {shown_code}\n");
+    // The artefact alone on stdout (`arvolo send --code f | pbcopy` copies just
+    // the code); the words around it are narration and go to stderr.
+    println!("{shown_code}");
+    eprintln!("\nOn the other device:\n");
+    eprintln!("    arvolo recv {shown_code}\n");
     if qr {
         print_qr(&shown_code);
     }
-    println!("Ctrl-C to stop.");
+    eprintln!("Ctrl-C to stop.");
 
     let cancel = cancel_on_ctrl_c();
     // Finish the pairing (publish the encrypted ticket once the receiver shows up)
