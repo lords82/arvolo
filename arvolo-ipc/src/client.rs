@@ -140,16 +140,28 @@ impl DaemonClient {
         }
     }
 
-    pub async fn push(&mut self, to: String, paths: Vec<String>, note: String) -> Result<u64> {
+    /// A live-first send. The mailbox options ride along because the *daemon*
+    /// re-probes presence: a recipient who drops offline between the caller's
+    /// probe and the daemon's would otherwise be deposited to with the defaults,
+    /// silently ignoring the ttl/max/password the user asked for.
+    pub async fn push(
+        &mut self,
+        to: String,
+        paths: Vec<String>,
+        note: String,
+        ttl: Option<u64>,
+        max: Option<u32>,
+        password: Option<String>,
+    ) -> Result<u64> {
         match self
             .request(Request::Push {
                 to,
                 paths,
                 note,
                 deposit: false,
-                ttl: None,
-                max: None,
-                password: None,
+                ttl,
+                max,
+                password,
             })
             .await?
         {

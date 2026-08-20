@@ -442,7 +442,11 @@ pub(crate) async fn daemon_stop_cmd() -> Result<()> {
     // death first would otherwise win the race and respawn it.
     std::fs::write(stop_marker_path(), b"stopped by `arvolo daemon stop`\n").ok();
 
-    if let Some(mut client) = daemon_client().await {
+    // No version gate here: stopping a daemon of ANOTHER version is exactly
+    // this command's job — the mismatch error recommends `daemon stop`, so
+    // `daemon stop` must not refuse on mismatch. An old daemon that doesn't
+    // know `Shutdown` errors the request and the pidfile below finishes it.
+    if let Some(mut client) = daemon_client_any_version().await {
         match client.shutdown().await {
             Ok(()) => {
                 eprintln!("✓ daemon stopped. Start it again with `arvolo daemon start`.");
@@ -680,8 +684,7 @@ pub(crate) fn daemon_shutdown_signal() -> CancellationToken {
 /// version here: same version → use it; different (or a pre-versioning daemon
 /// that reports none) → refuse loudly and exit, telling the user to restart it.
 pub(crate) async fn daemon_client() -> Option<ipc::client::DaemonClient> {
-    let mut c = ipc::client::DaemonClient::connect().await.ok()?;
-    c.ping().await.ok()?;
+    let mut c = daemon_client_any_version().await?;
     // `status` predates the newer requests, so an old daemon still answers it
     // (with an empty version) — safe to probe without risking a hang.
     if let Ok(st) = c.status().await {
@@ -714,6 +717,14 @@ pub(crate) async fn daemon_client() -> Option<ipc::client::DaemonClient> {
             std::process::exit(1);
         }
     }
+    Some(c)
+}
+
+/// Connect + ping, with no version gate. Only for operations that must work
+/// across versions (today: `daemon stop`).
+async fn daemon_client_any_version() -> Option<ipc::client::DaemonClient> {
+    let mut c = ipc::client::DaemonClient::connect().await.ok()?;
+    c.ping().await.ok()?;
     Some(c)
 }
 
@@ -954,11 +965,15 @@ pub(crate) async fn serve_code_via_daemon(
 /// Hand a push off to the running daemon and return immediately — the daemon
 /// delivers it in the background, concurrent and surviving our exit. Mirrors
 /// [`serve_ticket_via_daemon`]; observe progress with `arvolo status`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn push_via_daemon(
     mut client: ipc::client::DaemonClient,
     paths: Vec<PathBuf>,
     to: String,
     note: String,
+    ttl: Option<u64>,
+    max: Option<u32>,
+    password: Option<String>,
 ) -> Result<()> {
     // The daemon resolves paths on *its own* cwd (e.g. `/` under systemd), not
     // ours — so absolutize here, relative to the client's cwd, and validate the
@@ -974,7 +989,7 @@ pub(crate) async fn push_via_daemon(
         .context("no such file or folder to push")?;
     eprintln!("Handing off to the daemon (sending to {to})…");
     let id = client
-        .push(to, paths_s, note)
+        .push(to, paths_s, note, ttl, max, password)
         .await
         .context("daemon rejected the push")?;
     let shown = handle_for(&mut client, id).await;

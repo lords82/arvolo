@@ -273,6 +273,11 @@ async fn dispatch(d: &Daemon, cmd: Request) -> Response {
         Request::RejectOffer { offer_id } => {
             d.pending.lock().unwrap().remove(&offer_id);
             d.manager.reject_offer(&offer_id).await;
+            // Tell every attached front-end the row is gone: the decline may
+            // have come from the CLI while a window shows the same offer.
+            let _ = d.side_events.send(EventDto::OfferGone {
+                id: offer_id.clone(),
+            });
             Response::Ok
         }
         Request::AcceptOffer {
@@ -296,6 +301,9 @@ async fn dispatch(d: &Daemon, cmd: Request) -> Response {
                     // from `ListPending` while the engine still held it, leaving
                     // nothing to retry against.
                     d.pending.lock().unwrap().remove(&offer_id);
+                    let _ = d.side_events.send(EventDto::OfferGone {
+                        id: offer_id.clone(),
+                    });
                     Response::TransferId(id)
                 }
                 Err(e) => Response::Error(format!("{e:#}")),
@@ -339,11 +347,19 @@ async fn dispatch(d: &Daemon, cmd: Request) -> Response {
             Ok(_key_change) => Response::Ok,
             Err(e) => Response::Error(format!("{e:#}")),
         },
-        Request::RemoveContact { name } => match crate::book::contact_remove(&name) {
-            Ok(true) => Response::Ok,
-            Ok(false) => Response::Error(format!("no such contact '{name}'")),
-            Err(e) => Response::Error(format!("{e:#}")),
-        },
+        Request::RemoveContact { name } => {
+            // Clear the trust ledgers FIRST, exactly as the CLI does — they
+            // resolve the id via the contact name, which is gone once removed.
+            // Skipping this (as this handler used to) left a GUI remove with
+            // orphan verified/trusted marks the CLI path would have cleared.
+            crate::book::unmark_verified(&name).ok();
+            crate::book::unmark_trusted(&name).ok();
+            match crate::book::contact_remove(&name) {
+                Ok(true) => Response::Ok,
+                Ok(false) => Response::Error(format!("no such contact '{name}'")),
+                Err(e) => Response::Error(format!("{e:#}")),
+            }
+        }
         Request::RenameContact { old, new } => match crate::book::contact_rename(&old, &new) {
             Ok(()) => Response::Ok,
             Err(e) => Response::Error(format!("{e:#}")),

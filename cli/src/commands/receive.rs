@@ -318,6 +318,31 @@ pub(crate) async fn recv(
         Some(p) if p.is_empty() => Some(prompt_password()?),
         other => other,
     };
+    // One download-dir rule for every door: with no `-o`, files land in the
+    // configured download dir — the same place `listen` and the daemon save to.
+    // `recv` used to write into whatever directory the shell happened to be in,
+    // which made where a file ended up depend on which door it came through.
+    // An explicit `-o` naming an existing file would overwrite it: that is the
+    // caller's call, but on a terminal it gets asked first.
+    let out = match out {
+        None => {
+            let d = book::default_download_dir().unwrap_or_else(book::default_home_downloads);
+            std::fs::create_dir_all(&d).ok();
+            Some(d)
+        }
+        Some(p) => {
+            if p.is_file()
+                && std::io::stdin().is_terminal()
+                && !crate::ui::confirm_blocking(&format!(
+                    "{} already exists — overwrite it?",
+                    p.display()
+                ))
+            {
+                anyhow::bail!("not overwriting {} — pick another -o path", p.display());
+            }
+            Some(p)
+        }
+    };
     let Some(what) = what else {
         return recv_waiting(out, password).await;
     };

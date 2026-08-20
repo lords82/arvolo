@@ -26,7 +26,7 @@ pub(crate) fn me() -> Result<()> {
 }
 
 /// `arvolo me name [NAME]` — show or set the display name advertised in offers.
-pub(crate) fn name_cmd(name: Option<String>) -> Result<()> {
+pub(crate) async fn name_cmd(name: Option<String>) -> Result<()> {
     match name {
         None => {
             let current = book::my_display_name();
@@ -37,7 +37,16 @@ pub(crate) fn name_cmd(name: Option<String>) -> Result<()> {
             }
         }
         Some(n) => {
-            book::set_my_display_name(&n)?;
+            // Through the daemon when one runs: it advertises the name inside
+            // every offer, and its config watcher does not watch config.toml —
+            // a name written only to the file kept the OLD one on the air until
+            // the next restart. (`SetMyName` persists to the file too.) Without
+            // a daemon the file is the whole state, so writing it is enough.
+            if let Some(mut client) = crate::commands::daemon::daemon_client().await {
+                client.set_my_name(n.clone()).await?;
+            } else {
+                book::set_my_display_name(&n)?;
+            }
             let n = n.trim();
             if n.is_empty() {
                 println!("Cleared your display name (offers will no longer advertise one).");

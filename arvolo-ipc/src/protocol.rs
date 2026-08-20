@@ -755,6 +755,11 @@ pub enum EventDto {
     /// window is open. Carries nothing: drop what *you* consider finished, by the
     /// same rule the daemon uses (a deposit awaiting pickup is not finished).
     FinishedCleared,
+    /// A waiting offer left the daemon's parked list by *another* client's hand —
+    /// accepted or declined over IPC (`arvolo recv <handle>` / `arvolo decline`
+    /// while a window is open). Without this the other front-ends keep showing a
+    /// row wired to an offer that no longer exists.
+    OfferGone { id: String },
     /// A hosted pairing session has its code — this is what the other machine
     /// types. Only ever emitted for the `*Host` kinds.
     PairingCode {

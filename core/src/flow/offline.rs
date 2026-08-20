@@ -380,14 +380,17 @@ pub async fn claim_status(relay: &str, claim: &str) -> Result<ClaimStatus> {
 /// minted before names were carried has none, and falls back to the claim-derived
 /// name it always had.
 fn mailbox_out(user_out: Option<&Path>, t: &OfflineTicket) -> PathBuf {
+    use super::recv::collision_free;
     let named = safe_download_name(&t.name);
+    // Derived names never overwrite (` (1)`, ` (2)`, …); an explicitly named
+    // file is the caller's decision. Same rule as `single_file_out`.
     match (user_out, named) {
-        (Some(dir), Some(n)) if dir.is_dir() => dir.join(n),
-        (Some(dir), None) if dir.is_dir() => dir.join(default_out(&t.claim)),
+        (Some(dir), Some(n)) if dir.is_dir() => collision_free(dir.join(n)),
+        (Some(dir), None) if dir.is_dir() => collision_free(dir.join(default_out(&t.claim))),
         // Anything else the caller named is the file they asked for.
         (Some(file), _) => file.to_path_buf(),
-        (None, Some(n)) => PathBuf::from(n),
-        (None, None) => default_out(&t.claim),
+        (None, Some(n)) => collision_free(PathBuf::from(n)),
+        (None, None) => collision_free(default_out(&t.claim)),
     }
 }
 

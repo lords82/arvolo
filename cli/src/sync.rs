@@ -171,7 +171,11 @@ pub fn spawn_auto_sync(relay: String) -> tokio::task::JoinHandle<()> {
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(AUTO_SYNC_SECS));
         loop {
             tick.tick().await;
-            if let Err(e) = sync_now(Some(relay.clone()), true).await {
+            // `sync_round` directly, NOT `sync_now`: this loop runs *inside* the
+            // daemon (and inside a standalone `listen`), and `sync_now` now
+            // routes through the daemon's IPC when one answers — which from
+            // here would be the daemon calling itself.
+            if let Err(e) = sync_round(Some(relay.clone())).await {
                 tracing::debug!("auto-sync round failed: {e:#}");
             }
         }
@@ -179,7 +183,39 @@ pub fn spawn_auto_sync(relay: String) -> tokio::task::JoinHandle<()> {
 }
 
 /// `arvolo device status` — a quick read-only summary of the sync state.
+///
+/// With a daemon running, its own record is the one that means something: it is
+/// the process actually running the rounds, so it knows when the last one
+/// happened and whether it failed. Without one, the local files are all there is.
 pub async fn sync_status(json: bool) -> Result<()> {
+    if let Some(mut client) = crate::commands::daemon::daemon_client().await {
+        let s = client.sync_status().await?;
+        if json {
+            println!("{}", serde_json::to_string_pretty(&s)?);
+            return Ok(());
+        }
+        println!("identity:  {}", s.fingerprint);
+        println!("contacts:  {}", s.contacts);
+        if !s.enabled {
+            println!("sync:      off (config `sync = false`)");
+        } else if s.last_sync == 0 {
+            println!("sync:      on — no round since the daemon started");
+        } else {
+            let ago = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs().saturating_sub(s.last_sync))
+                .unwrap_or(0);
+            println!(
+                "sync:      on — last round {} ago, {} update(s) merged",
+                crate::human_duration(ago),
+                s.last_merged
+            );
+        }
+        if !s.last_error.is_empty() {
+            eprintln!("           last error: {}", s.last_error);
+        }
+        return Ok(());
+    }
     let me = crate::my_identity()?;
     if json {
         let v = serde_json::json!({
@@ -208,6 +244,20 @@ pub async fn sync_status(json: bool) -> Result<()> {
 /// full snapshot of the merged book, then delete the notes we merged (writer-side
 /// cleanup, so the slot tends to a single current snapshot).
 pub async fn sync_now(relay: Option<String>, quiet: bool) -> Result<()> {
+    // Through the daemon when one runs: its auto-sync loop shares the same inbox
+    // cell, and two processes running rounds concurrently race on the slot. The
+    // daemon also records the outcome, so the GUI's panel and `device status`
+    // agree on when the last round happened.
+    if let Some(mut client) = crate::commands::daemon::daemon_client().await {
+        let s = client.sync_now().await?;
+        if !quiet {
+            println!(
+                "✓ Synced via the daemon ({} update(s) merged from your other devices).",
+                s.last_merged
+            );
+        }
+        return Ok(());
+    }
     let merged = sync_round(relay).await?;
     if !quiet {
         println!("✓ Synced ({merged} update(s) merged from your other devices).");

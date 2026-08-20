@@ -66,6 +66,35 @@ pub(crate) async fn send_cmd(opts: SendOpts) -> Result<()> {
         .await;
     }
     if opts.link {
+        // Through the daemon when it runs and the payload is one plain file: the
+        // link then has a live engine row — visible in the GUI, cancelled in one
+        // place — same as code/ticket/push already do. Several paths are packed
+        // into a temp archive this process must clean up, so those stay here.
+        if opts.paths.len() == 1 && opts.paths[0].is_file() {
+            if let Some(mut client) = daemon_client().await {
+                let abs = std::fs::canonicalize(&opts.paths[0])
+                    .with_context(|| format!("{}", opts.paths[0].display()))?
+                    .to_string_lossy()
+                    .into_owned();
+                match client.create_link(abs, Some(opts.ttl), opts.max).await {
+                    Ok(url) => {
+                        println!("{url}");
+                        eprintln!(
+                            "\nAnyone with the link above can download it in a browser — no \
+                             arvolo needed. Deposited via the daemon; listed in `arvolo status`, \
+                             withdrawn with `arvolo cancel <id>`."
+                        );
+                        if opts.qr {
+                            print_qr(&url);
+                        }
+                        return Ok(());
+                    }
+                    // An older daemon or a relay hiccup — deposit from here
+                    // instead, and say so.
+                    Err(e) => eprintln!("Depositing from here instead ({e:#})."),
+                }
+            }
+        }
         return send_link(opts.paths, opts.relay, opts.ttl, opts.max, opts.qr).await;
     }
     if opts.code {
@@ -109,6 +138,9 @@ pub(crate) async fn push(
     to: String,
     relay: Option<String>,
     note: &str,
+    ttl: Option<u64>,
+    max: Option<u32>,
+    password: Option<String>,
 ) -> Result<()> {
     anyhow::ensure!(
         !paths.is_empty(),
@@ -116,10 +148,13 @@ pub(crate) async fn push(
     );
 
     // If a daemon is running, hand the send off to it (concurrent, survives our
-    // exit); otherwise fall back to a one-shot in-process send.
+    // exit); otherwise fall back to a one-shot in-process send. The mailbox
+    // options ride along: the daemon re-probes presence, and a recipient who
+    // dropped offline in between must still get the ttl/max/password asked for.
     {
         if let Some(client) = daemon_client().await {
-            return push_via_daemon(client, paths, to, note.to_string()).await;
+            return push_via_daemon(client, paths, to, note.to_string(), ttl, max, password)
+                .await;
         }
     }
 
@@ -297,13 +332,24 @@ async fn send_to(
     };
     if online {
         // Not a flag conflict — which of the two paths runs is decided by the
-        // presence probe, so this can only be found out here.
+        // presence probe, so this can only be found out here. The options are
+        // NOT dropped: if the daemon's own probe disagrees and the send falls
+        // back to the mailbox, they apply there.
         if max.is_some() || password.is_some() {
             eprintln!(
-                "note: --max/--password apply to a mailbox send; ignored for a live delivery."
+                "note: --max/--password apply only if this send falls back to the mailbox."
             );
         }
-        return push(paths, who, Some(relay_url), &note).await;
+        return push(
+            paths,
+            who,
+            Some(relay_url),
+            &note,
+            Some(ttl),
+            max,
+            password,
+        )
+        .await;
     }
     send_sealed(
         paths,
@@ -463,7 +509,8 @@ async fn ticket_cmd(
     ) {
         eprintln!("(note: could not save resumable session: {e:#})");
     }
-    let result = serve_session(session, Some((out, name))).await;
+    let record_id = crate::sessions::id_for(&session.ticket);
+    let result = serve_session(session, Some((out, name)), Some(record_id)).await;
     // The payload (a packed archive) had to stay readable for the whole session,
     // since chunks are produced on the fly; clean it up now that serving ended.
     if let Some(t) = &temp {
@@ -518,6 +565,10 @@ fn write_arvolo_file(base: &str, ticket: &str) -> Result<PathBuf> {
 pub(crate) async fn serve_session(
     session: flow::SendSession,
     emit: Option<(TicketOut, String)>,
+    // The resumable-session record backing this serve, dropped once a receiver
+    // has the whole file — a delivered send listed as "resumable" forever was
+    // the old leak (`cancel` used to be the only remover).
+    session_record: Option<String>,
 ) -> Result<()> {
     let cancel = cancel_on_ctrl_c();
     // Last progress percent we narrated, so `-v` shows a few milestones instead
@@ -563,7 +614,12 @@ pub(crate) async fn serve_session(
                 }
             }
             SendEvent::Progress { .. } => {}
-            SendEvent::Delivered => eprintln!("✓ A receiver got the whole file."),
+            SendEvent::Delivered => {
+                eprintln!("✓ A receiver got the whole file.");
+                if let Some(id) = &session_record {
+                    crate::sessions::remove_if_present(id);
+                }
+            }
             SendEvent::ReceiverDropped { missing } => {
                 eprintln!("Receiver dropped — backfilling {missing} missing chunks to the relay…")
             }
@@ -604,7 +660,7 @@ pub(crate) async fn resume_by_ticket(ticket: &str, path: &Path) -> Result<()> {
          start sends normally and resume by session id: `arvolo resume <id>`."
     );
     let session = flow::resume_send(path, key, None, &expected, RelayChoice::from_env()).await?;
-    serve_session(session, None).await
+    serve_session(session, None, None).await
 }
 
 /// `arvolo resume <id>`: replay a saved session (covers deliveries to a contact
@@ -644,7 +700,7 @@ pub(crate) async fn resume_by_id(id: &str) -> Result<()> {
         RelayChoice::from_env(),
     )
     .await?;
-    let result = serve_session(session, None).await;
+    let result = serve_session(session, None, Some(id.to_string())).await;
     if let Some(t) = &temp {
         let _ = std::fs::remove_file(t);
     }

@@ -1232,16 +1232,53 @@ fn default_from_name(name: &str, chunks: &[crate::reexport::Hash]) -> PathBuf {
 ///   folder picker and the CLI's `--out <dir>` hand over; taking it literally as the
 ///   output file opens the folder itself and fails with EISDIR ("Is a directory").
 /// - any other path → the caller named the file; use it as-is.
+///
+/// Derived names (the first two arms) never overwrite: an existing `report.pdf`
+/// makes this one `report (1).pdf`. An explicitly named file is the caller's
+/// decision and is honoured as given.
 fn single_file_out(
     user_out: Option<&std::path::Path>,
     name: &str,
     chunks: &[crate::reexport::Hash],
 ) -> PathBuf {
     match user_out {
-        Some(dir) if dir.is_dir() => dir.join(default_from_name(name, chunks)),
+        Some(dir) if dir.is_dir() => collision_free(dir.join(default_from_name(name, chunks))),
         Some(file) => file.to_path_buf(),
-        None => default_from_name(name, chunks),
+        None => collision_free(default_from_name(name, chunks)),
     }
+}
+
+/// Never silently overwrite a finished file: an occupied derived name gets
+/// ` (1)`, ` (2)`, … before the extension — the rule every desktop uses.
+///
+/// A path whose `.arvhave` resume sidecar exists is kept as-is: that file is a
+/// *partial* this very download owns, and renaming away from it would orphan
+/// the resume state it exists to continue.
+pub(crate) fn collision_free(path: PathBuf) -> PathBuf {
+    let sidecar_of = |p: &std::path::Path| PathBuf::from(format!("{}.arvhave", p.display()));
+    if !path.exists() || sidecar_of(&path).exists() {
+        return path;
+    }
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let ext = path
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+    let parent = path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+    for n in 1u32.. {
+        let candidate = parent.join(format!("{stem} ({n}){ext}"));
+        if sidecar_of(&candidate).exists() {
+            // A partial of ours already lives under this name: resume it.
+            return candidate;
+        }
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    unreachable!("u32 exhausted finding a free name")
 }
 
 #[cfg(test)]

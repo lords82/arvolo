@@ -145,7 +145,7 @@ async fn run() -> Result<()> {
         Command::Decline { handle } => decline_cmd(handle).await,
         Command::Me { action } => match action {
             None => me(),
-            Some(MeAction::Name { name }) => name_cmd(name),
+            Some(MeAction::Name { name }) => name_cmd(name).await,
         },
         Command::Completions { shell } => completions::completions_cmd(shell),
         Command::Contacts { action } => contacts_cmd(action).await,
