@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — the CLI, simplified
+## v0.11.0 — the CLI, simplified
 
 One verb sends, one verb receives. The surface drops from 18 top-level commands
 to 14, output becomes pipeable, and every id a person types is the same 8-hex
