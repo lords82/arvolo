@@ -344,6 +344,24 @@ jobs:
     needs: [build, app-macos, app-linux, app-windows, linux-packages]
     runs-on: ubuntu-latest
     steps:
+      # The full history, and BEFORE download-artifact: checkout cleans the
+      # workspace, and the lineage check below needs main to compare against.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # A tag cut from a work branch produces a release for trying things out,
+      # not the one `install.sh` should resolve: mark it Pre-release and leave
+      # "latest" pointing at the last release whose commit main actually
+      # contains. Nothing to remember at tag time — lineage decides.
+      - name: Is this tag on main?
+        id: lineage
+        run: |
+          sha=$(git rev-parse "${GITHUB_REF_NAME}^{commit}")
+          if git merge-base --is-ancestor "$sha" origin/main; then
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          fi
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -351,14 +369,15 @@ jobs:
       # Checksums so `install.sh` can verify downloads.
       - name: Checksums
         run: (cd dist && sha256sum arvolo* > SHA256SUMS)
-      # Published directly (non-draft) and marked latest, so `install.sh`'s
-      # `releases/latest` lookup resolves as soon as a vX.Y.Z tag is pushed.
+      # Published directly (non-draft); marked latest only from main, so
+      # `install.sh`'s `releases/latest` lookup never lands on a work-branch cut.
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*
           generate_release_notes: true
           draft: false
-          make_latest: true
+          prerelease: ${{ steps.lineage.outputs.prerelease }}
+          make_latest: ${{ steps.lineage.outputs.prerelease == 'false' }}
           # The .dmg is signed with a Developer ID and notarized, so macOS opens
           # it without complaint. The .msi still is not signed — so whoever
           # downloads it needs to be told the one gesture that gets past
@@ -395,6 +414,20 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # Same lineage rule as `publish`: the server pulls `:latest`, so an image
+      # built from a work-branch tag must not claim it — it keeps only its
+      # version tag until the commit reaches main.
+      - name: Is this tag on main?
+        id: lineage
+        run: |
+          sha=$(git rev-parse "${GITHUB_REF_NAME}^{commit}")
+          if git merge-base --is-ancestor "$sha" origin/main; then
+            echo "on_main=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "on_main=false" >> "$GITHUB_OUTPUT"
+          fi
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
       - name: Log in to GHCR
@@ -408,10 +441,10 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository_owner }}/arvolo-relay
-          # v0.1.0 -> tags 0.1.0 and latest
+          # v0.1.0 -> tags 0.1.0 and latest — latest only from main
           tags: |
             type=semver,pattern={{version}}
-            type=raw,value=latest
+            type=raw,value=latest,enable=${{ steps.lineage.outputs.on_main == 'true' }}
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
