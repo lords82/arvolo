@@ -195,7 +195,9 @@ pub async fn send_to(
 ) -> Result<u64, String> {
     let paths = state.resolve(&items)?;
     let mut c = client().await?;
-    c.push(to, paths, note).await.or_else(err)
+    // The GUI's live send carries no mailbox options: its mailbox mode goes
+    // through `deposit` below, which has always carried them.
+    c.push(to, paths, note, None, None, None).await.or_else(err)
 }
 
 /// `send --deposit`: straight to the recipient's mailbox, with the options that
@@ -583,6 +585,53 @@ pub async fn import_contacts(app: tauri::AppHandle) -> Result<Option<String>, St
 ///
 /// `default_name` is only a *suggestion* shown in the dialog; path separators are
 /// stripped so it can never smuggle directories into the suggestion.
+/// A ticket from a `.arvolo` file passed on the command line (double click on
+/// Windows/Linux launches a fresh instance with the path as argv). Held here
+/// until the webview is up and asks for it — an event emitted before the
+/// frontend subscribes would just be lost.
+pub struct PendingArvolo(pub std::sync::Mutex<Option<String>>);
+
+#[tauri::command]
+pub fn take_pending_ticket(state: tauri::State<'_, PendingArvolo>) -> Option<String> {
+    state.0.lock().unwrap().take()
+}
+
+/// Save an `arvc…` ticket as a `.arvolo` file — the CLI's default send artefact,
+/// shareable like a .torrent. Same shape as `export_contacts`: native save
+/// dialog, path stays Rust-side, the webview only learns the chosen file name.
+#[tauri::command]
+pub async fn save_ticket(
+    app: tauri::AppHandle,
+    default_name: String,
+    ticket: String,
+) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let default_name: String = default_name
+        .chars()
+        .map(|c| if matches!(c, '/' | '\\') { '_' } else { c })
+        .collect();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .add_filter("Arvolo ticket", &["arvolo"])
+        .set_file_name(&default_name)
+        .save_file(move |p| {
+            let _ = tx.send(p);
+        });
+    let Some(picked) = rx.await.map_err(|e| e.to_string())? else {
+        return Ok(None);
+    };
+    let path = picked.into_path().map_err(|e| e.to_string())?;
+    tokio::fs::write(&path, format!("{ticket}\n"))
+        .await
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(Some(
+        path.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+    ))
+}
+
 #[tauri::command]
 pub async fn export_contacts(
     app: tauri::AppHandle,

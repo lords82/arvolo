@@ -52,6 +52,10 @@ export const de: Dict = {
   "app.dropTitle": "Zum Senden hier ablegen",
   "app.dropHint": "Danach wählen Sie, an wen: Kontakt, Code oder Link.",
   "app.actionFailed": "Das hat nicht geklappt",
+  "app.errHintDaemon": "Der Daemon antwortet nicht — starte ihn neu und versuch es wieder.",
+  "app.errHintRelay": "Dafür braucht es ein Relay — unter Einstellungen → Netzwerk setzen.",
+  "app.errHintPassword": "Passwortgeschützt — frag den Absender nach dem Passwort.",
+  "app.errOpenSettings": "Einstellungen öffnen",
 
   "crash.title": "In der Oberfläche ist etwas kaputtgegangen",
   "crash.body":
@@ -91,11 +95,6 @@ export const de: Dict = {
   "status.failed": "Fehlgeschlagen",
   "status.cancelling": "Wird abgebrochen…",
   "status.cancelled": "Abgebrochen",
-
-  "method.p2p": "Direkt",
-  "method.cloud": "Postfach",
-  "method.link": "Link",
-  "method.ticket": "Ticket",
 
   "meta.paused": "pausiert",
   "meta.sharing": "verfügbar — niemand lädt es gerade",
@@ -236,7 +235,7 @@ export const de: Dict = {
     "Der Name gehört Ihnen: Schlüssel und Markierungen bleiben.",
 
   "people.swap": "Kontakte tauschen",
-  "people.haveCode": "Ich habe einen Code",
+  "people.haveCode": "Ich habe einen Kopplungscode",
   "people.byId": "Über die ID",
   "people.export": "Exportieren",
   "people.import": "Importieren",
@@ -303,7 +302,7 @@ export const de: Dict = {
   "deposits.openInBrowser": "Im Browser öffnen",
   "deposits.openFailed": "Ich kann den Link nicht öffnen",
   "deposits.share": "Link",
-  "deposits.shareTicket": "Ticket",
+  "deposits.shareTicket": "Abholcode",
   "deposits.shareTicketTitle": "Das Ticket, noch einmal",
   "deposits.ticketDetail":
     "Fügen Sie es der Empfängerseite ein: es öffnet sich in deren Arvolo, oder mit `arvolo recv`. Entschlüsseln kann es nur sie — es ist auf ihre Identität versiegelt.",
@@ -364,7 +363,7 @@ export const de: Dict = {
   "devices.pairBody":
     "Das Verbinden geschieht von beiden Seiten: auf diesem Rechner zeigen Sie einen Code, auf dem anderen geben Sie ihn ein. Das ist heikel — was übergeht, ist Ihre geheime Identität, keine bloße Einladung.",
   "devices.showCode": "Code anzeigen",
-  "devices.haveCode": "Ich habe einen Code",
+  "devices.haveCode": "Ich habe einen Kopplungscode",
   "devices.pairWarnLead": "Niemals auf einem Rechner, der nicht Ihrer ist.",
   "devices.pairWarnRest":
     "Wer den Code eingibt, wird in jeder Hinsicht zu Ihnen: gleiches Postfach, gleiches Adressbuch, dieselbe Fähigkeit zu öffnen, was Ihnen geschickt wird.",
@@ -488,6 +487,8 @@ export const de: Dict = {
   "send.depositResult": (to) =>
     `Für ${to} abgelegt. Das Ticket unten ist Ihre eigene Kopie: Sie brauchen es nur, wenn Sie es selbst übergeben wollen — etwa, wenn ${to} das Angebot nicht erhält.`,
   "send.onItsWay": (to) => `Unterwegs zu ${to}`,
+  "send.saveArvolo": "Als .arvolo-Datei speichern…",
+  "send.arvoloSaved": (name: string) => `${name} gespeichert — teile sie über einen beliebigen Kanal; drüben öffnet man sie mit Arvolo.`,
   "send.onItsWayDetail":
     "Ist die Person online, geht es direkt, sonst bleibt es in ihrem Postfach.",
   "send.codeKeepDetail":
@@ -505,7 +506,7 @@ export const de: Dict = {
   "send.title": "Senden",
   "send.subtitleReady": "Geben Sie weiter, was Sie unten sehen.",
   "send.subtitle": "Immer Ende-zu-Ende verschlüsselt.",
-  "send.submitDeposit": "Ablegen",
+  "send.submitDeposit": "Im Postfach hinterlegen",
   "send.submitSend": "Senden",
   "send.submitCode": "Code erzeugen",
   "send.submitLink": "Link erstellen",
@@ -719,6 +720,8 @@ export const de: Dict = {
   "store.errReceive": "Der Empfang ist fehlgeschlagen",
   "store.errAccept": "Die Datei ließ sich nicht annehmen",
   "store.errReject": "Die Datei ließ sich nicht ablehnen",
+  "store.declined": (who: string) => who ? `Angebot von ${who} abgelehnt.` : "Angebot abgelehnt.",
+  "bits.qrTooDense": "Zu viele Daten für einen QR — nutze Kopieren.",
   "store.errPause": "Pausieren nicht möglich",
   "store.errResume": "Fortsetzen nicht möglich",
   "store.errCancel": "Abbrechen nicht möglich",

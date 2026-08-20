@@ -2,7 +2,7 @@
 // metadata maps ported from the mock's `renderVals`.
 
 import { t } from "./i18n";
-import type { DepositDto, Method, UIStatus, UITransfer } from "./types";
+import type { DepositDto, UIStatus, UITransfer } from "./types";
 
 export function fmtBytes(bytes: number): string {
   if (!bytes && bytes !== 0) return "";
@@ -70,30 +70,6 @@ export function statusMeta(s: UIStatus): StatusMeta {
   }
 }
 
-export interface MethodMeta {
-  glyph: string;
-  label: string;
-  tone: Tone;
-}
-/** Glyph and tone are language-independent; only the label is looked up, and it
- *  is looked up per call rather than baked into a module constant — a constant
- *  built at import time would keep the launch language for ever. */
-const METHODS: Record<Method, { glyph: string; key: "method.p2p" | "method.cloud" | "method.link" | "method.ticket"; tone: Tone }> = {
-  p2p: { glyph: "⇄", key: "method.p2p", tone: "in" },
-  cloud: { glyph: "☁", key: "method.cloud", tone: "mut" },
-  link: { glyph: "◇", key: "method.link", tone: "violet" },
-  ticket: { glyph: "⛓", key: "method.ticket", tone: "out" },
-};
-export function methodMeta(m: Method): MethodMeta {
-  // `METHODS[m]` alone walks the prototype chain: "toString"/"valueOf" would hit
-  // Object.prototype's, which is truthy, so `??` would not fall back and the row
-  // would render `undefined`. Only an own key counts.
-  const spec = Object.prototype.hasOwnProperty.call(METHODS, m)
-    ? METHODS[m]
-    : METHODS.cloud;
-  return { glyph: spec.glyph, label: t(spec.key), tone: spec.tone };
-}
-
 /** File-kind tint, as a tone. Grouped by what the file *is* rather than by
  *  extension family, so a glance at a list separates media from documents from
  *  archives without anyone having to learn a legend. */
@@ -126,7 +102,8 @@ const EXT_TINT: Record<string, Tone> = {
   SVG: "violet",
 };
 export function extTint(ext: string): Tone {
-  // Own keys only — see `methodMeta` for why an inherited hit is not a match.
+  // Own keys only: a bare index would walk the prototype chain, where
+  // "toString"/"valueOf" are truthy hits for extensions nobody defined.
   return Object.prototype.hasOwnProperty.call(EXT_TINT, ext)
     ? EXT_TINT[ext]
     : "mut";

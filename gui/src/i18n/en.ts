@@ -61,6 +61,10 @@ export const en = {
   "app.dropTitle": "Drop here to send",
   "app.dropHint": "Then choose who for: a contact, a code, a link.",
   "app.actionFailed": "That didn't work",
+  "app.errHintDaemon": "The daemon isn't answering — restart it and try again.",
+  "app.errHintRelay": "This needs a relay — set one under Settings → Network.",
+  "app.errHintPassword": "This one is password-protected — ask the sender for the password.",
+  "app.errOpenSettings": "Open Settings",
 
   "crash.title": "Something broke in the interface",
   "crash.body":
@@ -102,11 +106,6 @@ export const en = {
   "status.failed": "Failed",
   "status.cancelling": "Cancelling…",
   "status.cancelled": "Cancelled",
-
-  "method.p2p": "Direct",
-  "method.cloud": "Mailbox",
-  "method.link": "Link",
-  "method.ticket": "Ticket",
 
   "meta.paused": "paused",
   "meta.sharing": "available — nobody downloading it",
@@ -248,7 +247,7 @@ export const en = {
   "person.renameHint": "The name is yours: the key and the marks stay put.",
 
   "people.swap": "Swap contacts",
-  "people.haveCode": "I have a code",
+  "people.haveCode": "I have a pairing code",
   "people.byId": "By id",
   "people.export": "Export",
   "people.import": "Import",
@@ -315,7 +314,7 @@ export const en = {
   "deposits.openInBrowser": "Open in the browser",
   "deposits.openFailed": "I can't open the link",
   "deposits.share": "Link",
-  "deposits.shareTicket": "Ticket",
+  "deposits.shareTicket": "Pickup code",
   "deposits.shareTicketTitle": "The ticket, again",
   "deposits.ticketDetail":
     "Paste it to the recipient: it opens in their Arvolo, or with `arvolo recv`. Only they can decrypt it — it is sealed to their identity.",
@@ -378,7 +377,7 @@ export const en = {
   "devices.pairBody":
     "Linking is done from both ends: on this machine you show a code, on the other you type it in. It is a delicate operation — what crosses over is your secret identity, not a mere invitation.",
   "devices.showCode": "Show a code",
-  "devices.haveCode": "I have a code",
+  "devices.haveCode": "I have a pairing code",
   "devices.pairWarnLead": "Never on a machine that isn't yours.",
   "devices.pairWarnRest":
     "Whoever types the code becomes you to every intent and purpose: same mailbox, same address book, same ability to open what is sent to you.",
@@ -502,6 +501,8 @@ export const en = {
   "send.depositResult": (to: string) =>
     `Deposited for ${to}. The ticket below is your own copy: you only need it if you want to hand it over yourself — if ${to} never gets the offer, say.`,
   "send.onItsWay": (to: string) => `On its way to ${to}`,
+  "send.saveArvolo": "Save as .arvolo file…",
+  "send.arvoloSaved": (name: string) => `Saved ${name} — share it over any channel; the other side opens it with Arvolo.`,
   "send.onItsWayDetail":
     "If they are online it goes direct, otherwise it waits in their mailbox.",
   "send.codeKeepDetail":
@@ -519,7 +520,7 @@ export const en = {
   "send.title": "Send",
   "send.subtitleReady": "Hand over what you see below.",
   "send.subtitle": "Encrypted end to end, always.",
-  "send.submitDeposit": "Deposit it",
+  "send.submitDeposit": "Leave it in their mailbox",
   "send.submitSend": "Send",
   "send.submitCode": "Generate the code",
   "send.submitLink": "Create the link",
@@ -735,6 +736,8 @@ export const en = {
   "store.errReceive": "Receiving failed",
   "store.errAccept": "Couldn't accept the file",
   "store.errReject": "Couldn't reject the file",
+  "store.declined": (who: string) => who ? `Offer from ${who} declined.` : "Offer declined.",
+  "bits.qrTooDense": "Too much data for a QR — use Copy instead.",
   "store.errPause": "Couldn't pause it",
   "store.errResume": "Couldn't resume it",
   "store.errCancel": "Couldn't cancel it",

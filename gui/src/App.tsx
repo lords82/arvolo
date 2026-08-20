@@ -9,7 +9,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { enable as autostartEnable } from "@tauri-apps/plugin-autostart";
-import { onPickedFiles } from "./ipc";
+import { onArvoloTicket, onPickedFiles } from "./ipc";
+import { api } from "./ipc";
 import { fire, TITLE_KEY, useStore, type Route } from "./store";
 import { useT } from "./i18n";
 import { Icon } from "./ui/Icons";
@@ -227,14 +228,51 @@ export function App() {
     return () => un?.();
   }, [openSheet]);
 
+  // A `.arvolo` handed to the app is something to RECEIVE: dropped on the
+  // window or double-clicked while running (event), or double-clicked cold
+  // (pending, held Rust-side until this asks). Either way the receive sheet
+  // opens with the ticket already in place.
+  const openReceiveWith = useStore((s) => s.openReceiveWith);
+  useEffect(() => {
+    let un: (() => void) | undefined;
+    onArvoloTicket((ticket) => openReceiveWith(ticket))
+      .then((f) => {
+        un = f;
+      })
+      .catch(() => {});
+    api
+      .takePendingTicket()
+      .then((t) => {
+        if (t) openReceiveWith(t);
+      })
+      .catch(() => {});
+    return () => un?.();
+  }, [openReceiveWith]);
+
   // A refused action is surfaced as a toast rather than left in the store: it is
   // fired from click handlers that cannot await, so without this the button
   // simply looks broken. Errors never auto-dismiss (see Toasts).
+  //
+  // The raw daemon string stays (it is the truth), but the toast leads with what
+  // to DO about it and carries the button that does it — the action affordance
+  // existed in Toasts from the start and no caller ever used it.
   useEffect(() => {
     if (!actionError) return;
-    toast.bad(t("app.actionFailed"), actionError);
+    const low = actionError.toLowerCase();
+    let action: { label: string; run: () => void } | undefined;
+    let hint = "";
+    if (low.includes("no daemon") || low.includes("daemon")) {
+      action = { label: t("app.restart"), run: () => fire(restartDaemon()) };
+      hint = t("app.errHintDaemon");
+    } else if (low.includes("relay")) {
+      action = { label: t("app.errOpenSettings"), run: () => go("settings") };
+      hint = t("app.errHintRelay");
+    } else if (low.includes("password")) {
+      hint = t("app.errHintPassword");
+    }
+    toast.bad(t("app.actionFailed"), hint ? `${hint} — ${actionError}` : actionError, action);
     dismissActionError();
-  }, [actionError, dismissActionError, t]);
+  }, [actionError, dismissActionError, t, go, restartDaemon]);
 
   const View =
     route === "transfers"
@@ -283,6 +321,9 @@ export function App() {
           <div className="banner bad" role="status">
             <Icon.Alert size={14} className="tone-bad" />
             <span className="grow">{loadError}</span>
+            <Button size="sm" onClick={() => fire(restartDaemon())}>
+              {t("app.restart")}
+            </Button>
           </div>
         )}
         {pendingOffers.length > 0 && route !== "transfers" && (

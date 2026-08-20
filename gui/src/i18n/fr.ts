@@ -52,6 +52,10 @@ export const fr: Dict = {
   "app.dropTitle": "Déposez ici pour envoyer",
   "app.dropHint": "Vous choisirez ensuite : un contact, un code, un lien.",
   "app.actionFailed": "Ça n'a pas marché",
+  "app.errHintDaemon": "Le démon ne répond pas — redémarrez-le et réessayez.",
+  "app.errHintRelay": "Il faut un relais — réglez-le dans Réglages → Réseau.",
+  "app.errHintPassword": "Protégé par mot de passe — demandez-le à l'expéditeur.",
+  "app.errOpenSettings": "Ouvrir les réglages",
 
   "crash.title": "Quelque chose a cassé dans l'interface",
   "crash.body":
@@ -91,11 +95,6 @@ export const fr: Dict = {
   "status.failed": "Échoué",
   "status.cancelling": "Annulation…",
   "status.cancelled": "Annulé",
-
-  "method.p2p": "Direct",
-  "method.cloud": "Boîte",
-  "method.link": "Lien",
-  "method.ticket": "Ticket",
 
   "meta.paused": "en pause",
   "meta.sharing": "disponible — personne ne le télécharge",
@@ -238,7 +237,7 @@ export const fr: Dict = {
     "Le nom vous appartient : la clé et les marques ne bougent pas.",
 
   "people.swap": "Échanger les contacts",
-  "people.haveCode": "J'ai un code",
+  "people.haveCode": "J'ai un code d'appairage",
   "people.byId": "Par identifiant",
   "people.export": "Exporter",
   "people.import": "Importer",
@@ -306,7 +305,7 @@ export const fr: Dict = {
   "deposits.openInBrowser": "Ouvrir dans le navigateur",
   "deposits.openFailed": "Je n'arrive pas à ouvrir le lien",
   "deposits.share": "Link",
-  "deposits.shareTicket": "Ticket",
+  "deposits.shareTicket": "Code de retrait",
   "deposits.shareTicketTitle": "Le ticket, à nouveau",
   "deposits.ticketDetail":
     "Collez-le au destinataire : il s'ouvre dans son Arvolo, ou avec `arvolo recv`. Lui seul peut le déchiffrer — il est scellé à son identité.",
@@ -366,7 +365,7 @@ export const fr: Dict = {
   "devices.pairBody":
     "Le rattachement se fait des deux côtés : sur cette machine vous affichez un code, sur l'autre vous le saisissez. C'est une opération délicate — ce qui passe, c'est votre identité secrète, pas une simple invitation.",
   "devices.showCode": "Afficher un code",
-  "devices.haveCode": "J'ai un code",
+  "devices.haveCode": "J'ai un code d'appairage",
   "devices.pairWarnLead": "Jamais sur une machine qui n'est pas la vôtre.",
   "devices.pairWarnRest":
     "Qui saisit le code devient vous à tous les égards : même boîte, même carnet d'adresses, même capacité à ouvrir ce qu'on vous envoie.",
@@ -493,6 +492,8 @@ export const fr: Dict = {
   "send.depositResult": (to) =>
     `Déposé pour ${to}. Le ticket ci-dessous est votre copie : il ne sert que si vous voulez le remettre vous-même, par exemple si ${to} ne reçoit pas l'offre.`,
   "send.onItsWay": (to) => `En route vers ${to}`,
+  "send.saveArvolo": "Enregistrer en fichier .arvolo…",
+  "send.arvoloSaved": (name: string) => `${name} enregistré — partagez-le par n'importe quel canal ; en face, il s'ouvre avec Arvolo.`,
   "send.onItsWayDetail":
     "S'il est en ligne, ça passe en direct ; sinon, ça reste dans sa boîte.",
   "send.codeKeepDetail":
@@ -510,7 +511,7 @@ export const fr: Dict = {
   "send.title": "Envoyer",
   "send.subtitleReady": "Transmettez ce que vous voyez ci-dessous.",
   "send.subtitle": "Chiffré de bout en bout, toujours.",
-  "send.submitDeposit": "Déposer",
+  "send.submitDeposit": "Laisser dans sa boîte",
   "send.submitSend": "Envoyer",
   "send.submitCode": "Générer le code",
   "send.submitLink": "Créer le lien",
@@ -725,6 +726,8 @@ export const fr: Dict = {
   "store.errReceive": "Réception impossible",
   "store.errAccept": "Impossible d'accepter le fichier",
   "store.errReject": "Impossible de refuser le fichier",
+  "store.declined": (who: string) => who ? `Offre de ${who} refusée.` : "Offre refusée.",
+  "bits.qrTooDense": "Trop de données pour un QR — utilisez Copier.",
   "store.errPause": "Impossible de mettre en pause",
   "store.errResume": "Impossible de reprendre",
   "store.errCancel": "Impossible d'annuler",

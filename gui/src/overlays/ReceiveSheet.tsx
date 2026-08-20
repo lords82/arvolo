@@ -31,10 +31,10 @@ export function shapeOf(raw: string): Shape {
   if (!s) return "empty";
   if (s.startsWith("arvc")) return "chunk";
   if (s.startsWith("arvm")) return "mailbox";
-  // 1–6 digits: the nameplate is `rng.random_range(0..10_000)`, so `7-fox-oak`
-  // is a perfectly ordinary code. Demanding three digits met one code in a
-  // hundred with "I don't recognise this shape".
-  if (/^\d{1,6}-[a-z]+-[a-z]+(@.+)?$/i.test(s)) return "code";
+  // Mirrors core's `looks_like_code`: a digit nameplate plus AT LEAST two more
+  // dash-separated parts (`7-fox-oak`, but also `7-fox-oak-extra`), optionally
+  // `@relay`. The old two-words-only regex called a daemon-valid code "unknown".
+  if (/^\d+(-[^-@\s]+){2,}(@.+)?$/.test(s)) return "code";
   return "unknown";
 }
 
@@ -49,6 +49,7 @@ const EXPLAIN = {
 export function ReceiveSheet() {
   const t = useT();
   const open = useStore((s) => s.receiveOpen);
+  const prefill = useStore((s) => s.receivePrefill);
   const close = useStore((s) => s.closeReceive);
   const receive = useStore((s) => s.receive);
   const downloadDir = useStore((s) => s.status?.download_dir ?? "");
@@ -60,11 +61,13 @@ export function ReceiveSheet() {
 
   useEffect(() => {
     if (!open) return;
-    setValue("");
+    // A `.arvolo` file dropped or double-clicked arrives as a prefill (read
+    // Rust-side); a plain open starts empty.
+    setValue(prefill ?? "");
     setOut(null);
     setPassword("");
     setBusy(false);
-  }, [open]);
+  }, [open, prefill]);
 
   const shape = shapeOf(value);
   // Only a mailbox ticket can be password-protected; offering the field for a

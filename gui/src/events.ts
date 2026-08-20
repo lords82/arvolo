@@ -61,6 +61,7 @@ export type WireEvent =
       };
     }
   | "contacts_changed"
+  | { offer_gone: { id: string } }
   | "finished_cleared";
 
 /** Every variant the app knows how to act on. A daemon of a different build may
@@ -79,6 +80,7 @@ const KNOWN = new Set<EngineEvent["type"]>([
   "code_paired",
   "code_closed",
   "contacts_changed",
+  "offer_gone",
   "finished_cleared",
   "pairing_code",
   "pairing_done",

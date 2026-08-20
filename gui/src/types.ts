@@ -1,7 +1,6 @@
 // Wire types — 1:1 with `arvolo_ipc::protocol` DTOs, and the derived UI model.
 
 export type Direction = "out" | "in";
-export type Method = "p2p" | "cloud" | "link" | "ticket";
 
 /** UI lifecycle state. These are internal identifiers, never rendered: the words
  *  the user reads come from `statusMeta` in format.ts, in their own language. */
@@ -256,6 +255,9 @@ export type EngineEvent =
   /** The address book moved (from this GUI, the CLI, or a sync). Carries nothing:
    *  refetch the contacts. */
   | { type: "contacts_changed" }
+  // A waiting offer left the daemon by another client's hand (CLI recv/decline
+  // while this window is open) — drop its row instead of showing a ghost.
+  | { type: "offer_gone"; id: string }
   /** Finished rows were cleared from the daemon's list by somebody else — an
    *  `arvolo status clear`, or another window. Carries nothing: drop the ones
    *  this window considers finished. */
@@ -288,6 +290,9 @@ export interface UITransfer {
   key: string;
   /** Numeric daemon transfer id (0 for a not-yet-accepted offer). */
   id: number;
+  /** The 8-hex handle the CLI shows and takes (`arvolo cancel <handle>`).
+   *  Empty for offers and against an older daemon. */
+  handle?: string;
   /** Offer id, when this row is a parked incoming offer. */
   offerId?: string;
   dir: Direction;
@@ -301,12 +306,9 @@ export interface UITransfer {
   senderName?: string;
   /** Base32 id of the peer, when known (for verify/name lookups). */
   peerId?: string;
-  encrypted: boolean;
   verified: boolean;
-  method: Method;
   swarmPeers: number;
   downloadPeers: number;
-  files: number;
   /** Short reason for waiting/paused/failed states. */
   reason?: string;
   /** Completed-receive path (for "open folder"). */

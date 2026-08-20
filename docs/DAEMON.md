@@ -65,7 +65,7 @@ serves in the background and you watch it (who's pulling, %, delivered) with
 `arvolo status`, surviving your terminal. `--foreground`
 keeps the inline behavior (serve here, Ctrl-C to stop).
 
-`arvolo code <file>` does the same for a short code. It prints the code and
+`arvolo send --code <file>` does the same for a short code. It prints the code and
 returns; the daemon holds the rendezvous open and serves the file behind it.
 `arvolo status` shows the live code, so you can read it out again later — useful,
 because the terminal that printed it is usually long gone:

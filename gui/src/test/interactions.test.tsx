@@ -624,7 +624,7 @@ describe("the send panel", () => {
     fireEvent.change(await screen.findByPlaceholderText("none"), {
       target: { value: "segreto" },
     });
-    fireEvent.click(screen.getByText("Deposit it"));
+    fireEvent.click(screen.getByText("Leave it in their mailbox"));
     await waitFor(() => expect(harness.recorder.depositTo).toHaveLength(1));
     const [to, , ttl, max, password] = harness.recorder.depositTo[0];
     expect(to).toBe("proj");
@@ -639,7 +639,7 @@ describe("the send panel", () => {
     render(<App />);
     fireEvent.click(await screen.findByText("proj"));
     fireEvent.click(screen.getByLabelText("Leave it in the mailbox"));
-    fireEvent.click(await screen.findByText("Deposit it"));
+    fireEvent.click(await screen.findByText("Leave it in their mailbox"));
     expect(await screen.findByText("arvm-test")).toBeTruthy();
   });
 
@@ -907,7 +907,7 @@ describe("pairing", () => {
   it("joining opens the code input without contacting the daemon first", async () => {
     render(<App />);
     useStore.getState().go("people");
-    fireEvent.click(await screen.findByText("I have a code"));
+    fireEvent.click(await screen.findByText("I have a pairing code"));
     // Starting a session now would spawn one that fails instantly ("a pairing
     // code is required") and replace the very input the user is meant to type
     // into with a spinner.
@@ -979,7 +979,7 @@ describe("pairing", () => {
   it("a cancelled exchange is not reported back as an error", async () => {
     render(<App />);
     useStore.getState().go("people");
-    fireEvent.click(await screen.findByText("I have a code"));
+    fireEvent.click(await screen.findByText("I have a pairing code"));
     await screen.findByText("Code");
     useStore.setState({
       pairing: {

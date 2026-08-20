@@ -114,8 +114,23 @@ export const api = {
   /** Native save dialog + write. Resolves to the chosen file name, or null. */
   exportContacts: (defaultName: string, contents: string) =>
     invoke<string | null>("export_contacts", { defaultName, contents }),
+  // Save an arvc… ticket as a shareable .arvolo file (native dialog, Rust-side
+  // path). Resolves to the chosen file name, or null if cancelled.
+  saveTicket: (defaultName: string, ticket: string) =>
+    invoke<string | null>("save_ticket", { defaultName, ticket }),
   guiVersion: () => invoke<string>("gui_version"),
+  // The ticket of a .arvolo the app was LAUNCHED with (double click before the
+  // window existed). One-shot: the backend hands it over once.
+  takePendingTicket: () => invoke<string | null>("take_pending_ticket"),
+  // Keep the native side (tray menu, arrival notifications) in the webview's
+  // language — they used to be hardcoded Italian in a four-language app.
+  setUiLanguage: (lang: string) => invoke<void>("set_ui_language", { lang }),
 };
+
+/** A .arvolo handed to the running app (drop on the window, macOS Opened). */
+export function onArvoloTicket(cb: (ticket: string) => void): Promise<UnlistenFn> {
+  return listen<string>("files://arvolo", (e) => cb(e.payload));
+}
 
 /** Subscribe to the pushed engine event stream, flattening each event out of its
  *  wire form (see `events.ts` — the daemon sends serde's externally tagged shape,

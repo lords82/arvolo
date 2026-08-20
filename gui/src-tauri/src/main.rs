@@ -31,6 +31,92 @@ const EV_CONNECTED: &str = "engine://connected";
 const EV_DAEMON_ERROR: &str = "engine://daemon-error";
 /// Files just dropped on the window, already registered: `[PickedItemDto]`.
 const EV_FILES_PICKED: &str = "files://picked";
+/// The ticket read out of a `.arvolo` file handed to the app — dropped on the
+/// window, double-clicked (macOS `Opened`), or passed on argv. The webview gets
+/// the ticket string, never the path.
+const EV_ARVOLO_TICKET: &str = "files://arvolo";
+
+/// The UI language, as the webview resolved it ("en"/"it"/"fr"/"de"). The six
+/// native strings (tray menu, arrival notifications) read it; the webview sets
+/// it on boot and on every change. Until it does, the OS locale decides — an
+/// English desktop must not get an Italian tray while the app loads.
+struct UiLang(std::sync::Mutex<String>);
+
+fn os_lang() -> String {
+    let raw = std::env::var("LC_ALL")
+        .or_else(|_| std::env::var("LANG"))
+        .unwrap_or_default()
+        .to_lowercase();
+    for l in ["it", "fr", "de"] {
+        if raw.starts_with(l) {
+            return l.to_string();
+        }
+    }
+    "en".to_string()
+}
+
+/// The native-side dictionary: six strings, four languages, no framework.
+fn tr(lang: &str, key: &str) -> &'static str {
+    match (lang, key) {
+        ("it", "show") => "Mostra Arvolo",
+        ("it", "quit") => "Esci",
+        ("it", "someone") => "Qualcuno",
+        ("it", "arrival_title") => "Arvolo — file in arrivo",
+        ("it", "auto_title") => "Arvolo — sto scaricando",
+        ("fr", "show") => "Afficher Arvolo",
+        ("fr", "quit") => "Quitter",
+        ("fr", "someone") => "Quelqu'un",
+        ("fr", "arrival_title") => "Arvolo — fichier entrant",
+        ("fr", "auto_title") => "Arvolo — téléchargement en cours",
+        ("de", "show") => "Arvolo anzeigen",
+        ("de", "quit") => "Beenden",
+        ("de", "someone") => "Jemand",
+        ("de", "arrival_title") => "Arvolo — eingehende Datei",
+        ("de", "auto_title") => "Arvolo — lade herunter",
+        (_, "show") => "Show Arvolo",
+        (_, "quit") => "Quit",
+        (_, "someone") => "Somebody",
+        (_, "arrival_title") => "Arvolo — incoming file",
+        (_, "auto_title") => "Arvolo — downloading",
+        _ => "",
+    }
+}
+
+fn arrival_body(lang: &str, auto: bool, name: &str, who: &str) -> String {
+    match (lang, auto) {
+        ("it", true) => format!("“{name}” da {who}, che è un contatto fidato"),
+        ("it", false) => format!("{who} vuole inviarti “{name}”"),
+        ("fr", true) => format!("« {name} » de {who}, un contact de confiance"),
+        ("fr", false) => format!("{who} veut vous envoyer « {name} »"),
+        ("de", true) => format!("„{name}“ von {who}, einem vertrauten Kontakt"),
+        ("de", false) => format!("{who} möchte dir „{name}“ senden"),
+        (_, true) => format!("“{name}” from {who}, a trusted contact"),
+        (_, false) => format!("{who} wants to send you “{name}”"),
+    }
+}
+
+/// The webview's language just resolved (boot, or the user switched): keep the
+/// native strings in step — the tray menu is rebuilt in place.
+#[tauri::command]
+fn set_ui_language(app: AppHandle, state: tauri::State<'_, UiLang>, lang: String) {
+    *state.0.lock().unwrap() = lang.clone();
+    if let Some(tray) = app.tray_by_id("main") {
+        let rebuilt = (|| -> tauri::Result<_> {
+            let show = MenuItemBuilder::with_id("show", tr(&lang, "show")).build(&app)?;
+            let quit = MenuItemBuilder::with_id("quit", tr(&lang, "quit")).build(&app)?;
+            MenuBuilder::new(&app).item(&show).separator().item(&quit).build()
+        })();
+        if let Ok(menu) = rebuilt {
+            let _ = tray.set_menu(Some(menu));
+        }
+    }
+}
+
+fn ui_lang(app: &AppHandle) -> String {
+    app.try_state::<UiLang>()
+        .map(|s| s.0.lock().unwrap().clone())
+        .unwrap_or_else(os_lang)
+}
 
 /// Whether the system tray icon actually got created. Hiding the window on close
 /// is only safe if there is a tray to get back from: on Linux desktops without a
@@ -44,6 +130,12 @@ fn main() {
     // it should come up hidden in the tray rather than with a window in the
     // face of someone who just signed in.
     let autostarted = std::env::args().any(|a| a == "--autostart");
+    // A `.arvolo` passed on argv: the file-association launch on Windows/Linux
+    // (macOS uses the Opened event instead). Read now, handed to the webview
+    // when it asks (`take_pending_ticket`).
+    let pending_ticket = std::env::args()
+        .skip(1)
+        .find_map(|a| read_arvolo_ticket(std::path::Path::new(&a)));
 
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_autostart::init(
@@ -97,6 +189,9 @@ fn main() {
             bridge::cancel_pairing,
             bridge::import_contacts,
             bridge::export_contacts,
+            bridge::save_ticket,
+            bridge::take_pending_ticket,
+            set_ui_language,
             bridge::pick_files,
             bridge::gui_version,
         ])
@@ -121,8 +216,12 @@ fn main() {
             } else {
                 show_main_window(app.handle());
             }
+            app.manage(UiLang(std::sync::Mutex::new(os_lang())));
             app.manage(attention::State::default());
             app.manage(bridge::PickedFiles::new());
+            app.manage(bridge::PendingArvolo(std::sync::Mutex::new(
+                pending_ticket.clone(),
+            )));
             // Ask now, not at the first arrival: a permission prompt that appears
             // the moment somebody sends you a file is in the way of the thing you
             // wanted to see. No-op when there is no bundle to ask for.
@@ -144,6 +243,15 @@ fn main() {
             // path any more, so knowing one buys nothing.
             if let WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
                 let app = window.app_handle();
+                // One `.arvolo` on its own is something to RECEIVE, not to send:
+                // read the ticket here (the path stays Rust-side) and open the
+                // receive flow with it. Mixed drops keep the send semantics.
+                if let [only] = paths.as_slice() {
+                    if let Some(ticket) = read_arvolo_ticket(only) {
+                        let _ = app.emit(EV_ARVOLO_TICKET, ticket);
+                        return;
+                    }
+                }
                 let items = bridge::register_paths(&app.state::<bridge::PickedFiles>(), paths);
                 if !items.is_empty() {
                     let _ = app.emit(EV_FILES_PICKED, items);
@@ -174,15 +282,41 @@ fn main() {
         if let tauri::RunEvent::Reopen { .. } = _event {
             show_main_window(_app);
         }
+        // A `.arvolo` opened from the Finder (double click / "Open with") while
+        // the app runs: macOS hands it over as an Opened event. The ticket goes
+        // to the webview; the path never does.
+        #[cfg(target_os = "macos")]
+        if let tauri::RunEvent::Opened { urls } = _event {
+            for url in urls {
+                if let Ok(path) = url.to_file_path() {
+                    if let Some(ticket) = read_arvolo_ticket(&path) {
+                        show_main_window(_app);
+                        let _ = _app.emit(EV_ARVOLO_TICKET, ticket);
+                    }
+                }
+            }
+        }
     });
+}
+
+/// The ticket inside a `.arvolo` file, if `path` is one. The extension is what
+/// makes a path eligible; the content is trimmed and must be non-empty.
+fn read_arvolo_ticket(path: &std::path::Path) -> Option<String> {
+    if path.extension().and_then(|e| e.to_str()) != Some("arvolo") {
+        return None;
+    }
+    let text = std::fs::read_to_string(path).ok()?;
+    let t = text.trim();
+    (!t.is_empty()).then(|| t.to_string())
 }
 
 /// System-tray icon with a minimal menu (Mostra / Esci) — the way back to a
 /// window closed to the tray, and the only one once the Dock/taskbar entry is
 /// gone.
 fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
-    let show = MenuItemBuilder::with_id("show", "Mostra Arvolo").build(app)?;
-    let quit = MenuItemBuilder::with_id("quit", "Esci").build(app)?;
+    let lang = os_lang();
+    let show = MenuItemBuilder::with_id("show", tr(&lang, "show")).build(app)?;
+    let quit = MenuItemBuilder::with_id("quit", tr(&lang, "quit")).build(app)?;
     let menu = MenuBuilder::new(app)
         .item(&show)
         .separator()
@@ -377,22 +511,18 @@ fn moves_the_count(ev: &EventDto) -> bool {
 /// we fall through to the plugin, which will also show nothing. A dev run being
 /// silent on macOS is expected and not worth chasing.
 fn notify_arrival(app: &AppHandle, name: &str, sender_name: &str, auto: bool) {
+    let lang = ui_lang(app);
     let who = if sender_name.trim().is_empty() {
-        "Qualcuno".to_string()
+        tr(&lang, "someone").to_string()
     } else {
         sender_name.to_string()
     };
-    let (title, body) = if auto {
-        (
-            "Arvolo — sto scaricando",
-            format!("“{name}” da {who}, che è un contatto fidato"),
-        )
+    let title = if auto {
+        tr(&lang, "auto_title")
     } else {
-        (
-            "Arvolo — file in arrivo",
-            format!("{who} vuole inviarti “{name}”"),
-        )
+        tr(&lang, "arrival_title")
     };
+    let body = arrival_body(&lang, auto, name, &who);
     #[cfg(target_os = "macos")]
     if notify_mac::available() {
         // One identifier per file name, so a re-offer of the same file replaces its

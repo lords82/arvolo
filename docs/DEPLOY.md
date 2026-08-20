@@ -253,8 +253,8 @@ On each device using `arvolo`:
 # use YOUR iroh relay instead of n0's public ones
 export ARVOLO_IROH_RELAY=https://relay.example.com
 
-# sends to a contact use YOUR relay (mailbox when they're offline; --use-http for plaintext)
-arvolo send <id> file --relay mailbox.example.com
+# sends to a contact use YOUR relay (mailbox when they're offline; http:// in the address for plaintext)
+arvolo send file --to <id> --relay mailbox.example.com
 ```
 
 With `ARVOLO_IROH_RELAY` set and your own mailbox URL, **no third-party server is

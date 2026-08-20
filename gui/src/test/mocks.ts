@@ -70,6 +70,8 @@ export interface Harness {
   failDaemon: (reason: string) => void;
   /** Deliver a registered drop, as the Rust window handler would. */
   dropFiles: (items: PickedItem[]) => void;
+  /** A .arvolo handed to the app (drop/double-click), as the window would emit it. */
+  arvoloTicket: (ticket: string) => void;
   /** What `reload()` will find on the daemon. */
   snapshot: {
     status: StatusDto | null;
@@ -179,6 +181,7 @@ export const harness: Harness = {
   setConnected: () => {},
   failDaemon: () => {},
   dropFiles: () => {},
+  arvoloTicket: () => {},
   snapshot: freshSnapshot(),
   fail: new Set(),
 };
@@ -256,6 +259,11 @@ export function makeIpcMock() {
       pickFiles: () => guard("pickFiles", [] as PickedItem[]),
       importContacts: () => guard("importContacts", "[]"),
       exportContacts: () => guard("exportContacts", "contacts.json"),
+      saveTicket: () => guard("saveTicket", "ticket.arvolo"),
+      // No pending .arvolo at test startup, and language changes are fire-and-
+      // forget toward the native side.
+      takePendingTicket: () => guard("takePendingTicket", null),
+      setUiLanguage: () => guard("setUiLanguage", undefined),
       serveCode: (paths: string[], _relay: string | null, keep: boolean) => {
         harness.recorder.serveCode.push([paths, keep]);
         return guard("serveCode", { id: 1, code: "4821-crater-mango" });
@@ -391,6 +399,10 @@ export function makeIpcMock() {
     // The registered result of a drop, as the Rust window handler would emit it.
     onPickedFiles: (cb: (items: PickedItem[]) => void) => {
       harness.dropFiles = cb;
+      return Promise.resolve(() => {});
+    },
+    onArvoloTicket: (cb: (ticket: string) => void) => {
+      harness.arvoloTicket = cb;
       return Promise.resolve(() => {});
     },
   };

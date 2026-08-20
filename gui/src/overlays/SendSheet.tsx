@@ -172,7 +172,11 @@ export function SendSheet() {
   const [note, setNote] = useState("");
   const [asDeposit, setAsDeposit] = useState(false);
   const [ttl, setTtl] = useState(7 * 24 * 3600);
+  // Separate per mode: the mailbox default is 1 pickup, a link's is unlimited.
+  // One shared field made a link die after the first download while its own
+  // hint promised "no limits".
   const [maxDl, setMaxDl] = useState("1");
+  const [maxDlLink, setMaxDlLink] = useState("");
   const [password, setPassword] = useState("");
   const [keepCode, setKeepCode] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -196,6 +200,7 @@ export function SendSheet() {
     setAsDeposit(false);
     setKeepCode(false);
     setMaxDl("1");
+    setMaxDlLink("");
     setTtl(7 * 24 * 3600);
   }, [open, picks, presetTo, presetMode]);
 
@@ -251,7 +256,7 @@ export function SendSheet() {
             : t("send.codeOnceDetail"),
         });
       } else if (mode === "link") {
-        const max = maxDl.trim() === "" ? null : Number(maxDl);
+        const max = maxDlLink.trim() === "" ? null : Number(maxDlLink);
         const url = await link(
           files[0].id,
           ttl,
@@ -337,6 +342,23 @@ export function SendSheet() {
           )}
           {result.kind === "link" && (
             <div className="t-sm t-sec">{t("send.linkKeyNote")}</div>
+          )}
+          {/* A ticket is a blob nobody retypes: offer it as a `.arvolo` file —
+              the CLI's own default artefact — shareable over any channel. */}
+          {result.kind === "ticket" && (
+            <Button
+              onClick={async () => {
+                const base =
+                  files[0]?.name?.replace(/[/\\]/g, "_") || "ticket";
+                const saved = await api.saveTicket(
+                  `${base}.arvolo`,
+                  result.value
+                );
+                if (saved) toast.ok(t("send.arvoloSaved", saved));
+              }}
+            >
+              {t("send.saveArvolo")}
+            </Button>
           )}
         </div>
       ) : (
@@ -547,8 +569,8 @@ export function SendSheet() {
                     aria-describedby={describedBy}
                     className="tnum"
                     inputMode="numeric"
-                    value={maxDl}
-                    onChange={(e) => setMaxDl(e.currentTarget.value)}
+                    value={maxDlLink}
+                    onChange={(e) => setMaxDlLink(e.currentTarget.value)}
                     placeholder={t("send.maxDownloadsPlaceholder")}
                   />
                 )}

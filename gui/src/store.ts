@@ -13,7 +13,7 @@ import type {
   DepositDto,
   EngineEvent,
   HistoryDto,
-  Method,
+  
   OfferDto,
   PairKind,
   StatusDto,
@@ -241,12 +241,6 @@ function toUIStatus(raw: string): { status: UIStatus; reason?: string } {
   return { status: "active" };
 }
 
-function methodFor(dto: TransferDto): Method {
-  if (dto.status.startsWith("deposited")) return "cloud";
-  if (dto.download_peers > 0 || dto.swarm_peers > 0) return "p2p";
-  return "p2p";
-}
-
 interface State {
   connected: boolean;
   status: StatusDto | null;
@@ -326,6 +320,9 @@ interface State {
    *  watch, so its numbers live behind a panel rather than crowding the row. */
   shareOpen: number | null;
   receiveOpen: boolean; // paste-a-ticket sheet
+  /** A ticket handed in from outside the webview — a dropped/double-clicked
+   *  `.arvolo` file, read Rust-side. The sheet consumes it as its initial value. */
+  receivePrefill: string | null;
   /** The person whose detail sheet is open, by contact name. */
   personOpen: string | null;
 
@@ -363,6 +360,7 @@ interface State {
   revokeDeposit: (id: string) => Promise<void>;
 
   openReceive: () => void;
+  openReceiveWith: (ticket: string) => void;
   closeReceive: () => void;
   loadHistory: () => Promise<void>;
   /** Forget the whole daemon-side history log. */
@@ -487,12 +485,10 @@ export const useStore = create<State>((set, get) => {
       reason,
       peer: get().peerLabel(d.peer, prev?.peer),
       peerId: d.peer ?? prev?.peerId,
-      encrypted: true,
       verified: get().isVerified(d.peer),
-      method: methodFor(d),
+      handle: d.handle || undefined,
       swarmPeers: d.swarm_peers,
       downloadPeers: d.download_peers,
-      files: prev?.files ?? 1,
       // The engine's answer wins: it is the one that survives a restart. Falling
       // back to what we already had keeps a path learned from a live event when
       // talking to a daemon too old to report it.
@@ -525,12 +521,9 @@ export const useStore = create<State>((set, get) => {
     peerId: o.from,
     note: o.note || undefined,
     senderName: o.sender_name || undefined,
-    encrypted: true,
     verified: get().isVerified(o.from),
-    method: "cloud",
     swarmPeers: 0,
     downloadPeers: 0,
-    files: 1,
     firstSeen: prev?.firstSeen ?? now(),
     rank: rankFor(`o${o.id}`, prev),
     copiesServed: 0,
@@ -554,12 +547,9 @@ export const useStore = create<State>((set, get) => {
           size: 0,
           transferred: 0,
           status: "active",
-          encrypted: true,
           verified: false,
-          method: "p2p",
           swarmPeers: 0,
           downloadPeers: 0,
-          files: 1,
           firstSeen: now(),
           rank: rankFor(key),
         } as UITransfer);
@@ -586,6 +576,7 @@ export const useStore = create<State>((set, get) => {
     incomingOfferId: null,
     shareOpen: null,
     receiveOpen: false,
+    receivePrefill: null,
     personOpen: null,
     presence: {},
     presenceLoading: false,
@@ -804,6 +795,19 @@ export const useStore = create<State>((set, get) => {
         case "code_closed":
           patch(ev.id, (tx) => ({ ...tx, code: undefined }));
           break;
+        case "offer_gone": {
+          // Accepted or declined elsewhere — typically `arvolo recv <handle>` /
+          // `arvolo decline` in a terminal. The row is a ghost from here on.
+          set((s) => {
+            const { [`o${ev.id}`]: _drop, ...rest } = s.transfers;
+            return {
+              transfers: rest,
+              incomingOfferId:
+                s.incomingOfferId === ev.id ? null : s.incomingOfferId,
+            };
+          });
+          break;
+        }
         case "contacts_changed":
           // Fired by the daemon whoever wrote the book — typically an
           // `arvolo contacts …` run in another process.
@@ -907,8 +911,9 @@ export const useStore = create<State>((set, get) => {
     openShare: (id) => set({ shareOpen: id }),
     closeShare: () => set({ shareOpen: null }),
     openPerson: (name) => set({ personOpen: name }),
-    openReceive: () => set({ receiveOpen: true }),
-    closeReceive: () => set({ receiveOpen: false }),
+    openReceive: () => set({ receiveOpen: true, receivePrefill: null }),
+    openReceiveWith: (ticket) => set({ receiveOpen: true, receivePrefill: ticket }),
+    closeReceive: () => set({ receiveOpen: false, receivePrefill: null }),
 
     loadHistory: async () => {
       set({ historyLoading: true });
@@ -1164,11 +1169,16 @@ export const useStore = create<State>((set, get) => {
       });
     },
     reject: async (offerId) => {
+      // The sender's name, before the row disappears with the offer.
+      const who = get().transfers[`o${offerId}`]?.peer;
       await act(t("store.errReject"), () => api.rejectOffer(offerId));
       set((s) => {
         const { [`o${offerId}`]: _drop, ...rest } = s.transfers;
         return { transfers: rest, incomingOfferId: null };
       });
+      // Declining used to succeed in silence: no toast, no undo, no trace —
+      // rejecting the wrong offer looked exactly like rejecting the right one.
+      toast.ok(t("store.declined", who ?? ""));
     },
     pause: async (id) => {
       await act(t("store.errPause"), () => api.pause(id));

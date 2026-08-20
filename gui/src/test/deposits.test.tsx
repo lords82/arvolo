@@ -275,7 +275,7 @@ describe("the panel", () => {
     await s().go("deposits");
     render(<DepositsView />);
     expect(screen.queryByText("Link", { selector: ".row button" })).toBeNull();
-    fireEvent.click(await screen.findByText("Ticket", { selector: ".row button" }));
+    fireEvent.click(await screen.findByText("Pickup code", { selector: ".row button" }));
     const dialog = await screen.findByRole("dialog");
     fireEvent.click(within(dialog).getByText("Copy"));
     expect(writeText).toHaveBeenCalledWith("arvmSEALED");
@@ -293,7 +293,7 @@ describe("the panel", () => {
     await s().go("deposits");
     render(<DepositsView />);
     expect(await screen.findByText("relazione.pdf")).toBeDefined();
-    expect(screen.queryByText("Ticket", { selector: ".row button" })).toBeNull();
+    expect(screen.queryByText("Pickup code", { selector: ".row button" })).toBeNull();
     expect(screen.queryByText("Link", { selector: ".row button" })).toBeNull();
     expect(screen.getByText("Withdraw", { selector: ".row button" })).toBeDefined();
   });
@@ -304,7 +304,7 @@ describe("the panel", () => {
     ];
     await s().go("deposits");
     render(<DepositsView />);
-    fireEvent.click(await screen.findByText("Ticket", { selector: ".row button" }));
+    fireEvent.click(await screen.findByText("Pickup code", { selector: ".row button" }));
     const dialog = await screen.findByRole("dialog");
     expect(within(dialog).getByText("arvmSEALED")).toBeDefined();
   });

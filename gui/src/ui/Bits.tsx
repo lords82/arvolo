@@ -193,6 +193,7 @@ export function CodeHero({
  *  Drawn in flat black on white regardless of theme: a scanner needs contrast
  *  and a fixed polarity, and an inverted QR is a QR many phone cameras refuse. */
 export function QrCode({ value, size = 148 }: { value: string; size?: number }) {
+  const t = useT();
   const ref = useRef<HTMLCanvasElement>(null);
   const [failed, setFailed] = useState(false);
   useEffect(() => {
@@ -210,7 +211,12 @@ export function QrCode({ value, size = 148 }: { value: string; size?: number }) 
       alive = false;
     };
   }, [value, size]);
-  if (failed) return null;
+  if (failed) {
+    // An arvm… ticket at ~300 chars is exactly the case most likely to overflow
+    // the QR capacity — vanishing silently made the panel look broken. Say why,
+    // and point at the copy button that always works.
+    return <div className="t-sm t-mut">{t("bits.qrTooDense")}</div>;
+  }
   return (
     <div className="qr">
       <canvas ref={ref} width={size} height={size} />

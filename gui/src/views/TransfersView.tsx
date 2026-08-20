@@ -219,6 +219,16 @@ function Row({
             <span className={`tone-${st.tone}`} style={{ fontWeight: 600 }}>
               {st.text}
             </span>
+            {tx.handle && (
+              <>
+                <span className="sep" />
+                {/* The same 8-hex handle `arvolo status` prints: with it on the
+                    row, "arvolo cancel <this>" works from either surface. */}
+                <span className="mono" style={{ fontSize: 10.5 }} title="arvolo cancel/pause/resume">
+                  {tx.handle}
+                </span>
+              </>
+            )}
             {tx.peer && (
               <>
                 <span className="sep" />
