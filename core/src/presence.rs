@@ -214,6 +214,23 @@ pub struct Offer {
     /// never substitutes the fingerprint in any trust decision.
     #[serde(default)]
     pub sender_name: String,
+    /// Which **device** posted this offer, when it knows its own id.
+    ///
+    /// Devices paired with `device pair` share one identity, so they also share a
+    /// public key, an inbox slot, and therefore a [`Envelope::sender`]: nothing in
+    /// an offer distinguishes "I posted this" from "my other device posted this".
+    /// That is fine between two people and fatal between two of your own machines
+    /// — the sender would find its own offer waiting in its own inbox and, since
+    /// an offer from your own identity is auto-accepted, download the file over
+    /// itself. This is the one field that tells them apart.
+    ///
+    /// A local tiebreak, not an identity: it is the same random
+    /// [`DeviceId`](crate::sync::DeviceId) the CRDT clock uses, it never leaves
+    /// the HPKE seal (so the relay cannot correlate devices by it), and it is
+    /// never shown to anyone. `None` from a client that predates it, which simply
+    /// means the filter cannot help there.
+    #[serde(default)]
+    pub origin: Option<crate::sync::DeviceId>,
 }
 
 /// The authenticated **inner** envelope: the sender's public key plus the
@@ -650,6 +667,10 @@ pub struct InboxSubscription {
     /// When the older slots were last drained, so the steady-state poll loop doesn't
     /// pay for them every round.
     last_backfill: std::sync::Mutex<u64>,
+    /// This device's id, once its owner has said what it is
+    /// ([`Self::set_origin`]). Offers stamped with it are ours and are skipped —
+    /// see `poll_wait`. `None` leaves the poll exactly as it was.
+    origin: std::sync::Mutex<Option<crate::sync::DeviceId>>,
 }
 
 #[derive(Clone)]
@@ -696,6 +717,26 @@ impl InboxSubscription {
             row_slots: std::sync::Mutex::new(HashMap::new()),
             undecodable: std::sync::Mutex::new(std::collections::HashSet::new()),
             last_backfill: std::sync::Mutex::new(0),
+            origin: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// Tell this subscription which device it is polling for, so it can recognise
+    /// the offers this same device posted. Call it before polling; see
+    /// [`Offer::origin`].
+    pub fn set_origin(&self, device: crate::sync::DeviceId) {
+        *self.origin.lock().unwrap() = Some(device);
+    }
+
+    /// Did *this* device post this offer? False whenever either side is unknown —
+    /// an offer from a client that predates [`Offer::origin`], or a subscription
+    /// nobody told which device it is. Unknown must mean "not ours": mistaking
+    /// someone else's offer for our own would drop a real delivery on the floor,
+    /// while the reverse merely restores the behaviour that came before.
+    fn is_ours(&self, offer: &Offer) -> bool {
+        match (*self.origin.lock().unwrap(), offer.origin) {
+            (Some(mine), Some(theirs)) => mine == theirs,
+            _ => false,
         }
     }
 
@@ -830,6 +871,13 @@ impl InboxSubscription {
                 continue;
             }
             match decode_offer(&item.blob, &me) {
+                // An offer this very device posted. Our paired devices share an
+                // identity, so it decodes and authenticates perfectly — it is
+                // addressed to us, by us. Skip it and, like a sync note, do NOT
+                // ack: our *other* devices still have to see it. Leaving it on
+                // the slot costs nothing, since the poll loop dedupes by row id
+                // and already holds a floor on how often a round may complete.
+                Some((_, offer)) if self.is_ours(&offer) => continue,
                 Some((sender, offer)) => out.push(ReceivedOffer {
                     id: item.id,
                     sender,
@@ -1307,6 +1355,7 @@ mod tests {
             ticket: "arvc-fake".into(),
             note: "see page 4".into(),
             sender_name: "Lorenzo".into(),
+            origin: None,
         }
     }
 

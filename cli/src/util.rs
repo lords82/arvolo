@@ -156,6 +156,25 @@ pub(crate) fn my_identity() -> Result<Identity> {
     Identity::load_or_create(&identity_path()).context("load identity")
 }
 
+/// The reserved `--to` word for your own devices: `arvolo send file --to me`.
+///
+/// It beats a saved contact of the same name, and that precedence is chosen for
+/// the direction it fails in. Read as the reserved word when a contact was meant,
+/// the file is sealed to you and simply does not reach them — annoying, nothing
+/// leaks. The other way round it would be sealed to *another person* when you
+/// meant yourself, which is a disclosure. So the reserved word wins, and
+/// [`crate::commands::send`] says so on stderr when the collision exists.
+pub(crate) const SELF_RECIPIENT: &str = "me";
+
+/// Is this base32 public id our own identity? Used to decide that an incoming
+/// offer came from another of our devices — the only sender we auto-accept
+/// without being asked to trust them.
+pub(crate) fn is_self(id_b32: &str) -> bool {
+    my_identity()
+        .map(|me| encode_id(&me.public()) == id_b32)
+        .unwrap_or(false)
+}
+
 pub(crate) fn encode_id(p: &PublicId) -> String {
     data_encoding::BASE32_NOPAD
         .encode(&p.to_bytes())

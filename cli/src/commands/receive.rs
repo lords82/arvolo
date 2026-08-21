@@ -48,6 +48,7 @@ pub(crate) async fn listen(
     let download_dir = book::default_download_dir().unwrap_or_else(book::default_home_downloads);
 
     let manager = TransferManager::new(me, Some(relay.clone()), download_dir.clone());
+    manager.set_device_id(book::load_or_init_device());
     let mut events = manager.subscribe();
     let inbox = manager.spawn_inbox()?;
     let auto_sync =
@@ -446,6 +447,7 @@ async fn take_offer_by_handle(
         let relay = require_relay(None)?;
         let me = my_identity()?;
         let inbox = InboxSubscription::new(relay, &me);
+        inbox.set_origin(book::load_or_init_device());
         let offers = read_inbox(&inbox).await?;
         match resolve_prefix(
             prefix,
@@ -959,6 +961,7 @@ async fn waiting_from_relay(out: Option<PathBuf>, password: Option<String>) -> R
     let relay = require_relay(None)?;
     let me = my_identity()?;
     let inbox = InboxSubscription::new(relay.clone(), &me);
+    inbox.set_origin(book::load_or_init_device());
     vprintln!("reading your inbox slot on {relay} (one round trip, no waiting)…");
     let offers = read_inbox(&inbox).await?;
 

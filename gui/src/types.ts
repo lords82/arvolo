@@ -7,6 +7,7 @@ export type Direction = "out" | "in";
 export type UIStatus =
   | "incoming" // a parked offer awaiting accept/reject
   | "active" // actively transferring
+  | "preparing" // reading + encrypting the payload; nothing on the wire yet
   | "sharing" // made available and waiting to be fetched — not progress
   | "paused" // manually paused
   | "stalled" // auto-held, retrying when possible (daemon "waiting")
@@ -251,6 +252,9 @@ export type EngineEvent =
   | { type: "progress"; id: number; transferred: number; total_size: number }
   | { type: "completed"; id: number; path: string | null }
   | { type: "deposited"; id: number }
+  /** Reading and encrypting the payload: nothing on the wire yet, and the
+   *  recipient has not been offered anything. */
+  | { type: "preparing"; id: number }
   | { type: "waiting"; id: number; reason: string }
   | { type: "paused"; id: number; reason: string }
   | { type: "failed"; id: number; error: string }

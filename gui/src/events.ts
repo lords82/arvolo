@@ -36,6 +36,7 @@ export type WireEvent =
   | { progress: { id: number; transferred: number; total_size: number } }
   | { completed: { id: number; path: string | null } }
   | { deposited: { id: number } }
+  | { preparing: { id: number } }
   | { waiting: { id: number; reason: string } }
   | { paused: { id: number; reason: string } }
   | { failed: { id: number; error: string } }
@@ -72,6 +73,7 @@ const KNOWN = new Set<EngineEvent["type"]>([
   "progress",
   "completed",
   "deposited",
+  "preparing",
   "waiting",
   "paused",
   "failed",

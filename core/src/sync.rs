@@ -229,6 +229,29 @@ pub struct SyncState {
 }
 
 impl SyncState {
+    /// Does any register here carry a clock stamped by a device other than `mine`?
+    ///
+    /// A register only gets a foreign device id by winning a merge against a
+    /// snapshot another device published, so this answering `true` is proof that
+    /// this identity has been on at least two machines. It is *not* proof of the
+    /// reverse: a device paired a minute ago, or one that has only ever received,
+    /// has nothing of anyone else's to show. Only good enough to decide whether to
+    /// suggest `device pair`, which is all it is used for.
+    pub fn authored_by_another_device(&self, mine: &DeviceId) -> bool {
+        let contacts = self.contacts.values().map(|r| &r.clock);
+        let names = self.names.values().map(|r| &r.clock);
+        let marks = self
+            .verified
+            .values()
+            .chain(self.trusted.values())
+            .chain(self.blocked.values())
+            .map(|r| &r.clock);
+        contacts
+            .chain(names)
+            .chain(marks)
+            .any(|c| &c.device != mine)
+    }
+
     /// Build canonical state from a wire snapshot.
     pub fn from_snapshot(s: &SyncSnapshot) -> Self {
         let mut state = SyncState::default();

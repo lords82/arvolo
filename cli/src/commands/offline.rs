@@ -221,6 +221,10 @@ pub(crate) async fn send_sealed(
             ticket: encoded.clone(),
             note: note.to_string(),
             sender_name: book::my_display_name(),
+            // Stamped even for a send to somebody else: it costs a byte, and it is
+            // what stops *our own* daemon from picking this up when the recipient
+            // is another device of ours.
+            origin: Some(book::load_or_init_device()),
         };
         match arvolo_core::presence::post_offer(
             &arvolo_core::http::client(),

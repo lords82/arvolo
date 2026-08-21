@@ -27,7 +27,9 @@ pub use recv::{
     default_out, discard_incomplete, recv_chunked, safe_download_name, ChunkSource, RecvCancel,
     RecvEvent, RecvOutcome,
 };
-pub use send::{prepare_send, resume_send, SendEvent, SendSession};
+pub use send::{
+    prepare_send, prepare_send_reusing, resume_send, ReusablePrep, SendEvent, SendSession,
+};
 pub use sidecar::read_ticket;
 
 pub(crate) use recv::{archive_stage_path, seeding_enabled, spawn_swarm_coordinator};

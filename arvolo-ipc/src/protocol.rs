@@ -766,6 +766,11 @@ pub enum EventDto {
     Deposited {
         id: u64,
     },
+    /// A send has begun reading and encrypting its payload; nothing is on the wire
+    /// and the recipient has not been offered anything yet.
+    Preparing {
+        id: u64,
+    },
     Waiting {
         id: u64,
         reason: String,
@@ -852,6 +857,7 @@ fn status_str(s: &TransferStatus) -> String {
         TransferStatus::Active => "active".into(),
         TransferStatus::Completed => "completed".into(),
         TransferStatus::Deposited => "deposited".into(),
+        TransferStatus::Preparing => "preparing".into(),
         TransferStatus::Waiting(r) => format!("waiting: {r}"),
         TransferStatus::Paused(r) => format!("paused: {r}"),
         TransferStatus::Cancelled => "cancelled".into(),
@@ -955,6 +961,7 @@ impl From<&ManagerEvent> for EventDto {
             // a sender-only secret, and every subscriber on the socket would get a
             // copy. A UI only ever needs the id — it asks the daemon to withdraw.
             ManagerEvent::Deposited { id, .. } => EventDto::Deposited { id: *id },
+            ManagerEvent::Preparing { id } => EventDto::Preparing { id: *id },
             ManagerEvent::Waiting { id, reason } => EventDto::Waiting {
                 id: *id,
                 reason: reason.clone(),

@@ -68,6 +68,7 @@ function Row({
   // back at all.
   const live =
     tx.status === "active" ||
+    tx.status === "preparing" ||
     tx.status === "sharing" ||
     tx.status === "paused" ||
     tx.status === "stalled" ||

@@ -223,6 +223,13 @@ pub(super) async fn deliver_to(
     // back, which the mailbox path covers anyway.
     let mut live_backoff = Duration::ZERO;
     let mut next_live_try = Instant::now();
+    // Carried across attempts on purpose: the chunk digests, and the key and seed
+    // they belong to. Recomputing them per attempt made a large file spend most of
+    // its life re-encrypting itself between tries — and minted a new ticket each
+    // time, so an offer the recipient had already seen went stale. See
+    // [`flow::ReusablePrep`]. Dropped with this task, which is right: the payload
+    // may have changed by the time a restarted daemon comes back to it.
+    let mut prep: Option<flow::ReusablePrep> = None;
     loop {
         if cancel.is_cancelled() {
             handle_stop(&inner, id, &pause_flag);
@@ -257,7 +264,7 @@ pub(super) async fn deliver_to(
                 .unwrap_or(false);
         if online {
             match serve_live_once(
-                &inner, id, &cancel, &relay, &recipient, &payload, &name, archive, &note,
+                &inner, id, &cancel, &relay, &recipient, &payload, &name, archive, &note, &mut prep,
             )
             .await
             {
@@ -379,14 +386,27 @@ pub(super) async fn serve_live_once(
     name: &str,
     archive: bool,
     note: &str,
+    prep: &mut Option<flow::ReusablePrep>,
 ) -> LiveOutcome {
-    let session = match flow::prepare_send(
+    // Say what this is before doing it — but only when there is something to say.
+    // The first attempt reads and encrypts the whole payload (a minute and a half
+    // per 10 GB on an SSD) and posts nothing anywhere: the recipient cannot know a
+    // file is coming, because the offer carries a ticket this pass has not
+    // produced yet. Left as `Active` the row said "0 B" for all that time, which
+    // is indistinguishable from a transfer that is failing to move. A later
+    // attempt reuses that work and starts serving at once, so it says nothing.
+    if prep.is_none() {
+        inner.set_status_live(id, TransferStatus::Preparing);
+        inner.emit(ManagerEvent::Preparing { id });
+    }
+    let session = match flow::prepare_send_reusing(
         payload.clone(),
         name,
         archive,
         Some((&inner.me, recipient)),
         Some(relay.to_string()),
         RelayChoice::from_env(),
+        prep,
     )
     .await
     {
@@ -401,6 +421,7 @@ pub(super) async fn serve_live_once(
         ticket: session.ticket.clone(),
         note: note.to_string(),
         sender_name: inner.display_name.lock().unwrap().clone(),
+        origin: *inner.device_id.lock().unwrap(),
     };
     let posted = match presence::post_offer(
         &inner.client,
@@ -632,6 +653,7 @@ pub(super) async fn deposit_offline_and_offer(
         ticket: deposited.ticket.encode(),
         note: note.to_string(),
         sender_name: inner.display_name.lock().unwrap().clone(),
+        origin: *inner.device_id.lock().unwrap(),
     };
     let posted = presence::post_offer(
         &inner.client,

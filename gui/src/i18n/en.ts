@@ -84,6 +84,9 @@ export const en = {
 
   // ---- transfer status ---------------------------------------------------
   "status.active": "Under way",
+  "status.preparing": "Preparing…",
+  "meta.preparing":
+    "reading and encrypting it — nothing has been sent yet, and they have not been told",
   "status.sharing": "Shared",
 
   "share.title": "Shared file",

@@ -71,6 +71,9 @@ export const it: Dict = {
   "rail.palette": "Cerca ed esegui",
 
   "status.active": "In corso",
+  "status.preparing": "Preparazione…",
+  "meta.preparing":
+    "lo sto leggendo e cifrando — non è ancora partito niente, e lui non ne sa nulla",
   "status.sharing": "In condivisione",
 
   "share.title": "File in condivisione",

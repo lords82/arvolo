@@ -73,6 +73,9 @@ export const fr: Dict = {
   "rail.palette": "Chercher et exécuter",
 
   "status.active": "En cours",
+  "status.preparing": "Préparation…",
+  "meta.preparing":
+    "lecture et chiffrement en cours — rien n'est encore parti, et le destinataire n'en sait rien",
   "status.sharing": "Partagé",
 
   "share.title": "Fichier partagé",

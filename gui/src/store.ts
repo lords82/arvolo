@@ -252,6 +252,7 @@ function statusOf(dto: TransferDto): { status: UIStatus; reason?: string } {
 /** Split a daemon status string into a UI status + optional reason. */
 function toUIStatus(raw: string): { status: UIStatus; reason?: string } {
   if (raw === "active") return { status: "active" };
+  if (raw === "preparing") return { status: "preparing" };
   if (raw === "completed") return { status: "completed" };
   if (raw === "deposited") return { status: "deposited" };
   if (raw === "cancelled") return { status: "cancelled" };
@@ -798,6 +799,12 @@ export const useStore = create<State>((set, get) => {
           break;
         case "deposited":
           patch(ev.id, (tx) => ({ ...tx, status: "deposited" }));
+          break;
+        // Reading and encrypting the payload: nothing on the wire, and the
+        // recipient has not been offered anything yet. Its own status because
+        // "active at 0 B" is what a stuck transfer looks like.
+        case "preparing":
+          patch(ev.id, (tx) => ({ ...tx, status: "preparing" }));
           break;
         case "waiting":
           patch(ev.id, (tx) => ({ ...tx, status: "stalled", reason: ev.reason }));

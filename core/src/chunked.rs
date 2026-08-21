@@ -604,11 +604,66 @@ pub struct ChunkSender {
 /// What the hashing pass produces: the chunk digests plus the sizes derived from
 /// them. A named struct rather than a 4-tuple only because the pass now returns
 /// across a `spawn_blocking` boundary, where the tuple was unreadable.
-struct Hashed {
+///
+/// Public, and cloneable, because it is worth **keeping**. Producing it means
+/// reading and encrypting the entire payload — measured at ~127 MiB/s, so a
+/// minute and a half for 10 GB — while what it produces is one 32-byte digest per
+/// 16 MiB chunk: 22 KB for that same 10 GB file. A caller that has to serve the
+/// same bytes again (a delivery loop retrying while the recipient is not yet
+/// connectable) can hand it back instead of paying for the pass a second time.
+#[derive(Clone)]
+pub struct PreparedChunks {
     total_size: u64,
     total_chunks: u32,
     chunks: Vec<Hash>,
     index: HashMap<Hash, u32>,
+}
+
+impl PreparedChunks {
+    /// Read and encrypt `source` chunk by chunk to compute the digests, keeping
+    /// none of the ciphertext — chunks are regenerated on demand while serving.
+    ///
+    /// On the blocking pool, not the async workers. This pass has no `.await`
+    /// anywhere in it, so run on the runtime it pins a worker for its whole
+    /// duration — tens of seconds per gigabyte. A handful of large sends prepared
+    /// at once therefore occupied every worker and the daemon stopped answering
+    /// its control socket at all: `arvolo status` and the GUI both hung until the
+    /// last one finished, which looks exactly like a crash and is not one.
+    pub async fn compute(
+        source: SendSource,
+        key: [u8; crate::crypto::CHUNK_KEY_LEN],
+    ) -> Result<Self> {
+        tokio::task::spawn_blocking(move || -> Result<Self> {
+            let total_size = source.len()?;
+            let total_chunks = (total_size as usize).div_ceil(CHUNK_SIZE as usize) as u32;
+            let mut chunks = Vec::new();
+            let mut index: HashMap<Hash, u32> = HashMap::new();
+            let mut file = source
+                .sequential_reader()
+                .with_context(|| format!("open {}", source.label()))?;
+            let mut buf = vec![0u8; CHUNK_SIZE as usize];
+            let mut idx: u32 = 0;
+            loop {
+                let n = fill(&mut file, &mut buf).context("read file")?;
+                if n == 0 {
+                    break;
+                }
+                let ct = crate::crypto::seal_chunk(&key, idx, total_chunks, &buf[..n])?;
+                let hash = Hash::new(&ct);
+                chunks.push(hash);
+                index.insert(hash, idx);
+                idx += 1;
+            }
+            Ok(Self {
+                total_size,
+                total_chunks,
+                chunks,
+                index,
+            })
+        })
+        .await
+        .context("hash payload")?
+    }
 }
 
 impl ChunkSender {
@@ -634,52 +689,31 @@ impl ChunkSender {
         node_seed: [u8; 32],
     ) -> Result<Self> {
         let source = source.into();
-        // Compute the chunk hashes by streaming the file (bounded memory), WITHOUT
-        // storing any ciphertext — chunks are regenerated on demand while serving.
-        //
-        // On the blocking pool, not the async workers. This pass reads and
-        // encrypts the *whole* payload with no `.await` anywhere in it, so run
-        // directly on the runtime it pins a worker for its entire duration —
-        // tens of seconds for a gigabyte. A handful of large sends prepared at
-        // once therefore occupied every worker and the daemon stopped answering
-        // its control socket at all: `arvolo status` and the GUI both hung until
-        // the last one finished, which looks exactly like a crash and is not one.
-        let owned = source.clone();
-        let Hashed {
+        let prepared = PreparedChunks::compute(source.clone(), key).await?;
+        Self::serve_prepared(source, relay, key, node_seed, prepared).await
+    }
+
+    /// [`serve_resume`](Self::serve_resume) with the hashing pass already done.
+    ///
+    /// The split exists so a caller that serves the same bytes more than once —
+    /// a delivery loop retrying against a recipient who has not connected yet —
+    /// pays for the read-and-encrypt pass once instead of once per attempt. Feed
+    /// it a [`PreparedChunks`] computed under this same `key`, or the digests will
+    /// not match the ciphertext this sender produces.
+    pub async fn serve_prepared(
+        source: impl Into<SendSource>,
+        relay: RelayChoice,
+        key: [u8; crate::crypto::CHUNK_KEY_LEN],
+        node_seed: [u8; 32],
+        prepared: PreparedChunks,
+    ) -> Result<Self> {
+        let source = source.into();
+        let PreparedChunks {
             total_size,
             total_chunks,
             chunks,
             index,
-        } = tokio::task::spawn_blocking(move || -> Result<Hashed> {
-            let total_size = owned.len()?;
-            let total_chunks = (total_size as usize).div_ceil(CHUNK_SIZE as usize) as u32;
-            let mut chunks = Vec::new();
-            let mut index: HashMap<Hash, u32> = HashMap::new();
-            let mut file = owned
-                .sequential_reader()
-                .with_context(|| format!("open {}", owned.label()))?;
-            let mut buf = vec![0u8; CHUNK_SIZE as usize];
-            let mut idx: u32 = 0;
-            loop {
-                let n = fill(&mut file, &mut buf).context("read file")?;
-                if n == 0 {
-                    break;
-                }
-                let ct = crate::crypto::seal_chunk(&key, idx, total_chunks, &buf[..n])?;
-                let hash = Hash::new(&ct);
-                chunks.push(hash);
-                index.insert(hash, idx);
-                idx += 1;
-            }
-            Ok(Hashed {
-                total_size,
-                total_chunks,
-                chunks,
-                index,
-            })
-        })
-        .await
-        .context("hash payload")??;
+        } = prepared;
         let peers = PeerCount::default();
         let sent = SentBytes::default();
         let chunk_server = ChunkServer {

@@ -46,6 +46,9 @@ async fn offer_round_trips_and_acks() {
         ticket: "arvcFAKETICKET".into(),
         note: String::new(),
         sender_name: String::new(),
+        // No device id in these fixtures: the field is a same-identity
+        // tiebreak, and every offer here comes from a different sender.
+        origin: None,
     };
     post_offer(&client, &relay, &recipient.public(), &sender, &offer, None)
         .await
@@ -87,6 +90,9 @@ async fn poster_can_retract_its_own_offer() {
             ticket: "arvcLIVE".into(),
             note: String::new(),
             sender_name: String::new(),
+        // No device id in these fixtures: the field is a same-identity
+        // tiebreak, and every offer here comes from a different sender.
+        origin: None,
         },
         None,
     )
@@ -155,6 +161,9 @@ async fn offer_status_walks_pending_then_arrived_then_taken() {
             ticket: "arvcLIVE".into(),
             note: String::new(),
             sender_name: String::new(),
+        // No device id in these fixtures: the field is a same-identity
+        // tiebreak, and every offer here comes from a different sender.
+        origin: None,
         },
         None,
     )
@@ -250,6 +259,9 @@ async fn a_retracted_offer_is_gone_not_taken() {
             ticket: "arvcRECALL".into(),
             note: String::new(),
             sender_name: String::new(),
+        // No device id in these fixtures: the field is a same-identity
+        // tiebreak, and every offer here comes from a different sender.
+        origin: None,
         },
         None,
     )
@@ -301,6 +313,9 @@ async fn wrong_recipient_sees_nothing_in_its_own_inbox() {
             ticket: "arvcX".into(),
             note: String::new(),
             sender_name: String::new(),
+        // No device id in these fixtures: the field is a same-identity
+        // tiebreak, and every offer here comes from a different sender.
+        origin: None,
         },
         None,
     )

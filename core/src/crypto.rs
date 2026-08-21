@@ -679,6 +679,33 @@ mod tests {
         assert_eq!(opened, msg);
     }
 
+    /// Sealing to **yourself** — the whole basis of a send between two devices
+    /// that share one identity, where sender and recipient are the same key.
+    ///
+    /// Auth mode runs a DH between the sender's static key and the recipient's,
+    /// which here is the same keypair; nothing in HPKE forbids that, but nothing
+    /// in this codebase relied on it either, so it is asserted rather than
+    /// assumed. Both layers of a sealed-sender offer are covered: the inner
+    /// auth-mode seal that proves who sent it, and the anonymous outer one that
+    /// keeps the relay from seeing whose it is.
+    #[test]
+    fn a_message_can_be_sealed_to_its_own_sender() {
+        let me = Identity::generate();
+        let msg = b"from this laptop to the other one";
+
+        let sealed = seal(msg, &me.public(), &me, b"report.pdf").unwrap();
+        assert_eq!(open(&sealed, &me, &me.public(), b"report.pdf").unwrap(), msg);
+
+        let anon = seal_anon(msg, &me.public(), b"report.pdf").unwrap();
+        assert_eq!(open_anon(&anon, &me, b"report.pdf").unwrap(), msg);
+
+        // And the guarantees do not weaken for being self-addressed: another
+        // identity still cannot open it, and the aad is still bound.
+        let other = Identity::generate();
+        assert!(open(&sealed, &other, &me.public(), b"report.pdf").is_err());
+        assert!(open(&sealed, &me, &me.public(), b"other.pdf").is_err());
+    }
+
     #[test]
     fn wrong_recipient_cannot_open() {
         let alice = Identity::generate();

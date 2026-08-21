@@ -36,6 +36,38 @@ pub(crate) fn load_or_init_device() -> DeviceId {
     id
 }
 
+pub(crate) fn paired_marker_path() -> PathBuf {
+    sync_dir().join("paired")
+}
+
+/// Remember that this identity now lives on more than one device. Written by both
+/// halves of `device pair`/`device join`, once the exchange has actually happened.
+pub(crate) fn mark_paired() {
+    std::fs::create_dir_all(sync_dir()).ok();
+    let _ = std::fs::write(paired_marker_path(), b"");
+}
+
+/// Does another device share this identity, as far as we can tell?
+///
+/// Only ever used to decide whether to *suggest* pairing, never to refuse
+/// anything — it is evidence, not bookkeeping. There is deliberately no device
+/// roster to consult (see `core::sync`), so this reads two traces instead:
+///
+/// 1. the marker [`mark_paired`] leaves when a pairing completes;
+/// 2. failing that — for an identity paired before the marker existed — a CRDT
+///    entry authored by a device id that is not ours, which only a merged
+///    snapshot from another device can produce.
+///
+/// Both can be false negatives (a fresh pairing that has not synced, on a build
+/// that predates the marker), which is exactly why the caller only adds a hint.
+pub(crate) fn paired_with_another_device() -> bool {
+    if paired_marker_path().exists() {
+        return true;
+    }
+    let (state, _, mine) = load_meta();
+    state.authored_by_another_device(&mine)
+}
+
 /// Load the CRDT sidecar: `(state, lamport, device)`. Missing/corrupt → empty.
 pub(crate) fn load_meta() -> (SyncState, u64, DeviceId) {
     let device = load_or_init_device();

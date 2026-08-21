@@ -71,6 +71,17 @@ pub enum Direction {
 pub enum TransferStatus {
     /// In progress (or, for a send, serving and awaiting the receiver).
     Active,
+    /// A send that is being *prepared*: the payload is being read and encrypted
+    /// chunk by chunk to compute its hashes, and nothing has left this machine —
+    /// the recipient has not even been offered the file yet, because the offer
+    /// carries a ticket that does not exist until this pass ends.
+    ///
+    /// Its own state because the alternative was a lie by omission: the row read
+    /// "active, 0 B" throughout, which is exactly what a transfer stuck at zero
+    /// bytes per second looks like. On a 10 GB file that is minutes of a screen
+    /// saying something is under way to someone who has not been told anything.
+    /// Measured at ~127 MiB/s on an SSD, so the wait is real and worth naming.
+    Preparing,
     /// Finished successfully (for a send: the recipient received it).
     Completed,
     /// An offline send: handed to the relay mailbox, delivery not yet confirmed.
@@ -262,6 +273,12 @@ pub enum ManagerEvent {
     /// recipient fetches it (within the confirmation window). `info` describes what
     /// was left on the relay, so a front-end can record a withdrawable receipt.
     Deposited { id: u64, info: DepositInfo },
+    /// A send has started reading and encrypting its payload to compute the chunk
+    /// hashes. Nothing is on the wire yet and the recipient has not been offered
+    /// anything — see [`TransferStatus::Preparing`]. Announced rather than left to
+    /// the next snapshot because a front end that only listens to events would
+    /// otherwise show the row as active-at-zero for the whole pass.
+    Preparing { id: u64 },
     /// A send is being held for later delivery because the relay couldn't take it
     /// (refused / unreachable / errored). The daemon keeps trying: live P2P when
     /// the recipient appears, and the relay again on a slow interval. `reason` is
@@ -347,6 +364,7 @@ impl TransferManager {
                 state_dir,
                 inbox,
                 display_name: Mutex::new(String::new()),
+                device_id: Mutex::new(None),
             }),
         }
     }
@@ -357,6 +375,24 @@ impl TransferManager {
     /// [`Offer::sender_name`](crate::presence::Offer::sender_name).
     pub fn set_display_name(&self, name: String) {
         *self.inner.display_name.lock().unwrap() = name;
+    }
+
+    /// Tell the engine which device it is running on. Call once at startup, before
+    /// [`spawn_inbox`](Self::spawn_inbox) or any send.
+    ///
+    /// It does two things, and the second is the one that matters: every offer we
+    /// post is stamped with it, and the inbox drops offers carrying it back out of
+    /// our own poll. Devices paired with `device pair` share an identity and
+    /// therefore an inbox — without this, a send to your own identity is an offer
+    /// the sender finds in its own inbox and, being from itself, auto-accepts.
+    ///
+    /// Never leaves the HPKE seal; see
+    /// [`Offer::origin`](crate::presence::Offer::origin).
+    pub fn set_device_id(&self, device: crate::sync::DeviceId) {
+        *self.inner.device_id.lock().unwrap() = Some(device);
+        if let Some(inbox) = &self.inner.inbox {
+            inbox.set_origin(device);
+        }
     }
 
     /// Subscribe to the manager's event stream.
@@ -546,7 +582,7 @@ impl TransferManager {
                 cancel_deposited(self.inner.clone(), id);
                 return true;
             }
-            TransferStatus::Active | TransferStatus::Waiting(_) => {}
+            TransferStatus::Active | TransferStatus::Preparing | TransferStatus::Waiting(_) => {}
         }
         let token = self.inner.cancels.lock().unwrap().get(&id).cloned();
         match token {
@@ -710,7 +746,7 @@ impl TransferManager {
                 (
                     matches!(
                         t.status,
-                        TransferStatus::Active | TransferStatus::Waiting(_)
+                        TransferStatus::Active | TransferStatus::Preparing | TransferStatus::Waiting(_)
                     ),
                     t.direction == Direction::Recv,
                 )
@@ -1859,7 +1895,7 @@ mod clear_finished_tests {
             // Each status through the setter that owns it: `set_status` is for the
             // ones that mean the task has ended, and says so with an assertion.
             match status {
-                TransferStatus::Active | TransferStatus::Waiting(_) => {
+                TransferStatus::Active | TransferStatus::Preparing | TransferStatus::Waiting(_) => {
                     m.inner.set_status_live(id, status)
                 }
                 _ => m.inner.set_status(id, status),

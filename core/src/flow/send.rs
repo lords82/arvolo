@@ -126,15 +126,68 @@ pub async fn prepare_send(
     seed_relay: Option<String>,
     relay: RelayChoice,
 ) -> Result<SendSession> {
+    prepare_send_reusing(source, name, archive, to, seed_relay, relay, &mut None).await
+}
+
+/// What a delivery loop keeps between attempts so it does not pay for the same
+/// work twice: the content key, the transport seed, and the chunk digests
+/// computed under that key.
+///
+/// Keeping all three together is not tidiness — the digests are only valid for
+/// *that* key, and reusing the seed is what makes the previously handed-out
+/// ticket keep working (same node id). Split them and you get a ticket that no
+/// longer resolves, or hashes that do not match the ciphertext being served.
+pub struct ReusablePrep {
+    key: [u8; crate::crypto::CHUNK_KEY_LEN],
+    node_seed: [u8; 32],
+    chunks: crate::chunked::PreparedChunks,
+}
+
+/// [`prepare_send`], reusing an earlier preparation when one is handed in.
+///
+/// The pass this skips reads and encrypts the whole payload — around a minute
+/// and a half per 10 GB — and a delivery loop that retries while the recipient is
+/// not yet connectable used to redo it on *every* attempt, spending far more time
+/// re-hashing than transferring. With `prep` threaded through, the first attempt
+/// pays for it and the rest start immediately; as a consequence the ticket also
+/// stays byte-identical across attempts, so an offer already sitting in the
+/// recipient's inbox keeps pointing at something real.
+pub async fn prepare_send_reusing(
+    source: impl Into<crate::source::SendSource>,
+    name: &str,
+    archive: bool,
+    to: Option<(&Identity, &PublicId)>,
+    seed_relay: Option<String>,
+    relay: RelayChoice,
+    prep: &mut Option<ReusablePrep>,
+) -> Result<SendSession> {
     let source = source.into();
     // Only a path can be pre-checked; a handed-off descriptor IS the proof of
     // access, and may have no visible path at all.
     if let crate::source::SendSource::Path(p) = &source {
         anyhow::ensure!(p.is_file(), "{} is not a file", p.display());
     }
-    let sender = ChunkSender::serve(source, relay)
-        .await
-        .context("start sender")?;
+    let reuse = match prep.take() {
+        Some(p) => p,
+        None => {
+            let key = crate::crypto::random_chunk_key();
+            ReusablePrep {
+                key,
+                node_seed: crate::node::random_node_seed(),
+                chunks: crate::chunked::PreparedChunks::compute(source.clone(), key).await?,
+            }
+        }
+    };
+    let sender = ChunkSender::serve_prepared(
+        source,
+        relay,
+        reuse.key,
+        reuse.node_seed,
+        reuse.chunks.clone(),
+    )
+    .await
+    .context("start sender")?;
+    *prep = Some(reuse);
     let client = crate::http::client();
 
     // Deliver the content key: sealed to a recipient with `--to`, else in the

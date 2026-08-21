@@ -47,6 +47,11 @@ export function statusMeta(s: UIStatus): StatusMeta {
   switch (s) {
     case "active":
       return { tone: "out", text: t("status.active") };
+    // Its own label, not "active": nothing has left this machine yet, and the
+    // recipient has not been told anything. Muted, because there is nothing to
+    // act on — only something to wait for.
+    case "preparing":
+      return { tone: "mut", text: t("status.preparing") };
     // Muted on purpose: nothing is happening, and nothing is wrong. A tone that
     // asked for attention would make every file you ever downloaded ask for it.
     case "sharing":
@@ -183,6 +188,8 @@ export function metaLine(tx: UITransfer): string {
         : t("meta.sharing");
     case "paused":
       return t("meta.paused");
+    case "preparing":
+      return t("meta.preparing");
     case "stalled":
       return tx.reason ? tx.reason : t("meta.stalled");
     case "incoming":
@@ -365,6 +372,7 @@ export function sectionsFor(
   // disagreeing with the engine, which is the bug this whole file guards against.
   const isActive = (s: UIStatus) =>
     s === "active" ||
+    s === "preparing" ||
     s === "sharing" ||
     s === "paused" ||
     s === "stalled" ||

@@ -209,6 +209,7 @@ pub(crate) async fn push(
 
     let manager = TransferManager::new(me, Some(relay.clone()), PathBuf::from("."));
     manager.set_display_name(book::my_display_name());
+    manager.set_device_id(book::load_or_init_device());
     let mut events = manager.subscribe();
 
     // `send_to` decides live-vs-mailbox itself (with a presence grace window and a
@@ -345,6 +346,13 @@ async fn send_to(
     anyhow::ensure!(note.len() <= 4096, "--note is too long (max 4096 bytes)");
 
     let relay_url = require_relay(relay)?;
+
+    // `--to me`: your own paired devices. Answered before the address book, and
+    // differently all the way down — see `send_to_self`.
+    if who == SELF_RECIPIENT {
+        return send_to_self(paths, mailbox, &note, relay_url, ttl, max, password).await;
+    }
+
     let recipient = book::resolve_recipient(&who)?;
     book::warn_if_unverified(&who, &encode_id(&recipient));
     // With P2P off there is nothing to gain from the probe: a live delivery is not
@@ -393,6 +401,56 @@ async fn send_to(
         &note,
     )
     .await
+}
+
+/// `arvolo send <paths…> --to me` — deliver to your own other devices.
+///
+/// Devices paired with `device pair` share one identity, so "me" is a real
+/// recipient: the file is sealed to our own public key, lands in the inbox slot
+/// every device of ours reads, and whichever one is up takes it. Two things have
+/// to differ from a send to somebody else:
+///
+/// - **no presence probe.** It reports the beacon *this* process is publishing, so
+///   for a shared identity it answers "online" and means nothing. Skipping it goes
+///   straight to the held delivery, which tries live and falls back on its own —
+///   with a shorter window, because the probe is not the only signal that lies
+///   here (see `SELF_LIVE_CONNECT_SECS`).
+/// - **no verification warning.** Being told you have not verified yourself is
+///   noise, and noise in a security warning is how the real ones stop being read.
+async fn send_to_self(
+    paths: Vec<PathBuf>,
+    mailbox: bool,
+    note: &str,
+    relay_url: String,
+    ttl: u64,
+    max: Option<u32>,
+    password: Option<String>,
+) -> Result<()> {
+    let me = my_identity()?;
+    let my_id = encode_id(&me.public());
+
+    // A contact really called "me" is reachable, just not by that name any more.
+    // Say it here rather than silently doing the other thing.
+    if book::resolve_name(&my_id).as_deref() != Some(SELF_RECIPIENT)
+        && book::contact_list().iter().any(|(n, _)| n == SELF_RECIPIENT)
+    {
+        eprintln!(
+            "note: '{SELF_RECIPIENT}' is reserved for your own devices, so it wins over your \
+             contact of that name — send to them with their public id, or rename them."
+        );
+    }
+
+    if !book::paired_with_another_device() {
+        eprintln!(
+            "note: no other device shares this identity yet — pair one with `arvolo device pair`. \
+             What you send now waits on the relay until then."
+        );
+    }
+
+    if mailbox {
+        return send_sealed(paths, my_id, Some(relay_url), ttl, max, password, true, note).await;
+    }
+    push(paths, my_id, Some(relay_url), note, Some(ttl), max, password).await
 }
 
 /// `arvolo send --code` — hand the ticket over as a short pairing code.

@@ -160,6 +160,7 @@ pub(crate) async fn daemon(
         Some(state_dir),
     );
     manager.set_display_name(book::my_display_name());
+    manager.set_device_id(book::load_or_init_device());
     let inbox = manager.spawn_inbox()?;
     let _auto_sync =
         (!no_sync && book::sync_enabled()).then(|| sync::spawn_auto_sync(relay.clone()));

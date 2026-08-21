@@ -437,6 +437,28 @@ describe("pause-all", () => {
   });
 });
 
+// A send spends its first minutes reading and encrypting the payload, with
+// nothing on the wire and the recipient not yet told anything. Shown as "active"
+// it was indistinguishable from a transfer stuck at zero bytes.
+describe("a send that is still preparing", () => {
+  it("says so, instead of reading as an active transfer at 0 B", async () => {
+    await boot();
+    harness.emit({ started: { id: 1, direction: "send", name: "big.ipsw", total_size: 11e9 } });
+    harness.emit({ preparing: { id: 1 } });
+    expect(row("t1").status).toBe("preparing");
+    // And it stays on the board rather than dropping out of every section.
+    expect(row("t1").transferred).toBe(0);
+  });
+
+  it("becomes an ordinary transfer once bytes actually move", async () => {
+    await boot();
+    harness.emit({ started: { id: 1, direction: "send", name: "big.ipsw", total_size: 11e9 } });
+    harness.emit({ preparing: { id: 1 } });
+    harness.emit({ progress: { id: 1, transferred: 1024, total_size: 11e9 } });
+    expect(row("t1").status).toBe("active");
+  });
+});
+
 describe("a failed action is never silent", () => {
   // The bug this closes: every action is fired from an `onClick` that cannot await
   // it, so a rejection vanished into the event loop. The button did nothing, said

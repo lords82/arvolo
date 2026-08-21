@@ -35,6 +35,10 @@ const REVOKE_TOKEN_HEADER: &str = "x-arvolo-revoke-token";
 const INBOX_POSTER_HASH_HEADER: &str = "x-arvolo-poster-hash";
 /// The inbox offer's retract token, sent on a DELETE to retract one's own offer.
 const INBOX_POSTER_TOKEN_HEADER: &str = "x-arvolo-poster-token";
+/// Comma-separated ids a long-polling reader already holds — see
+/// [`inbox_get_handler`]. A header rather than a query parameter so row ids stay
+/// out of access logs.
+const INBOX_HAVE_HEADER: &str = "x-arvolo-have";
 /// Seconds the relay actually granted a deposit, answered on the deposit response.
 ///
 /// The request's `?ttl=` is a wish: [`Mailbox::commit_deposit`] clamps it to this
@@ -786,10 +790,21 @@ async fn rz_sessions(
     }
 }
 
-/// How long a client may ask the relay to hold a GET open (long-poll), and the
-/// poll granularity while it waits.
+/// How long a client may ask the relay to hold a GET open (long-poll).
 const INBOX_MAX_WAIT_SECS: u64 = 30;
-const INBOX_POLL_MS: u64 = 500;
+/// How often a held poll re-reads the store on its own, having heard nothing.
+///
+/// A deposit wakes its slot directly (see [`AppState::inbox_wait_on`]), and
+/// `inbox_put` is the only thing that can make a row visible, so this should never
+/// be what finds one. It stays as a safety net for the cases the notification can't
+/// cross — a second relay process sharing the database, or a wake-up lost to a bug
+/// here — where it turns "never" into "within fifteen seconds". At a 30s cap that is
+/// at most one extra look per held poll, against the sixty the old 500ms loop paid.
+const INBOX_IDLE_RECHECK_SECS: u64 = 15;
+/// Cap on ids accepted in [`INBOX_HAVE_HEADER`]. A slot holds at most
+/// [`MAX_INBOX_PER_SLOT`] rows, so a longer list is either stale or junk; ignoring
+/// the tail merely costs the sender an early return it did not need.
+const MAX_HAVE_IDS: usize = MAX_INBOX_PER_SLOT as usize * 2;
 /// Lifetime of an inbox read/delete session token.
 const INBOX_SESSION_TTL: u64 = 3600;
 /// Length of the proof-of-possession nonce.
@@ -940,6 +955,10 @@ async fn inbox_post_handler(
         .mailbox
         .inbox_put(&slot, &id, &body, exp, &poster_hash)
         .map_err(err_response)?;
+    // Only now: the row is visible to a reader, so anyone woken by this will find
+    // it. Waking before the write would be a wake-up that lands on nothing and a
+    // recipient waiting out the rest of their hold for an offer already there.
+    state.notify_inbox(&slot);
     Ok(id)
 }
 
@@ -976,9 +995,46 @@ async fn presence_get_handler(
     }
 }
 
-/// Long-poll a recipient's inbox. Returns immediately with any queued offers;
-/// otherwise holds the connection up to `?wait=<secs>` (capped) before returning
-/// an empty body. Reading does **not** burn — the recipient acks with DELETE.
+/// The row ids a long-polling reader says it already holds, from
+/// [`INBOX_HAVE_HEADER`]. Empty (⇒ "I have nothing") for any reader that does not
+/// send it, which is what keeps an older client on the previous behaviour.
+fn inbox_have(headers: &HeaderMap) -> std::collections::HashSet<String> {
+    headers
+        .get(INBOX_HAVE_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| {
+            s.split(',')
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .take(MAX_HAVE_IDS)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Long-poll a recipient's inbox. Returns with the slot's queued offers as soon as
+/// one of them is a row the caller does not already hold; otherwise holds the
+/// connection up to `?wait=<secs>` (capped) before returning an empty body. Reading
+/// does **not** burn — the recipient acks with DELETE.
+///
+/// The "does not already hold" part is [`INBOX_HAVE_HEADER`], and it is what makes
+/// the long-poll a long-poll again. The hold used to end the moment the slot was
+/// non-empty, which sounds right until you notice what else lives in an inbox slot:
+/// the contact-sync cell, a durable row that never expires and is never acked. For
+/// every client with sync on, the slot was non-empty forever, every poll returned
+/// instantly, and the loop became a request every two seconds — 30 a minute per
+/// client, held down only by a floor on the client side (`MIN_ROUND` in
+/// `core/src/presence.rs`, added after this pegged a relay at >700 req/s). Told what
+/// the reader has, the relay can tell "there is a row" from "there is a row *for
+/// you*", and a quiet inbox costs one request per 25 seconds again.
+///
+/// The header only suppresses the *early* return: the body is unchanged — the whole
+/// slot on a return, empty on a timeout — so a reader that hears nothing keeps
+/// exactly what it had, and one that hears something gets everything, as before.
+/// `wait=0` ignores the header outright: a one-shot read is somebody asking what is
+/// in the slot right now (`arvolo status`, the receive listing, the sync engine),
+/// and answering that with "nothing new" would be answering a different question.
 async fn inbox_get_handler(
     State(state): State<AppState>,
     AxumPath(slot): AxumPath<String>,
@@ -991,10 +1047,23 @@ async fn inbox_get_handler(
             "inbox read requires a session".into(),
         ));
     }
-    let deadline = now_unix().saturating_add(q.wait.min(INBOX_MAX_WAIT_SECS));
+    let wait = q.wait.min(INBOX_MAX_WAIT_SECS);
+    let deadline = now_unix().saturating_add(wait);
+    let have = if wait == 0 {
+        std::collections::HashSet::new()
+    } else {
+        inbox_have(&headers)
+    };
+    // Registered before the first look at the store, and re-armed before each one:
+    // a deposit landing between a read and the wait that follows it still wakes us.
+    let waiter = state.inbox_wait_on(&slot);
     loop {
+        let notified = waiter.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+
         let rows = state.mailbox.inbox_list(&slot, now_unix());
-        if !rows.is_empty() {
+        if rows.iter().any(|(id, _)| !have.contains(id)) {
             // A recipient client is reading: mark these offers arrived, so their
             // posters can tell a client that is really there from stale presence.
             // Arrival only — a listing lands here exactly as a daemon poll does,
@@ -1010,10 +1079,17 @@ async fn inbox_get_handler(
                 .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
             return Ok(Bytes::from(bytes));
         }
-        if now_unix() >= deadline {
+        let now = now_unix();
+        if now >= deadline {
             return Ok(Bytes::new());
         }
-        tokio::time::sleep(std::time::Duration::from_millis(INBOX_POLL_MS)).await;
+        let step = std::time::Duration::from_secs(
+            (deadline - now).min(INBOX_IDLE_RECHECK_SECS),
+        );
+        tokio::select! {
+            _ = notified => {}
+            _ = tokio::time::sleep(step) => {}
+        }
     }
 }
 

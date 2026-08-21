@@ -56,6 +56,13 @@ pub(super) struct Inner {
     /// offer ([`Offer::sender_name`]). Empty = don't advertise a name. Set once at
     /// startup via [`TransferManager::set_display_name`] before any `send_to`.
     pub(super) display_name: Mutex<String>,
+    /// This device's local id, stamped on every offer we post
+    /// ([`Offer::origin`](crate::presence::Offer::origin)) and handed to the inbox
+    /// so it can drop our own offers back out of our own poll. `None` for a client
+    /// that never set one — the engine works, it just cannot tell its own offers
+    /// from another of its devices'. Set at startup via
+    /// [`TransferManager::set_device_id`], like the display name.
+    pub(super) device_id: Mutex<Option<crate::sync::DeviceId>>,
 }
 
 impl Inner {
@@ -75,7 +82,7 @@ impl Inner {
     /// mistake is invisible in production and trips immediately in a test.
     pub(super) fn set_status(&self, id: u64, status: TransferStatus) {
         debug_assert!(
-            !matches!(status, TransferStatus::Active | TransferStatus::Waiting(_)),
+            !matches!(status, TransferStatus::Active | TransferStatus::Preparing | TransferStatus::Waiting(_)),
             "set_status drops the cancel token — a live status needs set_status_live"
         );
         if let Some(t) = self.transfers.lock().unwrap().get_mut(&id) {
