@@ -405,7 +405,12 @@ pub(super) async fn serve_live_once(
     {
         Ok(p) => p,
         // Can't even notify them → treat as not-connected; the caller retries.
-        Err(_) => return LiveOutcome::NotConnected,
+        // Say why in the log: a silent discard here once hid a systematically
+        // failing offer as an endless quiet retry loop.
+        Err(e) => {
+            tracing::warn!("posting offer for transfer {id} failed: {e:#}");
+            return LiveOutcome::NotConnected;
+        }
     };
     inner.set_status(id, TransferStatus::Active);
 

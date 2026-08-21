@@ -784,7 +784,17 @@ pub(crate) async fn resolve_transfer_id(
                 hs.join(", ")
             ),
             // An all-digit input can still be a plain transfer number.
-            Match::None => {}
+            Match::None => {
+                if input.parse::<u64>().is_err() {
+                    // Well-formed handle, no such transfer: say that, not
+                    // "invalid digit" from trying to read hex as a number.
+                    anyhow::bail!(
+                        "no transfer with handle '{input}' — it may have ended, or \
+                         belonged to a previous daemon. `arvolo status` lists the \
+                         live ones."
+                    );
+                }
+            }
         }
     }
     input

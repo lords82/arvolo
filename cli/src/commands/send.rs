@@ -46,6 +46,7 @@ pub(crate) struct SendOpts {
 
 pub(crate) async fn send_cmd(opts: SendOpts) -> Result<()> {
     guard_contact_in_path_slot(&opts.paths, opts.to.is_some())?;
+    guard_readable(&opts.paths)?;
     // `--password` with no value means "prompt me" (clap stores the empty
     // string); resolve it before anything leaves the machine.
     let password = match opts.password {
@@ -129,6 +130,32 @@ fn guard_contact_in_path_slot(paths: &[PathBuf], has_to: bool) -> Result<()> {
             "'{s}' is a contact, not a file. The recipient is a flag now:\n\n    \
              arvolo send <files…> --to {s}\n"
         );
+    }
+    Ok(())
+}
+
+/// Prove every source is readable from THIS process before anything is queued.
+/// macOS keeps Downloads/Desktop/Documents behind per-app consent, and a daemon
+/// spawned outside the granted app gets `Operation not permitted` on open — a
+/// send queued anyway used to sit as a silent "active, 0 B" forever. An open()
+/// here fails fast, in the terminal the user is looking at, with the fix named.
+fn guard_readable(paths: &[PathBuf]) -> Result<()> {
+    for p in paths {
+        let probe = if p.is_dir() {
+            std::fs::read_dir(p).map(|_| ())
+        } else {
+            std::fs::File::open(p).map(|_| ())
+        };
+        if let Err(e) = probe {
+            let hint = if e.kind() == std::io::ErrorKind::PermissionDenied {
+                "\n  This folder is privacy-guarded (macOS asks per app). Move the file \
+                 somewhere neutral, or grant access in System Settings → Privacy & \
+                 Security → Files and Folders (or Full Disk Access)."
+            } else {
+                ""
+            };
+            anyhow::bail!("cannot read {}: {e}{hint}", p.display());
+        }
     }
     Ok(())
 }
