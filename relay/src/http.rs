@@ -1083,9 +1083,7 @@ async fn inbox_get_handler(
         if now >= deadline {
             return Ok(Bytes::new());
         }
-        let step = std::time::Duration::from_secs(
-            (deadline - now).min(INBOX_IDLE_RECHECK_SECS),
-        );
+        let step = std::time::Duration::from_secs((deadline - now).min(INBOX_IDLE_RECHECK_SECS));
         tokio::select! {
             _ = notified => {}
             _ = tokio::time::sleep(step) => {}

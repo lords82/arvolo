@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **Every client asked the relay for its inbox every two seconds, forever.** The
+  long-poll ended the moment the slot was non-empty — and the contact-sync cell
+  sits in that slot permanently, so for anyone with sync on it ended immediately,
+  every round, and a 25-second hold became 30 requests a minute (held down only by
+  a floor on the client side, added after this pegged a relay at >700 req/s). A
+  poll now says which rows it already holds and the relay waits for one it does
+  not: about 2.4 requests a minute instead. The relay has to be updated first —
+  an older one ignores the header and answers exactly as it did before.
+- **A held poll cost the relay a database scan twice a second.** Its steady-state
+  work grew with the number of *connected* clients rather than with the number of
+  deposits: ten thousand idle inboxes meant twenty thousand queries a second, all
+  of them answering "still nothing". A deposit now wakes exactly the slot it
+  landed in, which also takes the delivery latency of an offer arriving mid-hold
+  from up to half a second down to none.
+
 ## v0.12.0-rc1 — cancelling, and saying what is happening
 
 A prerelease off the work branch, for dogfooding.

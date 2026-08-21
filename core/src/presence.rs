@@ -671,6 +671,10 @@ pub struct InboxSubscription {
     /// ([`Self::set_origin`]). Offers stamped with it are ours and are skipped —
     /// see `poll_wait`. `None` leaves the poll exactly as it was.
     origin: std::sync::Mutex<Option<crate::sync::DeviceId>>,
+    /// The ids the last read of the current slot returned — what this subscription
+    /// already has, told to the relay on the next long-poll so it holds instead of
+    /// handing the same rows straight back. See [`Self::have_header`].
+    held: std::sync::Mutex<std::collections::HashSet<String>>,
 }
 
 #[derive(Clone)]
@@ -681,6 +685,11 @@ struct CachedSession {
 
 /// Seconds the relay may hold a GET open waiting for an offer (long-poll).
 const LONG_POLL_SECS: u64 = 25;
+
+/// Header carrying the row ids this subscription already holds, so the relay's hold
+/// ends on a row we do not have rather than on the slot merely being non-empty. A
+/// relay that predates it ignores it and answers as it always did.
+const HAVE_HEADER: &str = "x-arvolo-have";
 
 /// How often the previous epoch's slot is drained during a long-poll loop.
 ///
@@ -718,6 +727,7 @@ impl InboxSubscription {
             undecodable: std::sync::Mutex::new(std::collections::HashSet::new()),
             last_backfill: std::sync::Mutex::new(0),
             origin: std::sync::Mutex::new(None),
+            held: std::sync::Mutex::new(std::collections::HashSet::new()),
         }
     }
 
@@ -767,6 +777,24 @@ impl InboxSubscription {
         for id in ids {
             map.insert(id, slot.to_string());
         }
+    }
+
+    /// What to send as `x-arvolo-have`: the rows this subscription already holds, so
+    /// the relay ends its hold on a row we do *not* have rather than on any row at
+    /// all. `None` when there is nothing to say (the header is then simply absent,
+    /// which is also how an older relay reads it).
+    ///
+    /// The distinction matters because of what shares the inbox slot: the contact
+    /// sync cell is a durable row that is never acked, so "the slot is non-empty" is
+    /// permanently true for anyone with sync on, and without this the long-poll
+    /// returns instantly forever — the GET storm `run`'s `MIN_ROUND` floor exists to
+    /// contain.
+    fn have_header(&self) -> Option<String> {
+        let held = self.held.lock().unwrap();
+        if held.is_empty() {
+            return None;
+        }
+        Some(held.iter().cloned().collect::<Vec<_>>().join(","))
     }
 
     /// Whether the older slots are due a drain, stamping the clock if so.
@@ -937,7 +965,18 @@ impl InboxSubscription {
             }
             let wait = if first { wait_secs } else { 0 };
             let url = format!("{}?wait={}", inbox_url(&self.relay, slot), wait);
-            let bytes = match self.authed(reqwest::Method::GET, slot, &url).await {
+            // Only the held poll on the current slot says what it has. An older slot
+            // is read with `wait=0`, where the relay ignores the header anyway, and
+            // `held` describes the current slot's rows in any case.
+            let have = if first && wait > 0 {
+                self.have_header()
+            } else {
+                None
+            };
+            let bytes = match self
+                .authed(reqwest::Method::GET, slot, &url, have.as_deref())
+                .await
+            {
                 Ok(b) => b,
                 // A failure on the *current* slot is the caller's to see — it is the
                 // live inbox. An older slot failing is not worth losing the round
@@ -946,11 +985,20 @@ impl InboxSubscription {
                 Err(_) => continue,
             };
             if bytes.is_empty() {
+                // A hold that ended on its own timer, or an empty slot. Either way
+                // nothing has changed, so `held` still describes what we have — the
+                // relay was told that and answered "nothing you don't".
                 continue;
             }
             let items: Vec<InboxItem> =
                 postcard::from_bytes(&bytes).context("decode inbox items")?;
             self.remember_rows(slot, items.iter().map(|row| row.id.clone()));
+            if first {
+                // Replaced wholesale, not merged: a row that has left the slot must
+                // leave `held` with it, or a re-post under a new id would be the only
+                // thing that could ever end a hold again.
+                *self.held.lock().unwrap() = items.iter().map(|row| row.id.clone()).collect();
+            }
             out.extend(items);
         }
         Ok(out)
@@ -999,25 +1047,34 @@ impl InboxSubscription {
             .cloned()
             .unwrap_or_else(|| self.current_slot());
         let url = format!("{}/{id}", inbox_url(&self.relay, &slot));
-        self.authed(reqwest::Method::DELETE, &slot, &url).await?;
+        self.authed(reqwest::Method::DELETE, &slot, &url, None)
+            .await?;
         self.row_slots.lock().unwrap().remove(id);
         Ok(())
     }
 
     /// Perform an authenticated inbox request against `slot`, attaching its bearer
     /// token and re-authenticating once on a 401 (e.g. the relay restarted with a new
-    /// session secret). Returns the response body bytes.
-    async fn authed(&self, method: reqwest::Method, slot: &str, url: &str) -> Result<Vec<u8>> {
+    /// session secret). `have` is the optional `x-arvolo-have` value (see
+    /// [`Self::have_header`]). Returns the response body bytes.
+    async fn authed(
+        &self,
+        method: reqwest::Method,
+        slot: &str,
+        url: &str,
+        have: Option<&str>,
+    ) -> Result<Vec<u8>> {
         let mut forced = false;
         loop {
             let bearer = self.ensure_session(slot, forced).await?;
-            let resp = self
+            let mut req = self
                 .client
                 .request(method.clone(), url)
-                .bearer_auth(&bearer)
-                .send()
-                .await
-                .context("inbox request")?;
+                .bearer_auth(&bearer);
+            if let Some(have) = have {
+                req = req.header(HAVE_HEADER, have);
+            }
+            let resp = req.send().await.context("inbox request")?;
             if resp.status() == reqwest::StatusCode::UNAUTHORIZED && !forced {
                 // Stale token — drop it and retry the handshake once.
                 self.sessions.lock().unwrap().remove(slot);
@@ -1041,13 +1098,18 @@ impl InboxSubscription {
         // a polled-yet-unacked offer would be returned again on the next round —
         // dedupe by id so each offer is surfaced to the caller exactly once.
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-        // Floor on how often a round may complete. The relay's long-poll returns
-        // *immediately* whenever the slot is non-empty — and a slot holding a
-        // durable non-offer blob (the contact-sync cell) is non-empty forever, so
-        // without this floor the loop degenerates into a zero-delay GET storm
-        // (observed: >700 req/s per client, pegging the relay and its access
-        // logs). A quiet inbox still long-polls the full hold time and never
-        // waits here.
+        // Floor on how often a round may complete, and now only a backstop.
+        //
+        // The relay's long-poll used to return *immediately* whenever the slot was
+        // non-empty — and a slot holding a durable non-offer blob (the contact-sync
+        // cell) is non-empty forever, so without this floor the loop degenerated into
+        // a zero-delay GET storm (observed: >700 req/s per client, pegging the relay
+        // and its access logs). Telling the relay what we already hold
+        // (`have_header`) is what actually fixed that: a steady-state round now takes
+        // the full hold time and never reaches this line. It stays for the two cases
+        // that still could — an older relay that ignores the header, and any future
+        // shape of "returns at once, repeatedly" — because the cost of being wrong
+        // here is measured in requests per second.
         const MIN_ROUND: std::time::Duration = std::time::Duration::from_secs(2);
         loop {
             if cancel.is_cancelled() {

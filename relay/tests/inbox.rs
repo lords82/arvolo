@@ -90,9 +90,9 @@ async fn poster_can_retract_its_own_offer() {
             ticket: "arvcLIVE".into(),
             note: String::new(),
             sender_name: String::new(),
-        // No device id in these fixtures: the field is a same-identity
-        // tiebreak, and every offer here comes from a different sender.
-        origin: None,
+            // No device id in these fixtures: the field is a same-identity
+            // tiebreak, and every offer here comes from a different sender.
+            origin: None,
         },
         None,
     )
@@ -161,9 +161,9 @@ async fn offer_status_walks_pending_then_arrived_then_taken() {
             ticket: "arvcLIVE".into(),
             note: String::new(),
             sender_name: String::new(),
-        // No device id in these fixtures: the field is a same-identity
-        // tiebreak, and every offer here comes from a different sender.
-        origin: None,
+            // No device id in these fixtures: the field is a same-identity
+            // tiebreak, and every offer here comes from a different sender.
+            origin: None,
         },
         None,
     )
@@ -259,9 +259,9 @@ async fn a_retracted_offer_is_gone_not_taken() {
             ticket: "arvcRECALL".into(),
             note: String::new(),
             sender_name: String::new(),
-        // No device id in these fixtures: the field is a same-identity
-        // tiebreak, and every offer here comes from a different sender.
-        origin: None,
+            // No device id in these fixtures: the field is a same-identity
+            // tiebreak, and every offer here comes from a different sender.
+            origin: None,
         },
         None,
     )
@@ -313,9 +313,9 @@ async fn wrong_recipient_sees_nothing_in_its_own_inbox() {
             ticket: "arvcX".into(),
             note: String::new(),
             sender_name: String::new(),
-        // No device id in these fixtures: the field is a same-identity
-        // tiebreak, and every offer here comes from a different sender.
-        origin: None,
+            // No device id in these fixtures: the field is a same-identity
+            // tiebreak, and every offer here comes from a different sender.
+            origin: None,
         },
         None,
     )
@@ -487,6 +487,113 @@ async fn a_stranger_can_get_a_challenge_and_still_cannot_read_the_inbox() {
         .await
         .expect("get");
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
+}
+
+/// Put a durable non-offer row — a contact-sync note — in `me`'s current slot, and
+/// return its relay id. This is the row the long-poll tests are about: it is never
+/// acked and never expires, so the slot it lives in is non-empty for good.
+async fn post_sync_note(relay: &str, me: &Identity) -> String {
+    use arvolo_core::presence::encode_sync_note;
+    use arvolo_core::sync::SyncNote;
+
+    let slot = slot_for(&me.public());
+    let body = encode_sync_note(&SyncNote::Snapshot {
+        blob: vec![3u8; 32],
+    })
+    .expect("encode note");
+    reqwest::Client::new()
+        .post(format!("{relay}/v1/inbox/{slot}?ttl=3600"))
+        .body(body)
+        .send()
+        .await
+        .expect("post note")
+        .text()
+        .await
+        .expect("id")
+        .trim()
+        .to_string()
+}
+
+/// A slot is not empty just because it has *something* in it: the sync cell sits
+/// there for good, and the relay used to end every hold on it. That turned a
+/// 25-second long-poll into a request every two seconds, per client, forever — the
+/// GET storm that pegged a relay at >700 req/s.
+#[tokio::test]
+async fn a_row_the_reader_already_has_does_not_end_the_hold() {
+    let relay = spawn_relay().await;
+    let me = Identity::generate();
+    post_sync_note(&relay, &me).await;
+
+    let sub = InboxSubscription::new(relay.clone(), &me);
+    // The first read is what teaches the subscription the row exists; the relay is
+    // told about it from the next poll on.
+    assert_eq!(sub.raw_items(0).await.expect("first read").len(), 1);
+
+    let started = std::time::Instant::now();
+    let again = sub.raw_items(3).await.expect("long-poll");
+    let held_for = started.elapsed();
+
+    assert!(
+        again.is_empty(),
+        "a hold that times out says 'nothing you don't have', not the slot's contents"
+    );
+    assert!(
+        held_for >= std::time::Duration::from_secs(2),
+        "the poll came back after {held_for:?}: the hold ended on a row the reader \
+         already had, which is the storm this guards against"
+    );
+}
+
+/// The other half: holding must not cost latency. A deposit wakes the slot it landed
+/// in directly, so a held poll returns on the deposit rather than on its own timer.
+#[tokio::test]
+async fn a_new_offer_wakes_a_held_poll_at_once() {
+    let relay = spawn_relay().await;
+    let me = Identity::generate();
+    let sender = Identity::generate();
+    let client = reqwest::Client::new();
+    post_sync_note(&relay, &me).await;
+
+    let sub = InboxSubscription::new(relay.clone(), &me);
+    assert_eq!(sub.raw_items(0).await.expect("first read").len(), 1);
+
+    let started = std::time::Instant::now();
+    let (got, ()) = tokio::join!(sub.raw_items(20), async {
+        // Long enough that the poll is definitely holding when this lands.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        post_offer(
+            &client,
+            &relay,
+            &me.public(),
+            &sender,
+            &Offer {
+                name: "woken.bin".into(),
+                size: 1,
+                chunks: 1,
+                ticket: "arvcWOKEN".into(),
+                note: String::new(),
+                sender_name: String::new(),
+                origin: None,
+            },
+            None,
+        )
+        .await
+        .expect("post offer");
+    });
+    let waited = started.elapsed();
+
+    let got = got.expect("long-poll");
+    assert_eq!(
+        got.len(),
+        2,
+        "a return hands back the whole slot — the new offer and the note it sat next to"
+    );
+    // Well inside the 20s the poll asked for, and inside the relay's own idle
+    // re-check too: only the deposit's wake-up can have ended the hold this fast.
+    assert!(
+        waited < std::time::Duration::from_secs(6),
+        "the offer took {waited:?} to surface: the deposit did not wake the held poll"
+    );
 }
 
 /// Current unix seconds, as the slot derivation counts them.
