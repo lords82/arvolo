@@ -53,7 +53,8 @@ pub async fn is_running() -> bool {
 /// own log, breaking both.
 fn spawn_daemon() -> Result<()> {
     let mut cmd = std::process::Command::new(arvolo_bin());
-    cmd.args(["daemon", "run"]).stdin(std::process::Stdio::null());
+    cmd.args(["daemon", "run"])
+        .stdin(std::process::Stdio::null());
     // Keep what it says. Spawned from here the daemon has no terminal, and its
     // output used to go to /dev/null — which is the *common* case, so in the
     // situation where someone most needs to know what happened there was nothing

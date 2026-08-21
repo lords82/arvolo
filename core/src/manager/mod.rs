@@ -746,7 +746,9 @@ impl TransferManager {
                 (
                     matches!(
                         t.status,
-                        TransferStatus::Active | TransferStatus::Preparing | TransferStatus::Waiting(_)
+                        TransferStatus::Active
+                            | TransferStatus::Preparing
+                            | TransferStatus::Waiting(_)
                     ),
                     t.direction == Direction::Recv,
                 )

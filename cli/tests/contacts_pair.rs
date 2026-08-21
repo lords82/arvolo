@@ -82,15 +82,11 @@ async fn pairing_saves_and_verifies_both_sides() {
     assert_ne!(id_a, id_b, "the two sides must be different identities");
 
     // A shows a code and waits. The code goes to stdout; everything else to stderr.
-    let mut host = arvolo(
-        cfg_a.path(),
-        &relay,
-        &["contacts", "add", "bob"],
-    )
-    .stdout(Stdio::piped())
-    .stderr(Stdio::null())
-    .spawn()
-    .expect("spawn the host side");
+    let mut host = arvolo(cfg_a.path(), &relay, &["contacts", "add", "bob"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn the host side");
 
     let mut lines = BufReader::new(host.stdout.take().unwrap()).lines();
     let mut code = String::new();
@@ -107,12 +103,7 @@ async fn pairing_saves_and_verifies_both_sides() {
     );
 
     // B types it.
-    let (ok, out, err) = run(
-        cfg_b.path(),
-        &relay,
-        &["contacts", "add", "alice", &code],
-    )
-    .await;
+    let (ok, out, err) = run(cfg_b.path(), &relay, &["contacts", "add", "alice", &code]).await;
     assert!(ok, "the joining side failed: {err}");
     assert!(out.contains("verified"), "joiner should verify: {out}");
 
@@ -163,15 +154,11 @@ async fn a_wrong_code_saves_nobody() {
     let cfg_a = TempDir::new().unwrap();
     let cfg_b = TempDir::new().unwrap();
 
-    let mut host = arvolo(
-        cfg_a.path(),
-        &relay,
-        &["contacts", "add", "bob"],
-    )
-    .stdout(Stdio::piped())
-    .stderr(Stdio::null())
-    .spawn()
-    .expect("spawn the host side");
+    let mut host = arvolo(cfg_a.path(), &relay, &["contacts", "add", "bob"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn the host side");
 
     let mut lines = BufReader::new(host.stdout.take().unwrap()).lines();
     let mut code = String::new();
@@ -192,12 +179,7 @@ async fn a_wrong_code_saves_nobody() {
         format!("{head}-wrong-words{tail}")
     };
 
-    let (ok, _, _) = run(
-        cfg_b.path(),
-        &relay,
-        &["contacts", "add", "alice", &wrong],
-    )
-    .await;
+    let (ok, _, _) = run(cfg_b.path(), &relay, &["contacts", "add", "alice", &wrong]).await;
     assert!(!ok, "a wrong code must fail, not save a contact");
 
     let (_, book_b, _) = run(

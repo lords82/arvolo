@@ -277,9 +277,7 @@ pub(crate) async fn send_sealed(
         eprintln!("Password-protected — share the password out-of-band (not with the ticket).");
     }
     if offer {
-        eprintln!(
-            "The recipient's daemon will fetch it automatically. To hand it over instead:\n"
-        );
+        eprintln!("The recipient's daemon will fetch it automatically. To hand it over instead:\n");
     } else {
         eprintln!("Send this ticket to the recipient:\n");
     }
@@ -315,10 +313,11 @@ pub(crate) async fn recv_offline(
         .map(|t| t.total_size)
         .unwrap_or(0);
     let progress = crate::ui::Progress::new("downloading from the mailbox", total);
-    let (path, n) = flow::fetch_offline_with_progress(&ticket, out, &me, password.as_deref(), |done, _| {
-        progress.update(done);
-    })
-    .await?;
+    let (path, n) =
+        flow::fetch_offline_with_progress(&ticket, out, &me, password.as_deref(), |done, _| {
+            progress.update(done);
+        })
+        .await?;
     progress.finish();
     vprintln!("HPKE authentication passed — the sender in the ticket is genuine");
     let sender = arvolo_core::offline::OfflineTicket::decode(&ticket)
@@ -340,4 +339,3 @@ pub(crate) fn withdrawal_target(target: &str) -> Option<(String, String)> {
     }
     parse_dl_link(target).ok()
 }
-

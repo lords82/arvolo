@@ -165,10 +165,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("ARVOLO_CONFIG_DIR", dir.path());
 
-        let err = cancel_cmd("00ff00ff".into())
-            .await
-            .unwrap_err()
-            .to_string();
+        let err = cancel_cmd("00ff00ff".into()).await.unwrap_err().to_string();
         assert!(err.contains("arvolo status"), "got: {err}");
 
         std::env::remove_var("ARVOLO_CONFIG_DIR");

@@ -28,7 +28,6 @@
 //! chunks at [`LINK_CHUNK_SIZE`]), so the per-transfer random key is never reused
 //! against the same nonce — the one invariant AES-GCM requires.
 
-
 use anyhow::{anyhow, Context, Result};
 
 use crate::crypto::{open_chunk, random_chunk_key, seal_chunk, CHUNK_KEY_LEN};

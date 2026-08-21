@@ -374,8 +374,8 @@ fn read_arvolo_file(what: &str) -> Result<Option<String>> {
     if p.extension().and_then(|e| e.to_str()) != Some("arvolo") {
         return Ok(None);
     }
-    let content = std::fs::read_to_string(p)
-        .with_context(|| format!("read ticket file {}", p.display()))?;
+    let content =
+        std::fs::read_to_string(p).with_context(|| format!("read ticket file {}", p.display()))?;
     let t = content.trim();
     anyhow::ensure!(
         !t.is_empty(),

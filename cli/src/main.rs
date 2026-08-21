@@ -155,7 +155,11 @@ async fn run() -> Result<()> {
             DeviceAction::Sync => sync::sync_now(None, false).await,
             DeviceAction::Status { json } => sync::sync_status(json).await,
         },
-        Command::Status { watch, json, action } => status_cmd(watch, json, action).await,
+        Command::Status {
+            watch,
+            json,
+            action,
+        } => status_cmd(watch, json, action).await,
         Command::History { json, action } => history_cmd(json, action),
         Command::Listen {
             accept,
@@ -248,7 +252,10 @@ fn prompt_relay() -> Option<String> {
     if book::BUILTIN_RELAY.trim().is_empty() {
         println!("(none in this build — plain P2P `arvc…` tickets still work).");
     } else {
-        println!("({}) — plain P2P `arvc…` tickets work without any.", book::BUILTIN_RELAY);
+        println!(
+            "({}) — plain P2P `arvc…` tickets work without any.",
+            book::BUILTIN_RELAY
+        );
     }
     println!("  • Production (TLS):  just the hostname, e.g. relay.example.com");
     println!("  • LAN/dev (no TLS):  http://host:6282");

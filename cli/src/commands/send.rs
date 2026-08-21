@@ -184,8 +184,7 @@ pub(crate) async fn push(
     // dropped offline in between must still get the ttl/max/password asked for.
     {
         if let Some(client) = daemon_client().await {
-            return push_via_daemon(client, paths, to, note.to_string(), ttl, max, password)
-                .await;
+            return push_via_daemon(client, paths, to, note.to_string(), ttl, max, password).await;
         }
     }
 
@@ -375,32 +374,11 @@ async fn send_to(
         // NOT dropped: if the daemon's own probe disagrees and the send falls
         // back to the mailbox, they apply there.
         if max.is_some() || password.is_some() {
-            eprintln!(
-                "note: --max/--password apply only if this send falls back to the mailbox."
-            );
+            eprintln!("note: --max/--password apply only if this send falls back to the mailbox.");
         }
-        return push(
-            paths,
-            who,
-            Some(relay_url),
-            &note,
-            Some(ttl),
-            max,
-            password,
-        )
-        .await;
+        return push(paths, who, Some(relay_url), &note, Some(ttl), max, password).await;
     }
-    send_sealed(
-        paths,
-        who,
-        Some(relay_url),
-        ttl,
-        max,
-        password,
-        true,
-        &note,
-    )
-    .await
+    send_sealed(paths, who, Some(relay_url), ttl, max, password, true, &note).await
 }
 
 /// `arvolo send <paths…> --to me` — deliver to your own other devices.
@@ -432,7 +410,9 @@ async fn send_to_self(
     // A contact really called "me" is reachable, just not by that name any more.
     // Say it here rather than silently doing the other thing.
     if book::resolve_name(&my_id).as_deref() != Some(SELF_RECIPIENT)
-        && book::contact_list().iter().any(|(n, _)| n == SELF_RECIPIENT)
+        && book::contact_list()
+            .iter()
+            .any(|(n, _)| n == SELF_RECIPIENT)
     {
         eprintln!(
             "note: '{SELF_RECIPIENT}' is reserved for your own devices, so it wins over your \
@@ -448,9 +428,28 @@ async fn send_to_self(
     }
 
     if mailbox {
-        return send_sealed(paths, my_id, Some(relay_url), ttl, max, password, true, note).await;
+        return send_sealed(
+            paths,
+            my_id,
+            Some(relay_url),
+            ttl,
+            max,
+            password,
+            true,
+            note,
+        )
+        .await;
     }
-    push(paths, my_id, Some(relay_url), note, Some(ttl), max, password).await
+    push(
+        paths,
+        my_id,
+        Some(relay_url),
+        note,
+        Some(ttl),
+        max,
+        password,
+    )
+    .await
 }
 
 /// `arvolo send --code` — hand the ticket over as a short pairing code.
@@ -516,13 +515,17 @@ fn emit_ticket(out: TicketOut, base_name: &str, ticket: &str) {
         TicketOut::File => match write_arvolo_file(base_name, ticket) {
             Ok(path) => {
                 println!("{}", path.display());
-                eprintln!("\nTicket file written. Share it over any channel; on the other device:\n");
+                eprintln!(
+                    "\nTicket file written. Share it over any channel; on the other device:\n"
+                );
                 eprintln!("    arvolo recv {}\n", path.display());
             }
             // The send is already serving — a file that can't be written must
             // not kill it. Fall back to the raw ticket, and say why.
             Err(e) => {
-                eprintln!("(could not write the .arvolo file: {e:#} — printing the ticket instead)");
+                eprintln!(
+                    "(could not write the .arvolo file: {e:#} — printing the ticket instead)"
+                );
                 println!("{ticket}");
                 eprintln!("\nOn the other device:  arvolo recv <the ticket above>");
             }
@@ -635,14 +638,13 @@ fn write_arvolo_file(base: &str, ticket: &str) -> Result<PathBuf> {
             .open(&candidate)
         {
             Ok(mut f) => {
-                f.write_all(ticket.as_bytes()).context("write ticket file")?;
+                f.write_all(ticket.as_bytes())
+                    .context("write ticket file")?;
                 f.write_all(b"\n").context("write ticket file")?;
                 return Ok(candidate);
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => n += 1,
-            Err(e) => {
-                return Err(e).with_context(|| format!("create {}", candidate.display()))
-            }
+            Err(e) => return Err(e).with_context(|| format!("create {}", candidate.display())),
         }
     }
 }

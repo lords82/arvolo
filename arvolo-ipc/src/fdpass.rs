@@ -48,16 +48,22 @@ const WINDOW: Duration = Duration::from_secs(15);
 /// at most [`WINDOW`] and removes the socket file on its way out; dropping the
 /// handle does not block on it.
 pub fn offer_files(files: Vec<std::fs::File>) -> Result<FdOffer> {
-    anyhow::ensure!(!files.is_empty() && files.len() <= MAX_FDS, "1..={MAX_FDS} files");
+    anyhow::ensure!(
+        !files.is_empty() && files.len() <= MAX_FDS,
+        "1..={MAX_FDS} files"
+    );
     let dir = crate::socket_path()
         .parent()
         .context("socket dir")?
         .to_path_buf();
     let token = random_token();
-    let sock = dir.join(format!("fdpass-{}-{}.sock", std::process::id(), &token[..8]));
+    let sock = dir.join(format!(
+        "fdpass-{}-{}.sock",
+        std::process::id(),
+        &token[..8]
+    ));
     let _ = std::fs::remove_file(&sock);
-    let listener = UnixListener::bind(&sock)
-        .with_context(|| format!("bind {}", sock.display()))?;
+    let listener = UnixListener::bind(&sock).with_context(|| format!("bind {}", sock.display()))?;
     std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o600)).ok();
     // Poll-accept so the thread can give up: a blocking accept with no peer
     // would pin the thread past any usefulness.
@@ -128,14 +134,16 @@ fn serve_one(s: &mut UnixStream, expect: &str, files: &[std::fs::File]) -> Resul
 /// Blocking — call it from `spawn_blocking`.
 pub fn take_files(socket: &Path, token: &str, expect: usize) -> Result<Vec<std::fs::File>> {
     anyhow::ensure!((1..=MAX_FDS).contains(&expect), "1..={MAX_FDS} files");
-    let mut s = UnixStream::connect(socket)
-        .with_context(|| format!("connect {}", socket.display()))?;
+    let mut s =
+        UnixStream::connect(socket).with_context(|| format!("connect {}", socket.display()))?;
     s.set_read_timeout(Some(WINDOW))?;
     s.set_write_timeout(Some(WINDOW))?;
     s.write_all(format!("{token}\n").as_bytes())?;
     let mut byte = [0u8; 1];
     let mut raw = vec![-1 as RawFd; MAX_FDS];
-    let (n, nfds) = s.recv_with_fd(&mut byte, &mut raw).context("receive descriptors")?;
+    let (n, nfds) = s
+        .recv_with_fd(&mut byte, &mut raw)
+        .context("receive descriptors")?;
     anyhow::ensure!(n == 1, "peer sent no descriptor frame");
     anyhow::ensure!(
         nfds == expect && byte[0] as usize == expect,
@@ -168,7 +176,8 @@ fn random_token() -> String {
         .unwrap_or_default()
         .hash(&mut h);
     let a = h.finish();
-    SALT.fetch_add(a | 1, std::sync::atomic::Ordering::Relaxed).hash(&mut h);
+    SALT.fetch_add(a | 1, std::sync::atomic::Ordering::Relaxed)
+        .hash(&mut h);
     format!("{a:016x}{:016x}", h.finish())
 }
 

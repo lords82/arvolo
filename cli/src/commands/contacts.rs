@@ -229,9 +229,7 @@ pub(crate) async fn contacts_cmd(action: ContactAction) -> Result<()> {
             relay,
         } => {
             match id_or_code {
-                None => {
-                    return crate::commands::pair::pair_host(Some(name), relay.relay, qr).await
-                }
+                None => return crate::commands::pair::pair_host(Some(name), relay.relay, qr).await,
                 Some(c) if arvolo_core::code::looks_like_code(&c) => {
                     return crate::commands::pair::pair_join(c, Some(name)).await
                 }
@@ -389,9 +387,7 @@ pub(crate) async fn contacts_cmd(action: ContactAction) -> Result<()> {
             }
         }
         ContactAction::Verify {
-            name,
-            undo: true,
-            ..
+            name, undo: true, ..
         } => {
             // Report what actually happened: claiming to have cleared a mark that
             // was never set reads as "done" for a security state the user may
@@ -416,9 +412,8 @@ pub(crate) async fn contacts_cmd(action: ContactAction) -> Result<()> {
                          out-of-band: arvolo contacts verify {name} --yes"
                     );
                 }
-                if !crate::ui::confirm_blocking(
-                    "Have you confirmed this fingerprint out-of-band?",
-                ) {
+                if !crate::ui::confirm_blocking("Have you confirmed this fingerprint out-of-band?")
+                {
                     eprintln!("Aborted — '{name}' left unverified.");
                     return Ok(());
                 }

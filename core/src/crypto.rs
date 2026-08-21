@@ -694,7 +694,10 @@ mod tests {
         let msg = b"from this laptop to the other one";
 
         let sealed = seal(msg, &me.public(), &me, b"report.pdf").unwrap();
-        assert_eq!(open(&sealed, &me, &me.public(), b"report.pdf").unwrap(), msg);
+        assert_eq!(
+            open(&sealed, &me, &me.public(), b"report.pdf").unwrap(),
+            msg
+        );
 
         let anon = seal_anon(msg, &me.public(), b"report.pdf").unwrap();
         assert_eq!(open_anon(&anon, &me, b"report.pdf").unwrap(), msg);

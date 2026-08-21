@@ -29,11 +29,7 @@ use crate::util::*;
 const PAIR_WAIT: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// Show a code and wait for someone to take it — the side that speaks first.
-pub(crate) async fn pair_host(
-    name: Option<String>,
-    relay: Option<String>,
-    qr: bool,
-) -> Result<()> {
+pub(crate) async fn pair_host(name: Option<String>, relay: Option<String>, qr: bool) -> Result<()> {
     let relay = require_relay(relay)?;
     let me = my_identity()?;
     let my_id = encode_id(&me.public());

@@ -139,8 +139,7 @@ impl SendSource {
             SendSource::Handle { file, label } => {
                 let len = file.metadata().map(|m| m.len() as usize).unwrap_or(0);
                 let mut out = vec![0u8; len];
-                let n = read_full_at(file, &mut out, 0)
-                    .with_context(|| format!("read {label}"))?;
+                let n = read_full_at(file, &mut out, 0).with_context(|| format!("read {label}"))?;
                 out.truncate(n);
                 Ok(out)
             }

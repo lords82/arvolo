@@ -17,8 +17,7 @@ mod storage;
 pub use archive::pack_tar;
 pub use offline::{
     claim_info, claim_status, deposit_offline, fetch_offline, fetch_offline_with_progress,
-    revoke_offline, ClaimInfo,
-    ClaimStatus, DepositError, Deposited,
+    revoke_offline, ClaimInfo, ClaimStatus, DepositError, Deposited,
 };
 // Shared with the link path, which deposits through its own request but has to read
 // the same granted-TTL answer off it.

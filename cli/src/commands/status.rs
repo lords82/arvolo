@@ -22,7 +22,11 @@ use crate::util::*;
 ///
 /// What already finished is [`crate::commands::history`], not this — the split is
 /// exactly "can I still do something about it?".
-pub(crate) async fn status_cmd(watch: bool, json: bool, action: Option<StatusAction>) -> Result<()> {
+pub(crate) async fn status_cmd(
+    watch: bool,
+    json: bool,
+    action: Option<StatusAction>,
+) -> Result<()> {
     if let Some(StatusAction::Clear) = action {
         return clear_finished().await;
     }

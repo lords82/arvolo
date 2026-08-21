@@ -41,7 +41,10 @@ async fn a_reused_preparation_reproduces_the_same_ticket() {
     )
     .await
     .expect("first preparation");
-    assert!(prep.is_some(), "the preparation is kept for the next attempt");
+    assert!(
+        prep.is_some(),
+        "the preparation is kept for the next attempt"
+    );
 
     let second = flow::prepare_send_reusing(
         file.as_path(),

@@ -1013,8 +1013,7 @@ async fn create_link(
     let ttl = ttl.unwrap_or(7 * 24 * 3600);
     let max = max.unwrap_or(crate::deposits::UNLIMITED);
 
-    let (payload, _name, _archive, temp) = match resolve_payload_for(&[PathBuf::from(path)], &fds)
-    {
+    let (payload, _name, _archive, temp) = match resolve_payload_for(&[PathBuf::from(path)], &fds) {
         Ok(v) => v,
         Err(e) => return Response::Error(format!("{e:#}")),
     };
@@ -1106,10 +1105,7 @@ async fn adopt_source(
             Ok(Ok(mut files)) => {
                 // The label is the original path: names, errors and the
                 // persisted retry record all speak it, never a raw fd number.
-                arvolo_core::source::SendSource::handle(
-                    files.remove(0),
-                    payload.to_string_lossy(),
-                )
+                arvolo_core::source::SendSource::handle(files.remove(0), payload.to_string_lossy())
             }
             Ok(Err(e)) => {
                 // The path may still be readable here (same-user setups mostly

@@ -814,7 +814,9 @@ pub enum EventDto {
     /// accepted or declined over IPC (`arvolo recv <handle>` / `arvolo decline`
     /// while a window is open). Without this the other front-ends keep showing a
     /// row wired to an offer that no longer exists.
-    OfferGone { id: String },
+    OfferGone {
+        id: String,
+    },
     /// A hosted pairing session has its code — this is what the other machine
     /// types. Only ever emitted for the `*Host` kinds.
     PairingCode {

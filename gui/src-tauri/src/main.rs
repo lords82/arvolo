@@ -104,7 +104,11 @@ fn set_ui_language(app: AppHandle, state: tauri::State<'_, UiLang>, lang: String
         let rebuilt = (|| -> tauri::Result<_> {
             let show = MenuItemBuilder::with_id("show", tr(&lang, "show")).build(&app)?;
             let quit = MenuItemBuilder::with_id("quit", tr(&lang, "quit")).build(&app)?;
-            MenuBuilder::new(&app).item(&show).separator().item(&quit).build()
+            MenuBuilder::new(&app)
+                .item(&show)
+                .separator()
+                .item(&quit)
+                .build()
         })();
         if let Ok(menu) = rebuilt {
             let _ = tray.set_menu(Some(menu));

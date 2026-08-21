@@ -230,7 +230,13 @@ async fn an_offer_can_be_declined_and_then_it_is_gone() {
     let (ok, out, err) = run(
         cfg_send.path(),
         &relay,
-        &["send", file.to_str().unwrap(), "--to", &recv_id, "--mailbox"],
+        &[
+            "send",
+            file.to_str().unwrap(),
+            "--to",
+            &recv_id,
+            "--mailbox",
+        ],
     )
     .await;
     assert!(ok, "send --deposit failed: {out}{err}");
@@ -267,7 +273,13 @@ async fn status_without_a_daemon_shows_what_is_waiting() {
     let (ok, out, err) = run(
         cfg_send.path(),
         &relay,
-        &["send", file.to_str().unwrap(), "--to", &recv_id, "--mailbox"],
+        &[
+            "send",
+            file.to_str().unwrap(),
+            "--to",
+            &recv_id,
+            "--mailbox",
+        ],
     )
     .await;
     assert!(ok, "send --deposit failed: {out}{err}");
@@ -331,7 +343,13 @@ async fn a_blocked_sender_is_not_listed() {
     let (ok, out, err) = run(
         cfg_send.path(),
         &relay,
-        &["send", file.to_str().unwrap(), "--to", &recv_id, "--mailbox"],
+        &[
+            "send",
+            file.to_str().unwrap(),
+            "--to",
+            &recv_id,
+            "--mailbox",
+        ],
     )
     .await;
     assert!(ok, "send --deposit failed: {out}{err}");

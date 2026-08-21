@@ -118,10 +118,14 @@ fn read_arvolo(id: &str) -> Result<Option<String>> {
     if p.extension().and_then(|e| e.to_str()) != Some("arvolo") {
         return Ok(None);
     }
-    let content = std::fs::read_to_string(p)
-        .with_context(|| format!("read ticket file {}", p.display()))?;
+    let content =
+        std::fs::read_to_string(p).with_context(|| format!("read ticket file {}", p.display()))?;
     let t = content.trim();
-    anyhow::ensure!(!t.is_empty(), "{} is empty — not a ticket file", p.display());
+    anyhow::ensure!(
+        !t.is_empty(),
+        "{} is empty — not a ticket file",
+        p.display()
+    );
     Ok(Some(t.to_string()))
 }
 
@@ -142,7 +146,6 @@ async fn resume_download(partial: &std::path::Path) -> Result<()> {
     // its piece bitfield are the ones picked up.
     crate::commands::receive::recv_ticket(ticket, Some(partial.to_path_buf()), None).await
 }
-
 
 #[cfg(test)]
 mod tests {

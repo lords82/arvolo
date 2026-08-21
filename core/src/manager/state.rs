@@ -82,7 +82,10 @@ impl Inner {
     /// mistake is invisible in production and trips immediately in a test.
     pub(super) fn set_status(&self, id: u64, status: TransferStatus) {
         debug_assert!(
-            !matches!(status, TransferStatus::Active | TransferStatus::Preparing | TransferStatus::Waiting(_)),
+            !matches!(
+                status,
+                TransferStatus::Active | TransferStatus::Preparing | TransferStatus::Waiting(_)
+            ),
             "set_status drops the cancel token — a live status needs set_status_live"
         );
         if let Some(t) = self.transfers.lock().unwrap().get_mut(&id) {

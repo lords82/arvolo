@@ -472,7 +472,9 @@ pub(crate) async fn daemon_stop_cmd() -> Result<()> {
             // SAFETY: plain kill(2) with SIGTERM; an ESRCH just means it's gone.
             let rc = unsafe { libc::kill(pid, libc::SIGTERM) };
             if rc == 0 {
-                eprintln!("✓ daemon stopped (pid {pid}). Start it again with `arvolo daemon start`.");
+                eprintln!(
+                    "✓ daemon stopped (pid {pid}). Start it again with `arvolo daemon start`."
+                );
             } else {
                 std::fs::remove_file(&pidfile).ok();
                 eprintln!("no daemon is running (stale pidfile removed).");
@@ -487,7 +489,9 @@ pub(crate) async fn daemon_stop_cmd() -> Result<()> {
                 .map(|s| s.success())
                 .unwrap_or(false);
             if ok {
-                eprintln!("✓ daemon stopped (pid {pid}). Start it again with `arvolo daemon start`.");
+                eprintln!(
+                    "✓ daemon stopped (pid {pid}). Start it again with `arvolo daemon start`."
+                );
             } else {
                 std::fs::remove_file(&pidfile).ok();
                 eprintln!("no daemon is running (stale pidfile removed).");
@@ -530,10 +534,7 @@ pub(crate) async fn daemon_status_cmd(json: bool) -> Result<()> {
             }
             println!("id:            {}", s.public_id);
             println!("fingerprint:   {}", s.fingerprint);
-            println!(
-                "relay:         {}",
-                s.relay.as_deref().unwrap_or("(none)")
-            );
+            println!("relay:         {}", s.relay.as_deref().unwrap_or("(none)"));
             println!("downloads to:  {}", s.download_dir);
             if !s.display_name.is_empty() {
                 println!("display name:  {}", s.display_name);
