@@ -179,6 +179,9 @@ mod tests {
 
     #[test]
     fn descriptors_cross_and_reopen_through_dev_fd() {
+        // The socket below is placed beside the daemon socket, so this test owns
+        // `ARVOLO_CONFIG_DIR` while it runs — see [`crate::ENV_LOCK`].
+        let _g = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("ARVOLO_CONFIG_DIR", dir.path());
         let mut f = tempfile::tempfile().unwrap();
@@ -206,6 +209,7 @@ mod tests {
 
     #[test]
     fn a_wrong_token_gets_nothing() {
+        let _g = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("ARVOLO_CONFIG_DIR", dir.path());
         let f = tempfile::tempfile().unwrap();

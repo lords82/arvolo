@@ -30,6 +30,7 @@ pub(super) fn spawn_control_supervisor(
     sender_addr: iroh::EndpointAddr,
     on_relay: Arc<Mutex<std::collections::HashSet<u32>>>,
     cancel: CancellationToken,
+    abort_intent: Arc<std::sync::atomic::AtomicBool>,
 ) -> ControlHandle {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
@@ -75,6 +76,19 @@ pub(super) fn spawn_control_supervisor(
                 tokio::select! {
                     _ = cancel.cancelled() => {
                         live.store(false, Ordering::Relaxed);
+                        // A deliberate cancel says goodbye properly, so the
+                        // sender ends its side instead of nursing the tail; a
+                        // pause slips away like a network drop on purpose (the
+                        // resume wants that tail kept warm). Best-effort and
+                        // bounded — a sender that already vanished can't stall
+                        // the user's cancel.
+                        if abort_intent.load(Ordering::Relaxed) {
+                            let _ = tokio::time::timeout(
+                                Duration::from_secs(3),
+                                control.abort(),
+                            )
+                            .await;
+                        }
                         return;
                     }
                     _ = conn.closed() => break,

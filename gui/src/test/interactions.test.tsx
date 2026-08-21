@@ -108,6 +108,22 @@ async function renderAppWithSend(over: Record<string, unknown> = {}) {
   await screen.findByText("invio.txt");
 }
 
+/** A download under way from someone the address book has never heard of. */
+async function renderAppWithDownload(over: Record<string, unknown> = {}) {
+  harness.snapshot.transfers = [
+    dto.transfer({
+      id: 7,
+      direction: "recv",
+      name: "arrivo.zip",
+      peer: "peer9",
+      status: "active",
+      ...(over as object),
+    }),
+  ];
+  render(<App />);
+  await screen.findByText("arrivo.zip");
+}
+
 /** The row's overflow menu, opened. Every row action lives behind it. */
 async function openRowMenu(name: string) {
   fireEvent.click(await screen.findByLabelText(`Actions for ${name}`));
@@ -335,6 +351,41 @@ describe("the row menu", () => {
     await waitFor(() =>
       expect(revealItemInDir).toHaveBeenCalledWith("/Users/ls/Arvolo/invio.txt")
     );
+  });
+
+  // The offer dialog asks the same question, but only if you go through it: an
+  // auto-accepted arrival, or one waved past, otherwise leaves the sender
+  // nameless — with their id nowhere but a tooltip.
+  it("117a. a download from a stranger offers to save them, and saves what you type", async () => {
+    await renderAppWithDownload();
+    const menu = await openRowMenu("arrivo.zip");
+    fireEvent.click(within(menu).getByText("Save the sender…"));
+    const field = await screen.findByLabelText("Name to give the contact");
+    fireEvent.change(field, { target: { value: "lorenzo" } });
+    fireEvent.click(screen.getByText("Save"));
+    await waitFor(() =>
+      expect(harness.recorder.addContact).toEqual([["lorenzo", "peer9"]])
+    );
+  });
+
+  it("117b. someone already in the address book is not offered again", async () => {
+    harness.snapshot.contacts = [dto.contact({ name: "proj", id: "peer9" })];
+    await renderAppWithDownload();
+    const menu = await openRowMenu("arrivo.zip");
+    expect(within(menu).queryByText("Save the sender…")).toBeNull();
+  });
+
+  // Their own name for themselves is a claim, not evidence — but it is the best
+  // first guess at what to call them, and typing it out again is the friction
+  // that stops people saving anyone at all.
+  it("117c. the name the sender claims is offered as the default", async () => {
+    await renderAppWithDownload({ sender_name: "Anna Maria" });
+    const menu = await openRowMenu("arrivo.zip");
+    fireEvent.click(within(menu).getByText("Save the sender…"));
+    const field = (await screen.findByLabelText(
+      "Name to give the contact"
+    )) as HTMLInputElement;
+    expect(field.value).toBe("anna-maria");
   });
 
   it("118. the arrow keys on a row's grip reorder without touching the daemon", async () => {

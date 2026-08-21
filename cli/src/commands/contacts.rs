@@ -179,7 +179,7 @@ fn print_table(rows: &[Row], asked_presence: bool) {
 
         if let Some(p) = &r.pending {
             println!(
-                "    ⚠ wants to be called “{p}” — approve: arvolo contacts accept-name {}",
+                "    ⚠ wants to be called “{p}” — approve: arvolo contacts rename {}",
                 r.name
             );
         }

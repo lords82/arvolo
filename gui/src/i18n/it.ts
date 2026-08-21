@@ -135,6 +135,10 @@ export const it: Dict = {
   "transfers.liveCode": "codice attivo",
   "transfers.review": "Rivedi",
   "transfers.shareDetails": "Dettagli condivisione",
+  "transfers.saveSender": "Salva il mittente…",
+  "transfers.saveSenderTitle": "Salva il mittente in rubrica",
+  "transfers.saveSenderSub": (name) =>
+    `Ti ha mandato ${name} e non hai ancora un nome per lui.`,
   "transfers.reorder": (name) =>
     `Sposta ${name}: trascina, o usa le frecce su e giù`,
   "transfers.rowActions": (name) => `Azioni per ${name}`,
@@ -445,6 +449,7 @@ export const it: Dict = {
     "Il tuo segreto. Non condividerlo: chi lo possiede diventa te. Per usare Arvolo su un'altra tua macchina c'è il collegamento dispositivi, che lo trasferisce cifrato.",
   "settings.versions": (daemon, gui) =>
     `Daemon ${daemon} · interfaccia ${gui}`,
+  "settings.daemonProcess": (pid, exe) => `pid ${pid} · ${exe}`,
   "settings.restartDaemon": "Riavvia il daemon",
   "settings.confirmRestartTitle": "Riavviare il daemon?",
   "settings.confirmRestartBody":

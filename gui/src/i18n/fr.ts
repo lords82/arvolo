@@ -138,6 +138,10 @@ export const fr: Dict = {
   "transfers.liveCode": "code actif",
   "transfers.review": "Revoir",
   "transfers.shareDetails": "Détails du partage",
+  "transfers.saveSender": "Enregistrer l'expéditeur…",
+  "transfers.saveSenderTitle": "Enregistrer l'expéditeur dans vos contacts",
+  "transfers.saveSenderSub": (name) =>
+    `Cette personne vous a envoyé ${name} et vous n'avez pas encore de nom pour elle.`,
   "transfers.reorder": (name) =>
     `Déplacer ${name} : faites glisser, ou utilisez les flèches haut et bas`,
   "transfers.rowActions": (name) => `Actions pour ${name}`,
@@ -459,6 +463,7 @@ export const fr: Dict = {
     "Votre secret. Ne le partagez pas : qui le possède devient vous. Pour utiliser Arvolo sur une autre de vos machines, il y a le rattachement d'appareils, qui le transfère chiffré.",
   "settings.versions": (daemon, gui) =>
     `Démon ${daemon} · interface ${gui}`,
+  "settings.daemonProcess": (pid, exe) => `pid ${pid} · ${exe}`,
   "settings.restartDaemon": "Redémarrer le démon",
   "settings.confirmRestartTitle": "Redémarrer le démon ?",
   "settings.confirmRestartBody":

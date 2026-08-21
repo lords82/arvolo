@@ -51,6 +51,10 @@ pub enum SendEvent {
     /// The number of distinct peers currently downloading from us changed
     /// (0, 1, or many — a shared ticket can serve a whole swarm).
     Peers { count: usize },
+    /// The receiver cancelled ON PURPOSE (it said so on the control channel —
+    /// not a crash, not a network drop). `serve` ends right after emitting
+    /// this: no backfill, nothing to wait for.
+    RecipientCancelled,
 }
 
 /// A prepared send: the file is split and served, and the ticket is ready. Call
@@ -63,6 +67,9 @@ pub struct SendSession {
     sender: ChunkSender,
     relay: Option<RelayRelease>,
     client: reqwest::Client,
+    /// Sealed to one recipient (`--to`): their deliberate cancel ends the send.
+    /// A shared ticket outlives any one receiver's refusal.
+    sealed_to_recipient: bool,
 }
 
 impl SendSession {
@@ -173,6 +180,7 @@ pub async fn prepare_send(
         chunks: sender.chunks().len(),
         total_size: sender.total_size(),
         has_relay: relay.is_some(),
+        sealed_to_recipient: to.is_some(),
         sender,
         relay,
         client,
@@ -233,6 +241,8 @@ pub async fn resume_send(
         chunks: sender.chunks().len(),
         total_size: sender.total_size(),
         has_relay: false,
+        // A resumed send: the ticket says whether it was sealed to somebody.
+        sealed_to_recipient: matches!(expected.key, crate::chunked::KeyDelivery::Sealed { .. }),
         sender,
         relay: None,
         client: crate::http::client(),
@@ -329,6 +339,25 @@ impl SendSession {
                 _ = self.sender.receiver_connected() => {
                     on(SendEvent::ReceiverConnected);
                 }
+                _ = self.sender.receiver_aborted() => {
+                    // They cancelled on purpose. No backfill for a tail nobody
+                    // wants (the abort path never reports one). The rule:
+                    // one receiver's "no thanks" must not end anyone else's
+                    // download — but when EVERYONE has said no (nobody still
+                    // pulling, nobody ever completed a copy) the sender stops
+                    // too, instead of serving an empty room forever. Sealed to
+                    // one recipient, their single no IS everyone's no.
+                    //
+                    // `active_peers` may briefly still count the aborter (its
+                    // chunk connection closes moments after the ctrl goodbye),
+                    // hence `<= 1` rather than `== 0`.
+                    on(SendEvent::RecipientCancelled);
+                    if self.sealed_to_recipient
+                        || (self.sender.active_peers() <= 1 && reported.is_empty())
+                    {
+                        break;
+                    }
+                }
                 (peer, undelivered) = self.sender.receiver_gone() => {
                     // Empty tail ⇒ that receiver fetched the whole file. Still the
                     // authoritative signal for an empty (zero-chunk) payload, which
@@ -384,7 +413,18 @@ impl SendSession {
                 }
             }
         }
-        self.sender.shutdown().await;
+        // Teardown, bounded: `Endpoint::close()` waits for connected peers to
+        // acknowledge, and a pause happens mid-pull by construction — measured
+        // wedging this await for good, and with it the Paused status the user
+        // is watching for. The close keeps draining detached; only the *wait*
+        // ends, so the caller can report the pause while iroh says its goodbyes.
+        let teardown = tokio::spawn(self.sender.shutdown());
+        if tokio::time::timeout(std::time::Duration::from_secs(10), teardown)
+            .await
+            .is_err()
+        {
+            tracing::warn!("sender teardown still draining after 10s — not waiting for it");
+        }
         Ok(())
     }
 }

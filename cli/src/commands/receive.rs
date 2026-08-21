@@ -119,12 +119,17 @@ pub(crate) async fn listen(
                             eprintln!("   (auto-accepting: saved contact)");
                             true
                         } else {
-                            confirm(format!("   Accept from {}?", status.name.unwrap_or(from_b32))).await
+                            confirm(format!("   Accept from {}?", status.name.clone().unwrap_or_else(|| from_b32.clone()))).await
                         };
 
                         if accept {
                             match manager.accept_offer(&id, None).await {
-                                Ok(_) => eprintln!("   ✓ accepted — downloading…"),
+                                Ok(_) => {
+                                    eprintln!("   ✓ accepted — downloading…");
+                                    // While it downloads: their id is right here,
+                                    // and so is whoever knows who they are.
+                                    offer_to_save_contact(&from_b32).await;
+                                }
                                 Err(e) => eprintln!("   ✗ could not accept: {e:#}"),
                             }
                         } else {
@@ -227,7 +232,10 @@ pub(crate) async fn handle_attached_offer(
 
     if accept {
         match client.accept(offer.id, None).await {
-            Ok(tid) => eprintln!("   ✓ accepted — downloading (transfer {tid})…"),
+            Ok(tid) => {
+                eprintln!("   ✓ accepted — downloading (transfer {tid})…");
+                offer_to_save_contact(&offer.from).await;
+            }
             Err(e) => eprintln!("   ✗ could not accept: {e:#}"),
         }
     } else {
@@ -413,6 +421,7 @@ async fn take_offer_by_handle(
                          Follow it with `arvolo status --watch`.",
                         sanitize_display(&offer.name)
                     );
+                    offer_to_save_contact(&offer.from).await;
                     Ok(())
                 }
                 Decision::Decline => {
@@ -526,6 +535,10 @@ pub(crate) async fn recv_ticket(
     let tty = std::io::stderr().is_terminal();
     let bar: Arc<Mutex<Option<ProgressBar>>> = Arc::new(Mutex::new(None));
     let b = bar.clone();
+    // Who it turned out to be, once the ticket is opened: asked about below,
+    // after the file is on disk rather than in the middle of the progress bar.
+    let sender: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let sender_seen = sender.clone();
     // Last chunk source we narrated at -vv (0 = none, 1 = sender, 2 = relay), so
     // we log only when delivery flips between P2P and the relay, not every chunk.
     let last_src = Arc::new(AtomicU8::new(0));
@@ -539,7 +552,7 @@ pub(crate) async fn recv_ticket(
             let mut slot = b.lock().unwrap();
             match ev {
                 RecvEvent::Sender { id } => {
-                    print_sender_banner(id.as_deref());
+                    *sender_seen.lock().unwrap() = print_sender_banner(id.as_deref());
                 }
                 RecvEvent::Started {
                     total,
@@ -644,6 +657,12 @@ pub(crate) async fn recv_ticket(
         },
     )
     .await?;
+    // Saved, and we now know whose it was — offer to keep them. Anonymous
+    // tickets carry no identity to save, so nothing is asked there.
+    let sender = sender.lock().unwrap().clone();
+    if let Some(id) = sender {
+        offer_to_save_contact(&id).await;
+    }
     Ok(())
 }
 
@@ -923,6 +942,7 @@ async fn waiting_from_daemon(
         "Accepted — the daemon is downloading it (transfer {shown}). \
          Follow it with `arvolo status --watch`."
     );
+    offer_to_save_contact(&offer.from).await;
     Ok(())
 }
 

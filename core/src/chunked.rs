@@ -15,8 +15,8 @@
 //!   (anti-double-send), and releases each relay chunk as it gets it.
 
 use std::collections::{HashMap, HashSet};
-use std::io::{Read, Seek, SeekFrom};
-use std::path::{Path, PathBuf};
+use std::io::{Seek, SeekFrom};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -66,6 +66,11 @@ enum CtrlMsg {
     Have(u32),
     /// Sender: these chunk indices are now available on the relay.
     RelayHas(Vec<u32>),
+    /// Receiver is cancelling ON PURPOSE — not crashing, not pausing. The sender
+    /// must NOT keep the tail warm for it: no relay backfill, no re-offer; the
+    /// send ends. Appended last so an old sender, whose postcard decode fails on
+    /// the unknown index, reads it as EOF — today's "receiver gone" behavior.
+    Abort,
 }
 
 /// If the sender hears nothing on the control channel for this long, it treats
@@ -497,6 +502,9 @@ struct CtrlHandler {
     gone_tx: mpsc::UnboundedSender<(EndpointId, Vec<usize>)>,
     /// Signalled once per receiver, when its control channel connects.
     connected_tx: mpsc::UnboundedSender<()>,
+    /// Signalled when a receiver says [`CtrlMsg::Abort`]: it is cancelling on
+    /// purpose, and the send must end instead of keeping its tail warm.
+    abort_tx: mpsc::UnboundedSender<EndpointId>,
 }
 
 impl ProtocolHandler for CtrlHandler {
@@ -538,11 +546,19 @@ impl ProtocolHandler for CtrlHandler {
                         .or_default()
                         .insert(idx);
                 }
+                // A deliberate cancel: end the send, don't nurse the tail.
+                Ok(Some(CtrlMsg::Abort)) => break "aborted",
                 Ok(Some(_)) => {}        // Ping/Hello: keepalive
                 Ok(None) => break "eof", // closed cleanly
                 Err(_) => break "idle",  // idle: receiver gone
             }
         };
+        if reason == "aborted" {
+            tracing::debug!("ctrl: receiver aborted on purpose");
+            let _ = self.abort_tx.send(peer);
+            conn.close(0u32.into(), b"aborted");
+            return Ok(());
+        }
         // Receiver gone: report the chunks *this* receiver still lacks. What another
         // receiver happens to hold is no comfort to this one, and it is this one's
         // tail the relay is about to be asked to keep.
@@ -580,6 +596,7 @@ pub struct ChunkSender {
     on_relay: Arc<Mutex<HashSet<u32>>>,
     gone_rx: AsyncMutex<mpsc::UnboundedReceiver<(EndpointId, Vec<usize>)>>,
     connected_rx: AsyncMutex<mpsc::UnboundedReceiver<()>>,
+    abort_rx: AsyncMutex<mpsc::UnboundedReceiver<EndpointId>>,
     peers: PeerCount,
     sent: SentBytes,
 }
@@ -684,12 +701,14 @@ impl ChunkSender {
         let on_relay = Arc::new(Mutex::new(HashSet::new()));
         let (gone_tx, gone_rx) = mpsc::unbounded_channel();
         let (connected_tx, connected_rx) = mpsc::unbounded_channel();
+        let (abort_tx, abort_rx) = mpsc::unbounded_channel();
         let handler = CtrlHandler {
             total: chunks.len(),
             delivered: delivered.clone(),
             on_relay: on_relay.clone(),
             gone_tx,
             connected_tx,
+            abort_tx,
         };
         let router = Router::builder(endpoint.clone())
             .accept(CHUNK_ALPN, chunk_server)
@@ -713,6 +732,7 @@ impl ChunkSender {
             on_relay,
             gone_rx: AsyncMutex::new(gone_rx),
             connected_rx: AsyncMutex::new(connected_rx),
+            abort_rx: AsyncMutex::new(abort_rx),
             peers,
             sent,
         })
@@ -810,6 +830,17 @@ impl ChunkSender {
     /// meant nothing anyway.
     pub async fn receiver_gone(&self) -> (EndpointId, Vec<usize>) {
         let mut rx = self.gone_rx.lock().await;
+        match rx.recv().await {
+            Some(v) => v,
+            None => std::future::pending().await,
+        }
+    }
+
+    /// Resolves when a receiver cancels ON PURPOSE ([`CtrlMsg::Abort`]): unlike
+    /// [`Self::receiver_gone`] there is no tail to keep warm — the send should
+    /// end. Never fires for crashes or network drops.
+    pub async fn receiver_aborted(&self) -> EndpointId {
+        let mut rx = self.abort_rx.lock().await;
         match rx.recv().await {
             Some(v) => v,
             None => std::future::pending().await,
@@ -947,6 +978,21 @@ impl Control {
         {
             let mut send = self.send.lock().await;
             send.finish().map_err(|e| anyhow!("ctrl finish: {e}"))?;
+        }
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), self.conn.closed()).await;
+        Ok(())
+    }
+
+    /// Tell the sender this receiver is cancelling ON PURPOSE, then close. The
+    /// sender ends the transfer instead of backfilling the tail to the relay
+    /// and re-offering — see [`CtrlMsg::Abort`]. Best-effort: an old sender
+    /// reads it as a plain disconnect.
+    pub async fn abort(self) -> Result<()> {
+        self.heartbeat.abort();
+        {
+            let mut send = self.send.lock().await;
+            write_msg(&mut send, &CtrlMsg::Abort).await?;
+            send.finish().map_err(|e| anyhow!("ctrl abort: {e}"))?;
         }
         let _ = tokio::time::timeout(std::time::Duration::from_secs(5), self.conn.closed()).await;
         Ok(())

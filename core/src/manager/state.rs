@@ -31,6 +31,10 @@ pub(super) struct Inner {
     pub(super) next_id: AtomicU64,
     pub(super) transfers: Mutex<HashMap<u64, Transfer>>,
     pub(super) cancels: Mutex<HashMap<u64, CancellationToken>>,
+    /// Per-download abort intent (see `flow::RecvCancel`): defaults true, and
+    /// `pause` flips it to false *before* cancelling so the fetch slips away
+    /// like a drop (tail kept warm) instead of telling the sender to stop.
+    pub(super) recv_aborts: Mutex<HashMap<u64, Arc<std::sync::atomic::AtomicBool>>>,
     /// Delivery state for active/paused `send --to` transfers (for pause/resume).
     pub(super) held: Mutex<HashMap<u64, Held>>,
     pub(super) pending: Mutex<HashMap<String, ReceivedOffer>>,
@@ -63,7 +67,17 @@ impl Inner {
     /// Set a **terminal-or-paused** status: also drops the cancel token, since the
     /// running task is ending (finished, deposited, or paused — a resume installs a
     /// fresh token).
+    ///
+    /// Passing a *live* status here is always a bug, and a quiet one: the row keeps
+    /// running with no way left to stop it. That is not hypothetical — one call site
+    /// marked a send `Active` through this function and made every live P2P send
+    /// uncancellable from the moment it started serving. Hence the assertion: the
+    /// mistake is invisible in production and trips immediately in a test.
     pub(super) fn set_status(&self, id: u64, status: TransferStatus) {
+        debug_assert!(
+            !matches!(status, TransferStatus::Active | TransferStatus::Waiting(_)),
+            "set_status drops the cancel token — a live status needs set_status_live"
+        );
         if let Some(t) = self.transfers.lock().unwrap().get_mut(&id) {
             t.status = status;
         }

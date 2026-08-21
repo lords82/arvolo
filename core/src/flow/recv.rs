@@ -23,6 +23,30 @@ pub enum ChunkSource {
     Relay,
 }
 
+/// A receive's cancellation, with its INTENT attached. The token stops the
+/// work either way; `abort` decides what the sender is told as we leave:
+///
+/// - `true` (the default — what a bare [`CancellationToken`] converts to): the
+///   user is cancelling for good. The control channel says so ([`Ctrl` abort])
+///   and the sender ends its side — no relay backfill, no re-offer.
+/// - `false`: a pause. We disappear silently, exactly like a network drop, so
+///   the sender keeps the tail warm (backfilling it to the relay) and the
+///   resume finds it there.
+#[derive(Debug, Clone)]
+pub struct RecvCancel {
+    pub token: CancellationToken,
+    pub abort: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl From<CancellationToken> for RecvCancel {
+    fn from(token: CancellationToken) -> Self {
+        RecvCancel {
+            token,
+            abort: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        }
+    }
+}
+
 /// Progress events emitted while receiving a file.
 #[derive(Debug, Clone)]
 pub enum RecvEvent {
@@ -409,12 +433,19 @@ pub async fn recv_chunked(
     out: Option<PathBuf>,
     identity: Option<&Identity>,
     relay: RelayChoice,
-    cancel: CancellationToken,
+    cancel: impl Into<RecvCancel>,
     on: impl Fn(RecvEvent) + Send + Sync,
 ) -> Result<RecvOutcome> {
     use std::collections::{HashMap, HashSet};
     use std::io::{Read, Seek, SeekFrom, Write};
     use tokio::task::JoinSet;
+
+    // Split intent from mechanism: the token stops the work either way; `abort`
+    // decides what the control channel tells the sender on the way out.
+    let RecvCancel {
+        token: cancel,
+        abort: abort_intent,
+    } = cancel.into();
 
     let t = ChunkTicket::decode(ticket).context("invalid ticket")?;
     let user_out = out;
@@ -608,7 +639,13 @@ pub async fn recv_chunked(
     // `cancel` so it stops on cancel; we also cancel it explicitly on completion.
     let ctrl_cancel = cancel.child_token();
     let ctrl = sender_addr.clone().map(|s| {
-        spawn_control_supervisor(receiver.clone(), s, on_relay.clone(), ctrl_cancel.clone())
+        spawn_control_supervisor(
+            receiver.clone(),
+            s,
+            on_relay.clone(),
+            ctrl_cancel.clone(),
+            abort_intent.clone(),
+        )
     });
     let sender_live = ctrl.as_ref().map(|h| h.sender_live.clone());
     let ack_tx = ctrl.as_ref().map(|h| h.ack_tx.clone());

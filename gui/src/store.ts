@@ -196,18 +196,40 @@ function saveOrder(transfers: Record<string, UITransfer>) {
   }
 }
 
-/** Last progress sample per transfer id, for throughput estimation. Kept outside
- *  the store: it changes on every event and must not trigger renders itself. */
-const progSamples = new Map<number, { t: number; bytes: number }>();
+/** Recent progress samples per transfer id, for throughput estimation. Kept
+ *  outside the store: they change on every event and must not trigger renders. */
+const progSamples = new Map<number, { t: number; bytes: number }[]>();
 
-/** Exponentially-smoothed bytes/sec from consecutive progress events. */
+/** How much history the rate is computed over, and the least of it that must
+ *  exist before a number is shown at all. A receiver's progress advances in
+ *  whole verified chunks (16 MiB at a time): a rate read between two events is
+ *  either zero or a burst — on a slow link it once read "39 MB/s" on a wire
+ *  moving at 2. Only a slope over a window much wider than the gap between
+ *  chunks says something true. */
+const RATE_WINDOW_MS = 30_000;
+const RATE_MIN_SPAN_MS = 3_000;
+
+/** How long a row may say "cancelling…" on the strength of an event that has not
+ *  arrived, before the board asks the daemon what actually happened. Longer than
+ *  the engine's own worst case (it spends up to 10s withdrawing a deposit from the
+ *  relay before ending the row anyway), so a slow-but-working cancel is never
+ *  second-guessed — only a silent one. */
+const CANCEL_SETTLE_MS = 15_000;
+
+/** Bytes/sec as the slope over the last [`RATE_WINDOW_MS`] of samples. */
 function sampleRate(id: number, bytes: number, prevRate?: number): number | undefined {
   const at = now();
-  const last = progSamples.get(id);
-  progSamples.set(id, { t: at, bytes });
-  if (!last || at <= last.t || bytes < last.bytes) return prevRate;
-  const inst = ((bytes - last.bytes) * 1000) / (at - last.t);
-  return prevRate ? 0.7 * prevRate + 0.3 * inst : inst;
+  const samples = progSamples.get(id) ?? [];
+  // A byte count that went backwards is a restart/resume — start history over.
+  if (samples.length > 0 && bytes < samples[samples.length - 1].bytes) {
+    samples.length = 0;
+  }
+  samples.push({ t: at, bytes });
+  while (samples.length > 1 && samples[0].t < at - RATE_WINDOW_MS) samples.shift();
+  progSamples.set(id, samples);
+  const span = at - samples[0].t;
+  if (span < RATE_MIN_SPAN_MS) return prevRate;
+  return ((bytes - samples[0].bytes) * 1000) / span;
 }
 
 /** What a row is doing, from the daemon's status *and* what kind of row it is.
@@ -485,6 +507,10 @@ export const useStore = create<State>((set, get) => {
       reason,
       peer: get().peerLabel(d.peer, prev?.peer),
       peerId: d.peer ?? prev?.peerId,
+      // The sender's own claim about their name, kept so "save the sender" can
+      // propose it. `prev` covers a daemon too old to report it, which would
+      // otherwise blank a name a live event had already given us.
+      senderName: d.sender_name || prev?.senderName,
       verified: get().isVerified(d.peer),
       handle: d.handle || undefined,
       swarmPeers: d.swarm_peers,
@@ -1208,6 +1234,20 @@ export const useStore = create<State>((set, get) => {
         if (before) setStatus(before);
         throw e;
       }
+      // The `cancelled` event is the fast path, not the only one. If it never
+      // arrives — dropped in transit, or a daemon that died between taking the
+      // request and acting on it — the row would sit on "cancelling…" for ever,
+      // which is a claim about the daemon this side cannot make.
+      setTimeout(async () => {
+        if (get().transfers[key]?.status !== "cancelling") return;
+        // The engine's own list, whatever the events did: a successful re-read
+        // rebuilds every row from it, so "cancelling" cannot survive one.
+        await get().reload();
+        // Still cancelling ⇒ the re-read didn't land either (nothing is
+        // answering). The optimism was ours; take it back rather than let the row
+        // keep saying something is happening.
+        if (get().transfers[key]?.status === "cancelling" && before) setStatus(before);
+      }, CANCEL_SETTLE_MS);
     },
     removeRow: async (key) => {
       const tx = get().transfers[key];

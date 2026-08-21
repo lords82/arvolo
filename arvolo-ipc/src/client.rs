@@ -24,6 +24,21 @@ use crate::protocol::{
 type Read = BufReader<Box<dyn AsyncRead + Unpin + Send>>;
 type Write = Box<dyn AsyncWrite + Unpin + Send>;
 
+/// How long one request may wait for its reply before the caller is told the
+/// daemon is not answering.
+///
+/// Every handler on the other end returns promptly *by design*: the slow work —
+/// uploads, relay round trips, pairing — runs detached and reports through
+/// events. So a reply that never comes means the daemon is wedged, not busy, and
+/// a caller standing in front of a person has to be able to say so. Without this
+/// there was no way out at all: a window that asked to cancel a transfer and
+/// never heard back kept the row on "cancelling…" until the app was restarted,
+/// with nothing on screen admitting that nobody had answered.
+///
+/// Long enough for the slowest legitimate answer (the deposits listing asks every
+/// relay it knows, in turn), short enough to be a bounded wait.
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// An RPC connection to the running daemon.
 pub struct DaemonClient {
     reader: Read,
@@ -91,23 +106,41 @@ impl DaemonClient {
         self.next_id = self.next_id.wrapping_add(1);
         let mut line = serde_json::to_string(&RequestEnvelope { id, cmd })?;
         line.push('\n');
-        self.writer.write_all(line.as_bytes()).await?;
-        self.writer.flush().await?;
-        loop {
-            let mut resp = String::new();
-            let n = self.reader.read_line(&mut resp).await?;
-            if n == 0 {
-                bail!("daemon closed the connection");
+        let exchange = async {
+            // The write is inside the deadline too: a daemon that has stopped
+            // reading fills the socket buffer, and then it is the *send* that
+            // never returns.
+            self.writer.write_all(line.as_bytes()).await?;
+            self.writer.flush().await?;
+            loop {
+                let mut resp = String::new();
+                let n = self.reader.read_line(&mut resp).await?;
+                if n == 0 {
+                    bail!("daemon closed the connection");
+                }
+                if resp.trim().is_empty() {
+                    continue;
+                }
+                match serde_json::from_str::<ServerMessage>(resp.trim())? {
+                    ServerMessage::Reply { id: rid, result } if rid == id => return Ok(result),
+                    // An RPC connection never subscribes, so events/other replies
+                    // shouldn't appear; skip defensively rather than error.
+                    _ => continue,
+                }
             }
-            if resp.trim().is_empty() {
-                continue;
-            }
-            match serde_json::from_str::<ServerMessage>(resp.trim())? {
-                ServerMessage::Reply { id: rid, result } if rid == id => return Ok(result),
-                // An RPC connection never subscribes, so events/other replies
-                // shouldn't appear; skip defensively rather than error.
-                _ => continue,
-            }
+        };
+        // On timeout this connection is left mid-exchange (a reply may still be
+        // in flight for a request nobody is waiting on any more), so it must not
+        // be reused: every caller opens one per command, and the error is the
+        // signal to drop this one.
+        match tokio::time::timeout(REQUEST_TIMEOUT, exchange).await {
+            Ok(result) => result,
+            Err(_) => bail!(
+                "the daemon accepted the connection but did not answer within {}s — \
+                 it may be stuck. Check `arvolo daemon status`, and restart it with \
+                 `arvolo daemon stop && arvolo daemon start` if it stays silent.",
+                REQUEST_TIMEOUT.as_secs()
+            ),
         }
     }
 
@@ -160,6 +193,7 @@ impl DaemonClient {
     /// re-probes presence: a recipient who drops offline between the caller's
     /// probe and the daemon's would otherwise be deposited to with the defaults,
     /// silently ignoring the ttl/max/password the user asked for.
+    #[allow(clippy::too_many_arguments)]
     pub async fn push(
         &mut self,
         to: String,
@@ -192,6 +226,7 @@ impl DaemonClient {
 
     /// Deposit straight to the recipient's mailbox — `arvolo send --deposit`.
     /// Returns the transfer id and the `arvm…` ticket for hand-delivery.
+    #[allow(clippy::too_many_arguments)]
     pub async fn deposit(
         &mut self,
         to: String,

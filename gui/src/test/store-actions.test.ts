@@ -476,6 +476,58 @@ describe("a failed action is never silent", () => {
     expect(s().actionError, `${cmd} must say why`).toMatch(want);
   });
 
+  // The report this closes: a send the recipient had already dropped was
+  // cancelled, and the row sat on "Annullamento…" for good. The daemon answered
+  // "ok" to an id its engine no longer had, so the `cancelled` event that would
+  // have ended the row was never coming.
+  it("97a. a cancel the daemon refuses puts the row back, not on 'cancelling'", async () => {
+    await boot();
+    harness.emit({ started: { id: 1, direction: "send", name: "f", total_size: 1 } });
+    harness.fail = new Set(["cancel"]);
+    await expect(s().cancel(1)).rejects.toThrow();
+    expect(row("t1").status).toBe("active");
+  });
+
+  // And when the daemon accepts but the event never lands, the board asks rather
+  // than believing its own optimism for ever.
+  it("97b. a cancel with no event settles from the snapshot", async () => {
+    vi.useFakeTimers();
+    try {
+      await boot();
+      harness.emit({ started: { id: 1, direction: "send", name: "f", total_size: 1 } });
+      // The daemon takes it and says nothing more — but its list already has the
+      // row as cancelled, which is what the re-read finds.
+      harness.snapshot.transfers = [
+        dto.transfer({ id: 1, name: "f", status: "cancelled" }),
+      ];
+      await s().cancel(1);
+      expect(row("t1").status).toBe("cancelling");
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(row("t1").status).toBe("cancelled");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // The case actually caught in the wild: the daemon was gone by the time the
+  // cancel was asked for, so there was no event *and* no snapshot to fall back
+  // on. A row must not keep claiming to be cancelling on nobody's authority.
+  it("97c. a cancel with nothing answering gives the row back", async () => {
+    vi.useFakeTimers();
+    try {
+      await boot();
+      harness.emit({ started: { id: 1, direction: "send", name: "f", total_size: 1 } });
+      await s().cancel(1);
+      expect(row("t1").status).toBe("cancelling");
+      // Nothing answers any more — not the cancel's event, not the re-read.
+      harness.fail = new Set(["listTransfers", "status"]);
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(row("t1").status).toBe("active");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("98. a later success clears the message", async () => {
     await boot();
     harness.emit({ started: { id: 1, direction: "send", name: "f", total_size: 1 } });

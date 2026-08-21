@@ -241,9 +241,19 @@ async fn dispatch(d: &Daemon, cmd: Request) -> Response {
         Request::ListContacts => Response::Contacts(list_contacts()),
         Request::ListDeposits => Response::Deposits(crate::deposits::list_dtos().await),
         Request::RevokeDeposit { id } => revoke_deposit(d, &id).await,
+        // A bare `Ok` for an id the engine has never heard of is what left front
+        // ends showing "cancelling…" for ever: they take the Ok as "it is being
+        // torn down" and then wait for a `Cancelled` event that nothing will emit.
         Request::Cancel { id } => {
-            d.manager.cancel(id);
-            Response::Ok
+            if d.manager.cancel(id) {
+                Response::Ok
+            } else {
+                Response::Error(
+                    "no such transfer — it has already finished, or belonged to an \
+                     earlier daemon"
+                        .into(),
+                )
+            }
         }
         // Refuse (rather than silently no-op) when the transfer isn't finished:
         // a UI that dropped the row on a bare Ok would show a list that no longer
@@ -1226,6 +1236,12 @@ fn status(d: &Daemon) -> StatusDto {
         pending: d.pending.lock().unwrap().len(),
         download_dir: d.download_dir.display().to_string(),
         display_name: crate::book::my_display_name(),
+        pid: std::process::id(),
+        // Best-effort: an exe path is not guaranteed on every platform, and not
+        // knowing it is no reason to fail a status request.
+        exe: std::env::current_exe()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default(),
     }
 }
 

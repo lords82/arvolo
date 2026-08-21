@@ -643,6 +643,10 @@ pub struct InboxSubscription {
     /// nothing (the relay marks by `(slot, id)`), so this cannot be probed for —
     /// it has to be remembered.
     row_slots: std::sync::Mutex<HashMap<String, String>>,
+    /// Rows that failed to decode in THIS subscription's lifetime — skipped (and
+    /// not re-logged) on later rounds, but never acked: see `poll_wait` on why an
+    /// undecodable row must survive us.
+    undecodable: std::sync::Mutex<std::collections::HashSet<String>>,
     /// When the older slots were last drained, so the steady-state poll loop doesn't
     /// pay for them every round.
     last_backfill: std::sync::Mutex<u64>,
@@ -690,6 +694,7 @@ impl InboxSubscription {
             me_secret: me.secret_bytes(),
             sessions: std::sync::Mutex::new(HashMap::new()),
             row_slots: std::sync::Mutex::new(HashMap::new()),
+            undecodable: std::sync::Mutex::new(std::collections::HashSet::new()),
             last_backfill: std::sync::Mutex::new(0),
         }
     }
@@ -830,10 +835,22 @@ impl InboxSubscription {
                     sender,
                     offer,
                 }),
-                // Junk or an offer we can't authenticate: drop it from our view and
-                // ack it so it stops coming back.
+                // A row we can't decode is NOT acked. Acking marks it "taken" for
+                // the sender and destroys it — and a decode failure is not proof
+                // of junk: a daemon mid-restart with its identity half-loaded
+                // fails this same match on a perfectly good offer, and an ack
+                // here buried it forever (measured, not hypothesized). Skipping
+                // costs nothing: the in-run dedupe stops it from hammering, a
+                // restart retries the decode with fresh state, and true junk
+                // expires with its slot under the relay's row cap anyway.
                 None => {
-                    let _ = self.ack(&item.id).await;
+                    if self.undecodable.lock().unwrap().insert(item.id.clone()) {
+                        tracing::warn!(
+                            "inbox row {} does not decode as an offer for this identity — \
+                             leaving it on the relay (it may be readable after a restart)",
+                            item.id
+                        );
+                    }
                 }
             }
         }

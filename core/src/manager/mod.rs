@@ -140,6 +140,17 @@ pub struct Transfer {
     /// that says "waiting to be picked up" for a week and one that says whether it
     /// ever reached them.
     pub offer_status: String,
+    /// For a receive: the name the sender typed about *themselves*, carried over
+    /// from the offer this download came from. Empty for a send, for a download
+    /// nobody offered (a pasted ticket), and for a sender who advertises nothing.
+    ///
+    /// A claim, never evidence — the same untrusted string as
+    /// [`Offer::sender_name`](crate::presence::Offer::sender_name), kept here only
+    /// so a client can propose it as the name to file them under. It stays on the
+    /// transfer because the offer it came from is consumed by accepting: a UI that
+    /// asks "who was that?" once the download is under way has nowhere else to
+    /// look.
+    pub sender_name: String,
     /// Where a completed receive landed on disk.
     ///
     /// Kept on the transfer, not only announced in [`ManagerEvent::Completed`],
@@ -325,6 +336,7 @@ impl TransferManager {
                 next_id: AtomicU64::new(1),
                 transfers: Mutex::new(HashMap::new()),
                 cancels: Mutex::new(HashMap::new()),
+                recv_aborts: Mutex::new(HashMap::new()),
                 held: Mutex::new(HashMap::new()),
                 pending: Mutex::new(HashMap::new()),
                 events,
@@ -473,6 +485,7 @@ impl TransferManager {
                     from_download: 0,
                     share_started: 0,
                     offer_status: String::new(),
+                    sender_name: String::new(),
                     path: None,
                 },
             );
@@ -494,33 +507,57 @@ impl TransferManager {
         (id, cancel)
     }
 
-    /// Cancel a transfer by id (no-op if it already finished).
-    pub fn cancel(&self, id: u64) {
-        let status = self
+    /// Cancel a transfer by id. `false` only when there is no such transfer.
+    ///
+    /// **Total on purpose.** Every live row this is called on either reaches a
+    /// terminal state here or has a running task that will announce one — because
+    /// the caller in front of a user cannot tell the difference between "working on
+    /// it" and "nothing happened". This used to end with "cancel the token if there
+    /// is one", and a row with no token (nothing removes a *live* row's token today,
+    /// but every future state that ends a task and leaves the row alive would) got
+    /// silence: no status change, no event, and a UI stuck on "cancelling…" for
+    /// ever, waiting for something nobody was going to send.
+    pub fn cancel(&self, id: u64) -> bool {
+        let Some(status) = self
             .inner
             .transfers
             .lock()
             .unwrap()
             .get(&id)
-            .map(|t| t.status.clone());
+            .map(|t| t.status.clone())
+        else {
+            return false;
+        };
         match status {
+            // Already over. Saying so is not the same as doing nothing: the caller
+            // asked for it to be stopped, and it is stopped.
+            TransferStatus::Completed | TransferStatus::Cancelled | TransferStatus::Failed(_) => {
+                return true
+            }
             // A paused send has no running loop to cancel — end it directly.
-            Some(TransferStatus::Paused(_)) => {
+            TransferStatus::Paused(_) => {
                 finish(&self.inner, id, true, Ok(None));
-                return;
+                return true;
             }
             // An awaiting-pickup deposit has no running loop either, and the file
             // is sitting on the relay: withdraw it there before ending the row,
             // or "cancel" would only hide it while the recipient could still fetch.
-            Some(TransferStatus::Deposited) => {
+            TransferStatus::Deposited => {
                 cancel_deposited(self.inner.clone(), id);
-                return;
+                return true;
             }
-            _ => {}
+            TransferStatus::Active | TransferStatus::Waiting(_) => {}
         }
-        if let Some(c) = self.inner.cancels.lock().unwrap().get(&id) {
-            c.cancel();
+        let token = self.inner.cancels.lock().unwrap().get(&id).cloned();
+        match token {
+            // A running task owns the ending: it has to unwind (a serve to close,
+            // a deposit to stop mid-upload) before the row can honestly say it is
+            // over, and it emits `Cancelled` when it does.
+            Some(c) => c.cancel(),
+            // Live status, no task: nothing exists that could ever end this row.
+            None => finish(&self.inner, id, true, Ok(None)),
         }
+        true
     }
 
     // ---- presence ---------------------------------------------------------
@@ -700,6 +737,12 @@ impl TransferManager {
             if let Some(dir) = &self.inner.state_dir {
                 if download_record_path(dir, id).exists() {
                     mark_paused(dir, id);
+                    // Intent BEFORE mechanism: a pause must slip away like a
+                    // network drop (the sender keeps the tail warm for the
+                    // resume), not tell the sender to stop for good.
+                    if let Some(flag) = self.inner.recv_aborts.lock().unwrap().get(&id) {
+                        flag.store(false, Ordering::Relaxed);
+                    }
                     if let Some(c) = self.inner.cancels.lock().unwrap().get(&id) {
                         c.cancel();
                     }
@@ -1415,14 +1458,22 @@ impl TransferManager {
             let _ = sub.ack(offer_id).await;
         }
 
-        Ok(self.start_download_with_password(
+        let id = self.start_download_with_password(
             offer.offer.ticket.clone(),
             out_path,
             Some(offer.sender.clone()),
             offer.offer.name.clone(),
             offer.offer.size,
             password,
-        ))
+        );
+        // Carry the sender's claim about themselves onto the transfer: accepting
+        // consumes the offer, and this is the last moment it exists to be copied.
+        if !offer.offer.sender_name.is_empty() {
+            if let Some(t) = self.inner.transfers.lock().unwrap().get_mut(&id) {
+                t.sender_name = offer.offer.sender_name.clone();
+            }
+        }
+        Ok(id)
     }
 
     /// Start (or resume) a background download of `ticket` into `out_path`. A
@@ -1525,12 +1576,23 @@ impl TransferManager {
             let transferred = Arc::new(AtomicU64::new(0));
             let inner_cb = inner.clone();
             let t_cb = transferred.clone();
+            // Registered so `pause` can flip the intent to "not an abort"
+            // before it cancels — see `RecvCancel`.
+            let abort_intent = Arc::new(std::sync::atomic::AtomicBool::new(true));
+            inner
+                .recv_aborts
+                .lock()
+                .unwrap()
+                .insert(id, abort_intent.clone());
             let result = flow::recv_chunked(
                 &ticket,
                 Some(out_path.clone()),
                 Some(&me),
                 RelayChoice::from_env(),
-                cancel,
+                flow::RecvCancel {
+                    token: cancel,
+                    abort: abort_intent,
+                },
                 move |ev| match ev {
                     RecvEvent::Sender { id: Some(bytes) } => {
                         if let Ok(pk) = PublicId::from_bytes(&bytes) {
@@ -1794,7 +1856,14 @@ mod clear_finished_tests {
         let mk = |status: TransferStatus| {
             let (id, _c) = m.register(Direction::Send, None, "f.bin".into(), 1);
             m.inner.cancels.lock().unwrap().remove(&id);
-            m.inner.set_status(id, status);
+            // Each status through the setter that owns it: `set_status` is for the
+            // ones that mean the task has ended, and says so with an assertion.
+            match status {
+                TransferStatus::Active | TransferStatus::Waiting(_) => {
+                    m.inner.set_status_live(id, status)
+                }
+                _ => m.inner.set_status(id, status),
+            }
             id
         };
         let completed = mk(TransferStatus::Completed);

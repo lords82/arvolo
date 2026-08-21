@@ -64,7 +64,7 @@ async fn offline_deposit_round_trips() {
 
     // Deposit sealed to the recipient (the `send_to` offline path).
     let deposited = deposit_offline(
-        &src,
+        &src.as_path().into(),
         "src.bin",
         &recipient.public(),
         &sender,

@@ -116,7 +116,11 @@ impl Progress {
             return;
         }
         let decile = (done.min(self.total) * 10 / self.total) as u8;
-        if decile != self.last_decile.swap(decile, std::sync::atomic::Ordering::Relaxed) {
+        if decile
+            != self
+                .last_decile
+                .swap(decile, std::sync::atomic::Ordering::Relaxed)
+        {
             eprintln!(
                 "{}: {}% ({}/{})",
                 self.label,
@@ -149,21 +153,22 @@ pub(crate) fn cancel_on_ctrl_c() -> CancellationToken {
 ///
 /// `id` is `None` for a plain (anonymous, unauthenticated) ticket, or the
 /// sender's HPKE-authenticated public-key bytes for a sealed one. Prints to
-/// stderr before the progress bar starts.
-pub(crate) fn print_sender_banner(id: Option<&[u8]>) {
+/// stderr before the progress bar starts. Returns the sender's base32 id when
+/// the transfer is authenticated — the caller needs it to offer saving them.
+pub(crate) fn print_sender_banner(id: Option<&[u8]>) -> Option<String> {
     let bytes = match id {
         None => {
             eprintln!(
                 "⚠  From: anonymous sender — this ticket is not authenticated; anyone \
                  holding it could have created it."
             );
-            return;
+            return None;
         }
         Some(b) => b,
     };
     let Ok(pubid) = PublicId::from_bytes(bytes) else {
         eprintln!("⚠  From: a sender with an unreadable identity in the ticket.");
-        return;
+        return None;
     };
     let id_b32 = encode_id(&pubid);
     let fp = pubid.fingerprint();
@@ -191,6 +196,167 @@ pub(crate) fn print_sender_banner(id: Option<&[u8]>) {
         }
     }
     book::record_seen(&id_b32);
+    Some(id_b32)
+}
+
+// ---- saving the person a file came from ------------------------------------
+//
+// The id is on screen exactly once — while their file is arriving — and that is
+// also the only moment the user reliably knows who sent it. Telling them to run
+// `arvolo contacts add <name> <id>` afterwards means copying 52 base32 characters
+// out of scrollback, so in practice nobody does: senders stay nameless and every
+// later arrival asks the same question again. Asking here costs one line.
+
+/// Turn a sender's advertised display name into a contact name worth suggesting:
+/// lowercased, spaces collapsed to `-`, anything that isn't a letter, digit, `-`
+/// or `_` dropped. `None` when nothing typeable is left — a name nobody can type
+/// back into `--to` is a worse suggestion than no suggestion.
+fn slug_contact_name(advertised: &str) -> Option<String> {
+    let mut out = String::new();
+    for c in sanitize_display(advertised).trim().chars() {
+        if c.is_whitespace() {
+            if !out.ends_with('-') && !out.is_empty() {
+                out.push('-');
+            }
+        } else if c.is_alphanumeric() || c == '-' || c == '_' {
+            out.extend(c.to_lowercase());
+        }
+    }
+    let out = out.trim_matches('-').to_string();
+    (!out.is_empty()).then_some(out)
+}
+
+/// What we propose calling them: the name they advertise — the one still awaiting
+/// approval, or the approved one — never their id.
+fn suggested_contact_name(id_b32: &str) -> Option<String> {
+    book::pending_name_of(id_b32)
+        .or_else(|| book::display_name_of(id_b32))
+        .as_deref()
+        .and_then(slug_contact_name)
+}
+
+/// Read one answer to the save prompt. `None` is "don't save": an empty line with
+/// nothing suggested, or an explicit `n`/`no`. With a suggestion, an empty line
+/// takes it — which is why EOF is handled by the caller and never reaches here.
+fn answer_to_name(answer: &str, suggestion: Option<&str>) -> Option<String> {
+    let answer = answer.trim();
+    if matches!(answer.to_lowercase().as_str(), "n" | "no") {
+        return None;
+    }
+    if answer.is_empty() {
+        return suggestion.map(str::to_string);
+    }
+    Some(answer.to_string())
+}
+
+/// Offer to save the sender of a file that is arriving. Prints nothing and asks
+/// nothing when there is no one to answer (a daemon, a pipe, a script) or when we
+/// already have a name for them.
+pub(crate) fn save_contact_prompt(id_b32: &str) {
+    use std::io::{IsTerminal, Write};
+
+    if book::resolve_name(id_b32).is_some() || !std::io::stdin().is_terminal() {
+        return;
+    }
+    let suggestion = suggested_contact_name(id_b32);
+    loop {
+        match &suggestion {
+            Some(s) => eprint!(
+                "   Save them in your contacts as \"{s}\"? \
+                 (Enter to accept, another name to change it, n to skip) "
+            ),
+            None => eprint!("   Save them in your contacts? (type a name, Enter to skip) "),
+        }
+        let _ = std::io::stderr().flush();
+        let mut line = String::new();
+        match std::io::stdin().read_line(&mut line) {
+            // EOF or a broken stdin is not an answer, and with a suggestion on
+            // screen it must not be read as one — nobody said yes.
+            Ok(0) | Err(_) => return,
+            Ok(_) => {}
+        }
+        let Some(name) = answer_to_name(&line, suggestion.as_deref()) else {
+            return;
+        };
+
+        // A name already spoken for is refused rather than re-pointed: going
+        // through `contact_add` here would report a key change and quietly strip
+        // the other person's verified and trusted marks.
+        if let Some((_, other)) = book::contact_list().into_iter().find(|(n, _)| *n == name) {
+            if other == id_b32 {
+                return;
+            }
+            eprintln!("   '{name}' is already someone else in your contacts — pick another name.");
+            continue;
+        }
+
+        match book::contact_add(&name, id_b32) {
+            Ok(_) => {
+                eprintln!(
+                    "   ✓ saved as {name} — you can send to them with: arvolo send <file> --to {name}"
+                );
+                eprintln!(
+                    "     Their key is not verified yet: compare the fingerprint out-of-band, \
+                     then run `arvolo contacts verify {name}`."
+                );
+            }
+            Err(e) => eprintln!("   ✗ could not save the contact: {e:#}"),
+        }
+        return;
+    }
+}
+
+/// [`save_contact_prompt`] from an async context: the stdin read moves off the
+/// runtime, the same way [`confirm`] does.
+pub(crate) async fn offer_to_save_contact(id_b32: &str) {
+    let id = id_b32.to_string();
+    let _ = tokio::task::spawn_blocking(move || save_contact_prompt(&id)).await;
+}
+
+#[cfg(test)]
+mod save_contact_tests {
+    use super::{answer_to_name, slug_contact_name};
+
+    #[test]
+    fn a_suggestion_has_to_be_typeable() {
+        assert_eq!(slug_contact_name("Lorenzo"), Some("lorenzo".into()));
+        assert_eq!(
+            slug_contact_name("  Anna Maria  "),
+            Some("anna-maria".into())
+        );
+        assert_eq!(
+            slug_contact_name("O'Brien (work)"),
+            Some("obrien-work".into())
+        );
+        // Unicode letters are names too — only punctuation and controls go.
+        assert_eq!(slug_contact_name("Renée"), Some("renée".into()));
+        // Nothing typeable left → no suggestion at all.
+        assert_eq!(slug_contact_name("***"), None);
+        assert_eq!(slug_contact_name("   "), None);
+    }
+
+    // An empty line means two different things depending on whether there is a
+    // suggestion on screen, and getting that backwards would either save a contact
+    // nobody asked for or drop the one they accepted with Enter.
+    #[test]
+    fn enter_takes_the_suggestion_and_only_the_suggestion() {
+        assert_eq!(answer_to_name("", Some("lorenzo")), Some("lorenzo".into()));
+        assert_eq!(
+            answer_to_name("\n", Some("lorenzo")),
+            Some("lorenzo".into())
+        );
+        assert_eq!(answer_to_name("", None), None);
+        // A typed name always wins over the suggestion.
+        assert_eq!(
+            answer_to_name(" boss \n", Some("lorenzo")),
+            Some("boss".into())
+        );
+        // And "no" is never a contact name.
+        for no in ["n", "N", "no", "NO", " No "] {
+            assert_eq!(answer_to_name(no, Some("lorenzo")), None, "{no:?} means no");
+            assert_eq!(answer_to_name(no, None), None);
+        }
+    }
 }
 
 /// Make a remote-supplied, untrusted string safe to print on one terminal line.
@@ -228,7 +394,7 @@ pub(crate) fn note_advertised_name(id_b32: &str, sender_name: &str) {
                 "   🏷  NEW sender — calls themselves \"{}\" (unverified name)",
                 sanitize_display(&name)
             );
-            eprintln!("      approve with: arvolo contacts accept-name {id_b32}");
+            eprintln!("      approve with: arvolo contacts rename {id_b32}");
         }
         book::NameStatus::Changed { old, new } => {
             eprintln!(
@@ -237,7 +403,7 @@ pub(crate) fn note_advertised_name(id_b32: &str, sender_name: &str) {
                 sanitize_display(&old),
                 sanitize_display(&old)
             );
-            eprintln!("      approve the new name: arvolo contacts accept-name {id_b32}");
+            eprintln!("      approve the new name: arvolo contacts rename {id_b32}");
         }
     }
 }

@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
@@ -299,17 +299,24 @@ pub(super) async fn deliver_to(
         // 2) Try the relay mailbox — unless it already refused as too large, or
         //    we're backing off after it was unavailable.
         if !too_big && Instant::now() >= next_relay_try {
-            match deposit_offline_and_offer(
-                &inner,
-                &relay,
-                &recipient,
-                &payload,
-                &name,
-                &note,
-                &MailboxOpts::default(),
-            )
-            .await
-            {
+            // Interruptible: the upload is the longest thing this loop does, and a
+            // cancel that is only noticed once it *finishes* is a cancel that does
+            // nothing for as long as the file takes — minutes on a big one, with the
+            // UI saying "cancelling…" throughout. Dropping the future here abandons
+            // the request in flight; the partial blob expires on the relay with its
+            // slot, which is what an incomplete deposit does anyway.
+            let opts = MailboxOpts::default();
+            let attempt = deposit_offline_and_offer(
+                &inner, &relay, &recipient, &payload, &name, &note, &opts,
+            );
+            let outcome = tokio::select! {
+                _ = cancel.cancelled() => {
+                    handle_stop(&inner, id, &pause_flag);
+                    return;
+                }
+                out = attempt => out,
+            };
+            match outcome {
                 Ok(out) => {
                     drop_held(&inner, id);
                     spawn_offline_confirm(
@@ -414,7 +421,13 @@ pub(super) async fn serve_live_once(
             return LiveOutcome::NotConnected;
         }
     };
-    inner.set_status(id, TransferStatus::Active);
+    // `set_status_live`, emphatically not `set_status`: the latter is for statuses
+    // that mean the task is over (terminal, or paused) and so drops the transfer's
+    // cancel token. Used here it threw the token away at the exact moment the send
+    // started serving — leaving a running transfer that nothing could stop. Every
+    // live P2P send was uncancellable from this line on: `cancel` found no token,
+    // did nothing, said nothing, and the row served on for ever.
+    inner.set_status_live(id, TransferStatus::Active);
 
     // Per-attempt child token: the watchdog cancels *this* to stop serving on
     // fallback, leaving the caller's token (user cancel) untouched.
@@ -476,6 +489,8 @@ pub(super) async fn serve_live_once(
     let d = delivered.clone();
     let stop = attempt.clone();
     let inner_cb = inner.clone();
+    let recipient_cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let rc = recipient_cancelled.clone();
     let result = session
         .serve(attempt, move |ev| match ev {
             SendEvent::ReceiverConnected => c.store(true, Ordering::Relaxed),
@@ -491,6 +506,7 @@ pub(super) async fn serve_live_once(
                 d.store(true, Ordering::Relaxed);
                 stop.cancel();
             }
+            SendEvent::RecipientCancelled => rc.store(true, Ordering::Relaxed),
             SendEvent::Peers { count } => inner_cb.set_download_peers(id, count),
             SendEvent::Ready { .. }
             | SendEvent::ReceiverDropped { .. }
@@ -506,6 +522,21 @@ pub(super) async fn serve_live_once(
     }
     if delivered.load(Ordering::Relaxed) {
         return LiveOutcome::Delivered;
+    }
+    if recipient_cancelled.load(Ordering::Relaxed) {
+        // They said no, on the wire and on purpose. Retract the standing offer
+        // and end the send — retrying would re-offer a file just refused.
+        let _ = presence::retract_offer(
+            &inner.client,
+            relay,
+            recipient,
+            &posted.id,
+            &posted.poster_token,
+        )
+        .await;
+        return LiveOutcome::Fatal(anyhow::anyhow!(
+            "the recipient cancelled the transfer on their side"
+        ));
     }
     if cancel.is_cancelled() {
         return LiveOutcome::Cancelled;
@@ -1064,6 +1095,9 @@ pub(super) async fn serve_session(
                 });
             }
             SendEvent::Peers { count } => inner_cb.set_download_peers(id, count),
+            // A shared ticket outlives any single receiver's refusal — their
+            // abort already suppressed that receiver's backfill; keep serving.
+            SendEvent::RecipientCancelled => {}
             SendEvent::Ready { .. }
             | SendEvent::ReceiverConnected
             | SendEvent::ReceiverDropped { .. }

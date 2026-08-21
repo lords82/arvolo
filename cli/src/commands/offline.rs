@@ -317,10 +317,13 @@ pub(crate) async fn recv_offline(
     .await?;
     progress.finish();
     vprintln!("HPKE authentication passed — the sender in the ticket is genuine");
-    if let Ok(t) = arvolo_core::offline::OfflineTicket::decode(&ticket) {
-        print_sender_banner(Some(&t.sender));
-    }
+    let sender = arvolo_core::offline::OfflineTicket::decode(&ticket)
+        .ok()
+        .and_then(|t| print_sender_banner(Some(&t.sender)));
     crate::ui::saved(&path, n as u64);
+    if let Some(id) = sender {
+        crate::ui::offer_to_save_contact(&id).await;
+    }
     Ok(())
 }
 

@@ -44,6 +44,10 @@ export interface TransferDto {
   /** How far the inbox offer for a deposited send has got. Same vocabulary as a
    *  deposit's `offer_status`; null when there is nothing to say. */
   offer_status?: string | null;
+  /** What the sender of an incoming transfer calls themselves, carried over from
+   *  the offer. Absent from a send, a pasted ticket, and an older daemon — and a
+   *  claim either way, never evidence. */
+  sender_name?: string;
   copies_served?: number;
   bytes_served?: number;
   last_pickup?: number;
@@ -146,6 +150,11 @@ export interface StatusDto {
   download_dir: string;
   /** The display name advertised in offers ("" when none is set). */
   display_name: string;
+  /** The daemon's process id and the binary it runs. Absent from a daemon that
+   *  predates them — everything else here describes the identity, which every
+   *  build shares; only these say which process is answering. */
+  pid?: number;
+  exe?: string;
 }
 
 /** The settings screen: what is in force, and what `config.toml` says. The two

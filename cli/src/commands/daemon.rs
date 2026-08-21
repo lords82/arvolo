@@ -518,6 +518,15 @@ pub(crate) async fn daemon_status_cmd(json: bool) -> Result<()> {
                 return Ok(());
             }
             println!("version:       {}", s.version);
+            // Which process, before what it is doing: with a released install, a
+            // checkout build and one the desktop app spawned all possible on one
+            // machine, "there is a daemon" is only half an answer.
+            if s.pid > 0 {
+                println!("pid:           {}", s.pid);
+            }
+            if !s.exe.is_empty() {
+                println!("running:       {}", s.exe);
+            }
             println!("id:            {}", s.public_id);
             println!("fingerprint:   {}", s.fingerprint);
             println!(
@@ -1086,6 +1095,7 @@ mod share_line_tests {
             last_pickup: 0,
             from_download: 0,
             path: None,
+            sender_name: String::new(),
             offer_status: None,
         }
     }

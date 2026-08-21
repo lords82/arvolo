@@ -24,8 +24,8 @@ pub use offline::{
 // the same granted-TTL answer off it.
 pub(crate) use offline::granted_ttl;
 pub use recv::{
-    default_out, discard_incomplete, recv_chunked, safe_download_name, ChunkSource, RecvEvent,
-    RecvOutcome,
+    default_out, discard_incomplete, recv_chunked, safe_download_name, ChunkSource, RecvCancel,
+    RecvEvent, RecvOutcome,
 };
 pub use send::{prepare_send, resume_send, SendEvent, SendSession};
 pub use sidecar::read_ticket;

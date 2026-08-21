@@ -137,6 +137,10 @@ export const de: Dict = {
   "transfers.liveCode": "Code aktiv",
   "transfers.review": "Ansehen",
   "transfers.shareDetails": "Details zum Teilen",
+  "transfers.saveSender": "Absender speichern…",
+  "transfers.saveSenderTitle": "Absender in den Kontakten speichern",
+  "transfers.saveSenderSub": (name) =>
+    `Diese Person hat Ihnen ${name} geschickt, und Sie haben noch keinen Namen für sie.`,
   "transfers.reorder": (name) =>
     `${name} verschieben: ziehen oder die Pfeiltasten hoch/runter benutzen`,
   "transfers.rowActions": (name) => `Aktionen für ${name}`,
@@ -455,6 +459,7 @@ export const de: Dict = {
     "Ihr Geheimnis. Geben Sie es nicht weiter: wer es hat, ist Sie. Um Arvolo auf einem weiteren eigenen Rechner zu nutzen, gibt es die Geräteverbindung, die es verschlüsselt überträgt.",
   "settings.versions": (daemon, gui) =>
     `Daemon ${daemon} · Oberfläche ${gui}`,
+  "settings.daemonProcess": (pid, exe) => `pid ${pid} · ${exe}`,
   "settings.restartDaemon": "Daemon neu starten",
   "settings.confirmRestartTitle": "Daemon neu starten?",
   "settings.confirmRestartBody":

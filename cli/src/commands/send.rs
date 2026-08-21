@@ -632,6 +632,9 @@ pub(crate) async fn serve_session(
                 eprintln!("Ctrl-C to stop.");
             }
             SendEvent::ReceiverConnected => vprintln!("receiver connected — chunk pull started"),
+            SendEvent::RecipientCancelled => {
+                eprintln!("✗ The receiver cancelled on their side — stopping this send.");
+            }
             SendEvent::Progress { transferred, total } if total > 0 => {
                 let pct = (transferred * 100 / total) as u8;
                 // Narrate every ~10% step, once each.
@@ -820,6 +823,12 @@ pub(crate) async fn send_with_code(
             SendEvent::Delivered => eprintln!("✓ A receiver got the whole file."),
             SendEvent::ReceiverConnected => vprintln!("receiver connected — chunk pull started"),
             SendEvent::Peers { count } => vprintln!("{count} peer(s) downloading"),
+            SendEvent::RecipientCancelled => {
+                eprintln!(
+                    "A receiver cancelled on their side. Anyone still downloading is \
+                     unaffected; with nobody left, this stops serving."
+                )
+            }
             SendEvent::Progress { .. } => {}
             SendEvent::Ready { .. } => {} // code already printed
         })

@@ -24,10 +24,10 @@ import {
 import { useT } from "../i18n";
 import type { UITransfer } from "../types";
 import { Icon } from "../ui/Icons";
-import { Button, Empty, IconButton } from "../ui/Primitives";
-import { ExtChip, Progress } from "../ui/Bits";
+import { Button, Empty, Field, IconButton, TextInput } from "../ui/Primitives";
+import { ExtChip, Fingerprint, Progress } from "../ui/Bits";
 import { MenuButton, type MenuItem } from "../ui/Menu";
-import { Confirm } from "../ui/Sheet";
+import { Confirm, Sheet } from "../ui/Sheet";
 import { toast } from "../ui/Toasts";
 import { useReorder, type ReorderBits } from "./reorder";
 
@@ -53,7 +53,9 @@ function Row({
   const removeRow = useStore((s) => s.removeRow);
   const openIncoming = useStore((s) => s.openIncoming);
   const openShare = useStore((s) => s.openShare);
+  const contactsById = useStore((s) => s.contactsById);
   const [confirmCancel, setConfirmCancel] = useState(false);
+  const [saveSender, setSaveSender] = useState(false);
 
   const st = statusMeta(tx.status);
   const meta = metaLine(tx);
@@ -123,6 +125,24 @@ function Row({
           toast.bad(t("transfers.openFolderFailed"), String(e))
         );
       },
+    });
+  }
+  // Someone is sending you a file and you have no name for them. This is the
+  // moment you know who they are — the offer dialog asks the same question, but
+  // only if you went through it: an auto-accepted arrival, or one you waved past,
+  // otherwise leaves the sender nameless with their id only in the tooltip.
+  // Offers are left out: their own dialog owns that question.
+  const unknownSender =
+    tx.dir === "in" &&
+    tx.status !== "incoming" &&
+    !!tx.peerId &&
+    !contactsById[tx.peerId];
+  if (unknownSender) {
+    items.push({
+      key: "savesender",
+      label: t("transfers.saveSender"),
+      icon: <Icon.People size={13} />,
+      onSelect: () => setSaveSender(true),
     });
   }
   if (live) {
@@ -342,7 +362,111 @@ function Row({
           fire(cancel(tx.id));
         }}
       />
+
+      {/* Mounted only while open, so the suggested name is read from the row as
+          it stands now — a sheet kept mounted behind the board would have seeded
+          its field before the sender's claimed name ever arrived. */}
+      {unknownSender && saveSender && (
+        <SaveSenderSheet open tx={tx} onClose={() => setSaveSender(false)} />
+      )}
     </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+
+/** A contact name worth proposing, from the name the sender types about
+ *  themselves: lowercased, spaces to `-`, punctuation dropped. Empty when
+ *  nothing typeable is left — better no suggestion than one nobody can use. */
+function slugName(claimed: string | undefined): string {
+  return (claimed ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "-")
+    .replace(/[^\p{L}\p{N}_-]/gu, "")
+    .replace(/^-+|-+$/g, "");
+}
+
+/** Save the person on the other end of an incoming transfer, without leaving the
+ *  board. Deliberately the same three facts as the offer dialog — the name you
+ *  choose, the fingerprint to compare, and that saving is not verifying. */
+function SaveSenderSheet({
+  open,
+  tx,
+  onClose,
+}: {
+  open: boolean;
+  tx: UITransfer;
+  onClose: () => void;
+}) {
+  const t = useT();
+  const addContact = useStore((s) => s.addContact);
+  const [name, setName] = useState(() => slugName(tx.senderName));
+  const [busy, setBusy] = useState(false);
+
+  const submit = async () => {
+    const chosen = name.trim();
+    if (!chosen || !tx.peerId) return;
+    setBusy(true);
+    try {
+      await addContact(chosen, tx.peerId);
+      toast.ok(t("incoming.savedAs", chosen), t("incoming.savedAsDetail"));
+      onClose();
+    } catch {
+      // reported by the store
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Sheet
+      open={open}
+      onClose={onClose}
+      placement="center"
+      title={t("transfers.saveSenderTitle")}
+      subtitle={t("transfers.saveSenderSub", tx.name)}
+      footer={
+        <>
+          <div className="spacer" />
+          <Button onClick={onClose} disabled={busy}>
+            {t("common.cancel")}
+          </Button>
+          <Button
+            variant="primary"
+            onClick={submit}
+            disabled={!name.trim() || busy}
+            busy={busy}
+          >
+            {t("common.save")}
+          </Button>
+        </>
+      }
+    >
+      <Field label={t("incoming.saveAsLabel")} hint={t("incoming.saveNote")}>
+        {({ id, describedBy }) => (
+          <TextInput
+            id={id}
+            aria-describedby={describedBy}
+            data-autofocus
+            value={name}
+            onChange={(e) => setName(e.currentTarget.value)}
+            placeholder={t("incoming.saveAsPlaceholder")}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                void submit();
+              }
+            }}
+          />
+        )}
+      </Field>
+      {/* The only handle on them that means anything, so it is shown in full
+          rather than behind a disclosure — same rule as the offer dialog. */}
+      <Field label={t("incoming.senderId")} hint={t("incoming.hintUnknown")}>
+        {() => <Fingerprint value={tx.peerId ?? ""} />}
+      </Field>
+    </Sheet>
   );
 }
 

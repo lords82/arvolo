@@ -387,6 +387,22 @@ pub struct StatusDto {
     /// Optional on the wire for older daemons.
     #[serde(default)]
     pub display_name: String,
+    /// The daemon's process id, and the binary it is running.
+    ///
+    /// Which daemon is answering is not a detail once more than one build of it
+    /// exists on a machine — a released install, a debug build from a checkout,
+    /// one the desktop app spawned. Everything else here describes the *identity*,
+    /// which is the same for all of them; only these two say which **process** you
+    /// are actually talking to, and the answer is what a stale row, an unexpected
+    /// version or "is it even running?" all come down to. `ps` is no substitute:
+    /// the command line is `arvolo … daemon run`, so the obvious search for
+    /// "arvolo daemon" finds nothing at all.
+    ///
+    /// Both optional on the wire: an older daemon predates them and reports 0 / "".
+    #[serde(default)]
+    pub pid: u32,
+    #[serde(default)]
+    pub exe: String,
 }
 
 /// Serializable mirror of [`Transfer`] with a base32 peer id.
@@ -465,6 +481,16 @@ pub struct TransferDto {
     /// `None` for a send, an unfinished receive, or a daemon that predates it.
     #[serde(default)]
     pub path: Option<String>,
+    /// What the sender of an incoming transfer calls themselves, from the offer it
+    /// came from. Empty for a send, a pasted ticket, or a sender advertising
+    /// nothing — and always a claim, never evidence.
+    ///
+    /// Here so a client can offer to save a stranger *while their file arrives*
+    /// with the name already filled in. The offer that carried it is gone by then:
+    /// accepting consumes it, so a row that did not keep the name has no way back
+    /// to it.
+    #[serde(default)]
+    pub sender_name: String,
     /// How far the inbox offer for a **deposited** send has got: `"pending"`,
     /// `"arrived"`, `"taken"`, `"gone"`. `None` when there is nothing to say —
     /// any other kind of row, or a relay not yet asked.
@@ -873,6 +899,7 @@ impl From<&Transfer> for TransferDto {
             last_pickup: t.last_pickup,
             from_download: t.from_download,
             path: t.path.as_ref().map(|p| p.to_string_lossy().into_owned()),
+            sender_name: t.sender_name.clone(),
             offer_status: (!t.offer_status.is_empty()).then(|| t.offer_status.clone()),
         }
     }

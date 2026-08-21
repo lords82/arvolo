@@ -154,6 +154,10 @@ export const en = {
   "transfers.liveCode": "code live",
   "transfers.review": "Review",
   "transfers.shareDetails": "Sharing details",
+  "transfers.saveSender": "Save the sender…",
+  "transfers.saveSenderTitle": "Save the sender to your contacts",
+  "transfers.saveSenderSub": (name: string) =>
+    `They sent you ${name} and you have no name for them yet.`,
   "transfers.reorder": (name: string) =>
     `Move ${name}: drag, or use the up and down arrows`,
   "transfers.rowActions": (name: string) => `Actions for ${name}`,
@@ -468,6 +472,7 @@ export const en = {
     "Your secret. Do not share it: whoever holds it becomes you. To use Arvolo on another machine of yours there is device linking, which hands it over encrypted.",
   "settings.versions": (daemon: string, gui: string) =>
     `Daemon ${daemon} · interface ${gui}`,
+  "settings.daemonProcess": (pid: number, exe: string) => `pid ${pid} · ${exe}`,
   "settings.restartDaemon": "Restart the daemon",
   "settings.confirmRestartTitle": "Restart the daemon?",
   "settings.confirmRestartBody":

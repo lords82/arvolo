@@ -409,9 +409,25 @@ export function SettingsView() {
         <div className="divider" />
 
         <div className="hstack wrap">
-          <span className="t-sm t-sec grow">
-            {t("settings.versions", status?.version || "?", guiVersion || "?")}
-          </span>
+          <div className="grow">
+            <div className="t-sm t-sec">
+              {t("settings.versions", status?.version || "?", guiVersion || "?")}
+            </div>
+            {/* Which daemon this window is actually talking to. A released
+                install, a build from a checkout and one this app spawned can all
+                exist on the same machine, and everything else on this screen
+                describes the identity — which they share. It sits here, directly
+                above the button that restarts it, because that is the moment the
+                question gets asked. */}
+            {!!status?.pid && (
+              <div
+                className="t-xs t-mut mono truncate"
+                title={status.exe || undefined}
+              >
+                {t("settings.daemonProcess", status.pid, status.exe || "?")}
+              </div>
+            )}
+          </div>
           <Button size="sm" onClick={() => setConfirmRestart(true)}>
             <Icon.Refresh size={13} /> {t("settings.restartDaemon")}
           </Button>

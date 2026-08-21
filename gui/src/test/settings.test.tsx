@@ -251,3 +251,27 @@ describe("restarting the daemon", () => {
     watch.stop();
   });
 });
+
+// Which daemon this window is talking to. It sits beside the restart button
+// because that is where the question comes up, and it was the missing half of a
+// real morning's confusion: three builds of the same daemon can exist on one
+// machine, and every other line on this screen describes the identity they share.
+describe("which daemon is answering", () => {
+  it("names the process and the binary it runs", async () => {
+    harness.snapshot.status = {
+      ...harness.snapshot.status!,
+      pid: 4242,
+      exe: "/opt/arvolo/bin/arvolo",
+    };
+    await openSettings();
+    const line = await screen.findByText(/pid 4242/);
+    expect(line.textContent).toContain("/opt/arvolo/bin/arvolo");
+  });
+
+  it("says nothing at all against a daemon too old to report it", async () => {
+    // Not "pid 0", and not an empty line where a fact should be: the field is
+    // absent on the wire, and absent is not zero.
+    await openSettings();
+    expect(screen.queryByText(/pid/i)).toBeNull();
+  });
+});

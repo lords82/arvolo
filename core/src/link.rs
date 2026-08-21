@@ -28,7 +28,6 @@
 //! chunks at [`LINK_CHUNK_SIZE`]), so the per-transfer random key is never reused
 //! against the same nonce — the one invariant AES-GCM requires.
 
-use std::path::Path;
 
 use anyhow::{anyhow, Context, Result};
 
