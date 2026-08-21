@@ -1,5 +1,40 @@
 # Changelog
 
+## v0.12.0-rc1 — cancelling, and saying what is happening
+
+A prerelease off the work branch, for dogfooding.
+
+### Fixed
+
+- **A live send could not be cancelled.** Marking a send `Active` went through the
+  setter that drops the transfer's cancel token, so from the moment it started
+  serving nothing could stop it: `cancel` found no token, did nothing, and said
+  nothing. The window sat on "cancelling…" until it was restarted.
+- **Nothing bounded a request to the daemon.** No timeout anywhere in the IPC
+  client, so a request the daemon never answered hung its caller for good.
+- **Cancel is now total**: every live transfer either reaches a terminal state or
+  has a task that will announce one, and the daemon says so instead of answering
+  `Ok` for an id it has never heard of.
+- **A cancel during a mailbox upload** was only noticed once the upload finished.
+
+### New
+
+- **"Preparing…"** — a send spends its first minutes reading and encrypting the
+  payload, with nothing on the wire and the recipient not yet told anything. It
+  said "active, 0 B", which is what a stuck transfer looks like.
+- **That preparation is no longer repeated per attempt.** A delivery loop retrying
+  against a recipient who has not connected yet reused to redo the whole
+  read-and-encrypt pass every time — about a minute and a half per 10 GB — and
+  minted a new ticket each round, so an offer already in the recipient's inbox
+  went stale. It is computed once and carried.
+- **Save the sender while their file is arriving**, in the CLI and the GUI: their
+  id is on screen exactly once, and that is also the only moment you know who
+  they are.
+- **`daemon status` names the process**: pid and binary, in the CLI and in the
+  GUI's settings, above the button that restarts it.
+- **Direct sends between your own devices** (`--to me`), with a device id in the
+  beacon.
+
 ## v0.11.0 — the CLI, simplified
 
 One verb sends, one verb receives. The surface drops from 18 top-level commands
