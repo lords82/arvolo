@@ -230,17 +230,40 @@ pub(crate) async fn daemon(
                         let who = status.name.clone().unwrap_or_else(|| from_b32.clone());
                         // Trusted sender → auto-download. Everyone else parks and
                         // waits for the user's approval (the default).
-                        if status.trusted {
+                        //
+                        // "Everyone else" excludes ourselves. An offer that opens
+                        // and authenticates as our own identity can only have been
+                        // sealed by something holding our identity secret — another
+                        // of our devices — so there is nobody here to be asked to
+                        // trust. Asking would mean asking the user's permission to
+                        // receive what the user just sent, from the other side of
+                        // the same desk. It is deliberately NOT folded into
+                        // `trusted`: this is a fact about the identity, not a
+                        // standing decision about a contact, and the two are
+                        // revoked by completely different means.
+                        let own_device = is_self(&from_b32);
+                        if status.trusted || own_device {
                             let size_h = human_size(size);
-                            eprintln!(
-                                "⬇ auto-downloading {} ({size_h}) from trusted {who}",
-                                sanitize_display(&name)
-                            );
+                            if own_device {
+                                eprintln!(
+                                    "⬇ auto-downloading {} ({size_h}) from another of your devices",
+                                    sanitize_display(&name)
+                                );
+                            } else {
+                                eprintln!(
+                                    "⬇ auto-downloading {} ({size_h}) from trusted {who}",
+                                    sanitize_display(&name)
+                                );
+                            }
                             // Auto-accept, but still surface a notification so the
                             // user knows a trusted download is happening — unless a
                             // front-end is attached and will say so itself.
                             if should_self_notify(&front_ends) {
-                                notify::auto_downloading(&name, &who, &size_h);
+                                if own_device {
+                                    notify::auto_downloading_own_device(&name, &size_h);
+                                } else {
+                                    notify::auto_downloading(&name, &who, &size_h);
+                                }
                             }
                             if let Err(e) = manager.accept_offer(&id, None).await {
                                 eprintln!("   ✗ could not auto-accept: {e:#}");

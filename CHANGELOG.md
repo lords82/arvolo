@@ -18,6 +18,17 @@
   of them answering "still nothing". A deposit now wakes exactly the slot it
   landed in, which also takes the delivery latency of an offer arriving mid-hold
   from up to half a second down to none.
+- **A file from another of your own devices asked for approval.** Two halves of
+  `--to me` shipped in rc1 were written but never wired up. An offer that opens
+  and authenticates as your own identity can only have been sealed by something
+  holding your identity secret — your other device — so it now downloads without
+  asking, in all three places that decide (the daemon, `recv` attached to it, and
+  standalone `recv`), rather than asking your permission to receive what you just
+  sent yourself.
+- **`send --to me` offered to pair devices that were already paired.** The marker
+  a completed `device pair`/`device join` is supposed to leave was never written,
+  so until the first sync round landed a snapshot from the other side, a
+  freshly-paired identity still looked unpaired.
 
 ## v0.12.0-rc1 — cancelling, and saying what is happening
 

@@ -103,6 +103,9 @@ pub async fn device_pair(relay: Option<String>, qr: bool) -> Result<()> {
             }
         }
     }
+    // The exchange happened: from here on this identity lives on more than one
+    // device, and `send --to me` must stop offering to pair what is already paired.
+    book::mark_paired();
     eprintln!("✓ New device linked — it now shares your identity and address book.");
     Ok(())
 }
@@ -153,6 +156,10 @@ pub async fn device_join(code: String, yes: bool) -> Result<()> {
 
     new_id.save(&path).context("save shared identity")?;
     book::apply_merged_state(&payload.snapshot).context("import address book")?;
+    // Both halves mark it, and this half is the one that would otherwise take
+    // longest to find out: a device that has just joined has nothing of anyone
+    // else's authorship in its sidecar until the first sync round lands.
+    book::mark_paired();
 
     println!(
         "✓ Linked. This device now shares identity {} and {} contact(s).",

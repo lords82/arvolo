@@ -108,7 +108,13 @@ pub(crate) async fn listen(
                         // same `listen` used to behave differently depending on
                         // whether a daemon happened to be up — the daemon-attached
                         // path honours it, this one didn't.
-                        let accept = if status.trusted {
+                        let accept = if is_self(&from_b32) {
+                            // Sealed by something holding our own identity secret,
+                            // which is another of our devices and nobody else. See
+                            // `util::is_self` and the daemon's copy of this rule.
+                            eprintln!("   ⬇ auto-downloading: another of your devices");
+                            true
+                        } else if status.trusted {
                             eprintln!("   ⬇ auto-downloading: trusted contact");
                             true
                         } else if policy.yes {
@@ -192,8 +198,18 @@ pub(crate) async fn handle_attached_offer(
 ) {
     let status = book::sender_status(&offer.from);
     let who = status.name.clone().unwrap_or_else(|| offer.from.clone());
-    // Trusted senders are auto-downloaded by the daemon itself; don't also prompt
-    // for them here (the daemon already accepted or will).
+    // Trusted senders — and our own other devices — are auto-downloaded by the
+    // daemon itself; don't also prompt for them here (the daemon already accepted
+    // or will). This condition has to match the daemon's exactly: a prompt here for
+    // something it already took is a question with no answer that changes anything.
+    if is_self(&offer.from) {
+        book::observe_advertised_name(&offer.from, &offer.sender_name);
+        eprintln!(
+            "⬇ auto-downloading {} from another of your devices",
+            sanitize_display(&offer.name)
+        );
+        return;
+    }
     if status.trusted {
         // Record any advertised-name change silently (it's surfaced later in
         // `contacts list`); never block or prompt for a trusted sender.

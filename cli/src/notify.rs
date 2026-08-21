@@ -45,6 +45,16 @@ pub fn auto_downloading(name: &str, who: &str, size: &str) {
     );
 }
 
+/// The same, for a file sent by another device of the user's own identity. A
+/// separate line rather than a `who` passed into the one above: "da <id>, che è un
+/// contatto fidato" is not what happened, and the id would mean nothing to read.
+pub fn auto_downloading_own_device(name: &str, size: &str) {
+    show(
+        "Arvolo — sto scaricando",
+        format!("“{name}” ({size}) da un altro dei tuoi dispositivi."),
+    );
+}
+
 /// The installed app bundle. macOS attributes a notification to a bundle, not to
 /// a process, and a bare CLI binary has none — so without this the daemon's
 /// notifications are posted by whatever `mac-notification-sys` falls back to,
