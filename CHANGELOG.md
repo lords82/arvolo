@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.12.0-rc3
+
+Same code as rc2, plus the fix that lets a prerelease ship Linux packages at all:
+the .deb files were being built and then discarded when the .rpm in the same step
+rejected the hyphen in the version. Both now get `0.12.0~rc3`, which is how both
+ecosystems spell "sorts before the final release".
+
 ## v0.12.0-rc2
 
 Second prerelease, on top of rc1.
