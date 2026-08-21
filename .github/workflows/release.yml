@@ -149,12 +149,33 @@ jobs:
       # `--no-build` on both: the release binaries are already there, and letting
       # each tool rebuild would double the work and risk two different binaries
       # ending up in the two packages.
+      # A prerelease tag carries a hyphen, and both packaging worlds object — in
+      # opposite ways. RPM refuses the character outright ("invalid version
+      # 0.12.0-rc1"), and because both tools ran in one step that failure landed
+      # *after* the two .deb files were built and took them down with it: the
+      # first prerelease shipped no Linux packages at all. Debian, meanwhile,
+      # accepts the hyphen and reads the tail as a package revision, which sorts
+      # `0.12.0-rc1` **above** `0.12.0` — an rc apt would refuse to upgrade to the
+      # real thing.
+      #
+      # `~` is the one character both ecosystems define as sorting *before*, which
+      # is exactly what a release candidate is: 0.12.0~rc1 < 0.12.0. It is passed
+      # to each tool rather than written into the manifest, because Cargo parses
+      # that version as semver and rejects a tilde outright — rewriting it there
+      # breaks the build before either packager sees it. A final release has no
+      # hyphen, so the same line is a no-op for it.
       - name: Package
         run: |
-          cargo deb --no-build -p arvolo-cli --output "arvolo_${{ github.ref_name }}_${{ matrix.arch }}.deb"
-          cargo deb --no-build -p arvolo-relay --output "arvolo-relay_${{ github.ref_name }}_${{ matrix.arch }}.deb"
-          cargo generate-rpm -p cli --output "arvolo-${{ github.ref_name }}-${{ matrix.arch }}.rpm"
-          cargo generate-rpm -p relay --output "arvolo-relay-${{ github.ref_name }}-${{ matrix.arch }}.rpm"
+          PKGVER="$(printf '%s' "${GITHUB_REF_NAME#v}" | tr '-' '~')"
+          echo "packaging as $PKGVER"
+          cargo deb --no-build -p arvolo-cli --deb-version "$PKGVER" \
+            --output "arvolo_${{ github.ref_name }}_${{ matrix.arch }}.deb"
+          cargo deb --no-build -p arvolo-relay --deb-version "$PKGVER" \
+            --output "arvolo-relay_${{ github.ref_name }}_${{ matrix.arch }}.deb"
+          cargo generate-rpm -p cli -s "version = \"$PKGVER\"" \
+            --output "arvolo-${{ github.ref_name }}-${{ matrix.arch }}.rpm"
+          cargo generate-rpm -p relay -s "version = \"$PKGVER\"" \
+            --output "arvolo-relay-${{ github.ref_name }}-${{ matrix.arch }}.rpm"
       - name: What did we actually build
         run: |
           for f in *.deb; do echo "== $f"; dpkg-deb -I "$f" | sed -n 's/^ //p' | head -12; done
