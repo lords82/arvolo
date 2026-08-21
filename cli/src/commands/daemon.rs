@@ -900,6 +900,53 @@ pub(crate) async fn resume_cmd(id: &str) -> Result<()> {
     Ok(())
 }
 
+/// The guard for a pending descriptor hand-off; `()` where none can exist.
+#[cfg(unix)]
+pub(crate) type FdOfferGuard = arvolo_ipc::fdpass::FdOffer;
+#[cfg(windows)]
+pub(crate) type FdOfferGuard = ();
+
+/// Stand up the descriptor hand-off for `paths` when it applies — unix, exactly
+/// one plain file this process can open. The CLI runs in the user's own context
+/// (macOS settles folder consent here, prompting if it must), so its open
+/// succeeds where the daemon's would not; the daemon then reads through the
+/// descriptor instead of the path. Keep the returned guard alive until the
+/// daemon has replied — its thread is what serves the fd. Every `None` simply
+/// means plain path behavior, as before.
+pub(crate) fn offer_sources(
+    paths: &[PathBuf],
+) -> (Option<ipc::client::FdHandoff>, Option<FdOfferGuard>) {
+    #[cfg(unix)]
+    {
+        if paths.len() != 1 || !paths[0].is_file() {
+            return (None, None);
+        }
+        let Ok(f) = std::fs::File::open(&paths[0]) else {
+            // `guard_readable` in `send` already turned a real permission
+            // problem into its own error; anything left is a race — let the
+            // daemon try the path and report in its own words.
+            return (None, None);
+        };
+        match arvolo_ipc::fdpass::offer_files(vec![f]) {
+            Ok(o) => {
+                let handoff = ipc::client::FdHandoff {
+                    socket: o.socket.display().to_string(),
+                    token: o.token.clone(),
+                };
+                (Some(handoff), Some(o))
+            }
+            Err(_) => (None, None),
+        }
+    }
+    #[cfg(windows)]
+    {
+        // Windows has no per-app folder consent: same-user processes read the
+        // same files, so the daemon's own open is exactly as good.
+        let _ = paths;
+        (None, None)
+    }
+}
+
 /// Hand a plain ticket send to the daemon: it serves in the background and this
 /// returns immediately with the transfer's handle and the `arvc…` ticket — the
 /// caller decides how the ticket is delivered (raw, or written as a `.arvolo`
@@ -919,8 +966,9 @@ pub(crate) async fn serve_ticket_via_daemon(
         })
         .collect::<Result<Vec<_>>>()
         .context("no such file or folder to serve")?;
+    let (handoff, _offer) = offer_sources(&paths);
     let (id, ticket) = client
-        .serve_ticket(paths_s, seed_relay)
+        .serve_ticket(paths_s, seed_relay, handoff)
         .await
         .context("daemon rejected the serve")?;
     Ok((handle_for(&mut client, id).await, ticket))
@@ -946,8 +994,9 @@ pub(crate) async fn serve_code_via_daemon(
         })
         .collect::<Result<Vec<_>>>()
         .context("no such file or folder to serve")?;
+    let (handoff, _offer) = offer_sources(&paths);
     let (id, code) = client
-        .serve_code(paths_s, relay, keep)
+        .serve_code(paths_s, relay, keep, handoff)
         .await
         .context("daemon refused to host the code")?;
     let shown = handle_for(&mut client, id).await;
@@ -997,9 +1046,10 @@ pub(crate) async fn push_via_daemon(
         })
         .collect::<Result<Vec<_>>>()
         .context("no such file or folder to push")?;
+    let (handoff, _offer) = offer_sources(&paths);
     eprintln!("Handing off to the daemon (sending to {to})…");
     let id = client
-        .push(to, paths_s, note, ttl, max, password)
+        .push(to, paths_s, note, ttl, max, password, handoff)
         .await
         .context("daemon rejected the push")?;
     let shown = handle_for(&mut client, id).await;

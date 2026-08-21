@@ -317,6 +317,8 @@ async fn dispatch(d: &Daemon, cmd: Request) -> Response {
             ttl,
             max,
             password,
+            fd_socket,
+            fd_token,
         } => {
             push(
                 d,
@@ -329,12 +331,30 @@ async fn dispatch(d: &Daemon, cmd: Request) -> Response {
                     max,
                     password,
                 },
+                (fd_socket, fd_token),
             )
             .await
         }
-        Request::ServeTicket { paths, seed_relay } => serve_ticket(d, paths, seed_relay).await,
-        Request::ServeCode { paths, relay, keep } => serve_code(d, paths, relay, keep).await,
-        Request::CreateLink { path, ttl, max } => create_link(d, path, ttl, max).await,
+        Request::ServeTicket {
+            paths,
+            seed_relay,
+            fd_socket,
+            fd_token,
+        } => serve_ticket(d, paths, seed_relay, (fd_socket, fd_token)).await,
+        Request::ServeCode {
+            paths,
+            relay,
+            keep,
+            fd_socket,
+            fd_token,
+        } => serve_code(d, paths, relay, keep, (fd_socket, fd_token)).await,
+        Request::CreateLink {
+            path,
+            ttl,
+            max,
+            fd_socket,
+            fd_token,
+        } => create_link(d, path, ttl, max, (fd_socket, fd_token)).await,
         Request::Recv {
             ticket,
             out,
@@ -467,6 +487,7 @@ async fn push(
     paths: Vec<String>,
     note: String,
     opts: MailboxOpts,
+    fds: (Option<String>, Option<String>),
 ) -> Response {
     if paths.is_empty() {
         return Response::Error("provide at least one file or folder to push".into());
@@ -476,10 +497,13 @@ async fn push(
         Err(e) => return Response::Error(format!("{e:#}")),
     };
     let paths: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
-    let (payload, name, archive, temp) = match crate::resolve_payload(&paths) {
+    let (payload, name, archive, temp) = match resolve_payload_for(&paths, &fds) {
         Ok(v) => v,
         Err(e) => return Response::Error(format!("{e:#}")),
     };
+    // Name and archive decision came from the real paths above; only what the
+    // engine will READ becomes the handed-off descriptor, when there is one.
+    let source = adopt_source(fds.0, fds.1, temp.is_none(), payload).await;
 
     // Subscribe *before* sending so a temp archive is cleaned up even if the
     // transfer's terminal event fires before we start watching.
@@ -496,12 +520,12 @@ async fn push(
             password: opts.password.filter(|p| !p.is_empty()),
         };
         d.manager
-            .deposit_to(&recipient, payload, name, note, mailbox)
+            .deposit_to(&recipient, source, name, note, mailbox)
             .await
             .map(|(id, ticket)| (id, Some(ticket)))
     } else {
         d.manager
-            .send_to(&recipient, payload, name, archive, note)
+            .send_to(&recipient, source, name, archive, note)
             .await
             .map(|id| (id, None))
     };
@@ -715,21 +739,27 @@ async fn sync_now(d: &Daemon) -> Response {
     }
 }
 
-async fn serve_ticket(d: &Daemon, paths: Vec<String>, seed_relay: Option<String>) -> Response {
+async fn serve_ticket(
+    d: &Daemon,
+    paths: Vec<String>,
+    seed_relay: Option<String>,
+    fds: (Option<String>, Option<String>),
+) -> Response {
     if paths.is_empty() {
         return Response::Error("provide at least one file or folder to serve".into());
     }
     let paths: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
-    let (payload, name, archive, temp) = match crate::resolve_payload(&paths) {
+    let (payload, name, archive, temp) = match resolve_payload_for(&paths, &fds) {
         Ok(v) => v,
         Err(e) => return Response::Error(format!("{e:#}")),
     };
+    let source = adopt_source(fds.0, fds.1, temp.is_none(), payload).await;
     // Subscribe before serving so the temp archive is cleaned up once the serving
     // transfer ends (it stays alive for the whole session — chunks are on the fly).
     let watch = temp.clone().map(|t| (d.manager.subscribe(), t));
     match d
         .manager
-        .serve_ticket(payload, name, archive, seed_relay)
+        .serve_ticket(source, name, archive, seed_relay)
         .await
     {
         Ok((id, ticket)) => {
@@ -749,7 +779,13 @@ async fn serve_ticket(d: &Daemon, paths: Vec<String>, seed_relay: Option<String>
 
 /// Host a short pairing code in the daemon: the rendezvous *and* the ticket
 /// behind it, so the terminal that asked for the code can go away.
-async fn serve_code(d: &Daemon, paths: Vec<String>, relay: Option<String>, keep: bool) -> Response {
+async fn serve_code(
+    d: &Daemon,
+    paths: Vec<String>,
+    relay: Option<String>,
+    keep: bool,
+    fds: (Option<String>, Option<String>),
+) -> Response {
     if paths.is_empty() {
         return Response::Error("provide at least one file or folder to serve".into());
     }
@@ -761,10 +797,11 @@ async fn serve_code(d: &Daemon, paths: Vec<String>, relay: Option<String>, keep:
         );
     };
     let paths: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
-    let (payload, name, archive, temp) = match crate::resolve_payload(&paths) {
+    let (payload, name, archive, temp) = match resolve_payload_for(&paths, &fds) {
         Ok(v) => v,
         Err(e) => return Response::Error(format!("{e:#}")),
     };
+    let source = adopt_source(fds.0, fds.1, temp.is_none(), payload).await;
     // Same cleanup contract as `serve_ticket`: a packed archive has to stay
     // readable for the whole session, so it goes when the transfer ends.
     let watch = temp.clone().map(|t| (d.manager.subscribe(), t));
@@ -773,7 +810,7 @@ async fn serve_code(d: &Daemon, paths: Vec<String>, relay: Option<String>, keep:
     let max_sessions = (!keep).then_some(1);
     match d
         .manager
-        .serve_code(payload, name, archive, relay, true, max_sessions)
+        .serve_code(source, name, archive, relay, true, max_sessions)
         .await
     {
         Ok((id, code)) => {
@@ -952,7 +989,13 @@ async fn recv_ticket(
 /// deposit a public, browser-openable download link on the relay. The key rides
 /// in the URL fragment; the relay only ever sees ciphertext. Mirrors the CLI's
 /// `--link` send, including saving a revocable deposit record.
-async fn create_link(d: &Daemon, path: String, ttl: Option<u64>, max: Option<u32>) -> Response {
+async fn create_link(
+    d: &Daemon,
+    path: String,
+    ttl: Option<u64>,
+    max: Option<u32>,
+    fds: (Option<String>, Option<String>),
+) -> Response {
     let relay = match d.relay.as_deref() {
         Some(r) => r.to_string(),
         None => return Response::Error("no relay configured — links need a relay".into()),
@@ -960,12 +1003,16 @@ async fn create_link(d: &Daemon, path: String, ttl: Option<u64>, max: Option<u32
     let ttl = ttl.unwrap_or(7 * 24 * 3600);
     let max = max.unwrap_or(crate::deposits::UNLIMITED);
 
-    let (payload, _name, _archive, temp) = match crate::resolve_payload(&[PathBuf::from(path)]) {
+    let (payload, _name, _archive, temp) = match resolve_payload_for(&[PathBuf::from(path)], &fds)
+    {
         Ok(v) => v,
         Err(e) => return Response::Error(format!("{e:#}")),
     };
+    // The upload happens inside this handler; the source (and any descriptor
+    // inside it) lives exactly as long as this call.
+    let source = adopt_source(fds.0, fds.1, temp.is_none(), payload).await;
 
-    let outcome = arvolo_core::link::deposit_link(&payload, &relay, ttl, max).await;
+    let outcome = arvolo_core::link::deposit_link(source, &relay, ttl, max).await;
     if let Some(t) = &temp {
         let _ = std::fs::remove_file(t);
     }
@@ -998,6 +1045,83 @@ async fn create_link(d: &Daemon, path: String, ttl: Option<u64>, max: Option<u32
 }
 
 /// Remove a packed-archive temp once its transfer reaches a terminal state.
+/// [`crate::resolve_payload`], minus one assumption: a request that carries a
+/// descriptor hand-off for its single path must not depend on the daemon being
+/// able to even `stat` that path (macOS folder consent, systemd `ProtectHome=`).
+/// The client only offers descriptors for a single regular file, so the name
+/// comes straight from the path string and the payload from the descriptor.
+fn resolve_payload_for(
+    paths: &[PathBuf],
+    fds: &(Option<String>, Option<String>),
+) -> anyhow::Result<(PathBuf, String, bool, Option<PathBuf>)> {
+    if fds.0.is_some() && fds.1.is_some() && paths.len() == 1 {
+        let name = paths[0]
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "file".into());
+        return Ok((paths[0].clone(), name, false, None));
+    }
+    crate::resolve_payload(paths)
+}
+
+/// Adopt the descriptor hand-off riding on a request, when there is one: a
+/// single plain-file source becomes a [`SendSource::Handle`] — the CLI opened
+/// the file in the user's own context (macOS settles folder consent at that
+/// open, with a prompt the daemon could never show), and the descriptor
+/// crossed over via [`arvolo_ipc::fdpass`]. Anything else — archives,
+/// directories, requests without the fields, an old client — stays a path.
+/// The engine reads the handle positionally and never re-opens anything, and
+/// the descriptor lives exactly as long as the send that uses it (it rides
+/// inside the source).
+async fn adopt_source(
+    fd_socket: Option<String>,
+    fd_token: Option<String>,
+    single_plain_file: bool,
+    payload: PathBuf,
+) -> arvolo_core::source::SendSource {
+    #[cfg(unix)]
+    {
+        let (Some(sock), Some(token)) = (&fd_socket, &fd_token) else {
+            return payload.into();
+        };
+        if !single_plain_file {
+            return payload.into();
+        }
+        let (sock, token) = (sock.clone(), token.clone());
+        let fetched = tokio::task::spawn_blocking(move || {
+            arvolo_ipc::fdpass::take_files(std::path::Path::new(&sock), &token, 1)
+        })
+        .await;
+        match fetched {
+            Ok(Ok(mut files)) => {
+                // The label is the original path: names, errors and the
+                // persisted retry record all speak it, never a raw fd number.
+                arvolo_core::source::SendSource::handle(
+                    files.remove(0),
+                    payload.to_string_lossy(),
+                )
+            }
+            Ok(Err(e)) => {
+                // The path may still be readable here (same-user setups mostly
+                // are) — degrade rather than fail, but say so.
+                tracing::warn!("descriptor hand-off failed ({e:#}); trying the path");
+                payload.into()
+            }
+            Err(e) => {
+                tracing::warn!("descriptor hand-off task died ({e}); trying the path");
+                payload.into()
+            }
+        }
+    }
+    #[cfg(windows)]
+    {
+        // No per-app folder consent on Windows: same-user processes read the
+        // same files, so the fields are never set and paths just work.
+        let _ = (fd_socket, fd_token, single_plain_file);
+        payload.into()
+    }
+}
+
 fn spawn_temp_cleanup(
     mut rx: tokio::sync::broadcast::Receiver<ManagerEvent>,
     id: u64,

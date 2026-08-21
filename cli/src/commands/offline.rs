@@ -162,7 +162,7 @@ pub(crate) async fn send_sealed(
         }
     );
     let deposited = match flow::deposit_offline(
-        &payload,
+        &payload.as_path().into(),
         &name,
         &recipient,
         &me,

@@ -118,7 +118,7 @@ impl std::error::Error for DepositError {}
 
 #[allow(clippy::too_many_arguments)]
 pub async fn deposit_offline(
-    path: &Path,
+    source: &crate::source::SendSource,
     name: &str,
     recipient: &PublicId,
     me: &Identity,
@@ -129,14 +129,15 @@ pub async fn deposit_offline(
 ) -> std::result::Result<Deposited, DepositError> {
     use std::sync::{Arc, Mutex};
 
-    use tokio::io::AsyncReadExt;
     use DepositError::Fatal;
-    let io = |e: std::io::Error| Fatal(anyhow::Error::from(e));
 
-    if !path.is_file() {
-        return Err(Fatal(anyhow::anyhow!("{} is not a file", path.display())));
+    // Only a path can be pre-checked; a handed-off descriptor IS the access.
+    if let crate::source::SendSource::Path(p) = source {
+        if !p.is_file() {
+            return Err(Fatal(anyhow::anyhow!("{} is not a file", p.display())));
+        }
     }
-    let total_size = tokio::fs::metadata(path).await.map_err(io)?.len();
+    let total_size = source.len().map_err(Fatal)?;
     let total_chunks = if total_size == 0 {
         0
     } else {
@@ -183,31 +184,45 @@ pub async fn deposit_offline(
     // Stash it out of band: after the request fails, a stashed error means Fatal, its
     // absence means the network. Without this, a mid-file read error would demote to
     // Unavailable and invite a pointless retry.
-    let src = path.to_path_buf();
+    let src = source.clone();
     let fatal: Arc<Mutex<Option<anyhow::Error>>> = Arc::new(Mutex::new(None));
     let fatal_w = fatal.clone();
     let body = reqwest::Body::wrap_stream(async_stream::stream! {
-        let mut infile = match tokio::fs::File::open(&src).await {
-            Ok(f) => f,
-            Err(e) => {
-                *fatal_w.lock().unwrap() = Some(anyhow::Error::from(e));
-                yield Err(std::io::Error::other("open source file"));
-                return;
-            }
-        };
-        let mut buf = vec![0u8; CHUNK_SIZE as usize];
         for idx in 0..total_chunks {
             let want = if idx == total_chunks - 1 {
                 (total_size - idx as u64 * CHUNK_SIZE as u64) as usize
             } else {
                 CHUNK_SIZE as usize
             };
-            if let Err(e) = infile.read_exact(&mut buf[..want]).await {
-                *fatal_w.lock().unwrap() = Some(anyhow::Error::from(e));
-                yield Err(std::io::Error::other("read source file"));
-                return;
-            }
-            match seal_chunk(&key, idx, total_chunks, &buf[..want]) {
+            // Positional reads through the source (path OR handed-off
+            // descriptor), off the async workers: a 16 MiB read is blocking.
+            let s = src.clone();
+            let read = tokio::task::spawn_blocking(move || -> std::io::Result<Vec<u8>> {
+                let mut buf = vec![0u8; want];
+                let n = s.read_at_full(&mut buf, idx as u64 * CHUNK_SIZE as u64)?;
+                if n != want {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "source shrank mid-deposit",
+                    ));
+                }
+                Ok(buf)
+            })
+            .await;
+            let buf = match read {
+                Ok(Ok(buf)) => buf,
+                Ok(Err(e)) => {
+                    *fatal_w.lock().unwrap() = Some(anyhow::Error::from(e));
+                    yield Err(std::io::Error::other("read source file"));
+                    return;
+                }
+                Err(e) => {
+                    *fatal_w.lock().unwrap() = Some(anyhow::Error::from(e));
+                    yield Err(std::io::Error::other("read source file"));
+                    return;
+                }
+            };
+            match seal_chunk(&key, idx, total_chunks, &buf) {
                 Ok(ct) => yield Ok::<Vec<u8>, std::io::Error>(ct),
                 Err(e) => {
                     *fatal_w.lock().unwrap() = Some(e);

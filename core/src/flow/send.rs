@@ -112,15 +112,20 @@ async fn fetch_relay_release(client: &reqwest::Client, url: &str) -> Result<Rela
 /// token so the tail can be backfilled if the receiver drops (nothing is
 /// uploaded yet — that's lazy, in [`SendSession::serve`]).
 pub async fn prepare_send(
-    path: &Path,
+    source: impl Into<crate::source::SendSource>,
     name: &str,
     archive: bool,
     to: Option<(&Identity, &PublicId)>,
     seed_relay: Option<String>,
     relay: RelayChoice,
 ) -> Result<SendSession> {
-    anyhow::ensure!(path.is_file(), "{} is not a file", path.display());
-    let sender = ChunkSender::serve(path, relay)
+    let source = source.into();
+    // Only a path can be pre-checked; a handed-off descriptor IS the proof of
+    // access, and may have no visible path at all.
+    if let crate::source::SendSource::Path(p) = &source {
+        anyhow::ensure!(p.is_file(), "{} is not a file", p.display());
+    }
+    let sender = ChunkSender::serve(source, relay)
         .await
         .context("start sender")?;
     let client = crate::http::client();

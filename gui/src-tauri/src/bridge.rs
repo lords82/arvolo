@@ -197,7 +197,11 @@ pub async fn send_to(
     let mut c = client().await?;
     // The GUI's live send carries no mailbox options: its mailbox mode goes
     // through `deposit` below, which has always carried them.
-    c.push(to, paths, note, None, None, None).await.or_else(err)
+    // No descriptor hand-off from the GUI: its daemon is a child of the app
+    // and inherits the app's own file-access grants.
+    c.push(to, paths, note, None, None, None, None)
+        .await
+        .or_else(err)
 }
 
 /// `send --deposit`: straight to the recipient's mailbox, with the options that
@@ -215,7 +219,7 @@ pub async fn deposit_to(
 ) -> Result<ServedDto, String> {
     let paths = state.resolve(&items)?;
     let mut c = client().await?;
-    match c.deposit(to, paths, note, ttl, max, password).await {
+    match c.deposit(to, paths, note, ttl, max, password, None).await {
         Ok((id, ticket)) => Ok(ServedDto { id, ticket }),
         Err(e) => err(e),
     }
@@ -286,7 +290,7 @@ pub async fn serve_ticket(
 ) -> Result<ServedDto, String> {
     let paths = state.resolve(&items)?;
     let mut c = client().await?;
-    match c.serve_ticket(paths, seed_relay).await {
+    match c.serve_ticket(paths, seed_relay, None).await {
         Ok((id, ticket)) => Ok(ServedDto { id, ticket }),
         Err(e) => err(e),
     }
@@ -301,7 +305,7 @@ pub async fn create_link(
 ) -> Result<String, String> {
     let path = state.resolve(std::slice::from_ref(&item))?.remove(0);
     let mut c = client().await?;
-    c.create_link(path, ttl, max).await.or_else(err)
+    c.create_link(path, ttl, max, None).await.or_else(err)
 }
 
 #[tauri::command]
@@ -365,7 +369,7 @@ pub async fn serve_code(
 ) -> Result<CodeDto, String> {
     let paths = state.resolve(&items)?;
     let mut c = client().await?;
-    match c.serve_code(paths, relay, keep).await {
+    match c.serve_code(paths, relay, keep, None).await {
         Ok((id, code)) => Ok(CodeDto { id, code }),
         Err(e) => err(e),
     }

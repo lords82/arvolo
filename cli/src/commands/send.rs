@@ -77,7 +77,11 @@ pub(crate) async fn send_cmd(opts: SendOpts) -> Result<()> {
                     .with_context(|| format!("{}", opts.paths[0].display()))?
                     .to_string_lossy()
                     .into_owned();
-                match client.create_link(abs, Some(opts.ttl), opts.max).await {
+                let (handoff, _offer) = crate::commands::daemon::offer_sources(&opts.paths);
+                match client
+                    .create_link(abs, Some(opts.ttl), opts.max, handoff)
+                    .await
+                {
                     Ok(url) => {
                         println!("{url}");
                         eprintln!(

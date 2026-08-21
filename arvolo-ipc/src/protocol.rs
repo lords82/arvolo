@@ -66,12 +66,26 @@ pub enum Request {
         /// End-to-end password on the deposit; the recipient must supply it.
         #[serde(default)]
         password: Option<String>,
+        /// Descriptor hand-off (unix): a one-shot socket + pairing token where
+        /// the client serves the sources' open fds, one per path in order —
+        /// see [`crate::fdpass`]. The daemon then reads files the OS would not
+        /// let it open by path (macOS privacy-guarded folders). Both default
+        /// to `None` and an old daemon ignores them: plain path behavior.
+        #[serde(default)]
+        fd_socket: Option<String>,
+        #[serde(default)]
+        fd_token: Option<String>,
     },
     /// Serve an anonymous P2P ticket in the background (no recipient); paths are on
     /// the *daemon's* filesystem. → [`Response::Served`].
     ServeTicket {
         paths: Vec<String>,
         seed_relay: Option<String>,
+        /// Descriptor hand-off, exactly as on [`Request::Push`].
+        #[serde(default)]
+        fd_socket: Option<String>,
+        #[serde(default)]
+        fd_token: Option<String>,
     },
     /// Serve a short pairing code in the background: the daemon hosts the
     /// rendezvous *and* the ticket behind it. → [`Response::CodeServed`].
@@ -85,6 +99,11 @@ pub enum Request {
         relay: Option<String>,
         #[serde(default)]
         keep: bool,
+        /// Descriptor hand-off, exactly as on [`Request::Push`].
+        #[serde(default)]
+        fd_socket: Option<String>,
+        #[serde(default)]
+        fd_token: Option<String>,
     },
     /// Deposit a public, browser-openable **download link** for `path` (on the
     /// daemon's filesystem) on the relay → [`Response::Link`]. `ttl` defaults to
@@ -93,6 +112,11 @@ pub enum Request {
         path: String,
         ttl: Option<u64>,
         max: Option<u32>,
+        /// Descriptor hand-off (single fd), exactly as on [`Request::Push`].
+        #[serde(default)]
+        fd_socket: Option<String>,
+        #[serde(default)]
+        fd_token: Option<String>,
     },
     /// Cancel a transfer by id → [`Response::Ok`].
     Cancel { id: u64 },
@@ -951,6 +975,8 @@ mod tests {
                 ttl: None,
                 max: None,
                 password: None,
+                fd_socket: None,
+                fd_token: None,
             },
         };
         let line = serde_json::to_string(&env).unwrap();
@@ -978,6 +1004,8 @@ mod tests {
                 ttl: None,
                 max: None,
                 password: None,
+                fd_socket: None,
+                fd_token: None,
             }
         );
     }

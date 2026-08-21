@@ -32,6 +32,7 @@ use tokio::sync::{mpsc, Mutex as AsyncMutex};
 
 use crate::backfill::RelayRelease;
 use crate::node::{decode_ticket, encode_ticket, local_addr_of, remote_addr_of};
+use crate::source::SendSource;
 use crate::transfer::{bind_endpoint, bind_endpoint_with_key, RelayChoice};
 
 /// Chunk size: 16 MiB.
@@ -39,7 +40,7 @@ pub const CHUNK_SIZE: u32 = 16 * 1024 * 1024;
 
 /// Read from `f` until `buf` is full or EOF (a single `read` may return less).
 /// Returns the number of bytes filled (0 at EOF).
-fn fill(f: &mut std::fs::File, buf: &mut [u8]) -> std::io::Result<usize> {
+fn fill(f: &mut impl std::io::Read, buf: &mut [u8]) -> std::io::Result<usize> {
     let mut filled = 0;
     while filled < buf.len() {
         match f.read(&mut buf[filled..])? {
@@ -152,9 +153,10 @@ async fn read_frame<T: serde::de::DeserializeOwned>(recv: &mut RecvStream) -> Op
 /// A provider of chunk ciphertext: regenerated on the fly from a file (sender)
 /// or read from stored files (relay).
 enum ChunkBackend {
-    /// Regenerate any chunk from the original plaintext file, on demand.
+    /// Regenerate any chunk from the original plaintext source, on demand —
+    /// positional reads, so a handed-off descriptor serves as well as a path.
     OnTheFly {
-        path: PathBuf,
+        source: SendSource,
         key: [u8; crate::crypto::CHUNK_KEY_LEN],
         index: HashMap<Hash, u32>,
         total_chunks: u32,
@@ -186,17 +188,16 @@ impl ChunkBackend {
     fn produce(&self, hash: &Hash) -> Option<Vec<u8>> {
         match self {
             ChunkBackend::OnTheFly {
-                path,
+                source,
                 key,
                 index,
                 total_chunks,
             } => {
                 let idx = *index.get(hash)?;
-                let mut file = std::fs::File::open(path).ok()?;
-                file.seek(SeekFrom::Start(idx as u64 * CHUNK_SIZE as u64))
-                    .ok()?;
                 let mut buf = vec![0u8; CHUNK_SIZE as usize];
-                let n = fill(&mut file, &mut buf).ok()?;
+                let n = source
+                    .read_at_full(&mut buf, idx as u64 * CHUNK_SIZE as u64)
+                    .ok()?;
                 let ct = crate::crypto::seal_chunk(key, idx, *total_chunks, &buf[..n]).ok()?;
                 Some(ct)
             }
@@ -594,10 +595,10 @@ struct Hashed {
 }
 
 impl ChunkSender {
-    /// Serve `path` under a fresh random per-transfer content key and node id.
-    pub async fn serve(path: &Path, relay: RelayChoice) -> Result<Self> {
+    /// Serve `source` under a fresh random per-transfer content key and node id.
+    pub async fn serve(source: impl Into<SendSource>, relay: RelayChoice) -> Result<Self> {
         Self::serve_resume(
-            path,
+            source,
             relay,
             crate::crypto::random_chunk_key(),
             crate::node::random_node_seed(),
@@ -605,16 +606,17 @@ impl ChunkSender {
         .await
     }
 
-    /// Serve `path` under an explicit content `key` and transport `node_seed`.
+    /// Serve `source` under an explicit content `key` and transport `node_seed`.
     /// Used to *resume* a previous send: the same key over the same (unchanged)
     /// file reproduces identical chunk hashes, and the same seed reproduces the
     /// same node id — so the ticket the original session handed out stays valid.
     pub async fn serve_resume(
-        path: &Path,
+        source: impl Into<SendSource>,
         relay: RelayChoice,
         key: [u8; crate::crypto::CHUNK_KEY_LEN],
         node_seed: [u8; 32],
     ) -> Result<Self> {
+        let source = source.into();
         // Compute the chunk hashes by streaming the file (bounded memory), WITHOUT
         // storing any ciphertext — chunks are regenerated on demand while serving.
         //
@@ -625,21 +627,20 @@ impl ChunkSender {
         // once therefore occupied every worker and the daemon stopped answering
         // its control socket at all: `arvolo status` and the GUI both hung until
         // the last one finished, which looks exactly like a crash and is not one.
-        let owned = path.to_path_buf();
+        let owned = source.clone();
         let Hashed {
             total_size,
             total_chunks,
             chunks,
             index,
         } = tokio::task::spawn_blocking(move || -> Result<Hashed> {
-            let total_size = std::fs::metadata(&owned)
-                .with_context(|| format!("stat {}", owned.display()))?
-                .len();
+            let total_size = owned.len()?;
             let total_chunks = (total_size as usize).div_ceil(CHUNK_SIZE as usize) as u32;
             let mut chunks = Vec::new();
             let mut index: HashMap<Hash, u32> = HashMap::new();
-            let mut file =
-                std::fs::File::open(&owned).with_context(|| format!("open {}", owned.display()))?;
+            let mut file = owned
+                .sequential_reader()
+                .with_context(|| format!("open {}", owned.label()))?;
             let mut buf = vec![0u8; CHUNK_SIZE as usize];
             let mut idx: u32 = 0;
             loop {
@@ -666,7 +667,7 @@ impl ChunkSender {
         let sent = SentBytes::default();
         let chunk_server = ChunkServer {
             backend: Arc::new(ChunkBackend::OnTheFly {
-                path: path.to_path_buf(),
+                source,
                 key,
                 index,
                 total_chunks,

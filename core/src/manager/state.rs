@@ -17,7 +17,7 @@ use super::*;
 #[derive(Clone)]
 pub(super) struct Held {
     pub(super) recipient: PublicId,
-    pub(super) payload: PathBuf,
+    pub(super) source: crate::source::SendSource,
     pub(super) name: String,
     pub(super) archive: bool,
     /// Optional sender note to attach to the offer.

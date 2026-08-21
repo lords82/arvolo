@@ -22,6 +22,7 @@ pub mod node;
 pub mod offline;
 pub mod pairing;
 pub mod presence;
+pub mod source;
 pub mod swarm;
 pub mod sync;
 pub mod transfer;

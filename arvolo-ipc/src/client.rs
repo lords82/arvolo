@@ -58,6 +58,22 @@ async fn open() -> Result<(Read, Write)> {
     }
 }
 
+/// Where a request's source descriptors are being served — the client-side pair
+/// for [`crate::fdpass`] (`offer_files` yields both). Plain strings so callers
+/// on every platform compile; only unix daemons ever collect.
+#[derive(Clone, Debug)]
+pub struct FdHandoff {
+    pub socket: String,
+    pub token: String,
+}
+
+fn split(fds: Option<FdHandoff>) -> (Option<String>, Option<String>) {
+    match fds {
+        Some(f) => (Some(f.socket), Some(f.token)),
+        None => (None, None),
+    }
+}
+
 impl DaemonClient {
     /// Connect to the daemon control socket. Returns `Err` if it's absent or
     /// refuses (no daemon running) — the signal for callers to fall back.
@@ -152,7 +168,9 @@ impl DaemonClient {
         ttl: Option<u64>,
         max: Option<u32>,
         password: Option<String>,
+        fds: Option<FdHandoff>,
     ) -> Result<u64> {
+        let (fd_socket, fd_token) = split(fds);
         match self
             .request(Request::Push {
                 to,
@@ -162,6 +180,8 @@ impl DaemonClient {
                 ttl,
                 max,
                 password,
+                fd_socket,
+                fd_token,
             })
             .await?
         {
@@ -180,7 +200,9 @@ impl DaemonClient {
         ttl: Option<u64>,
         max: Option<u32>,
         password: Option<String>,
+        fds: Option<FdHandoff>,
     ) -> Result<(u64, String)> {
+        let (fd_socket, fd_token) = split(fds);
         match self
             .request(Request::Push {
                 to,
@@ -190,6 +212,8 @@ impl DaemonClient {
                 ttl,
                 max,
                 password,
+                fd_socket,
+                fd_token,
             })
             .await?
         {
@@ -203,9 +227,16 @@ impl DaemonClient {
         &mut self,
         paths: Vec<String>,
         seed_relay: Option<String>,
+        fds: Option<FdHandoff>,
     ) -> Result<(u64, String)> {
+        let (fd_socket, fd_token) = split(fds);
         match self
-            .request(Request::ServeTicket { paths, seed_relay })
+            .request(Request::ServeTicket {
+                paths,
+                seed_relay,
+                fd_socket,
+                fd_token,
+            })
             .await?
         {
             Response::Served { id, ticket } => Ok((id, ticket)),
@@ -219,9 +250,17 @@ impl DaemonClient {
         paths: Vec<String>,
         relay: Option<String>,
         keep: bool,
+        fds: Option<FdHandoff>,
     ) -> Result<(u64, String)> {
+        let (fd_socket, fd_token) = split(fds);
         match self
-            .request(Request::ServeCode { paths, relay, keep })
+            .request(Request::ServeCode {
+                paths,
+                relay,
+                keep,
+                fd_socket,
+                fd_token,
+            })
             .await?
         {
             Response::CodeServed { id, code } => Ok((id, code)),
@@ -236,8 +275,19 @@ impl DaemonClient {
         path: String,
         ttl: Option<u64>,
         max: Option<u32>,
+        fds: Option<FdHandoff>,
     ) -> Result<String> {
-        match self.request(Request::CreateLink { path, ttl, max }).await? {
+        let (fd_socket, fd_token) = split(fds);
+        match self
+            .request(Request::CreateLink {
+                path,
+                ttl,
+                max,
+                fd_socket,
+                fd_token,
+            })
+            .await?
+        {
             Response::Link(url) => Ok(url),
             other => unexpected(other),
         }

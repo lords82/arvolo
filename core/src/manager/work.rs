@@ -142,7 +142,9 @@ pub(super) fn persist_held_record(inner: &Inner, id: u64, paused: bool, reason: 
             &SendToRecord {
                 id,
                 recipient: h.recipient.to_bytes(),
-                payload: h.payload.to_string_lossy().into_owned(),
+                // A handle's label is its original path: the best a restart can
+                // do is retry by name (and fail visibly if the daemon may not).
+                payload: h.source.label(),
                 name: h.name.clone(),
                 archive: h.archive,
                 paused,
@@ -203,7 +205,7 @@ pub(super) async fn deliver_to(
     cancel: CancellationToken,
     relay: String,
     recipient: PublicId,
-    payload: PathBuf,
+    payload: crate::source::SendSource,
     name: String,
     archive: bool,
     note: String,
@@ -366,13 +368,13 @@ pub(super) async fn serve_live_once(
     cancel: &CancellationToken,
     relay: &str,
     recipient: &PublicId,
-    payload: &Path,
+    payload: &crate::source::SendSource,
     name: &str,
     archive: bool,
     note: &str,
 ) -> LiveOutcome {
     let session = match flow::prepare_send(
-        payload,
+        payload.clone(),
         name,
         archive,
         Some((&inner.me, recipient)),
@@ -564,12 +566,12 @@ pub(super) async fn deposit_offline_and_offer(
     inner: &Inner,
     relay: &str,
     recipient: &PublicId,
-    payload: &Path,
+    payload: &crate::source::SendSource,
     name: &str,
     note: &str,
     opts: &MailboxOpts,
 ) -> std::result::Result<DepositOutcome, flow::DepositError> {
-    let size = std::fs::metadata(payload).map(|m| m.len()).unwrap_or(0);
+    let size = payload.len().unwrap_or(0);
     let ttl = opts.ttl.unwrap_or(OFFLINE_TTL_SECS);
     let max = opts.max.unwrap_or(OFFLINE_MAX_DOWNLOADS);
     let deposited = flow::deposit_offline(

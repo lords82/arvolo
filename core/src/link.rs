@@ -79,11 +79,18 @@ fn total_chunks_for(size: u64, chunk_size: u32) -> u32 {
 
 /// Encrypt `path` into a link container blob. Returns the blob, the per-transfer
 /// key (goes in the URL fragment), the file name, and its plaintext size.
-pub fn encrypt_link(path: &Path) -> Result<(Vec<u8>, [u8; CHUNK_KEY_LEN], String, u64)> {
-    anyhow::ensure!(path.is_file(), "{} is not a file", path.display());
-    let data = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+pub fn encrypt_link(
+    source: impl Into<crate::source::SendSource>,
+) -> Result<(Vec<u8>, [u8; CHUNK_KEY_LEN], String, u64)> {
+    let source = source.into();
+    if let crate::source::SendSource::Path(p) = &source {
+        anyhow::ensure!(p.is_file(), "{} is not a file", p.display());
+    }
+    let data = source.read_all()?;
     let size = data.len() as u64;
-    let name = path
+    // The label is the original path (or filename) even for a handed-off
+    // descriptor, so the download page never says "3" for `/dev/fd/3`.
+    let name = std::path::Path::new(&source.label())
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("download.bin")
@@ -209,7 +216,13 @@ pub async fn relay_allows_links(relay: &str) -> Result<bool> {
 /// sealed to a specific recipient: whoever holds the link (its fragment key) can
 /// download it — the link *is* the capability. The relay still only sees
 /// ciphertext.
-pub async fn deposit_link(path: &Path, relay: &str, ttl: u64, max: u32) -> Result<LinkOutcome> {
+pub async fn deposit_link(
+    source: impl Into<crate::source::SendSource>,
+    relay: &str,
+    ttl: u64,
+    max: u32,
+) -> Result<LinkOutcome> {
+    let source = source.into();
     // Fail fast (before encrypting/uploading) if the relay administrator has
     // turned links off — with a message that says exactly that.
     anyhow::ensure!(
@@ -218,7 +231,7 @@ pub async fn deposit_link(path: &Path, relay: &str, ttl: u64, max: u32) -> Resul
          send it sealed to a recipient with --to, or use a different relay"
     );
 
-    let (blob, key, name, size) = encrypt_link(path)?;
+    let (blob, key, name, size) = encrypt_link(source)?;
 
     // Sender-held revoke secret; the relay stores only its BLAKE3 hash.
     let revoke_token = random_token();

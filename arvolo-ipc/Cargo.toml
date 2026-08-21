@@ -19,5 +19,12 @@ data-encoding = "2"
 # opens is decided in `client::open`; everything above that is the same protocol.
 tokio = { workspace = true }
 
+# Hands open file descriptors from the CLI to the daemon over a one-shot unix
+# socket (SCM_RIGHTS): the daemon then serves files it could never open itself
+# (macOS keeps Downloads & co. behind per-app consent, and consent prompts are
+# never shown for background daemons). See `fdpass`.
+[target.'cfg(unix)'.dependencies]
+sendfd = "0.4"
+
 [dev-dependencies]
 tempfile = "3"

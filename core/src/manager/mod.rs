@@ -546,15 +546,16 @@ impl TransferManager {
     pub async fn send_to(
         &self,
         recipient: &PublicId,
-        payload: PathBuf,
+        payload: impl Into<crate::source::SendSource>,
         name: String,
         archive: bool,
         note: String,
     ) -> Result<u64> {
+        let source = payload.into();
         let relay = self.inner.relay.clone().context(
             "a relay is required to send to a contact (set ARVOLO_RELAY or config `relay`)",
         )?;
-        let size = std::fs::metadata(&payload).map(|m| m.len()).unwrap_or(0);
+        let size = source.len().unwrap_or(0);
         let (id, cancel) =
             self.register(Direction::Send, Some(recipient.clone()), name.clone(), size);
         let pause_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -562,7 +563,7 @@ impl TransferManager {
             id,
             Held {
                 recipient: recipient.clone(),
-                payload: payload.clone(),
+                source: source.clone(),
                 name: name.clone(),
                 archive,
                 note: note.clone(),
@@ -576,7 +577,7 @@ impl TransferManager {
             cancel,
             relay,
             recipient.clone(),
-            payload,
+            source,
             name,
             archive,
             note,
@@ -598,17 +599,18 @@ impl TransferManager {
     pub async fn deposit_to(
         &self,
         recipient: &PublicId,
-        payload: PathBuf,
+        payload: impl Into<crate::source::SendSource>,
         name: String,
         note: String,
         opts: MailboxOpts,
     ) -> Result<(u64, String)> {
+        let payload = payload.into();
         let relay = self
             .inner
             .relay
             .clone()
             .context("a relay is required to deposit to a contact's mailbox")?;
-        let size = std::fs::metadata(&payload).map(|m| m.len()).unwrap_or(0);
+        let size = payload.len().unwrap_or(0);
         let (id, cancel) =
             self.register(Direction::Send, Some(recipient.clone()), name.clone(), size);
 
@@ -743,7 +745,7 @@ impl TransferManager {
                 cancel,
                 relay,
                 h.recipient,
-                h.payload,
+                h.source,
                 h.name,
                 h.archive,
                 h.note,
@@ -866,8 +868,11 @@ impl TransferManager {
         let Some(relay) = self.inner.relay.clone() else {
             return; // can't deliver without a relay; drop the stale record
         };
-        let payload = PathBuf::from(&rec.payload);
-        let size = std::fs::metadata(&payload).map(|m| m.len()).unwrap_or(0);
+        // Records only ever hold a path (a handed-off descriptor died with the
+        // process that held it): the restart retries by name and, if the daemon
+        // may not open it, fails with the reason on the transfer.
+        let source = crate::source::SendSource::Path(PathBuf::from(&rec.payload));
+        let size = source.len().unwrap_or(0);
         let (id, cancel) = self.register(
             Direction::Send,
             Some(recipient.clone()),
@@ -879,7 +884,7 @@ impl TransferManager {
             id,
             Held {
                 recipient: recipient.clone(),
-                payload: payload.clone(),
+                source: source.clone(),
                 name: rec.name.clone(),
                 archive: rec.archive,
                 note: rec.note.clone(),
@@ -904,7 +909,7 @@ impl TransferManager {
                 cancel,
                 relay,
                 recipient,
-                payload,
+                source,
                 rec.name,
                 rec.archive,
                 rec.note,
@@ -950,13 +955,14 @@ impl TransferManager {
     /// there's no recipient, no offer, and no mailbox fallback.
     pub async fn serve_ticket(
         &self,
-        payload: PathBuf,
+        payload: impl Into<crate::source::SendSource>,
         name: String,
         archive: bool,
         seed_relay: Option<String>,
     ) -> Result<(u64, String)> {
+        let payload = payload.into();
         let session = flow::prepare_send(
-            &payload,
+            payload.clone(),
             &name,
             archive,
             None,
@@ -986,7 +992,7 @@ impl TransferManager {
                 dir,
                 &SendRecord {
                     id,
-                    path: payload.to_string_lossy().into_owned(),
+                    path: payload.label(),
                     node_seed: node_seed.to_vec(),
                     ticket: ticket.clone(),
                     owned_stage: None,
@@ -1008,13 +1014,14 @@ impl TransferManager {
     /// the process that claimed it, which is the whole point here.
     pub async fn serve_code(
         &self,
-        payload: PathBuf,
+        payload: impl Into<crate::source::SendSource>,
         name: String,
         archive: bool,
         relay: String,
         embed: bool,
         max_sessions: Option<u32>,
     ) -> Result<(u64, String)> {
+        let payload = payload.into();
         anyhow::ensure!(
             code::relay_rz_version(&relay).await == code::RzVersion::V2,
             "relay {relay} is too old to host a background code (needs rendezvous v2) — \
