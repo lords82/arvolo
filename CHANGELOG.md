@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.12.0-rc2
+
+Second prerelease, on top of rc1.
+
+- **Preparing a send now uses several cores.** Reading stays sequential — that is
+  what a disk wants — while sealing and hashing the chunks runs on four threads.
+  `seal_chunk` is a pure function of `(key, index, bytes)`, so the digests are
+  identical to the single-threaded ones; only the wall clock changes. Measured
+  132 → 411 MiB/s, which takes a 10.7 GiB file from 83 seconds to 27 before the
+  recipient is offered anything.
+- **`--to me` is wired up end to end**: the two halves of sending between your own
+  devices had been written but never connected.
+- **The relay's inbox long-poll holds properly**, and a deposit wakes it.
+- A `cargo fmt` sweep: the check had been failing for a while.
+
 ## Unreleased
 
 ### Fixed
