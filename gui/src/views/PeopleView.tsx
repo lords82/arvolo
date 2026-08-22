@@ -118,12 +118,14 @@ function PersonRow({ c }: { c: ContactDto }) {
       ? {
           key: "untrust",
           label: t("people.menuUntrust"),
+          desc: t("people.menuUntrustDesc"),
           icon: <Icon.Star size={13} />,
           onSelect: () => fire(markUntrusted(c.name)),
         }
       : {
           key: "trust",
           label: t("people.menuTrust"),
+          desc: t("people.menuTrustDesc"),
           icon: <Icon.Star size={13} />,
           onSelect: () => {
             if (c.verified) fire(markTrusted(c.name, false));
@@ -257,9 +259,6 @@ function PersonRow({ c }: { c: ContactDto }) {
             {t("people.confirmForceBody", c.name)}
             <div style={{ marginTop: 10 }}>
               <Fingerprint value={c.fingerprint} />
-            </div>
-            <div style={{ marginTop: 10 }}>
-              {t("people.confirmForceFooter")}
             </div>
           </>
         }

@@ -18,6 +18,10 @@ export interface MenuItem {
   key: string;
   label: string;
   icon?: ReactNode;
+  /** A second line under the label, for an item whose effect is not obvious
+   *  from a verb alone ("Trust" — and then what happens?). The label stays the
+   *  verb; this is what the verb used to be dragging along behind it. */
+  desc?: string;
   onSelect: () => void;
   disabled?: boolean;
   danger?: boolean;
@@ -125,7 +129,16 @@ export function Menu({
               }}
             >
               {item.icon}
-              {item.label}
+              {item.desc ? (
+                <span className="grow" style={{ textAlign: "left" }}>
+                  {item.label}
+                  <span className="t-xs t-mut" style={{ display: "block" }}>
+                    {item.desc}
+                  </span>
+                </span>
+              ) : (
+                item.label
+              )}
             </button>
           </div>
         );

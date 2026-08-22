@@ -198,7 +198,7 @@ export const en = {
   "transfers.firstRunAction": "Send something",
 
   // ---- people ------------------------------------------------------------
-  "people.presenceUnknownTitle": "No idea: the relay didn't answer",
+  "people.presenceUnknownTitle": "The relay didn't answer",
   "people.presenceUnknownLabel": "Presence unknown",
   "people.presenceOnTitle": "Connected right now",
   "people.presenceOffTitle": "Not connected",
@@ -206,62 +206,69 @@ export const en = {
   "people.presenceOff": "Not connected",
 
   "people.menuDetails": "Details and fingerprint",
-  "people.menuUnverify": "Take back the verification",
+  "people.menuUnverify": "Unverify",
   "people.menuVerify": "Mark as verified…",
-  "people.menuUntrust": "No longer trusted: ask me every time",
-  "people.menuTrust": "Mark as trusted: download automatically",
+  "people.menuUntrust": "Stop trusting",
+  "people.menuUntrustDesc": "You'll be asked for each file.",
+  "people.menuTrust": "Trust",
+  "people.menuTrustDesc": "Their files download without asking.",
   "people.menuUnblock": "Unblock",
   "people.menuBlock": "Block",
-  "people.menuRemove": "Remove from the address book",
+  "people.menuRemove": "Remove from contacts",
   "people.rowActions": (name: string) => `Actions for ${name}`,
   "people.notVerified": "Not verified",
-  "people.notVerifiedTitle": "The fingerprint has never been compared",
+  "people.notVerifiedTitle": "Fingerprint never compared",
   "people.claimedPlain": (name: string) => `(“${name}”)`,
   "people.claimedNew": (name: string) => `(calls themselves “${name}”)`,
   "people.claimedChange": (now: string, before: string) =>
     `(now: “${now}” — was: “${before}”)`,
+  // A tooltip: it has to be readable at a glance or it is not one.
   "people.claimedTip": (mine: string) =>
-    `The name they chose for themselves. It can change at any time, and it is not proof of who they are — the name you use, “${mine}”, never changes on its own.`,
+    `Their own label, not proof. Yours — “${mine}” — never changes on its own.`,
   "people.claimedNote": (mine: string) =>
-    `Here is the name they now advertise. Yours for them stays “${mine}” either way — acknowledging only stops the highlight until they change it again.`,
+    `The name they now advertise. Yours for them stays “${mine}”.`,
   "people.acknowledge": "Got it",
   "people.send": "Send",
   "people.details": "Details",
 
   "people.confirmRemoveTitle": (name: string) => `Remove ${name}?`,
   "people.confirmRemoveBody":
-    "They disappear from the address book along with their verified and trusted marks. Transfers already made stay in the history.",
-  "people.confirmForceTitle": "Download automatically from an unverified key?",
+    "The verified and trusted marks go with them. Past transfers stay in the history.",
+  "people.confirmForceTitle": "Trust an unverified key?",
+  // Floored in copy-rules.ts: it must say the fingerprint was never compared
+  // *and* what that lets through. The footer is gone — it repeated the
+  // conclusion the body had just reached.
   "people.confirmForceBody": (name: string) =>
-    `Files from ${name} would be downloaded without asking you anything, but you have never compared their fingerprint in person. If somebody had got in the middle when you added them, you would be auto-downloading from that person.`,
-  "people.confirmForceFooter":
-    "The right way round is to compare the fingerprint and then mark them verified.",
+    `You have never compared ${name}'s fingerprint. If somebody got in the middle when you added them, you would be auto-downloading from that person.`,
   "people.confirmForceLabel": "Force it anyway",
   "people.confirmForceCancel": "I'll verify first",
 
   "people.addTitle": "Add by id",
-  "people.addSubtitle": "The long way round: you need their public id in full.",
+  "people.addSubtitle": "You need their public id in full.",
   "people.addNameLabel": "What you call them",
   "people.addNamePlaceholder": "e.g. Julia",
   "people.addIdLabel": "Public id",
   "people.addIdHint":
     "They find it with “arvolo me”, or on the Settings screen of their app.",
-  "people.addTip":
-    "Far simpler: Swap contacts. You read each other a short code and you both end up saved and already verified, without copying fifty characters.",
+  // A pointer, not a second telling: `pair.subContactHost` is where swapping
+  // codes is explained, on the sheet that does it.
+  "people.addTip": "Swapping codes is quicker.",
   "people.addSaved": (name: string) => `Saved ${name}`,
   "people.addSavedDetail":
     "They stay unverified until you compare the fingerprint.",
 
   "person.fingerprint": "Fingerprint",
+  // The canonical wording. Everywhere else that needs this either points here
+  // or repeats it verbatim — nine near-variants was eight too many.
   "person.fingerprintHint":
-    "The same words have to appear on their screen. Compare them out loud or in person — not over a chat on the same channel you swapped ids on.",
+    "The same words must appear on their screen. Compare them out loud, not over the channel you swapped ids on.",
   "person.publicId": "Public id",
   "person.verified": "Verified",
   "person.verifiedBody": "You have confirmed this fingerprint out of band.",
-  "person.unverify": "Take back the verification",
+  "person.unverify": "Unverify",
   "person.notVerifiedYet": "Not verified yet",
   "person.notVerifiedBody":
-    "Until you compare the fingerprint, the only thing you know is that somebody gave you that id.",
+    "All you know so far is that somebody gave you that id.",
   "person.compared": (name: string) =>
     `I compared the fingerprint with ${name} outside this app.`,
   "person.markVerified": "Mark as verified",
@@ -269,31 +276,31 @@ export const en = {
   "person.renameHint": "The name is yours: the key and the marks stay put.",
 
   "people.swap": "Swap contacts",
-  "people.haveCode": "I have a pairing code",
+  "people.haveCode": "Enter a code",
   "people.byId": "By id",
   "people.export": "Export",
   "people.import": "Import",
   "people.whoIsOnline": "Who's about",
-  "people.whoIsOnlineTitle": "Ask the relay who is connected right now",
-  "people.moreActions": "Other address-book actions",
-  "people.prune": "Clean up orphaned names",
+  "people.whoIsOnlineTitle": "Ask the relay who is connected",
+  "people.moreActions": "More actions",
+  "people.prune": "Clean up orphans",
   "people.pruneNone": "Nothing to clean up",
   "people.pruneOne": "Removed 1 record",
   "people.pruneMany": (n: number) => `Removed ${n} records`,
   "people.pruneDetail":
     "They were names advertised by contacts you no longer have.",
-  "people.filterLabel": "Address-book filter",
+  "people.filterLabel": "Contact filter",
   "people.filterAll": "All",
   "people.filterVerified": "Verified",
   "people.filterTrusted": "Trusted",
   "people.filterBlocked": "Blocked",
   "people.filterBlockedN": (n: number) => `Blocked (${n})`,
   "people.searchPlaceholder": "Search by name or id…",
-  "people.searchLabel": "Search the address book",
+  "people.searchLabel": "Search contacts",
   "people.emptyNone": "Nobody in the address book",
   "people.emptyNoMatch": "No contact matches",
   "people.emptyNoneBody":
-    "The quickest way to add somebody is to read them a short code: you save each other and you are verified straight away, with no ids to copy by hand.",
+    "Swapping codes is quickest: you save each other, already verified.",
   "people.emptyNoMatchBody": "Try a different filter or search.",
   "people.exportFilename": "arvolo-contacts.json",
   "people.exportedOne": "Exported 1 contact",

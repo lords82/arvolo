@@ -977,11 +977,11 @@ describe("the address book", () => {
     useStore.getState().go("people");
     fireEvent.click(await screen.findByLabelText("Actions for proj"));
     fireEvent.click(
-      within(await screen.findByRole("menu")).getByText(/Mark as trusted/)
+      within(await screen.findByRole("menu")).getByText(en["people.menuTrust"])
     );
     // Not sent yet: auto-downloading from an unconfirmed key is a MITM risk.
     expect(harness.recorder.markTrusted).toEqual([]);
-    fireEvent.click(await screen.findByText("Force it anyway"));
+    fireEvent.click(await screen.findByText(en["people.confirmForceLabel"]));
     await waitFor(() =>
       expect(harness.recorder.markTrusted).toEqual([["proj", true]])
     );
@@ -993,7 +993,7 @@ describe("the address book", () => {
     useStore.getState().go("people");
     fireEvent.click(await screen.findByLabelText("Actions for proj"));
     fireEvent.click(
-      within(await screen.findByRole("menu")).getByText(/Mark as trusted/)
+      within(await screen.findByRole("menu")).getByText(en["people.menuTrust"])
     );
     await waitFor(() =>
       expect(harness.recorder.markTrusted).toEqual([["proj", false]])
@@ -1007,7 +1007,7 @@ describe("pairing", () => {
   it("hosting a contact exchange starts a session and shows its code", async () => {
     render(<App />);
     useStore.getState().go("people");
-    fireEvent.click((await screen.findAllByText("Swap contacts"))[0]);
+    fireEvent.click((await screen.findAllByText(en["people.swap"]))[0]);
     await waitFor(() =>
       expect(harness.recorder.startPairing[0]?.[0]).toBe("contact_host")
     );
@@ -1023,7 +1023,7 @@ describe("pairing", () => {
   it("joining opens the code input without contacting the daemon first", async () => {
     render(<App />);
     useStore.getState().go("people");
-    fireEvent.click(await screen.findByText("I have a pairing code"));
+    fireEvent.click(await screen.findByText(en["people.haveCode"]));
     // Starting a session now would spawn one that fails instantly ("a pairing
     // code is required") and replace the very input the user is meant to type
     // into with a spinner.
@@ -1043,7 +1043,7 @@ describe("pairing", () => {
   it("starting a second exchange retires the first", async () => {
     render(<App />);
     useStore.getState().go("people");
-    fireEvent.click((await screen.findAllByText("Swap contacts"))[0]);
+    fireEvent.click((await screen.findAllByText(en["people.swap"]))[0]);
     await waitFor(() => expect(useStore.getState().pairing?.session).toBe("pair-1"));
     // The hosting side waits until cancelled, so an orphaned session would keep
     // its rendezvous slot with no handle left anywhere to stop it.
@@ -1084,7 +1084,7 @@ describe("pairing", () => {
   it("closing the sheet cancels the session on the daemon", async () => {
     render(<App />);
     useStore.getState().go("people");
-    fireEvent.click((await screen.findAllByText("Swap contacts"))[0]);
+    fireEvent.click((await screen.findAllByText(en["people.swap"]))[0]);
     await waitFor(() => expect(useStore.getState().pairing?.session).toBe("pair-1"));
     fireEvent.click(screen.getByLabelText("Close"));
     await waitFor(() =>
@@ -1095,7 +1095,7 @@ describe("pairing", () => {
   it("a cancelled exchange is not reported back as an error", async () => {
     render(<App />);
     useStore.getState().go("people");
-    fireEvent.click(await screen.findByText("I have a pairing code"));
+    fireEvent.click(await screen.findByText(en["people.haveCode"]));
     await screen.findByText("Code");
     useStore.setState({
       pairing: {

@@ -45,16 +45,10 @@ function worst(key: string): number {
 
 /** What was over the cap when this gate was written. Shrinks to nothing. */
 const DEBT: Record<string, number> = {
-  "people.confirmForceBody": 220,
   "transfers.firstRunBody": 176,
   "incoming.passwordHint": 176,
   "incoming.hintUnknown": 162,
-  "people.claimedNote": 158,
   "deposits.intro": 154,
-  "people.claimedTip": 148,
-  "people.emptyNoneBody": 147,
-  "people.addTip": 144,
-  "person.fingerprintHint": 139,
   "deposits.confirmRevokeLink": 139,
   "deposits.confirmRevokeSealed": 139,
   "receive.explainEmpty": 138,
@@ -64,29 +58,21 @@ const DEBT: Record<string, number> = {
   "app.disconnected": 93,
   "meta.preparing": 82,
   "app.versionMismatch": 81,
-  "people.confirmForceFooter": 78,
   "share.fromDownload": 77,
   "incoming.claimedName": 63,
   "transfers.saveSenderSub": 61,
   "transfers.reorder": 53,
-  "people.addSubtitle": 53,
-  "person.compared": 52,
-  "people.confirmForceTitle": 48,
   "store.loadTransfers": 47,
   "store.loadHistory": 45,
   "store.loadConfig": 45,
   "store.loadDeposits": 43,
   "bits.qrTooDense": 42,
-  "people.menuTrust": 41,
   "store.loadSync": 41,
-  "people.menuUntrust": 38,
   "palette.sync": 37,
-  "people.moreActions": 33,
   "palette.pauseAll": 32,
   "palette.placeholder": 32,
   "receive.passwordLabel": 30,
   "palette.pairContact": 30,
-  "people.searchLabel": 29,
   "palette.clearFinished": 29,
 };
 
@@ -158,7 +144,6 @@ describe("the app speaks in no voice of its own", () => {
   const USER_VOICE = new Set([
     "person.compared", // the claim the user signs by ticking the box
     "people.confirmForceCancel", // "I'll verify first" — a choice, in their words
-    "people.haveCode",
     "incoming.later",
     "pair.understood", // "I understand: this device loses its identity."
     "pair.captionDevice", // quotes the button above, which is the user's words

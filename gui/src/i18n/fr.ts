@@ -175,7 +175,7 @@ export const fr: Dict = {
     "Ou choisissez un contact, générez un code court à lire à voix haute, ou créez un lien qui s'ouvre dans n'importe quel navigateur. Tout est chiffré de bout en bout : le relais ne voit que des octets illisibles.",
   "transfers.firstRunAction": "Envoyer quelque chose",
 
-  "people.presenceUnknownTitle": "Je ne sais pas : le relais n'a pas répondu",
+  "people.presenceUnknownTitle": "Le relais n'a pas répondu",
   "people.presenceUnknownLabel": "Présence inconnue",
   "people.presenceOnTitle": "Connecté en ce moment",
   "people.presenceOffTitle": "Non connecté",
@@ -185,63 +185,57 @@ export const fr: Dict = {
   "people.menuDetails": "Détails et empreinte",
   "people.menuUnverify": "Retirer la vérification",
   "people.menuVerify": "Marquer comme vérifié…",
-  "people.menuUntrust": "Plus de confiance : me demander à chaque fois",
-  "people.menuTrust": "Marquer comme fiable : téléchargement automatique",
+  "people.menuUntrust": "Retirer la confiance",
+  "people.menuUntrustDesc": "On vous demandera pour chaque fichier.",
+  "people.menuTrust": "Faire confiance",
+  "people.menuTrustDesc": "Ses fichiers se téléchargent sans rien demander.",
   "people.menuUnblock": "Débloquer",
   "people.menuBlock": "Bloquer",
-  "people.menuRemove": "Retirer du carnet d'adresses",
+  "people.menuRemove": "Retirer des contacts",
   "people.rowActions": (name) => `Actions pour ${name}`,
   "people.notVerified": "Non vérifié",
-  "people.notVerifiedTitle": "L'empreinte n'a jamais été comparée",
+  "people.notVerifiedTitle": "Empreinte jamais comparée",
   "people.claimedPlain": (name) => `(« ${name} »)`,
   "people.claimedNew": (name) => `(se présente comme « ${name} »)`,
   "people.claimedChange": (now, before) =>
     `(maintenant : « ${now} » — avant : « ${before} »)`,
   "people.claimedTip": (mine) =>
-    `Le nom qu'il s'est choisi. Il peut changer à tout moment et ne prouve pas son identité : le nom que vous utilisez, « ${mine} », ne change jamais tout seul.`,
+    `Son étiquette, pas une preuve. Le vôtre — « ${mine} » — ne change pas seul.`,
   "people.claimedNote": (mine) =>
-    `Voici le nom sous lequel il se présente désormais. Pour vous, il reste « ${mine} » dans tous les cas — en prendre acte ne fait que retirer la mise en évidence jusqu'à ce qu'il en change à nouveau.`,
+    `Le nom sous lequel il se présente. Pour vous, il reste « ${mine} ».`,
   "people.acknowledge": "J'ai vu",
   "people.send": "Envoyer",
   "people.details": "Détails",
 
   "people.confirmRemoveTitle": (name) => `Supprimer ${name} ?`,
-  "people.confirmRemoveBody":
-    "Cette personne disparaît du carnet d'adresses avec ses marques de vérification et de confiance. Les transferts déjà faits restent dans l'historique.",
-  "people.confirmForceTitle":
-    "Télécharger automatiquement depuis une clé non vérifiée ?",
+  "people.confirmRemoveBody": "Ses marques de vérification et de confiance partent avec lui. Les transferts passés restent dans l'historique.",
+  "people.confirmForceTitle": "Faire confiance à une clé non vérifiée ?",
   "people.confirmForceBody": (name) =>
-    `Les fichiers de ${name} seraient téléchargés sans rien vous demander, alors que vous n'avez jamais comparé son empreinte en personne. Si quelqu'un s'était interposé au moment où vous l'avez ajouté, c'est de cette personne que vous téléchargeriez automatiquement.`,
-  "people.confirmForceFooter":
-    "La bonne façon de faire : comparer l'empreinte, puis marquer le contact comme vérifié.",
+    `Vous n'avez jamais comparé l'empreinte de ${name}. Si quelqu'un s'est interposé au moment de l'ajout, vous téléchargeriez automatiquement depuis cette personne.`,
   "people.confirmForceLabel": "Forcer quand même",
   "people.confirmForceCancel": "Je vérifie d'abord",
 
   "people.addTitle": "Ajouter par identifiant",
-  "people.addSubtitle":
-    "Le chemin long : il faut son identifiant public en entier.",
+  "people.addSubtitle": "Il faut son identifiant public en entier.",
   "people.addNameLabel": "Comment vous l'appelez",
   "people.addNamePlaceholder": "ex. Julie",
   "people.addIdLabel": "Identifiant public",
   "people.addIdHint":
     "Il le trouve avec « arvolo me », ou dans l'écran Réglages de son application.",
-  "people.addTip":
-    "Bien plus simple : Échanger les contacts. Vous vous lisez un code court et vous vous retrouvez tous les deux enregistrés et déjà vérifiés, sans copier cinquante caractères.",
+  "people.addTip": "L'échange par code est plus rapide.",
   "people.addSaved": (name) => `${name} enregistré`,
   "people.addSavedDetail":
     "Reste non vérifié tant que vous n'avez pas comparé l'empreinte.",
 
   "person.fingerprint": "Empreinte",
-  "person.fingerprintHint":
-    "Les mêmes mots doivent apparaître sur son écran. Comparez-les à voix haute ou en personne — pas par messagerie sur le canal qui vous a servi à échanger l'identifiant.",
+  "person.fingerprintHint": "Les mêmes mots doivent apparaître sur son écran. Comparez-les à voix haute, pas par le canal du partage d'identifiants.",
   "person.publicId": "Identifiant public",
   "person.verified": "Vérifié",
   "person.verifiedBody":
     "Vous avez confirmé cette empreinte hors bande.",
   "person.unverify": "Retirer la vérification",
   "person.notVerifiedYet": "Pas encore vérifié",
-  "person.notVerifiedBody":
-    "Tant que vous n'avez pas comparé l'empreinte, la seule chose que vous savez est que quelqu'un vous a donné cet identifiant.",
+  "person.notVerifiedBody": "Pour l'instant, vous savez seulement que quelqu'un vous a donné cet identifiant.",
   "person.compared": (name) =>
     `J'ai comparé l'empreinte avec ${name} en dehors de cette application.`,
   "person.markVerified": "Marquer comme vérifié",
@@ -250,32 +244,30 @@ export const fr: Dict = {
     "Le nom vous appartient : la clé et les marques ne bougent pas.",
 
   "people.swap": "Échanger les contacts",
-  "people.haveCode": "J'ai un code d'appairage",
+  "people.haveCode": "Saisir un code",
   "people.byId": "Par identifiant",
   "people.export": "Exporter",
   "people.import": "Importer",
   "people.whoIsOnline": "Qui est là",
-  "people.whoIsOnlineTitle":
-    "Demander au relais qui est connecté en ce moment",
-  "people.moreActions": "Autres actions sur le carnet d'adresses",
-  "people.prune": "Nettoyer les noms orphelins",
+  "people.whoIsOnlineTitle": "Demander au relais qui est connecté",
+  "people.moreActions": "Autres actions",
+  "people.prune": "Nettoyer les orphelins",
   "people.pruneNone": "Rien à nettoyer",
   "people.pruneOne": "1 enregistrement supprimé",
   "people.pruneMany": (n) => `${n} enregistrements supprimés`,
   "people.pruneDetail":
     "C'étaient des noms annoncés par des contacts que vous n'avez plus.",
-  "people.filterLabel": "Filtre du carnet d'adresses",
+  "people.filterLabel": "Filtre des contacts",
   "people.filterAll": "Tous",
   "people.filterVerified": "Vérifiés",
   "people.filterTrusted": "De confiance",
   "people.filterBlocked": "Bloqués",
   "people.filterBlockedN": (n) => `Bloqués (${n})`,
   "people.searchPlaceholder": "Chercher par nom ou identifiant…",
-  "people.searchLabel": "Chercher dans le carnet d'adresses",
+  "people.searchLabel": "Chercher un contact",
   "people.emptyNone": "Personne dans le carnet d'adresses",
   "people.emptyNoMatch": "Aucun contact ne correspond",
-  "people.emptyNoneBody":
-    "Le plus rapide pour ajouter quelqu'un est de lui lire un code court : vous vous enregistrez mutuellement et vous êtes vérifiés d'emblée, sans recopier d'identifiant à la main.",
+  "people.emptyNoneBody": "L'échange par code est le plus rapide : vous vous enregistrez mutuellement, déjà vérifiés.",
   "people.emptyNoMatchBody": "Essayez un autre filtre ou une autre recherche.",
   "people.exportFilename": "arvolo-contacts.json",
   "people.exportedOne": "1 contact exporté",

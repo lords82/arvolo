@@ -66,6 +66,9 @@ const CATEGORY: Record<string, Cat> = {
   // States, not headings.
   "pair.waitingOther": "status",
   "devices.neverSynced": "status",
+  // A tooltip, and the sentence on a consent checkbox.
+  "people.claimedTip": "secondary",
+  "person.compared": "secondary",
 };
 
 /** The other end of the cap, for the handful of strings where being brief is the

@@ -174,7 +174,7 @@ export const de: Dict = {
     "Oder wählen Sie einen Kontakt, erzeugen Sie einen kurzen Code zum Vorlesen, oder erstellen Sie einen Link, der sich in jedem Browser öffnet. Alles ist Ende-zu-Ende verschlüsselt: das Relay sieht nur unlesbare Bytes.",
   "transfers.firstRunAction": "Etwas senden",
 
-  "people.presenceUnknownTitle": "Weiß ich nicht: das Relay hat nicht geantwortet",
+  "people.presenceUnknownTitle": "Das Relay hat nicht geantwortet",
   "people.presenceUnknownLabel": "Anwesenheit unbekannt",
   "people.presenceOnTitle": "Gerade verbunden",
   "people.presenceOffTitle": "Nicht verbunden",
@@ -182,65 +182,59 @@ export const de: Dict = {
   "people.presenceOff": "Nicht verbunden",
 
   "people.menuDetails": "Details und Fingerabdruck",
-  "people.menuUnverify": "Verifizierung zurücknehmen",
+  "people.menuUnverify": "Verifizierung entziehen",
   "people.menuVerify": "Als verifiziert markieren…",
-  "people.menuUntrust": "Nicht mehr vertrauenswürdig: jedes Mal nachfragen",
-  "people.menuTrust": "Als vertrauenswürdig markieren: automatisch laden",
+  "people.menuUntrust": "Vertrauen entziehen",
+  "people.menuUntrustDesc": "Sie werden bei jeder Datei gefragt.",
+  "people.menuTrust": "Vertrauen",
+  "people.menuTrustDesc": "Ihre Dateien laden ohne Rückfrage.",
   "people.menuUnblock": "Entsperren",
   "people.menuBlock": "Sperren",
-  "people.menuRemove": "Aus dem Adressbuch entfernen",
+  "people.menuRemove": "Aus Kontakten entfernen",
   "people.rowActions": (name) => `Aktionen für ${name}`,
   "people.notVerified": "Nicht verifiziert",
-  "people.notVerifiedTitle": "Der Fingerabdruck wurde nie verglichen",
+  "people.notVerifiedTitle": "Fingerabdruck nie verglichen",
   "people.claimedPlain": (name) => `(„${name}“)`,
   "people.claimedNew": (name) => `(nennt sich „${name}“)`,
   "people.claimedChange": (now, before) =>
     `(jetzt: „${now}“ — vorher: „${before}“)`,
   "people.claimedTip": (mine) =>
-    `Der Name, den sie sich selbst gegeben haben. Er kann sich jederzeit ändern und ist kein Beweis dafür, wer sie sind — der Name, den Sie verwenden, „${mine}“, ändert sich nie von allein.`,
+    `Ihr eigenes Etikett, kein Beweis. Ihres — „${mine}“ — ändert sich nie von selbst.`,
   "people.claimedNote": (mine) =>
-    `Unter diesem Namen treten sie jetzt auf. Für Sie bleiben sie in jedem Fall „${mine}“ — die Kenntnisnahme nimmt nur die Hervorhebung weg, bis der Name erneut wechselt.`,
+    `Der Name, unter dem sie jetzt auftreten. Für Sie bleibt es „${mine}“.`,
   "people.acknowledge": "Gesehen",
   "people.send": "Senden",
   "people.details": "Details",
 
   "people.confirmRemoveTitle": (name) => `${name} entfernen?`,
-  "people.confirmRemoveBody":
-    "Verschwindet mitsamt den Markierungen für Verifizierung und Vertrauen aus dem Adressbuch. Bereits erfolgte Übertragungen bleiben im Verlauf.",
-  "people.confirmForceTitle":
-    "Von einem nicht verifizierten Schlüssel automatisch laden?",
+  "people.confirmRemoveBody": "Die Markierungen für Verifizierung und Vertrauen gehen mit. Frühere Übertragungen bleiben im Verlauf.",
+  "people.confirmForceTitle": "Nicht verifiziertem Schlüssel vertrauen?",
   "people.confirmForceBody": (name) =>
-    `Dateien von ${name} würden ohne Rückfrage geladen, obwohl Sie den Fingerabdruck nie persönlich verglichen haben. Hätte sich beim Hinzufügen jemand dazwischengeschaltet, würden Sie automatisch von dieser Person laden.`,
-  "people.confirmForceFooter":
-    "Der richtige Weg ist, den Fingerabdruck zu vergleichen und den Kontakt dann als verifiziert zu markieren.",
+    `Sie haben den Fingerabdruck von ${name} nie verglichen. Hat sich beim Hinzufügen jemand dazwischengeschoben, würden Sie automatisch von dieser Person laden.`,
   "people.confirmForceLabel": "Trotzdem erzwingen",
   "people.confirmForceCancel": "Ich verifiziere erst",
 
   "people.addTitle": "Über die ID hinzufügen",
-  "people.addSubtitle":
-    "Der lange Weg: Sie brauchen die vollständige öffentliche ID.",
+  "people.addSubtitle": "Sie brauchen die vollständige öffentliche ID.",
   "people.addNameLabel": "Wie Sie die Person nennen",
   "people.addNamePlaceholder": "z. B. Julia",
   "people.addIdLabel": "Öffentliche ID",
   "people.addIdHint":
     "Sie findet sie mit „arvolo me“, oder im Einstellungen-Fenster ihrer App.",
-  "people.addTip":
-    "Viel einfacher: Kontakte tauschen. Sie lesen einander einen kurzen Code vor und sind beide gespeichert und schon verifiziert, ohne fünfzig Zeichen abzutippen.",
+  "people.addTip": "Codes tauschen geht schneller.",
   "people.addSaved": (name) => `${name} gespeichert`,
   "people.addSavedDetail":
     "Bleibt unverifiziert, bis Sie den Fingerabdruck vergleichen.",
 
   "person.fingerprint": "Fingerabdruck",
-  "person.fingerprintHint":
-    "Dieselben Wörter müssen auf dem anderen Bildschirm stehen. Vergleichen Sie sie mündlich oder persönlich — nicht per Chat über denselben Kanal, über den Sie die IDs getauscht haben.",
+  "person.fingerprintHint": "Dieselben Wörter müssen auf dem anderen Bildschirm stehen. Mündlich vergleichen, nicht über den Kanal des ID-Tauschs.",
   "person.publicId": "Öffentliche ID",
   "person.verified": "Verifiziert",
   "person.verifiedBody":
     "Sie haben diesen Fingerabdruck außerhalb des Kanals bestätigt.",
-  "person.unverify": "Verifizierung zurücknehmen",
+  "person.unverify": "Verifizierung entziehen",
   "person.notVerifiedYet": "Noch nicht verifiziert",
-  "person.notVerifiedBody":
-    "Solange Sie den Fingerabdruck nicht vergleichen, wissen Sie nur, dass Ihnen jemand diese ID gegeben hat.",
+  "person.notVerifiedBody": "Bislang wissen Sie nur, dass Ihnen jemand diese ID gegeben hat.",
   "person.compared": (name) =>
     `Ich habe den Fingerabdruck mit ${name} außerhalb dieser App verglichen.`,
   "person.markVerified": "Als verifiziert markieren",
@@ -249,31 +243,30 @@ export const de: Dict = {
     "Der Name gehört Ihnen: Schlüssel und Markierungen bleiben.",
 
   "people.swap": "Kontakte tauschen",
-  "people.haveCode": "Ich habe einen Kopplungscode",
+  "people.haveCode": "Code eingeben",
   "people.byId": "Über die ID",
   "people.export": "Exportieren",
   "people.import": "Importieren",
   "people.whoIsOnline": "Wer ist da",
-  "people.whoIsOnlineTitle": "Das Relay fragen, wer gerade verbunden ist",
-  "people.moreActions": "Weitere Adressbuch-Aktionen",
-  "people.prune": "Verwaiste Namen aufräumen",
+  "people.whoIsOnlineTitle": "Das Relay fragen, wer verbunden ist",
+  "people.moreActions": "Weitere Aktionen",
+  "people.prune": "Verwaiste aufräumen",
   "people.pruneNone": "Nichts aufzuräumen",
   "people.pruneOne": "1 Eintrag entfernt",
   "people.pruneMany": (n) => `${n} Einträge entfernt`,
   "people.pruneDetail":
     "Das waren Namen von Kontakten, die Sie nicht mehr haben.",
-  "people.filterLabel": "Adressbuch-Filter",
+  "people.filterLabel": "Kontaktfilter",
   "people.filterAll": "Alle",
   "people.filterVerified": "Verifiziert",
   "people.filterTrusted": "Vertrauenswürdig",
   "people.filterBlocked": "Gesperrt",
   "people.filterBlockedN": (n) => `Gesperrt (${n})`,
   "people.searchPlaceholder": "Nach Name oder ID suchen…",
-  "people.searchLabel": "Im Adressbuch suchen",
+  "people.searchLabel": "Kontakte durchsuchen",
   "people.emptyNone": "Niemand im Adressbuch",
   "people.emptyNoMatch": "Kein Kontakt passt",
-  "people.emptyNoneBody":
-    "Am schnellsten fügen Sie jemanden hinzu, indem Sie ihm einen kurzen Code vorlesen: Sie speichern einander und sind sofort verifiziert, ganz ohne IDs abzutippen.",
+  "people.emptyNoneBody": "Codes tauschen geht am schnellsten: Sie speichern einander, gleich verifiziert.",
   "people.emptyNoMatchBody": "Versuchen Sie einen anderen Filter oder Suchtext.",
   "people.exportFilename": "arvolo-kontakte.json",
   "people.exportedOne": "1 Kontakt exportiert",
