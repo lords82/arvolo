@@ -726,6 +726,48 @@ impl PreparedChunks {
         .await
         .context("hash payload")?
     }
+
+    /// Rebuild from digests computed by an earlier pass — a preparation that was
+    /// written down and is being picked up again — without re-reading a byte of
+    /// the payload.
+    ///
+    /// `index` is a pure reverse map of `chunks`, so nothing is lost by not having
+    /// kept it (the same rebuild happens in [`ChunkSeeder::start`]). What *is* lost
+    /// is the proof the pass gives for free: that the payload still holds the bytes
+    /// these digests were taken from. The caller owes that guarantee — see
+    /// [`crate::flow::ReusablePrep::from_parts`], which is where it is spelled out.
+    ///
+    /// Refuses a digest list that does not describe `total_size`. That catches a
+    /// torn record and a payload that changed size, which is the cheapest half of
+    /// the guarantee the caller is otherwise carrying alone.
+    pub fn from_digests(total_size: u64, chunks: Vec<Hash>) -> Result<Self> {
+        let total_chunks = (total_size as usize).div_ceil(CHUNK_SIZE as usize) as u32;
+        anyhow::ensure!(
+            total_chunks as usize == chunks.len(),
+            "{} digests do not describe {total_size} bytes (expected {total_chunks})",
+            chunks.len()
+        );
+        let mut index: HashMap<Hash, u32> = HashMap::new();
+        for (i, h) in chunks.iter().enumerate() {
+            index.insert(*h, i as u32);
+        }
+        Ok(Self {
+            total_size,
+            total_chunks,
+            chunks,
+            index,
+        })
+    }
+
+    pub fn total_size(&self) -> u64 {
+        self.total_size
+    }
+
+    /// The ordered chunk digests — what a ticket carries, and what a persisted
+    /// preparation has to write down.
+    pub fn chunks(&self) -> &[Hash] {
+        &self.chunks
+    }
 }
 
 /// How many threads seal and hash chunks at once.
@@ -1341,6 +1383,19 @@ impl ChunkTicket {
 
     pub fn looks_like(s: &str) -> bool {
         s.trim_start().starts_with(TICKET_PREFIX)
+    }
+
+    /// What this ticket *serves*, as opposed to how to reach it:
+    /// [`crate::swarm::swarm_id`] over the digests and the size.
+    ///
+    /// Two tickets for the same send agree on it and nothing else has to: the
+    /// provider address changes with every socket bind, and the sealed key blob is
+    /// randomised by HPKE on every seal, so comparing ticket strings answers a
+    /// question nobody asked. It is also a strong claim about *which* send: the
+    /// digests are of ciphertext under a random 32-byte content key, so producing
+    /// the same id means holding that key.
+    pub fn content_id(&self) -> String {
+        crate::swarm::swarm_id(&self.chunks, self.total_size)
     }
 }
 

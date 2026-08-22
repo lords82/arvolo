@@ -25,6 +25,19 @@ pub(super) struct Held {
     /// Flipped by [`TransferManager::pause`] so the running loop, once its token is
     /// cancelled, knows to pause (keep the transfer) rather than cancel (drop it).
     pub(super) pause_flag: Arc<std::sync::atomic::AtomicBool>,
+    /// The content key, transport seed and chunk digests this send has already paid
+    /// for — here rather than in the delivery task, because the task is what a pause
+    /// destroys.
+    ///
+    /// Re-running the pass does not just cost the minute it takes: it mints a fresh
+    /// key and a fresh seed, so the recipient is looking at a different send, under a
+    /// node id nobody is serving. What they had in flight dies, and what they get
+    /// instead is another offer to approve by hand.
+    ///
+    /// The key therefore sits in memory for as long as a paused send is kept. It
+    /// already did for a running one, and `SendRecord` keeps a plain-key ticket on
+    /// disk for anonymous shares — but it is worth knowing rather than discovering.
+    pub(super) prep: crate::flow::PrepSlot,
 }
 
 pub(super) struct Inner {

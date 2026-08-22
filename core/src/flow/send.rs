@@ -143,6 +143,77 @@ pub struct ReusablePrep {
     chunks: crate::chunked::PreparedChunks,
 }
 
+impl ReusablePrep {
+    /// A preparation rebuilt from parts somebody wrote down, skipping the pass that
+    /// produced them.
+    ///
+    /// The caller takes on the guarantee that pass would have given: that the
+    /// payload still holds the bytes these digests were taken from. Get that wrong
+    /// and the sender serves ciphertext the ticket does not describe — every chunk
+    /// fails its integrity check at the receiver, so the failure is a transfer that
+    /// never completes, never a file that arrives wrong. See
+    /// `manager::work::payload_stamp` for the guard the daemon uses.
+    pub fn from_parts(
+        key: [u8; crate::crypto::CHUNK_KEY_LEN],
+        node_seed: [u8; 32],
+        total_size: u64,
+        chunks: Vec<crate::hash::Hash>,
+    ) -> Result<Self> {
+        Ok(Self {
+            key,
+            node_seed,
+            chunks: crate::chunked::PreparedChunks::from_digests(total_size, chunks)?,
+        })
+    }
+
+    /// The content key. A capability secret: whoever holds it decrypts the payload.
+    pub fn key(&self) -> [u8; crate::crypto::CHUNK_KEY_LEN] {
+        self.key
+    }
+
+    /// The transport seed, which is what reproduces the node id an already-handed-out
+    /// ticket resolves to.
+    pub fn node_seed(&self) -> [u8; 32] {
+        self.node_seed
+    }
+
+    pub fn total_size(&self) -> u64 {
+        self.chunks.total_size()
+    }
+
+    pub fn chunks(&self) -> &[crate::hash::Hash] {
+        self.chunks.chunks()
+    }
+}
+
+/// A preparation owned by something that outlives the task using it.
+///
+/// The delivery loop of a held `send --to` dies and respawns on every pause and
+/// resume; what it must not lose therefore cannot live in it. See
+/// [`prepare_send_in_slot`], and `manager::state::Held`, which is what holds the
+/// other end of this `Arc`.
+pub type PrepSlot = std::sync::Arc<std::sync::Mutex<Option<ReusablePrep>>>;
+
+/// [`prepare_send_reusing`] against a slot shared with whoever outlives this task.
+///
+/// Take, prepare, put back — the lock is never held across the await, so the future
+/// stays `Send` and two attempts can never be preparing the same slot anyway (the
+/// loop that owns it is single-threaded through this call).
+pub async fn prepare_send_in_slot(
+    source: impl Into<crate::source::SendSource>,
+    name: &str,
+    archive: bool,
+    to: Option<(&Identity, &PublicId)>,
+    seed_relay: Option<String>,
+    relay: RelayChoice,
+    slot: &PrepSlot,
+) -> Result<SendSession> {
+    let mut prep = slot.lock().unwrap().take();
+    let out = prepare_send_reusing(source, name, archive, to, seed_relay, relay, &mut prep).await;
+    *slot.lock().unwrap() = prep;
+    out
+}
+
 /// [`prepare_send`], reusing an earlier preparation when one is handed in.
 ///
 /// The pass this skips reads and encrypts the whole payload — around a minute
@@ -178,16 +249,15 @@ pub async fn prepare_send_reusing(
             }
         }
     };
-    let sender = ChunkSender::serve_prepared(
-        source,
-        relay,
-        reuse.key,
-        reuse.node_seed,
-        reuse.chunks.clone(),
-    )
-    .await
-    .context("start sender")?;
+    // Put it back *before* serving, not after: binding the endpoint can fail (a
+    // port exhausted, P2P turned off between attempts) and the `?` below would then
+    // throw away a pass that costs half a minute on a large file — the exact waste
+    // this function exists to avoid.
+    let (key, node_seed, chunks) = (reuse.key, reuse.node_seed, reuse.chunks.clone());
     *prep = Some(reuse);
+    let sender = ChunkSender::serve_prepared(source, relay, key, node_seed, chunks)
+        .await
+        .context("start sender")?;
     let client = crate::http::client();
 
     // Deliver the content key: sealed to a recipient with `--to`, else in the

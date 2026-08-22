@@ -27,7 +27,8 @@ pub use recv::{
     RecvEvent, RecvOutcome,
 };
 pub use send::{
-    prepare_send, prepare_send_reusing, resume_send, ReusablePrep, SendEvent, SendSession,
+    prepare_send, prepare_send_in_slot, prepare_send_reusing, resume_send, PrepSlot, ReusablePrep,
+    SendEvent, SendSession,
 };
 pub use sidecar::read_ticket;
 

@@ -74,6 +74,124 @@ async fn a_reused_preparation_reproduces_the_same_ticket() {
     assert_eq!(first.total_size, second.total_size);
 }
 
+/// The same claim through the slot the daemon actually uses. The slot exists so the
+/// preparation can be owned by something that outlives the delivery task — a pause
+/// destroys the task, and re-preparing is what made the recipient's transfer die and
+/// their next offer a new one to approve by hand.
+#[tokio::test]
+async fn a_preparation_in_a_slot_survives_the_attempt_that_made_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = payload(dir.path());
+
+    let slot = flow::PrepSlot::default();
+    let first = flow::prepare_send_in_slot(
+        file.as_path(),
+        "payload.bin",
+        false,
+        None,
+        None,
+        RelayChoice::Disabled,
+        &slot,
+    )
+    .await
+    .expect("first attempt");
+    assert!(
+        slot.lock().unwrap().is_some(),
+        "the slot keeps the preparation for whoever comes next"
+    );
+
+    // A second attempt, as a resume would make it: same slot, nothing else carried.
+    let second = flow::prepare_send_in_slot(
+        file.as_path(),
+        "payload.bin",
+        false,
+        None,
+        None,
+        RelayChoice::Disabled,
+        &slot,
+    )
+    .await
+    .expect("second attempt");
+
+    let (a, b) = (
+        ChunkTicket::decode(&first.ticket).unwrap(),
+        ChunkTicket::decode(&second.ticket).unwrap(),
+    );
+    assert_eq!(a.chunks, b.chunks);
+    assert_eq!(a.providers[0].id, b.providers[0].id);
+    assert_eq!(
+        a.content_id(),
+        b.content_id(),
+        "and so the recipient sees one send, not two"
+    );
+}
+
+/// What a persisted preparation has to be able to do: come back as parts and be the
+/// same send again. Everything step 2 writes to disk is these four values.
+#[tokio::test]
+async fn a_preparation_taken_apart_and_rebuilt_is_the_same_send() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = payload(dir.path());
+
+    let slot = flow::PrepSlot::default();
+    let first = flow::prepare_send_in_slot(
+        file.as_path(),
+        "payload.bin",
+        false,
+        None,
+        None,
+        RelayChoice::Disabled,
+        &slot,
+    )
+    .await
+    .expect("first attempt");
+
+    let rebuilt = {
+        let held = slot.lock().unwrap();
+        let p = held.as_ref().expect("prepared");
+        flow::ReusablePrep::from_parts(p.key(), p.node_seed(), p.total_size(), p.chunks().to_vec())
+            .expect("rebuild from parts")
+    };
+
+    // A fresh slot seeded with the rebuilt preparation: this is a restarted daemon.
+    let slot = flow::PrepSlot::new(std::sync::Mutex::new(Some(rebuilt)));
+    let second = flow::prepare_send_in_slot(
+        file.as_path(),
+        "payload.bin",
+        false,
+        None,
+        None,
+        RelayChoice::Disabled,
+        &slot,
+    )
+    .await
+    .expect("after the restart");
+
+    let (a, b) = (
+        ChunkTicket::decode(&first.ticket).unwrap(),
+        ChunkTicket::decode(&second.ticket).unwrap(),
+    );
+    assert_eq!(
+        a.chunks, b.chunks,
+        "no pass was paid for, and none was needed"
+    );
+    assert_eq!(
+        a.providers[0].id, b.providers[0].id,
+        "the seed is what an old ticket re-resolves through"
+    );
+}
+
+/// The digest count has to describe the size, or the parts are not a preparation.
+/// Cheap half of the guarantee the hashing pass gives for free.
+#[test]
+fn parts_that_do_not_describe_the_payload_are_refused() {
+    let chunks = vec![arvolo_core::hash::Hash::new(b"one")];
+    // One 16 MiB chunk's worth of digests, claiming three chunks' worth of bytes.
+    assert!(
+        flow::ReusablePrep::from_parts([7u8; 32], [9u8; 32], 40 * 1024 * 1024, chunks).is_err()
+    );
+}
+
 /// The control: without the carried preparation, two attempts are two different
 /// sends. This is what the old loop did on every retry.
 #[tokio::test]

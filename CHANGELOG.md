@@ -55,6 +55,14 @@ Second prerelease, on top of rc1.
   accepting any of the dead ones named an offer the sender had stopped listening
   for. A held send now keeps one offer standing for its whole life and withdraws
   it once, when the send really ends.
+- **Pausing a send and resuming it re-encrypted the whole file.** The preparation —
+  the chunk digests, and the content key and node id they belong to — lived in the
+  delivery task, and a pause is what ends that task: resuming paid the pass again
+  (half a minute for 10 GB) and, worse, minted a fresh key and node id. The
+  recipient's transfer was then pointing at a node nobody was serving, and the only
+  way back was another offer for them to approve by hand. The preparation now
+  belongs to the held send, which survives the pause, so resuming carries on with
+  the same content under the same node id.
 - **A file from another of your own devices asked for approval.** Two halves of
   `--to me` shipped in rc1 were written but never wired up. An offer that opens
   and authenticates as your own identity can only have been sealed by something

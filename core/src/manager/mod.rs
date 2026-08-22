@@ -641,6 +641,7 @@ impl TransferManager {
                 archive,
                 note: note.clone(),
                 pause_flag: pause_flag.clone(),
+                prep: Default::default(),
             },
         );
         persist_held_record(&self.inner, id, false, "");
@@ -970,6 +971,7 @@ impl TransferManager {
                 archive: rec.archive,
                 note: rec.note.clone(),
                 pause_flag: pause_flag.clone(),
+                prep: Default::default(),
             },
         );
         if rec.paused {
@@ -1967,6 +1969,53 @@ mod clear_finished_tests {
             events.try_recv().is_err(),
             "an empty clear must not wake every subscriber"
         );
+    }
+}
+
+#[cfg(test)]
+mod held_prep_tests {
+    use super::*;
+
+    /// Looks tautological, and is the one line that keeps the fix: the delivery loop
+    /// must read its preparation from the held send, because the loop is what a
+    /// pause destroys and `Held` is what survives it. Tidy this back into a task
+    /// local and every resume re-encrypts the payload — and hands the recipient a
+    /// different send.
+    #[tokio::test]
+    async fn the_delivery_loop_reads_its_preparation_from_the_held_send() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = TransferManager::with_state_dir(
+            Identity::generate(),
+            None,
+            dir.path().to_path_buf(),
+            Some(dir.path().to_path_buf()),
+        );
+        let (id, _c) = m.register(Direction::Send, None, "f.bin".into(), 1);
+        let slot = crate::flow::PrepSlot::default();
+        m.inner.held.lock().unwrap().insert(
+            id,
+            Held {
+                recipient: Identity::generate().public(),
+                source: crate::source::SendSource::Path(PathBuf::from("f.bin")),
+                name: "f.bin".into(),
+                archive: false,
+                note: String::new(),
+                pause_flag: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                prep: slot.clone(),
+            },
+        );
+
+        assert!(
+            Arc::ptr_eq(&work::held_prep(&m.inner, id), &slot),
+            "the loop must share the held send's slot, not a copy of it"
+        );
+        // Cloning `Held` — which pause and resume both do — must not fork the slot.
+        let cloned = m.inner.held.lock().unwrap().get(&id).cloned().unwrap();
+        assert!(Arc::ptr_eq(&cloned.prep, &slot));
+
+        // No held entry: a private slot, so reuse within one task still works.
+        let (other, _c) = m.register(Direction::Send, None, "g.bin".into(), 1);
+        assert!(work::held_prep(&m.inner, other).lock().unwrap().is_none());
     }
 }
 

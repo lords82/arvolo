@@ -155,6 +155,20 @@ pub(super) fn persist_held_record(inner: &Inner, id: u64, paused: bool, reason: 
     }
 }
 
+/// The preparation slot a held `send --to` owns, so the delivery loop reads it from
+/// something that outlives the loop. A send with no held entry gets a private slot:
+/// the reuse within one task still works, which is what the slot did before it had
+/// anywhere longer-lived to live.
+pub(super) fn held_prep(inner: &Inner, id: u64) -> flow::PrepSlot {
+    inner
+        .held
+        .lock()
+        .unwrap()
+        .get(&id)
+        .map(|h| h.prep.clone())
+        .unwrap_or_default()
+}
+
 /// Forget a `send --to`'s delivery state (memory + disk) — called on any terminal
 /// end (delivered, deposited, cancelled, failed).
 pub(super) fn drop_held(inner: &Inner, id: u64) {
@@ -284,13 +298,14 @@ async fn deliver_to_inner(
     // publishing a beacon. Without this the wake-up would fire into a presence check
     // that says "offline" and the attempt would be skipped.
     let mut proven_present = false;
-    // Carried across attempts on purpose: the chunk digests, and the key and seed
-    // they belong to. Recomputing them per attempt made a large file spend most of
-    // its life re-encrypting itself between tries — and minted a new ticket each
-    // time, so an offer the recipient had already seen went stale. See
-    // [`flow::ReusablePrep`]. Dropped with this task, which is right: the payload
-    // may have changed by the time a restarted daemon comes back to it.
-    let mut prep: Option<flow::ReusablePrep> = None;
+    // The chunk digests, and the key and seed they belong to. Recomputing them per
+    // attempt made a large file spend most of its life re-encrypting itself between
+    // tries — and minted a new ticket each time, so an offer the recipient had
+    // already seen went stale. See [`flow::ReusablePrep`].
+    //
+    // Read from the held send rather than owned here: this task is what a pause
+    // destroys, and the preparation must not be. `Held` survives it.
+    let prep = held_prep(inner, id);
     loop {
         if cancel.is_cancelled() {
             handle_stop(inner, id, pause_flag);
@@ -326,8 +341,7 @@ async fn deliver_to_inner(
                     .unwrap_or(false));
         if online {
             match serve_live_once(
-                inner, id, cancel, relay, recipient, payload, name, archive, note, &mut prep,
-                standing,
+                inner, id, cancel, relay, recipient, payload, name, archive, note, &prep, standing,
             )
             .await
             {
@@ -507,7 +521,7 @@ pub(super) async fn serve_live_once(
     name: &str,
     archive: bool,
     note: &str,
-    prep: &mut Option<flow::ReusablePrep>,
+    prep: &flow::PrepSlot,
     standing: &mut Option<StandingOffer>,
 ) -> LiveOutcome {
     // Say what this is before doing it — but only when there is something to say.
@@ -517,11 +531,12 @@ pub(super) async fn serve_live_once(
     // produced yet. Left as `Active` the row said "0 B" for all that time, which
     // is indistinguishable from a transfer that is failing to move. A later
     // attempt reuses that work and starts serving at once, so it says nothing.
-    if prep.is_none() {
+    let fresh = prep.lock().unwrap().is_none();
+    if fresh {
         inner.set_status_live(id, TransferStatus::Preparing);
         inner.emit(ManagerEvent::Preparing { id });
     }
-    let session = match flow::prepare_send_reusing(
+    let session = match flow::prepare_send_in_slot(
         payload.clone(),
         name,
         archive,
