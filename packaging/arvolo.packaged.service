@@ -25,7 +25,13 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/arvolo daemon
+# `daemon run`, not a bare `daemon`: the verb takes a subcommand, and `run` is the
+# blocking one meant for a service manager (`start` returns immediately, which
+# would make systemd think the service died). This line said `daemon` alone from
+# before the CLI grew subcommands and kept shipping in every package after: the
+# unit exits 2/INVALIDARGUMENT and systemd restart-loops. See the test in
+# `cli/src/args.rs` that now parses this file with the real argument parser.
+ExecStart=/usr/bin/arvolo daemon run
 Restart=on-failure
 RestartSec=5
 

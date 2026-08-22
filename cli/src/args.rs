@@ -893,3 +893,95 @@ mod tests {
         assert!(parse_ttl("d").is_err());
     }
 }
+
+/// The service definitions we ship must invoke a command this binary still has.
+///
+/// They are text files nobody compiles, so when a verb changes they simply keep
+/// saying the old thing. That is not hypothetical: `daemon` grew subcommands in
+/// 0.11 and the unit inside every .deb and .rpm went on saying `arvolo daemon`
+/// for three releases. Nothing caught it because nothing reads those files —
+/// until a machine boots one, gets `2/INVALIDARGUMENT`, and restart-loops.
+///
+/// So the parser itself reads them. Whatever a service manager would exec is fed
+/// to clap here, and a renamed verb fails with the offending file's name.
+#[cfg(test)]
+mod packaging_tests {
+    use super::*;
+
+    fn repo_file(rel: &str) -> String {
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace root")
+            .join(rel);
+        std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()))
+    }
+
+    /// The arguments after the binary path, as the service manager would pass them.
+    fn exec_args(unit: &str, file: &str) -> Vec<String> {
+        let line = unit
+            .lines()
+            .find(|l| l.starts_with("ExecStart="))
+            .unwrap_or_else(|| panic!("{file} has no ExecStart"));
+        line.trim_start_matches("ExecStart=")
+            .split_whitespace()
+            .skip(1) // the binary path
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn every_shipped_unit_runs_a_command_that_exists() {
+        for file in [
+            "packaging/arvolo.packaged.service",
+            "packaging/arvolo.service",
+        ] {
+            let args = exec_args(&repo_file(file), file);
+            let argv: Vec<String> = std::iter::once("arvolo".to_string())
+                .chain(args.iter().cloned())
+                .collect();
+            if let Err(e) = Cli::try_parse_from(&argv) {
+                panic!(
+                    "{file} execs `arvolo {}`, which this binary does not accept:\n{e}",
+                    args.join(" ")
+                );
+            }
+            // And specifically the blocking one: `daemon start` returns straight
+            // away, which a `Type=simple` unit reads as the service dying.
+            assert_eq!(
+                args,
+                ["daemon", "run"],
+                "{file} must run the foreground daemon"
+            );
+        }
+    }
+
+    /// launchd's plist says the same thing in XML, and rots the same way.
+    #[test]
+    fn the_macos_plist_runs_the_foreground_daemon() {
+        let plist = repo_file("packaging/it.lords82.arvolo.plist");
+        let args: Vec<String> = plist
+            .split("<key>ProgramArguments</key>")
+            .nth(1)
+            .expect("ProgramArguments")
+            .split("</array>")
+            .next()
+            .expect("array")
+            .lines()
+            .filter_map(|l| {
+                let t = l.trim();
+                t.strip_prefix("<string>")?
+                    .strip_suffix("</string>")
+                    .map(str::to_string)
+            })
+            .collect();
+        let argv: Vec<String> = std::iter::once("arvolo".to_string())
+            .chain(args.iter().skip(1).cloned())
+            .collect();
+        if let Err(e) = Cli::try_parse_from(&argv) {
+            panic!(
+                "the plist execs `{}`, which this binary does not accept:\n{e}",
+                args.join(" ")
+            );
+        }
+    }
+}
