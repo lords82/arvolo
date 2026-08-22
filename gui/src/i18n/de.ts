@@ -367,23 +367,17 @@ export const de: Dict = {
     "Das Protokoll wird vollständig vergessen und lässt sich nicht wiederherstellen. Bereits empfangene Dateien bleiben, wo sie sind; das hier löscht nur die Liste.",
 
   "devices.identityTitle": "Ihre gemeinsame Identität",
-  "devices.identityHint":
-    "Jedes verbundene Gerät benutzt diese eine. Für den Rest der Welt sind Sie eine einzige Person, wo immer Sie Arvolo öffnen.",
+  "devices.identityHint": "Jedes verbundene Gerät benutzt diese eine. Für alle anderen sind Sie eine Person.",
   "devices.fingerprint": "Fingerabdruck",
-  "devices.fingerprintHint":
-    "Er muss auf allen Ihren Geräten gleich sein. Zeigt ein Rechner andere Wörter, ist er nicht verbunden: das ist eine andere Identität.",
+  "devices.fingerprintHint": "Er muss auf allen Geräten gleich sein. Andere Wörter sind eine andere Identität.",
   "devices.publicId": "Öffentliche ID",
   "devices.pairTitle": "Ein Gerät verbinden",
-  "devices.pairBody":
-    "Das Verbinden geschieht von beiden Seiten: auf diesem Rechner zeigen Sie einen Code, auf dem anderen geben Sie ihn ein. Das ist heikel — was übergeht, ist Ihre geheime Identität, keine bloße Einladung.",
+  "devices.pairBody": "Sie zeigen hier einen Code und geben ihn auf dem anderen Rechner ein.",
   "devices.showCode": "Code anzeigen",
-  "devices.haveCode": "Ich habe einen Kopplungscode",
+  "devices.haveCode": "Code eingeben",
   "devices.pairWarnLead": "Niemals auf einem Rechner, der nicht Ihrer ist.",
-  "devices.pairWarnRest":
-    "Wer den Code eingibt, wird in jeder Hinsicht zu Ihnen: gleiches Postfach, gleiches Adressbuch, dieselbe Fähigkeit zu öffnen, was Ihnen geschickt wird.",
   "devices.syncTitle": "Adressbuch im Gleichstand",
-  "devices.syncHint":
-    "Kontakte wandern zwischen Ihren Geräten in einer verschlüsselten Zelle in Ihrem Postfach. Das Relay verwahrt Bytes, die es nicht lesen kann.",
+  "devices.syncHint": "Kontakte wandern in einer verschlüsselten Zelle in Ihrem Postfach.",
   "devices.syncOn": "Aktiv",
   "devices.syncOff": "Deaktiviert",
   "devices.contactCount": (n) =>
@@ -393,8 +387,7 @@ export const de: Dict = {
   "devices.lastError": (err) => `Die letzte Runde ist fehlgeschlagen: ${err}`,
   "devices.syncNow": "Jetzt abgleichen",
   "devices.autoTitle": "Von allein abgleichen",
-  "devices.autoDesc":
-    "Der Daemon dreht alle paar Minuten eine Runde. Wenn Sie das abschalten, gleicht sich das Adressbuch nur ab, wenn Sie oben auf den Knopf drücken.",
+  "devices.autoDesc": "Alle paar Minuten eine Runde. Aus, gleicht es sich nur auf Knopfdruck ab.",
   "devices.autoOn": "Automatischer Abgleich aktiv",
   "devices.autoOff": "Automatischer Abgleich aus",
 
@@ -629,37 +622,27 @@ export const de: Dict = {
   "pair.subDeviceJoin":
     "Ersetzt die Identität dieses Geräts durch die gemeinsame.",
   "pair.restarting": "Daemon startet neu",
-  "pair.restartingDetail":
-    "Er fährt mit der gemeinsamen Identität wieder hoch: ein paar Sekunden, dann ist alles zurück.",
+  "pair.restartingDetail": "In ein paar Sekunden zurück, mit der gemeinsamen Identität.",
   "pair.restartAndClose": "Neu starten und schließen",
   "pair.link": "Verbinden",
   "pair.done": "Fertig",
-  "pair.needsRestart":
-    "Der Daemon läuft noch mit der vorherigen Identität. Er muss neu gestartet werden, damit die Änderung wirkt — der Knopf unten erledigt das.",
+  "pair.needsRestart": "Der Daemon hat noch die vorherige Identität. Starten Sie ihn unten neu.",
   "pair.failed": "Das hat nicht geklappt",
   "pair.deviceWarnLead": "Das teilt Ihre geheime Identität.",
-  "pair.deviceWarnRest":
-    "Wer den Code eingibt, wird zu Ihnen: gleiche öffentliche ID, gleiches Postfach, gleiches Adressbuch. Nur auf einem eigenen Rechner benutzen. Der Code gilt für ein Gerät und verfällt, sobald er benutzt wurde.",
-  "pair.captionDevice":
-    "Auf dem anderen Gerät: Ihre Geräte → Ich habe einen Code.",
-  "pair.captionContact":
-    "Lesen Sie ihn vor. Die Gegenseite öffnet Personen → Ich habe einen Code und gibt ihn ein.",
-  "pair.waitingOther":
-    "Warte auf die andere Seite… zum Abbrechen einfach schließen.",
+  "pair.deviceWarnRest": "Wer ihn eingibt, wird zu Ihnen: gleiche ID, gleiches Postfach, gleiches Adressbuch. Nur auf einem eigenen Rechner.",
+  "pair.captionDevice": "Auf dem anderen Gerät: Ihre Geräte → Code eingeben.",
+  "pair.captionContact": "Lesen Sie ihn vor. Die Gegenseite öffnet Personen → Code eingeben.",
+  "pair.waitingOther": "Warten auf die andere Seite… zum Abbrechen schließen.",
   "pair.preparingCode": "Ich bereite den Code vor…",
-  "pair.contactNote":
-    "Getauscht werden nur die öffentlichen IDs. Ihre geheime Identität und Ihr Adressbuch verlassen diesen Rechner nicht.",
+  "pair.contactNote": "Getauscht werden nur die öffentlichen IDs.",
   "pair.joinWarnLead": "Achtung: das lässt sich nicht rückgängig machen.",
-  "pair.joinWarnRest":
-    "Die aktuelle Identität dieses Geräts wird durch die gemeinsame ersetzt. Alles, was noch für die alte Identität versiegelt ist, lässt sich hier nicht mehr öffnen.",
+  "pair.joinWarnRest": "Die Identität dieses Geräts wird durch die gemeinsame ersetzt. Für die alte Versiegeltes lässt sich hier nicht mehr öffnen.",
   "pair.codeLabel": "Code",
   "pair.codeHint":
     "Der auf dem anderen Rechner angezeigte, etwa 4821-crater-mango.",
-  "pair.nameLabel": "Wie Sie die Person nennen (optional)",
-  "pair.nameHint":
-    "Lassen Sie es leer, speichere ich sie unter einem Namen aus ihrem Fingerabdruck; umbenennen können Sie jederzeit.",
-  "pair.understood":
-    "Verstanden: dieses Gerät verliert seine bisherige Identität.",
+  "pair.nameLabel": "Ihr Name für sie",
+  "pair.nameHint": "Leer lassen für einen Namen aus dem Fingerabdruck. Umbenennen geht später.",
+  "pair.understood": "Verstanden: dieses Gerät verliert seine Identität.",
   "pair.waitingMachine": "Warte auf den anderen Rechner…",
   "pair.cancelled": "Abgebrochen.",
 

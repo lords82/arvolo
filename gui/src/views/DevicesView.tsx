@@ -103,8 +103,11 @@ export function DevicesView() {
           className="card card-pad t-xs"
           style={{ borderColor: "var(--amber)", background: "var(--amber-soft)" }}
         >
-          <strong>{t("devices.pairWarnLead")}</strong>{" "}
-          {t("devices.pairWarnRest")}
+          {/* The lead only. What "linked" costs — whoever types the code
+              becomes you — is on the pairing sheet, where the code is actually
+              on screen about to be read out. Here it sat sixteen lines under a
+              paragraph that had just said the same thing. */}
+          <strong>{t("devices.pairWarnLead")}</strong>
         </div>
       </div>
 

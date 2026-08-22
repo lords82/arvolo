@@ -358,23 +358,17 @@ export const it: Dict = {
     "Il registro viene dimenticato per intero e non si può recuperare. I file già ricevuti restano dove sono; questo cancella solo l'elenco.",
 
   "devices.identityTitle": "La tua identità condivisa",
-  "devices.identityHint":
-    "Ogni dispositivo collegato usa questa. Per il resto del mondo sei una persona sola, ovunque tu apra Arvolo.",
+  "devices.identityHint": "Ogni dispositivo collegato usa questa. Per tutti gli altri sei una persona sola.",
   "devices.fingerprint": "Impronta",
-  "devices.fingerprintHint":
-    "Deve essere identica su tutti i tuoi dispositivi. Se su una macchina leggi parole diverse, quella non è collegata: è un'altra identità.",
+  "devices.fingerprintHint": "Deve coincidere su tutti i tuoi dispositivi. Parole diverse sono un'altra identità.",
   "devices.publicId": "Id pubblico",
   "devices.pairTitle": "Collega un dispositivo",
-  "devices.pairBody":
-    "Il collegamento va fatto da entrambe le parti: su questa macchina mostri un codice, sull'altra lo inserisci. È un'operazione delicata — quello che passa è la tua identità segreta, non un semplice invito.",
+  "devices.pairBody": "Mostri un codice qui e lo inserisci sull'altra macchina.",
   "devices.showCode": "Mostra un codice",
-  "devices.haveCode": "Ho un codice di abbinamento",
+  "devices.haveCode": "Inserisci un codice",
   "devices.pairWarnLead": "Su una macchina che non è tua, mai.",
-  "devices.pairWarnRest":
-    "Chi inserisce il codice diventa te a tutti gli effetti: stessa casella, stessa rubrica, stessa capacità di aprire ciò che ti viene mandato.",
   "devices.syncTitle": "Rubrica in sincronia",
-  "devices.syncHint":
-    "I contatti viaggiano fra i tuoi dispositivi dentro una cella cifrata sulla tua casella. Il relay conserva byte che non sa leggere.",
+  "devices.syncHint": "I contatti viaggiano in una cella cifrata sulla tua casella.",
   "devices.syncOn": "Attiva",
   "devices.syncOff": "Disattivata",
   "devices.contactCount": (n) =>
@@ -385,8 +379,7 @@ export const it: Dict = {
   "devices.lastError": (err) => `L'ultimo giro non è riuscito: ${err}`,
   "devices.syncNow": "Sincronizza adesso",
   "devices.autoTitle": "Sincronizza da sola",
-  "devices.autoDesc":
-    "Il daemon fa un giro ogni pochi minuti. Se la disattivi, la rubrica si allinea solo quando premi il pulsante qui sopra.",
+  "devices.autoDesc": "Un giro ogni pochi minuti. Spenta, si allinea solo quando premi il pulsante.",
   "devices.autoOn": "Sincronizzazione automatica attiva",
   "devices.autoOff": "Sincronizzazione automatica disattivata",
 
@@ -622,36 +615,27 @@ export const it: Dict = {
   "pair.subDeviceJoin":
     "Sostituisce l'identità di questo dispositivo con quella condivisa.",
   "pair.restarting": "Daemon in riavvio",
-  "pair.restartingDetail":
-    "Sta ripartendo con l'identità condivisa: qualche secondo e torna tutto.",
+  "pair.restartingDetail": "Torna fra qualche secondo, con l'identità condivisa.",
   "pair.restartAndClose": "Riavvia e chiudi",
   "pair.link": "Collega",
   "pair.done": "Fatto",
-  "pair.needsRestart":
-    "Il daemon sta ancora girando con l'identità precedente. Va riavviato perché il cambio abbia effetto — ci pensa il pulsante qui sotto.",
+  "pair.needsRestart": "Il daemon ha ancora l'identità precedente. Riavvialo qui sotto.",
   "pair.failed": "Non ha funzionato",
   "pair.deviceWarnLead": "Questo condivide la tua identità segreta.",
-  "pair.deviceWarnRest":
-    "Chi inserisce il codice diventa te: stesso id pubblico, stessa casella, stessa rubrica. Usalo solo su una macchina tua. Il codice vale per un solo dispositivo e scade appena viene usato.",
-  "pair.captionDevice":
-    "Sull'altro dispositivo: I tuoi dispositivi → Ho un codice.",
-  "pair.captionContact":
-    "Leggiglielo. Lui apre Persone → Ho un codice e lo inserisce.",
-  "pair.waitingOther": "In attesa dell'altra parte… puoi chiudere per annullare.",
+  "pair.deviceWarnRest": "Chi lo inserisce diventa te: stesso id, stessa casella, stessa rubrica. Solo su una macchina tua.",
+  "pair.captionDevice": "Sull'altro dispositivo: I tuoi dispositivi → Inserisci un codice.",
+  "pair.captionContact": "Leggiglielo. Apre Persone → Inserisci un codice.",
+  "pair.waitingOther": "In attesa dell'altra parte… chiudi per annullare.",
   "pair.preparingCode": "Preparo il codice…",
-  "pair.contactNote":
-    "Vengono scambiati solo gli id pubblici. La tua identità segreta e la tua rubrica non escono da qui.",
+  "pair.contactNote": "Vengono scambiati solo gli id pubblici.",
   "pair.joinWarnLead": "Attenzione: è un'operazione irreversibile.",
-  "pair.joinWarnRest":
-    "L'identità attuale di questo dispositivo viene sostituita da quella condivisa. Tutto ciò che è ancora sigillato per la vecchia identità non sarà più apribile qui.",
+  "pair.joinWarnRest": "L'identità di questo dispositivo viene sostituita da quella condivisa. Ciò che è sigillato per la vecchia non si apre più qui.",
   "pair.codeLabel": "Codice",
   "pair.codeHint":
     "Quello mostrato sull'altra macchina, tipo 4821-crater-mango.",
-  "pair.nameLabel": "Come lo chiami (facoltativo)",
-  "pair.nameHint":
-    "Se lo lasci vuoto lo salvo con un nome ricavato dalla sua impronta, e poi lo rinomini quando vuoi.",
-  "pair.understood":
-    "Ho capito: questo dispositivo perde la sua identità attuale.",
+  "pair.nameLabel": "Come lo chiami tu",
+  "pair.nameHint": "Lascialo vuoto per un nome ricavato dalla sua impronta. Puoi rinominarlo dopo.",
+  "pair.understood": "Ho capito: questo dispositivo perde la sua identità.",
   "pair.waitingMachine": "In attesa dell'altra macchina…",
   "pair.cancelled": "Annullato.",
 

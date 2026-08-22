@@ -57,6 +57,15 @@ const CATEGORY: Record<string, Cat> = {
   // A toast's second line. `common.*` is otherwise all micro-labels, which is
   // why the prefix alone reads it as one.
   "common.afterRestart": "secondary",
+  // Captions under a code, and the notice above the restart button.
+  "pair.captionDevice": "secondary",
+  "pair.captionContact": "secondary",
+  "pair.needsRestart": "secondary",
+  // A consent checkbox: its label is the sentence being agreed to, so it is one.
+  "pair.understood": "secondary",
+  // States, not headings.
+  "pair.waitingOther": "status",
+  "devices.neverSynced": "status",
 };
 
 /** The other end of the cap, for the handful of strings where being brief is the
@@ -71,7 +80,6 @@ const CATEGORY: Record<string, Cat> = {
 export const FLOOR: Record<string, number> = {
   // Must say that whoever types the code *becomes* you — not "gets access".
   "pair.deviceWarnRest": 90,
-  "devices.pairWarnRest": 90,
   "pair.joinWarnRest": 90,
   // Must say the fingerprint was never compared, and what that lets through.
   "people.confirmForceBody": 90,

@@ -390,22 +390,22 @@ export const en = {
   // ---- devices -----------------------------------------------------------
   "devices.identityTitle": "Your shared identity",
   "devices.identityHint":
-    "Every linked device uses this one. To the rest of the world you are a single person, wherever you open Arvolo.",
+    "Every linked device uses this one. To everyone else you are one person.",
   "devices.fingerprint": "Fingerprint",
   "devices.fingerprintHint":
-    "It must be identical on all your devices. If one machine reads different words, that machine is not linked: it is another identity.",
+    "It must match on all your devices. Different words mean a different identity.",
   "devices.publicId": "Public id",
   "devices.pairTitle": "Link a device",
+  // How it is done. What it *costs* is in `pair.deviceWarnRest`, on the sheet
+  // where the code appears — the moment somebody is about to read one out.
   "devices.pairBody":
-    "Linking is done from both ends: on this machine you show a code, on the other you type it in. It is a delicate operation — what crosses over is your secret identity, not a mere invitation.",
+    "You show a code here and type it in on the other machine.",
   "devices.showCode": "Show a code",
-  "devices.haveCode": "I have a pairing code",
+  "devices.haveCode": "Enter a code",
   "devices.pairWarnLead": "Never on a machine that isn't yours.",
-  "devices.pairWarnRest":
-    "Whoever types the code becomes you to every intent and purpose: same mailbox, same address book, same ability to open what is sent to you.",
   "devices.syncTitle": "Address book in step",
   "devices.syncHint":
-    "Contacts travel between your devices inside an encrypted cell on your mailbox. The relay keeps bytes it cannot read.",
+    "Contacts travel inside an encrypted cell on your mailbox.",
   "devices.syncOn": "On",
   "devices.syncOff": "Off",
   "devices.contactCount": (n: number) =>
@@ -416,7 +416,7 @@ export const en = {
   "devices.syncNow": "Sync now",
   "devices.autoTitle": "Sync on its own",
   "devices.autoDesc":
-    "The daemon does a round every few minutes. Turn it off and the address book only lines up when you press the button above.",
+    "A round every few minutes. Off, it only lines up when you press the button.",
   "devices.autoOn": "Automatic sync on",
   "devices.autoOff": "Automatic sync off",
 
@@ -671,36 +671,34 @@ export const en = {
   "pair.subDeviceJoin":
     "It replaces this device's identity with the shared one.",
   "pair.restarting": "Daemon restarting",
-  "pair.restartingDetail":
-    "It is coming back up with the shared identity: a few seconds and everything is back.",
+  "pair.restartingDetail": "Back in a few seconds, with the shared identity.",
   "pair.restartAndClose": "Restart and close",
   "pair.link": "Link",
   "pair.done": "Done",
   "pair.needsRestart":
-    "The daemon is still running with the previous identity. It has to be restarted for the change to take effect — the button below does it.",
+    "The daemon still has the previous identity. Restart it below.",
   "pair.failed": "That didn't work",
   "pair.deviceWarnLead": "This shares your secret identity.",
+  // Has a floor in copy-rules.ts. It must keep saying that the person typing
+  // the code *becomes* you — "gets access" is a different, smaller claim.
   "pair.deviceWarnRest":
-    "Whoever types the code becomes you: same public id, same mailbox, same address book. Use it only on a machine of your own. The code is good for one device and expires the moment it is used.",
-  "pair.captionDevice":
-    "On the other device: Your devices → I have a code.",
-  "pair.captionContact":
-    "Read it out to them. They open People → I have a code and type it in.",
-  "pair.waitingOther": "Waiting for the other side… you can close to cancel.",
+    "Whoever types it becomes you: same id, same mailbox, same address book. Only on a machine of your own.",
+  "pair.captionDevice": "On the other device: Your devices → Enter a code.",
+  "pair.captionContact": "Read it out. They open People → Enter a code.",
+  "pair.waitingOther": "Waiting for the other side… close to cancel.",
   "pair.preparingCode": "Preparing the code…",
-  "pair.contactNote":
-    "Only public ids are exchanged. Your secret identity and your address book do not leave this machine.",
+  "pair.contactNote": "Only public ids are exchanged.",
   "pair.joinWarnLead": "Careful: this cannot be undone.",
+  // Floored too: "replaced" and "stops opening" are the whole warning.
   "pair.joinWarnRest":
-    "This device's current identity is replaced by the shared one. Anything still sealed to the old identity stops being openable here.",
+    "This device's identity is replaced by the shared one. Anything sealed to the old one stops opening here.",
   "pair.codeLabel": "Code",
   "pair.codeHint":
     "The one shown on the other machine, something like 4821-crater-mango.",
-  "pair.nameLabel": "What you call them (optional)",
+  "pair.nameLabel": "Your name for them",
   "pair.nameHint":
-    "Leave it empty and I'll save them under a name derived from their fingerprint; you can rename them whenever you like.",
-  "pair.understood":
-    "I understand: this device loses its current identity.",
+    "Leave it empty for a name derived from their fingerprint. You can rename them later.",
+  "pair.understood": "I understand: this device loses its identity.",
   "pair.waitingMachine": "Waiting for the other machine…",
   "pair.cancelled": "Cancelled.",
 

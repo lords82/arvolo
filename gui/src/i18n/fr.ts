@@ -368,23 +368,17 @@ export const fr: Dict = {
     "Le journal est oublié en entier et ne peut pas être récupéré. Les fichiers déjà reçus restent où ils sont ; ceci n'efface que la liste.",
 
   "devices.identityTitle": "Votre identité partagée",
-  "devices.identityHint":
-    "Chaque appareil relié utilise celle-ci. Pour le reste du monde vous êtes une seule personne, où que vous ouvriez Arvolo.",
+  "devices.identityHint": "Chaque appareil relié utilise celle-ci. Pour tous les autres, vous êtes une seule personne.",
   "devices.fingerprint": "Empreinte",
-  "devices.fingerprintHint":
-    "Elle doit être identique sur tous vos appareils. Si une machine affiche d'autres mots, elle n'est pas reliée : c'est une autre identité.",
+  "devices.fingerprintHint": "Elle doit correspondre sur tous vos appareils. D'autres mots, c'est une autre identité.",
   "devices.publicId": "Identifiant public",
   "devices.pairTitle": "Relier un appareil",
-  "devices.pairBody":
-    "Le rattachement se fait des deux côtés : sur cette machine vous affichez un code, sur l'autre vous le saisissez. C'est une opération délicate — ce qui passe, c'est votre identité secrète, pas une simple invitation.",
+  "devices.pairBody": "Vous affichez un code ici et le saisissez sur l'autre machine.",
   "devices.showCode": "Afficher un code",
-  "devices.haveCode": "J'ai un code d'appairage",
+  "devices.haveCode": "Saisir un code",
   "devices.pairWarnLead": "Jamais sur une machine qui n'est pas la vôtre.",
-  "devices.pairWarnRest":
-    "Qui saisit le code devient vous à tous les égards : même boîte, même carnet d'adresses, même capacité à ouvrir ce qu'on vous envoie.",
   "devices.syncTitle": "Carnet d'adresses synchronisé",
-  "devices.syncHint":
-    "Les contacts circulent entre vos appareils dans une cellule chiffrée sur votre boîte. Le relais conserve des octets qu'il ne sait pas lire.",
+  "devices.syncHint": "Les contacts circulent dans une cellule chiffrée sur votre boîte.",
   "devices.syncOn": "Active",
   "devices.syncOff": "Désactivée",
   "devices.contactCount": (n) =>
@@ -397,8 +391,7 @@ export const fr: Dict = {
   "devices.lastError": (err) => `Le dernier tour a échoué : ${err}`,
   "devices.syncNow": "Synchroniser maintenant",
   "devices.autoTitle": "Synchroniser toute seule",
-  "devices.autoDesc":
-    "Le démon fait un tour toutes les quelques minutes. Si vous désactivez, le carnet d'adresses ne s'aligne que lorsque vous appuyez sur le bouton ci-dessus.",
+  "devices.autoDesc": "Un tour toutes les quelques minutes. Désactivé, ça ne s'aligne qu'au bouton.",
   "devices.autoOn": "Synchronisation automatique activée",
   "devices.autoOff": "Synchronisation automatique désactivée",
 
@@ -630,37 +623,27 @@ export const fr: Dict = {
   "pair.subDeviceJoin":
     "Remplace l'identité de cet appareil par l'identité partagée.",
   "pair.restarting": "Démon en redémarrage",
-  "pair.restartingDetail":
-    "Il repart avec l'identité partagée : quelques secondes et tout revient.",
+  "pair.restartingDetail": "De retour dans quelques secondes, avec l'identité partagée.",
   "pair.restartAndClose": "Redémarrer et fermer",
   "pair.link": "Relier",
   "pair.done": "Terminé",
-  "pair.needsRestart":
-    "Le démon tourne encore avec l'identité précédente. Il faut le redémarrer pour que le changement prenne effet — le bouton ci-dessous s'en charge.",
+  "pair.needsRestart": "Le démon a encore l'identité précédente. Redémarrez-le ci-dessous.",
   "pair.failed": "Ça n'a pas marché",
   "pair.deviceWarnLead": "Ceci partage votre identité secrète.",
-  "pair.deviceWarnRest":
-    "Qui saisit le code devient vous : même identifiant public, même boîte, même carnet d'adresses. À n'utiliser que sur une machine à vous. Le code vaut pour un seul appareil et expire dès qu'il est utilisé.",
-  "pair.captionDevice":
-    "Sur l'autre appareil : Vos appareils → J'ai un code.",
-  "pair.captionContact":
-    "Lisez-le-lui. Il ouvre Personnes → J'ai un code et le saisit.",
-  "pair.waitingOther":
-    "En attente de l'autre partie… vous pouvez fermer pour annuler.",
+  "pair.deviceWarnRest": "Qui le saisit devient vous : même identifiant, même boîte, même carnet. Uniquement sur une machine à vous.",
+  "pair.captionDevice": "Sur l'autre appareil : Vos appareils → Saisir un code.",
+  "pair.captionContact": "Lisez-le-lui. Il ouvre Personnes → Saisir un code.",
+  "pair.waitingOther": "En attente de l'autre partie… fermez pour annuler.",
   "pair.preparingCode": "Je prépare le code…",
-  "pair.contactNote":
-    "Seuls les identifiants publics sont échangés. Votre identité secrète et votre carnet d'adresses ne sortent pas d'ici.",
+  "pair.contactNote": "Seuls les identifiants publics sont échangés.",
   "pair.joinWarnLead": "Attention : c'est une opération irréversible.",
-  "pair.joinWarnRest":
-    "L'identité actuelle de cet appareil est remplacée par l'identité partagée. Tout ce qui est encore scellé pour l'ancienne identité ne sera plus ouvrable ici.",
+  "pair.joinWarnRest": "L'identité de cet appareil est remplacée par l'identité partagée. Ce qui est scellé pour l'ancienne ne s'ouvre plus ici.",
   "pair.codeLabel": "Code",
   "pair.codeHint":
     "Celui affiché sur l'autre machine, du type 4821-crater-mango.",
-  "pair.nameLabel": "Comment vous l'appelez (facultatif)",
-  "pair.nameHint":
-    "Si vous laissez vide, je l'enregistre sous un nom tiré de son empreinte, et vous le renommez quand vous voulez.",
-  "pair.understood":
-    "J'ai compris : cet appareil perd son identité actuelle.",
+  "pair.nameLabel": "Votre nom pour lui",
+  "pair.nameHint": "Laissez vide pour un nom tiré de son empreinte. Vous pourrez le renommer.",
+  "pair.understood": "J'ai compris : cet appareil perd son identité.",
   "pair.waitingMachine": "En attente de l'autre machine…",
   "pair.cancelled": "Annulé.",
 
