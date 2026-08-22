@@ -20,6 +20,31 @@ import type {
   SyncDto,
   TransferDto, PickedItem,} from "../types";
 
+// ---- fixture values, at the size the real ones are ------------------------
+//
+// These used to be "peer1", "arvc-test", "arvm-test". Five and nine characters
+// standing in for fifty-two and several hundred — fine while a fixture only has
+// to match another fixture, and the reason a whole class of bug was invisible
+// here: an id and a ticket are single tokens with no space in them, and what
+// they do to a layout is precisely a question of their length. jsdom does not
+// lay anything out, so no test in this suite can catch that either way — but a
+// fixture that lies about its size cannot even be looked at by hand.
+
+/** Somebody else's public id: 52 base32 characters. Deliberately *not* the id in
+ *  `freshSnapshot`, which is the local identity — a peer that shares it is one of
+ *  your own devices, which is a different code path and a different screen. */
+export const PEER_ID = "wq7dlk4rn2zhcv6ax8mjt3pfsyeb95uog1i0kd7rvxn24qazhm3e";
+
+/** A peer-to-peer ticket, at length. This is a value the GUI displays whole. */
+export const P2P_TICKET =
+  "arvc1qyqszqgpqyqszqgpqyqszqgpqyqszqgp5vt4qh3xwvhdkzfpmn2ug7yq3d8kx" +
+  "wer9wcs8qatzqgpqyqszqgpqyqszqgpqyqszqgp5vt4qh3xwvhdkzfpmn2ug7yq3d8";
+
+/** The mailbox equivalent, sealed to a recipient. */
+export const MAILBOX_TICKET =
+  "arvm1qyqszqgpqyqszqgpqyqszqgpqyqszqgp5vt4qh3xwvhdkzfpmn2ug7yq3d8kx" +
+  "wer9wcs8qatzqgpqyqszqgpqyqszqgpqyqszqgp5vt4qh3xwvhdkzfpmn2ug7yq3d8";
+
 /** Calls the store made, so a test can assert the daemon was actually told. */
 export interface Recorder {
   cancel: number[];
@@ -219,7 +244,7 @@ export function makeIpcMock() {
         harness.recorder.sendTo.push([to, paths, note]);
         return guard("sendTo", 1);
       },
-      serveTicket: () => guard("serveTicket", { id: 1, ticket: "arvc-test" }),
+      serveTicket: () => guard("serveTicket", { id: 1, ticket: P2P_TICKET }),
       depositTo: (
         to: string,
         paths: string[],
@@ -229,7 +254,7 @@ export function makeIpcMock() {
         password: string | null
       ) => {
         harness.recorder.depositTo.push([to, paths, ttl, max, password]);
-        return guard("depositTo", { id: 2, ticket: "arvm-test" });
+        return guard("depositTo", { id: 2, ticket: MAILBOX_TICKET });
       },
       getConfig: () => guard("getConfig", harness.snapshot.config),
       setConfig: (patch: ConfigPatch) => {
@@ -426,7 +451,7 @@ export const dto = {
     return {
       id: 1,
       direction: "send",
-      peer: "peer1",
+      peer: PEER_ID,
       name: "file.txt",
       total_size: 100,
       transferred: 0,
@@ -441,7 +466,7 @@ export const dto = {
   offer(over: Partial<OfferDto> = {}): OfferDto {
     return {
       id: "off1",
-      from: "peer1",
+      from: PEER_ID,
       name: "incoming.pdf",
       size: 500,
       note: "",
@@ -452,7 +477,7 @@ export const dto = {
   contact(over: Partial<ContactDto> = {}): ContactDto {
     return {
       name: "proj",
-      id: "peer1",
+      id: PEER_ID,
       fingerprint: "able-otter-nine",
       verified: false,
       trusted: false,

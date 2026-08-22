@@ -4,7 +4,7 @@
 // that moved no number. These lock that behaviour down.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { dto, harness, makeIpcMock, resetHarness } from "./mocks";
+import { PEER_ID, dto, harness, makeIpcMock, resetHarness } from "./mocks";
 
 vi.mock("../ipc", () => makeIpcMock());
 
@@ -285,7 +285,7 @@ describe("engine events → rows", () => {
     const offer = (id: string) => ({
       offer_received: {
         id,
-        from: "peer1",
+        from: PEER_ID,
         name: "relazione.pdf",
         size: 10,
         note: "",
@@ -303,7 +303,7 @@ describe("engine events → rows", () => {
   it("11c. a different file from the same sender is not superseded", async () => {
     await boot();
     const offer = (id: string, name: string) => ({
-      offer_received: { id, from: "peer1", name, size: 10, note: "", sender_name: "" },
+      offer_received: { id, from: PEER_ID, name, size: 10, note: "", sender_name: "" },
     });
     harness.emit(offer("a", "uno.txt"));
     harness.emit(offer("b", "due.txt"));
@@ -313,7 +313,7 @@ describe("engine events → rows", () => {
   it("11d. the same file from a different sender is its own offer", async () => {
     await boot();
     harness.emit({
-      offer_received: { id: "a", from: "peer1", name: "x.txt", size: 1, note: "", sender_name: "" },
+      offer_received: { id: "a", from: PEER_ID, name: "x.txt", size: 1, note: "", sender_name: "" },
     });
     harness.emit({
       offer_received: { id: "b", from: "peer2", name: "x.txt", size: 1, note: "", sender_name: "" },
@@ -416,12 +416,12 @@ describe("actions reach the daemon", () => {
   });
 
   it("20. verifying a contact tells the daemon and re-stamps the badge", async () => {
-    harness.snapshot.contacts = [dto.contact({ name: "proj", id: "peer1", verified: false })];
-    harness.snapshot.transfers = [dto.transfer({ id: 1, peer: "peer1" })];
+    harness.snapshot.contacts = [dto.contact({ name: "proj", id: PEER_ID, verified: false })];
+    harness.snapshot.transfers = [dto.transfer({ id: 1, peer: PEER_ID })];
     await boot();
     expect(row("t1").verified).toBe(false);
 
-    harness.snapshot.contacts = [dto.contact({ name: "proj", id: "peer1", verified: true })];
+    harness.snapshot.contacts = [dto.contact({ name: "proj", id: PEER_ID, verified: true })];
     await useStore.getState().markVerified("proj");
 
     expect(harness.recorder.markVerified).toEqual(["proj"]);
@@ -499,9 +499,9 @@ describe("list housekeeping", () => {
   });
 
   it("24. the peer label prefers a saved contact over a raw id", async () => {
-    harness.snapshot.contacts = [dto.contact({ name: "proj", id: "peer1" })];
+    harness.snapshot.contacts = [dto.contact({ name: "proj", id: PEER_ID })];
     harness.snapshot.transfers = [
-      dto.transfer({ id: 1, peer: "peer1" }),
+      dto.transfer({ id: 1, peer: PEER_ID }),
       dto.transfer({ id: 2, peer: "unknownlongidentifier1234567890" }),
     ];
     await boot();

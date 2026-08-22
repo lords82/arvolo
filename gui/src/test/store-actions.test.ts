@@ -4,7 +4,7 @@
 // on a refusal, a click that reported success the daemon never gave).
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { dto, harness, makeIpcMock, resetHarness, pick } from "./mocks";
+import { P2P_TICKET, PEER_ID, dto, harness, makeIpcMock, resetHarness, pick } from "./mocks";
 
 vi.mock("../ipc", () => makeIpcMock());
 
@@ -71,11 +71,11 @@ describe("refreshContacts", () => {
 
 describe("peerLabel / isVerified", () => {
   it("64. a saved contact wins over the sender's self-declared name", async () => {
-    harness.snapshot.contacts = [dto.contact({ name: "proj", id: "peer1" })];
+    harness.snapshot.contacts = [dto.contact({ name: "proj", id: PEER_ID })];
     await boot();
     // The petname inside an offer is a claim, not an identity: never let it
     // override what the user themselves saved for that key.
-    expect(s().peerLabel("peer1", "Mi Chiamo Proj")).toBe("proj");
+    expect(s().peerLabel(PEER_ID, "Mi Chiamo Proj")).toBe("proj");
   });
 
   it("65. an unknown peer falls back to its claimed name, then to a short id", async () => {
@@ -202,7 +202,7 @@ describe("ticket", () => {
     await boot();
     await expect(s().ticket(["/a.txt"])).resolves.toEqual({
       id: 1,
-      ticket: "arvc-test",
+      ticket: P2P_TICKET,
     });
   });
 
@@ -287,8 +287,8 @@ describe("pause / resume", () => {
 
 describe("markVerified", () => {
   it("86. a refused verify does not stamp a badge the daemon never granted", async () => {
-    harness.snapshot.contacts = [dto.contact({ name: "proj", id: "peer1", verified: false })];
-    harness.snapshot.transfers = [dto.transfer({ id: 1, peer: "peer1" })];
+    harness.snapshot.contacts = [dto.contact({ name: "proj", id: PEER_ID, verified: false })];
+    harness.snapshot.transfers = [dto.transfer({ id: 1, peer: PEER_ID })];
     await boot();
     harness.fail = new Set(["markVerified"]);
     await expect(s().markVerified("proj")).rejects.toThrow();

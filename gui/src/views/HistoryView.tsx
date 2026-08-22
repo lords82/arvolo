@@ -188,7 +188,7 @@ export function HistoryView() {
       </div>
 
       {error && (
-        <div className="card card-pad t-sm" style={{ borderColor: "var(--red)" }}>
+        <div className="card card-pad card-err t-sm">
           {error}
         </div>
       )}

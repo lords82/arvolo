@@ -87,11 +87,11 @@ function ToastRow({ t: item }: { t: Toast }) {
       </span>
       <div className="grow">
         <div style={{ fontWeight: 570 }}>{item.title}</div>
+        {/* Wrapping long unbreakable runs is `.toast .grow` in theme.css, which
+            covers the title too — it takes file paths, and this one used to be
+            the only half of the toast that could hold a ticket without spilling. */}
         {item.detail && (
-          <div
-            className="t-sm t-sec"
-            style={{ marginTop: 2, wordBreak: "break-word" }}
-          >
+          <div className="t-sm t-sec" style={{ marginTop: 2 }}>
             {item.detail}
           </div>
         )}

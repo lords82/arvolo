@@ -19,7 +19,7 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
-import { dto, harness, makeIpcMock, resetHarness, pick } from "./mocks";
+import { MAILBOX_TICKET, P2P_TICKET, PEER_ID, dto, harness, makeIpcMock, resetHarness, pick } from "./mocks";
 
 vi.mock("../ipc", () => makeIpcMock());
 vi.mock("@tauri-apps/api/webview", () => ({
@@ -93,7 +93,7 @@ function fresh() {
  *  here: mounting `App` refetches, and would wipe a hand-placed row. */
 async function renderAppWithOffer() {
   harness.snapshot.pending = [
-    dto.offer({ id: "o1", from: "peer1", name: "arrivo.zip" }),
+    dto.offer({ id: "o1", from: PEER_ID, name: "arrivo.zip" }),
   ];
   render(<App />);
   await screen.findByText("arrivo.zip");
@@ -239,7 +239,7 @@ describe("an incoming offer", () => {
 
   it("135. it shows the sender's note", async () => {
     harness.snapshot.pending = [
-      dto.offer({ id: "o1", from: "peer1", name: "arrivo.zip", note: "guarda qui" }),
+      dto.offer({ id: "o1", from: PEER_ID, name: "arrivo.zip", note: "guarda qui" }),
     ];
     render(<App />);
     fireEvent.click(await screen.findByText("arrivo.zip"));
@@ -624,7 +624,7 @@ describe("the send panel", () => {
     render(<App />);
     fireEvent.click(await screen.findByText("Ticket"));
     fireEvent.click(screen.getByText("Create the ticket"));
-    expect(await screen.findByText("arvc-test")).toBeTruthy();
+    expect(await screen.findByText(P2P_TICKET)).toBeTruthy();
   });
 
   it("130. the Link mode creates a link and shows it", async () => {
@@ -691,7 +691,7 @@ describe("the send panel", () => {
     fireEvent.click(await screen.findByText("proj"));
     fireEvent.click(screen.getByLabelText("Leave it in the mailbox"));
     fireEvent.click(await screen.findByText("Leave it in their mailbox"));
-    expect(await screen.findByText("arvm-test")).toBeTruthy();
+    expect(await screen.findByText(MAILBOX_TICKET)).toBeTruthy();
   });
 
   it("reopening the panel never inherits the last send's password", async () => {

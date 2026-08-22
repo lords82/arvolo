@@ -583,7 +583,7 @@ export function SendSheet() {
           )}
 
           {(mode === "code" || mode === "link") && !relay && (
-            <div className="card card-pad t-sm" style={{ borderColor: "var(--red)" }}>
+            <div className="card card-pad card-err t-sm">
               {t("send.noRelay")}
             </div>
           )}

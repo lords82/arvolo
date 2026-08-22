@@ -34,7 +34,7 @@ export function DevicesView() {
 
   if (error && !sync) {
     return (
-      <div className="card card-pad t-sm" style={{ borderColor: "var(--red)" }}>
+      <div className="card card-pad card-err t-sm">
         {error}
         <div style={{ marginTop: 10 }}>
           <Button size="sm" onClick={() => fire(reload())}>
@@ -133,10 +133,7 @@ export function DevicesView() {
         </div>
 
         {sync.last_error && (
-          <div
-            className="card card-pad t-sm"
-            style={{ borderColor: "var(--red)" }}
-          >
+          <div className="card card-pad card-err t-sm">
             {t("devices.lastError", sync.last_error)}
           </div>
         )}
