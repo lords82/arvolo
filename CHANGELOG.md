@@ -1,6 +1,18 @@
 # Changelog
 
-## Unreleased
+## v0.13.0-rc1 — fewer words, and they stay in the box
+
+The words in the CLI and the GUI explained too much. Almost every string said
+the true and useful thing in its first three words and then explained itself,
+and the explanation is read once with interest and a hundred times after by
+somebody who already knows it and is in a hurry. This prerelease is that
+rewritten — everywhere, in all four languages — plus a layout bug the same
+audit turned up.
+
+Nothing is deleted, it moves: what happened and what you can do about it stay
+in front of you, the reason why goes to the hint line in the GUI or to `-v` in
+the CLI. `docs/COPY.md` is the rule and `gui/src/test/copy.test.ts` is what
+fails when it drifts.
 
 ### Fixed
 
@@ -15,6 +27,27 @@
   fifteen days. A failed seed now removes what it wrote, and the reaper runs an
   hourly sweep that starts from the directory rather than the table, deleting any
   file with no row behind it that has been untouched for six hours.
+- **A long id ran out of the box that was showing it.** An id is 52 base32
+  characters and a ticket is several hundred, both with no space anywhere in
+  them, and CSS has no break opportunity to work with in such a run: the box
+  does not wrap it, it draws it out the side. Four places already defended
+  themselves; everywhere else was one long value away from spilling. The worst
+  of it was the sender's own id — an unknown sender has no fingerprint to show,
+  so the raw id goes on screen through a component written for words with
+  spaces — and the five cards that print a daemon error verbatim, where the text
+  ran past the red border and was sheared off at the edge of the screen. Fixed
+  on the containers rather than per screen, so the next long value is covered
+  too.
+- **Five messages named commands that do not exist.** `--deposit` had been
+  `--mailbox` for long enough that a test was asserting on the old spelling;
+  `arvolo code --foreground` had become `send --code --foreground`; `arvolo
+  name` had become `arvolo me name`. A new test reads the source and checks
+  every cited verb against the parser, so the next rename cannot leave a message
+  behind.
+- One error surfaced in Italian from an otherwise English CLI.
+- **A download cap that was not a number was no cap at all.** "tre" parsed to
+  NaN and fell through to the wire value for *no limit*, so a field the user
+  believed said three published a link anyone could download for ever.
 
 ### Changed
 
@@ -44,6 +77,20 @@
   not "something is still waiting". Clearing the last request no longer cuts back
   to the resting frame either: the mark walks home the short way round, at most
   half a breath, so the return is never a jump.
+- **The copy, throughout.** Buttons are verbs rather than sentences describing
+  their own effect ("Trust", not "Mark as trusted: download automatically").
+  The app no longer speaks in the first person about its own plumbing. Facts
+  that were repeated across four or five screens are stated once, where the
+  choice that depends on them is actually made — the relay's zero-knowledge
+  property next to the relay field, the "whoever types this code becomes you"
+  warning on the sheet where the code appears rather than three times across
+  two screens. Nine near-variants of "compare the fingerprint out loud" are one.
+- **Security warnings have a floor as well as a ceiling.** Six strings are the
+  last thing read before something irreversible, and "Careful." would satisfy
+  every length rule while warning nobody. Each carries a minimum and a note on
+  what it must still contain.
+- Length limits are written for English and scaled per language, so the German
+  is not squeezed into English word lengths.
 
 ## v0.12.0 — no silent stalls
 
