@@ -28,7 +28,7 @@ pub(crate) struct Config {
 }
 
 /// The local user's self-chosen display name, advertised inside every outgoing
-/// offer (`arvolo name "…"`). Empty string when unset — meaning "don't advertise a
+/// offer (`arvolo me name "…"`). Empty string when unset — meaning "don't advertise a
 /// name", the pre-existing behavior. It is a petname claim, never an authenticated
 /// identity.
 pub fn my_display_name() -> String {
@@ -340,7 +340,7 @@ pub fn write_default_config(relay: Option<&str>) -> Result<()> {
 #sync = true
 
 # Your display name, advertised to recipients inside each sealed offer (a petname
-# claim, never a verified identity). Set with `arvolo name "…"`; empty = none.
+# claim, never a verified identity). Set with `arvolo me name "…"`; empty = none.
 #display_name = ""
 "#,
         relay_line = relay_line,

@@ -160,12 +160,14 @@ pub async fn bind_endpoint_full(
     secret: SecretKey,
     alpns: Option<Vec<Vec<u8>>>,
 ) -> Result<Endpoint> {
+    // The parenthetical about relays stays: an operator who set ARVOLO_P2P
+    // globally and then wondered why backfill stopped is the reason it is here,
+    // and this is the only place that error surfaces.
     anyhow::ensure!(
         p2p_enabled(),
-        "direct peer-to-peer transport is disabled (ARVOLO_P2P=off / `p2p = false`), \
-         so this needs the relay's mailbox instead: send with `--deposit`, and receive \
-         the `arvm…` ticket it prints. (A relay must not set ARVOLO_P2P — it needs an \
-         endpoint of its own for backfill.)"
+        "peer-to-peer transport is off (ARVOLO_P2P=off / `p2p = false`); use the mailbox:\n\
+         \x20   arvolo send <paths> --to <who> --mailbox\n\
+         (A relay must not set ARVOLO_P2P — it needs an endpoint of its own for backfill.)"
     );
     // n0's `Endpoint::builder()` is `empty_builder` plus the N0 preset, i.e. the
     // pkarr publisher, the DNS resolver and n0's relays in one bundle. Build the

@@ -580,8 +580,8 @@ pub async fn recv_chunked(
             // the user decides: resume (re-fetch from scratch — the sidecar is now
             // empty) or remove the transfer. Mirrors the disk-full pause below, and
             // reuses the same Paused outcome the manager/GUI already surface.
-            let reason = "il file del download non è più su disco (rimosso o spostato): \
-                 riprendi per riscaricarlo da capo, oppure elimina il trasferimento"
+            let reason = "the partial download is no longer on disk (moved or deleted); \
+                 resume to fetch it again from scratch, or remove the transfer"
                 .to_string();
             on(RecvEvent::Paused {
                 reason: reason.clone(),

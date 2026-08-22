@@ -26,7 +26,7 @@ async fn the_switch_is_enforced_at_the_bind_not_at_the_callers() {
     // by paths that never mentioned P2P, so it names the way out.
     let msg = err.to_string();
     assert!(msg.contains("mailbox"), "unhelpful refusal: {msg}");
-    assert!(msg.contains("--deposit"), "unhelpful refusal: {msg}");
+    assert!(msg.contains("--mailbox"), "unhelpful refusal: {msg}");
 
     std::env::remove_var("ARVOLO_P2P");
 }

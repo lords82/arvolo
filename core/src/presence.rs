@@ -207,7 +207,7 @@ pub struct Offer {
     /// sender-authenticated exactly like the ticket — the relay never sees it.
     #[serde(default)]
     pub note: String,
-    /// The sender's self-chosen display name (`arvolo name "…"`), or empty when
+    /// The sender's self-chosen display name (`arvolo me name "…"`), or empty when
     /// unset. A *petname claim*: it rides inside the sealed, sender-authenticated
     /// offer (so it's bound to the sender's key and the relay never sees it), but it
     /// is attacker-controllable text — the receiver treats it as unverified and it

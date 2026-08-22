@@ -522,7 +522,7 @@ async fn push(
     // A forced deposit is a different engine call, not a flag on the same one: it
     // skips the presence check and the held/retry loop entirely (see
     // `TransferManager::deposit_to`). The ticket comes back so a UI can offer the
-    // `arvm…` for hand-delivery, exactly as `arvolo send --deposit` prints it.
+    // `arvm…` for hand-delivery, exactly as `arvolo send --mailbox` prints it.
     let outcome = if opts.deposit {
         let mailbox = arvolo_core::manager::MailboxOpts {
             ttl: opts.ttl,

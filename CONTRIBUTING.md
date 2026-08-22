@@ -29,6 +29,16 @@ cargo fmt --all
 
 Requires a recent Rust toolchain (>= 1.88; CI uses stable).
 
+## Copy
+
+Anything the user reads — a label, an error, a line of `--help` — follows
+[docs/COPY.md](docs/COPY.md). In one line: say what happened, say what they can
+do about it, and put the reason on the second level (a hint line in the GUI,
+`-v` in the CLI) instead of in front of them every time.
+
+`gui/src/test/copy.test.ts` enforces the length caps and the voice, and lists
+what is still over. Commit messages, release notes and PR titles are in English.
+
 ## Trademark
 
 "Arvolo" and the Arvolo logo are trademarks of the project owner. The AGPL covers

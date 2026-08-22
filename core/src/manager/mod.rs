@@ -664,7 +664,7 @@ impl TransferManager {
     /// Deposit `payload` in `recipient`'s relay mailbox now, without trying a live
     /// delivery first. Returns the transfer id and the `arvm…` ticket for the blob.
     ///
-    /// This is `send --deposit`: send-and-forget. It differs from
+    /// This is `send --mailbox`: send-and-forget. It differs from
     /// [`send_to`](Self::send_to) in more than the presence check — there is no
     /// held record and no retry loop, so the attempt either lands or fails, once.
     /// That is deliberate. A held send is restored from disk after a restart, and
@@ -1142,8 +1142,8 @@ impl TransferManager {
         let payload = payload.into();
         anyhow::ensure!(
             code::relay_rz_version(&relay).await == code::RzVersion::V2,
-            "relay {relay} is too old to host a background code (needs rendezvous v2) — \
-             run `arvolo code --foreground`, which serves it in this terminal instead"
+            "relay {relay} is too old to host a background code (needs rendezvous v2):\n\
+             \x20   arvolo send <paths> --code --foreground"
         );
         // Claim before serving: a code that can't be minted should leave no
         // half-started transfer behind.
@@ -1497,7 +1497,7 @@ impl TransferManager {
 
     /// Accept a parked offer, supplying the password it was sealed with.
     ///
-    /// A mailbox deposit can carry an end-to-end password (`send --deposit
+    /// A mailbox deposit can carry an end-to-end password (`send --mailbox
     /// --password`), and the inbox offer that points at it looks exactly like any
     /// other. Without a way to pass one, accepting such an offer could only ever
     /// fail — the recipient would watch it land as
@@ -1546,9 +1546,8 @@ impl TransferManager {
                 .unwrap_or(false);
             if live {
                 anyhow::bail!(
-                    "this offer is a direct transfer and P2P is off — ask the sender to \
-                     deposit it instead (`arvolo send <you> <file> --deposit`). The offer \
-                     is left where it is."
+                    "this offer is a direct transfer and P2P is off. The offer stays \
+                     where it is — ask the sender to use `--mailbox` instead."
                 );
             }
         }

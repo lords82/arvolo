@@ -10,6 +10,13 @@
 // Keys are dotted by area. The prefix is where the string is *shown*, not where
 // it happens to be constructed: `store.err.*` reads on screen as a toast, but it
 // is raised from the store, and grouping it with the screens would scatter it.
+//
+// All of the above is about the *keys*. What goes in the values is `docs/COPY.md`
+// — in short: say what happened, say what they can do, and put the reason on the
+// hint line rather than in the label. The key suffix decides how long a value may
+// be (`*Hint` and `*Body` are the second level and get room; `*.submit*` is a
+// button and gets almost none), which is why the suffixes are worth keeping
+// honest. `gui/src/test/copy.test.ts` enforces it and lists what is still over.
 
 export const en = {
   // ---- locale ------------------------------------------------------------

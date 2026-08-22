@@ -121,15 +121,17 @@ pub(crate) fn require_relay(relay: Option<String>) -> Result<String> {
 /// command that never mentioned either. `what` names the thing being refused, e.g.
 /// "a pairing code".
 pub(crate) fn ensure_p2p(what: &str) -> Result<()> {
-    anyhow::ensure!(
-        arvolo_core::transfer::p2p_enabled(),
-        "{what} needs a direct peer-to-peer transfer, and P2P is off \
-         (`p2p = false` in config.toml, or ARVOLO_P2P=off).\n\
-         Go through the relay instead: `arvolo send <who> <paths> --deposit` for a \
-         recipient you have, or `arvolo link <paths>` for a browser link. Both are \
-         plain HTTP, so they also honour `proxy`."
-    );
-    Ok(())
+    if arvolo_core::transfer::p2p_enabled() {
+        return Ok(());
+    }
+    Err(crate::output::refuse(
+        format!(
+            "{what} needs a direct transfer, and P2P is off. Go through the relay:\n\
+             \x20   arvolo send <paths> --to <who> --mailbox   (or --link, for a browser link)"
+        ),
+        "P2P is off in config.toml (`p2p = false`) or in the environment \
+         (ARVOLO_P2P=off). Both relay routes are plain HTTP, so they honour `proxy` too.",
+    ))
 }
 
 /// Parse a download link (`https://<relay>/dl/<claim>[#key]`) into its relay base

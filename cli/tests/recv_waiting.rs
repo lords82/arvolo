@@ -136,7 +136,7 @@ async fn lists_what_is_waiting_and_downloads_the_chosen_one() {
         ],
     )
     .await;
-    assert!(ok, "send --deposit failed: {out}{err}");
+    assert!(ok, "send --mailbox failed: {out}{err}");
 
     // 1. See it. Stdin is closed, so the command lists and stops.
     let (ok, listed, err) = run(cfg_recv.path(), &relay, &["recv"]).await;
@@ -239,7 +239,7 @@ async fn an_offer_can_be_declined_and_then_it_is_gone() {
         ],
     )
     .await;
-    assert!(ok, "send --deposit failed: {out}{err}");
+    assert!(ok, "send --mailbox failed: {out}{err}");
 
     let (ok, log) = run_answering(cfg_recv.path(), &relay, &["recv"], "d1\n").await;
     assert!(ok, "declining should succeed: {log}");
@@ -282,7 +282,7 @@ async fn status_without_a_daemon_shows_what_is_waiting() {
         ],
     )
     .await;
-    assert!(ok, "send --deposit failed: {out}{err}");
+    assert!(ok, "send --mailbox failed: {out}{err}");
 
     let (ok, status, err) = run(cfg_recv.path(), &relay, &["status"]).await;
     assert!(ok, "status should succeed: {status}{err}");
@@ -352,7 +352,7 @@ async fn a_blocked_sender_is_not_listed() {
         ],
     )
     .await;
-    assert!(ok, "send --deposit failed: {out}{err}");
+    assert!(ok, "send --mailbox failed: {out}{err}");
 
     let (ok, out, err) = run(cfg_recv.path(), &relay, &["contacts", "block", &send_id]).await;
     assert!(ok, "block failed: {out}{err}");
