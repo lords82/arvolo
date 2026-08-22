@@ -471,9 +471,12 @@ impl SendSession {
                     // too, instead of serving an empty room forever. Sealed to
                     // one recipient, their single no IS everyone's no.
                     //
-                    // `active_peers` may briefly still count the aborter (its
-                    // chunk connection closes moments after the ctrl goodbye),
-                    // hence `<= 1` rather than `== 0`.
+                    // `active_peers` may briefly still count the aborter (it was
+                    // transferring until moments ago, and the activity window
+                    // keeps it counted for a few seconds more), hence `<= 1`
+                    // rather than `== 0`. Peers that are connected but idle no
+                    // longer count at all — which is right here too: they were
+                    // never a reason to keep serving.
                     on(SendEvent::RecipientCancelled);
                     if self.sealed_to_recipient
                         || (self.sender.active_peers() <= 1 && reported.is_empty())

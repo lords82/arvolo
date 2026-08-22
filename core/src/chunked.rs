@@ -276,29 +276,100 @@ impl ChunkBackend {
     }
 }
 
-/// Live count of *distinct* peers currently connected to a [`ChunkServer`] —
-/// i.e. how many are downloading from us right now. Keyed by remote endpoint id
-/// so repeated connects from the same peer count once. Cheap `Arc<Mutex<…>>`
-/// clone shared between the server and its [`ChunkSender`].
+/// How recently a peer must have shown signs of life to count as "downloading
+/// from us right now" — a request arriving, or bytes still leaving for it.
+///
+/// The claim shown to the user is "downloading *now*", so the window is short:
+/// twenty display ticks (the sender polls the count every 500ms), several times
+/// the worst healthy gap — the body write loop stamps once per flow-control
+/// window, so even a KB/s-thin link stamps every few seconds mid-chunk, and
+/// between chunks the receiver's own provider cooldown is three seconds — and
+/// well under both clocks that eventually close the connection itself, because
+/// the point is that an idle peer stops *counting* long before it stops being
+/// *tracked*. No env override: tests backdate the stamp directly.
+const ACTIVE_WINDOW_SECS: u64 = 10;
+
+/// Milliseconds on the process clock. `Instant`-based, so immune to wall-clock
+/// steps; relaxed atomics carry it into hot loops. Always compare with
+/// `saturating_sub`.
+///
+/// The clock starts one window past zero, not at zero: with an origin of 0, a
+/// stamp meaning "already stale" is unrepresentable near process start —
+/// subtracting the window saturates back into "fresh". Every reading is offset
+/// equally, so comparisons are untouched.
+fn now_ms() -> u64 {
+    static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    EPOCH
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_millis() as u64
+        + ACTIVE_WINDOW_SECS * 1000
+        + 1
+}
+
+/// A tracked peer: how many of its connections are open, and when it last did
+/// anything. The two travel together but answer different questions — the
+/// refcount is bookkeeping (when may the entry be dropped), the stamp is the
+/// metric (does this peer count as downloading).
+struct PeerEntry {
+    conns: usize,
+    activity: Arc<AtomicU64>,
+}
+
+/// Live count of *distinct* peers downloading from a [`ChunkServer`] right now.
+/// Keyed by remote endpoint id so repeated connects from the same peer count
+/// once. Cheap `Arc<Mutex<…>>` clone shared between the server and its
+/// [`ChunkSender`].
+///
+/// "Downloading" means connected **and** active within [`ACTIVE_WINDOW_SECS`] —
+/// not merely connected. The distinction is not pedantry: a healthy receiver
+/// opens a fresh connection per 16 MiB chunk, so the only connection that stays
+/// open for long is precisely the pathological one — a peer that connected and
+/// then did nothing. Counted by open connections, the metric was at its most
+/// stable when it was least true, and "1 downloading" once meant a hung peer
+/// for two hours straight.
 #[derive(Clone, Default)]
-pub(crate) struct PeerCount(Arc<Mutex<HashMap<EndpointId, usize>>>);
+pub(crate) struct PeerCount(Arc<Mutex<HashMap<EndpointId, PeerEntry>>>);
 
 impl PeerCount {
-    fn enter(&self, id: EndpointId) {
-        *self.0.lock().unwrap().entry(id).or_insert(0) += 1;
+    /// Track one more connection from `id`, returning the stamp its serve loop
+    /// touches on every sign of life — taken once per connection, like
+    /// [`SentBytes::counter`], so the hot path pays a relaxed store and never a
+    /// map lookup.
+    fn enter(&self, id: EndpointId) -> Arc<AtomicU64> {
+        let mut m = self.0.lock().unwrap();
+        let e = m.entry(id).or_insert_with(|| PeerEntry {
+            conns: 0,
+            activity: Arc::new(AtomicU64::new(0)),
+        });
+        e.conns += 1;
+        e.activity.store(now_ms(), Ordering::Relaxed);
+        e.activity.clone()
     }
     fn leave(&self, id: EndpointId) {
         let mut m = self.0.lock().unwrap();
-        if let Some(c) = m.get_mut(&id) {
-            *c -= 1;
-            if *c == 0 {
+        if let Some(e) = m.get_mut(&id) {
+            e.conns -= 1;
+            if e.conns == 0 {
                 m.remove(&id);
             }
         }
     }
-    /// Number of distinct peers currently connected.
+    /// Number of distinct peers with a connection open *and* signs of life
+    /// within the window. An entry gone quiet stays in the map — the refcount
+    /// must still balance when its connections end — it just stops counting.
+    /// Filtered at read time: the sender polls this every 500ms, which is all
+    /// the sweeping the window needs.
     pub(crate) fn distinct(&self) -> usize {
-        self.0.lock().unwrap().len()
+        let now = now_ms();
+        self.0
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|e| {
+                now.saturating_sub(e.activity.load(Ordering::Relaxed)) <= ACTIVE_WINDOW_SECS * 1000
+            })
+            .count()
     }
 }
 
@@ -385,7 +456,7 @@ impl ProtocolHandler for ChunkServer {
         // Track this peer as an active downloader for the duration of the
         // connection (dropped when it ends, even on error).
         let peer = conn.remote_id();
-        self.peers.enter(peer);
+        let activity = self.peers.enter(peer);
         let _guard = PeerGuard(self.peers.clone(), peer);
         // Taken once for the connection: the write loop below then costs one atomic
         // add per flow-control window, exactly as it did when the counter was global.
@@ -447,8 +518,12 @@ impl ProtocolHandler for ChunkServer {
                 }
             };
             // It has asked for something: from here the connection has a purpose, and
-            // a quiet spell on it is idling rather than the shape of the hang.
+            // a quiet spell on it is idling rather than the shape of the hang. The
+            // request is also a sign of life for the peer *metric* — the two clocks
+            // are deliberately separate: this one decides when to hang up (minutes),
+            // the stamp decides when to stop calling it "downloading" (seconds).
             has_asked = true;
+            activity.store(now_ms(), Ordering::Relaxed);
             // Producing a chunk opens the file and re-encrypts 16 MiB (CPU-bound).
             // Run it on the blocking pool so concurrent requests (parallel receiver
             // fetches) don't stall the async runtime's worker threads.
@@ -477,6 +552,11 @@ impl ProtocolHandler for ChunkServer {
                         let Ok(n) = send.write(body).await else { break };
                         body = &body[n..];
                         sent.fetch_add(n as u64, Ordering::Relaxed);
+                        // Bytes still leaving for this peer are a sign of life too —
+                        // essential, not decorative: a slow peer mid-16 MiB chunk can
+                        // legitimately make no *new* request for minutes, and must
+                        // keep counting as long as it keeps taking bytes.
+                        activity.store(now_ms(), Ordering::Relaxed);
                     }
                 }
                 None => {
@@ -1114,7 +1194,10 @@ impl ChunkSender {
         self.sent.best()
     }
 
-    /// How many distinct peers are currently downloading from this sender.
+    /// How many distinct peers are downloading from this sender *right now* —
+    /// connected and showing signs of life within the last few seconds, not
+    /// merely connected. See [`PeerCount`] for why the distinction is the whole
+    /// point.
     pub fn active_peers(&self) -> usize {
         self.peers.distinct()
     }
@@ -1643,6 +1726,69 @@ mod tests {
     #[test]
     fn nothing_sent_yet_is_zero_not_a_panic() {
         assert_eq!(SentBytes::default().best(), 0);
+    }
+
+    /// Backdate a peer's stamp past the activity window, as time passing would.
+    fn backdate(activity: &AtomicU64) {
+        let stale = now_ms().saturating_sub(ACTIVE_WINDOW_SECS * 1000 + 1);
+        activity.store(stale, Ordering::Relaxed);
+    }
+
+    /// The bug this metric replaces: a peer that connected and then did nothing
+    /// counted as "downloading" for as long as its connection lived — hours, in
+    /// the case that prompted this. It must drop out of the count while staying
+    /// tracked (the refcount has to balance when its connections finally end).
+    #[test]
+    fn a_connected_but_silent_peer_stops_counting() {
+        let peers = PeerCount::default();
+        let id = peer();
+        let activity = peers.enter(id);
+        assert_eq!(peers.distinct(), 1, "fresh entry counts");
+
+        backdate(&activity);
+        assert_eq!(peers.distinct(), 0, "gone quiet: no longer downloading");
+        assert_eq!(
+            peers.0.lock().unwrap().len(),
+            1,
+            "but still tracked — its connection is open and must balance on leave"
+        );
+
+        peers.leave(id);
+        assert!(peers.0.lock().unwrap().is_empty(), "leave still balances");
+    }
+
+    /// The other half of the definition: activity is not only "a request
+    /// arrived". A slow peer mid-16 MiB chunk makes no new request for minutes,
+    /// but bytes keep leaving for it — the write loop's stamp (this exact store)
+    /// must keep it counted.
+    #[test]
+    fn progress_in_the_body_write_loop_keeps_a_slow_peer_counted() {
+        let peers = PeerCount::default();
+        let activity = peers.enter(peer());
+
+        backdate(&activity);
+        assert_eq!(peers.distinct(), 0);
+        // What the write loop does after handing bytes to QUIC:
+        activity.store(now_ms(), Ordering::Relaxed);
+        assert_eq!(peers.distinct(), 1, "moving bytes is being downloaded from");
+    }
+
+    /// A receiver opens a fresh connection per chunk, so the same peer enters
+    /// and leaves repeatedly — one entry, counted once, removed only when its
+    /// last connection ends.
+    #[test]
+    fn reconnects_share_one_entry() {
+        let peers = PeerCount::default();
+        let id = peer();
+        peers.enter(id);
+        peers.enter(id);
+        assert_eq!(peers.distinct(), 1, "distinct peers, not connections");
+
+        peers.leave(id);
+        assert_eq!(peers.distinct(), 1, "one connection left, still here");
+        peers.leave(id);
+        assert_eq!(peers.distinct(), 0);
+        assert!(peers.0.lock().unwrap().is_empty());
     }
 }
 

@@ -68,6 +68,15 @@ Second prerelease, on top of rc1.
   turns silence into an ordinary error, which is the one form the scheduler's
   existing recovery (cool the provider down, re-queue the piece, reassign) knows
   what to do with.
+- **"1 downloading" could mean a peer that had done nothing for minutes.** The
+  count behind the CLI's "N downloading" and the GUI's "N people downloading it"
+  counted open chunk connections — but a healthy receiver opens a fresh
+  connection per 16 MiB piece, so the only connection that stays open for long is
+  precisely the hung one: the metric was at its most stable when it was least
+  true. A peer now counts only while it shows signs of life — a request arriving,
+  or bytes still leaving for it mid-piece — and drops out of the count ten
+  seconds after the last one. The connection bookkeeping underneath is unchanged;
+  what changed is who gets called a downloader.
 
 - **Every client asked the relay for its inbox every two seconds, forever.** The
   long-poll ended the moment the slot was non-empty — and the contact-sync cell
