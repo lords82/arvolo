@@ -816,6 +816,18 @@ struct InboxWait {
     wait: u64,
 }
 
+/// [`InboxWait`] plus the status the caller last saw, for the poster's own
+/// long-poll on one offer — see [`inbox_status_handler`].
+#[derive(Deserialize)]
+struct StatusWait {
+    #[serde(default)]
+    wait: u64,
+    /// The wire word (`pending` / `fetched` / `taken`) this caller already has.
+    /// Empty means "I have no reading yet; hold out for `taken`".
+    #[serde(default)]
+    since: String,
+}
+
 /// MAC binding a session nonce to its slot and expiry, keyed by the relay's
 /// per-process secret. BLAKE3 keyed hash → 32 bytes.
 fn inbox_mac(secret: &[u8; 32], slot: &str, nonce: &[u8], exp: u64) -> [u8; 32] {
@@ -1071,6 +1083,13 @@ async fn inbox_get_handler(
             // comes later, on the ack, if the file is actually taken.
             let ids: Vec<String> = rows.iter().map(|(id, _)| id.clone()).collect();
             state.mailbox.inbox_mark_arrived(&slot, &ids, now_unix());
+            // Tell the posters, who may be holding on exactly this transition. For a
+            // recipient with no daemon, listing the inbox is the *only* thing they do
+            // before dialling — they ack once the file is saved, far too late to be a
+            // starting gun — so this is what gets the sender serving in time. Cannot
+            // ping-pong with other readers of the slot: a poll woken here re-reads,
+            // finds nothing it doesn't already hold, and stamps nothing.
+            state.notify_inbox(&slot);
             let items: Vec<arvolo_core::presence::InboxItem> = rows
                 .into_iter()
                 .map(|(id, blob)| arvolo_core::presence::InboxItem { id, blob })
@@ -1118,37 +1137,99 @@ async fn inbox_delete_handler(
         return StatusCode::UNAUTHORIZED;
     }
     state.mailbox.inbox_mark_taken(&slot, &id, now_unix());
+    // Wake whoever is holding on this offer's status. The ack is the one event in
+    // an inbox that reports a *person* — the recipient just said yes — and the
+    // sender is on the other side of it, waiting to know whether to start serving.
+    // Without this the transition is only ever found by a later poll, which is how
+    // accepting a held send used to cost minutes of silence on both ends.
+    state.notify_inbox(&slot);
     StatusCode::NO_CONTENT
 }
 
 /// Poster-only status of one offer: has a live recipient seen it? Authorized by
 /// the retract token (only the poster holds it). Body is a plain word:
-/// `pending` / `fetched` / `gone`; a wrong/missing token is 401.
+/// `pending` / `fetched` / `taken` / `gone`; a wrong/missing token is 401.
+///
+/// With `?wait=<secs>` (capped at [`INBOX_MAX_WAIT_SECS`]) the answer is held back
+/// until the status *changes*: `&since=<word>` names what the caller last saw, and
+/// the hold lasts as long as the answer is still that word. `gone` returns at once
+/// whatever was asked — nothing further can happen to a row that is no longer
+/// there. `wait=0` (the default) is the plain one-shot read this endpoint has
+/// always been; `wait` without `since` holds out for `taken`.
+///
+/// Waiting on the *change* rather than on `taken` is what makes this work for both
+/// kinds of recipient. One running a daemon acks the moment they accept, so `taken`
+/// is their signal. One running a bare `arvolo recv` acks only once the file is
+/// saved — deliberately, so a fetch that fails doesn't consume the offer — which is
+/// far too late to be a starting gun. What that recipient *does* do first is list
+/// their inbox, and a listing stamps `fetched`. Told what the sender last saw, the
+/// relay can report that step too, and the sender is serving by the time the human
+/// on the other end has finished reading the prompt.
+///
+/// The hold is what makes a `send --to` that the relay refused as too large start
+/// the moment the recipient shows up, instead of on the delivery loop's next look.
+/// A caller must still floor its own retry interval: a relay that does not know
+/// `wait` answers instantly, and a loop that trusts the hold to pace it would turn
+/// into a request storm — see `MIN_ROUND` in `core/src/presence.rs` for the last
+/// time that happened.
+///
+/// The wake-up is the slot's, not the offer's: every sender holding here, and the
+/// recipient's own inbox poll, are woken by anything that happens in that slot.
+/// The extra wake-ups cost one re-read and a return to waiting, which is cheaper
+/// than a notify per row would be to keep.
 async fn inbox_status_handler(
     State(state): State<AppState>,
     AxumPath((slot, id)): AxumPath<(String, String)>,
+    Query(q): Query<StatusWait>,
     headers: HeaderMap,
 ) -> Result<&'static str, StatusCode> {
     let token = headers
         .get(INBOX_POSTER_TOKEN_HEADER)
         .and_then(|v| v.to_str().ok())
-        .ok_or(StatusCode::UNAUTHORIZED)?;
-    match state
-        .mailbox
-        .inbox_status_by_poster(&slot, &id, token.trim())
-    {
-        InboxStatus::BadToken => Err(StatusCode::UNAUTHORIZED),
-        InboxStatus::Gone => Ok("gone"),
-        InboxStatus::Pending => Ok("pending"),
-        // Still spelled `fetched` on the wire, though the state is now called what
-        // it always meant. A client older than this relay maps the word it knows to
-        // "a live client has it" and keeps working; renaming it would have made
-        // every such client read an unknown word, fall through to `pending`, and
-        // abandon live sends to recipients who were right there. `taken` is purely
-        // additive — an old client falls through to `pending` for it, which costs
-        // nothing: by then the recipient has the file.
-        InboxStatus::Arrived => Ok("fetched"),
-        InboxStatus::Taken => Ok("taken"),
+        .ok_or(StatusCode::UNAUTHORIZED)?
+        .trim()
+        .to_string();
+    // No `since` means "hold out for `taken`" — spelled as "you last saw pending or
+    // fetched", since holding while the answer is either of those is the same rule.
+    let since = q.since.trim();
+    let deadline = now_unix().saturating_add(q.wait.min(INBOX_MAX_WAIT_SECS));
+    // Registered before the first look, and re-armed before each one — same
+    // ordering as [`inbox_get_handler`], for the same reason: an ack landing
+    // between a read and the wait that follows it still wakes us.
+    let waiter = state.inbox_wait_on(&slot);
+    loop {
+        let notified = waiter.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+
+        let word = match state.mailbox.inbox_status_by_poster(&slot, &id, &token) {
+            InboxStatus::BadToken => return Err(StatusCode::UNAUTHORIZED),
+            InboxStatus::Gone => return Ok("gone"),
+            InboxStatus::Pending => "pending",
+            // Still spelled `fetched` on the wire, though the state is now called what
+            // it always meant. A client older than this relay maps the word it knows to
+            // "a live client has it" and keeps working; renaming it would have made
+            // every such client read an unknown word, fall through to `pending`, and
+            // abandon live sends to recipients who were right there. `taken` is purely
+            // additive — an old client falls through to `pending` for it, which costs
+            // nothing: by then the recipient has the file.
+            InboxStatus::Arrived => "fetched",
+            InboxStatus::Taken => "taken",
+        };
+        let unchanged = if since.is_empty() {
+            word != "taken"
+        } else {
+            word == since
+        };
+        let now = now_unix();
+        if !unchanged || now >= deadline {
+            return Ok(word);
+        }
+        let step = std::time::Duration::from_secs((deadline - now).min(INBOX_IDLE_RECHECK_SECS));
+        tokio::select! {
+            _ = notified => {}
+            _ = tokio::time::sleep(step) => {}
+        }
     }
 }
 

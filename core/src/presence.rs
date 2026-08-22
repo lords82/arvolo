@@ -559,13 +559,95 @@ pub async fn offer_status(
     id: &str,
     poster_token: &str,
 ) -> Result<OfferStatus> {
+    offer_status_once(client, relay, recipient, id, poster_token, 0, None).await
+}
+
+/// How long a client may ask the relay to hold the status GET open. Matches the
+/// relay's own cap (`INBOX_MAX_WAIT_SECS`); asking for more is silently clamped
+/// there, so this only keeps us honest about what we expect.
+pub const OFFER_STATUS_MAX_WAIT_SECS: u64 = 30;
+
+/// [`offer_status`], holding the connection open for up to `wait_secs` until the
+/// status becomes something other than `since` — what the caller last saw.
+///
+/// This is how a `send --to` learns that its recipient has shown up: the sender is
+/// otherwise asleep between delivery attempts, on a backoff that grows to minutes,
+/// and the whole point of a held send is that the file can only move while both
+/// ends are awake at once. Waiting on the change collapses that window to a round
+/// trip — and it catches both kinds of recipient, the daemon that acks on accept
+/// and the bare `arvolo recv` that only lists its inbox before dialling (see the
+/// relay's `inbox_status_handler`).
+///
+/// **Never returns before `wait_secs` unless there is news.** A relay that does
+/// not know `wait` answers instantly, and a caller looping on this to pace itself
+/// would then hammer it — the failure this same client already paid for once, on
+/// the inbox poll (`MIN_ROUND` in [`InboxSubscription::run`]). So the floor lives
+/// here, in the one place every caller inherits it, and an unaware relay simply
+/// degrades to the polling interval the caller asked for.
+pub async fn offer_status_waiting(
+    client: &reqwest::Client,
+    relay: &str,
+    recipient: &PublicId,
+    id: &str,
+    poster_token: &str,
+    since: OfferStatus,
+    wait_secs: u64,
+) -> Result<OfferStatus> {
+    let started = std::time::Instant::now();
+    let out = offer_status_once(
+        client,
+        relay,
+        recipient,
+        id,
+        poster_token,
+        wait_secs,
+        Some(since),
+    )
+    .await;
+    let news = matches!(&out, Ok(st) if *st != since);
+    if !news {
+        let floor = std::time::Duration::from_secs(wait_secs);
+        if let Some(rest) = floor.checked_sub(started.elapsed()) {
+            tokio::time::sleep(rest).await;
+        }
+    }
+    out
+}
+
+/// The wire spelling of a status, for `?since=`. Deliberately not
+/// [`OfferStatus::as_str`]: that one is the vocabulary a UI shows, and the two
+/// disagree on `Arrived`/`fetched` — the relay speaks the older word.
+fn wire_word(s: OfferStatus) -> &'static str {
+    match s {
+        OfferStatus::Pending => "pending",
+        OfferStatus::Arrived => "fetched",
+        OfferStatus::Taken => "taken",
+        OfferStatus::Gone => "gone",
+    }
+}
+
+async fn offer_status_once(
+    client: &reqwest::Client,
+    relay: &str,
+    recipient: &PublicId,
+    id: &str,
+    poster_token: &str,
+    wait_secs: u64,
+    since: Option<OfferStatus>,
+) -> Result<OfferStatus> {
+    let wait = wait_secs.min(OFFER_STATUS_MAX_WAIT_SECS);
+    let since = since.map(wire_word).unwrap_or_default();
     // Like `retract_offer`, the offer may be in the previous epoch's slot. The relay
     // answers `gone` for a row it doesn't have, which is exactly what a wrong slot
     // looks like — so keep asking while the answer is `gone`, and only conclude the
-    // offer is gone once every slot in the window says so.
+    // offer is gone once every slot in the window says so. A wrong slot costs
+    // nothing even when waiting: `gone` is answered at once, never held.
     let mut first_err = None;
     for slot in inbox_slots_at(recipient, now_unix()) {
-        let url = format!("{}/{id}/status", inbox_url(relay, &slot));
+        let url = format!(
+            "{}/{id}/status?wait={wait}&since={since}",
+            inbox_url(relay, &slot)
+        );
         let sent = client
             .get(url)
             .header(POSTER_TOKEN_HEADER, poster_token)

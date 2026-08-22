@@ -40,6 +40,21 @@ Second prerelease, on top of rc1.
   of them answering "still nothing". A deposit now wakes exactly the slot it
   landed in, which also takes the delivery latency of an offer arriving mid-hold
   from up to half a second down to none.
+- **Accepting a big file left it sitting at 0 B for minutes.** A file the relay
+  refuses as too large can only go peer-to-peer, so the sender keeps trying while
+  the recipient is away — on a backoff that grows to five minutes. Nothing told it
+  the recipient had said yes, so an accept landed in the middle of that sleep and
+  both ends showed a transfer that was doing nothing. The sender now spends the
+  wait held open on its offer's status, and the relay answers the moment the
+  recipient touches it: accepting starts the transfer in a round trip. Both kinds
+  of recipient reach it — the daemon, which acks on accept, and a bare
+  `arvolo recv`, which only lists its inbox before dialling.
+- **Every delivery attempt left another copy of the same offer.** Each attempt
+  posted a fresh offer and withdrew it on the way out, so a recipient who was away
+  for a while collected a row per attempt, all but one of them already dead — and
+  accepting any of the dead ones named an offer the sender had stopped listening
+  for. A held send now keeps one offer standing for its whole life and withdraws
+  it once, when the send really ends.
 - **A file from another of your own devices asked for approval.** Two halves of
   `--to me` shipped in rc1 were written but never wired up. An offer that opens
   and authenticates as your own identity can only have been sealed by something

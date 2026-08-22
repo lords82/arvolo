@@ -8,7 +8,8 @@ use std::sync::Arc;
 use arvolo_core::backfill::BlobNode;
 use arvolo_core::crypto::Identity;
 use arvolo_core::presence::{
-    offer_status, post_offer, retract_offer, slot_for, InboxSubscription, Offer, OfferStatus,
+    offer_status, offer_status_waiting, post_offer, retract_offer, slot_for, InboxSubscription,
+    Offer, OfferStatus,
 };
 use arvolo_core::transfer::RelayChoice;
 use arvolo_relay::{router, AppState, Mailbox};
@@ -593,6 +594,173 @@ async fn a_new_offer_wakes_a_held_poll_at_once() {
     assert!(
         waited < std::time::Duration::from_secs(6),
         "the offer took {waited:?} to surface: the deposit did not wake the held poll"
+    );
+}
+
+/// Post a throwaway live offer and hand back the poster's handle.
+async fn post_live_offer(
+    client: &reqwest::Client,
+    relay: &str,
+    recipient: &Identity,
+    sender: &Identity,
+) -> arvolo_core::presence::PostedOffer {
+    post_offer(
+        client,
+        relay,
+        &recipient.public(),
+        sender,
+        &Offer {
+            name: "held.bin".into(),
+            size: 1,
+            chunks: 1,
+            ticket: "arvcHELD".into(),
+            note: String::new(),
+            sender_name: String::new(),
+            origin: None,
+        },
+        None,
+    )
+    .await
+    .expect("post")
+}
+
+/// The sender's side of the same trick: a held `send --to` sleeps between delivery
+/// attempts, and the recipient accepting is what should end that sleep. The ack must
+/// come back to a waiting poster at once, not on its next look.
+#[tokio::test]
+async fn an_ack_wakes_a_held_status_poll_at_once() {
+    let relay = spawn_relay().await;
+    let sender = Identity::generate();
+    let recipient = Identity::generate();
+    let client = reqwest::Client::new();
+    let posted = post_live_offer(&client, &relay, &recipient, &sender).await;
+    let who = recipient.public();
+
+    // Their daemon lists the inbox first, as it would: that is `Arrived`, and it is
+    // where a sender that has already seen the listing starts waiting from.
+    let sub = InboxSubscription::new(relay.clone(), &recipient);
+    assert_eq!(sub.poll_wait(0).await.expect("poll").len(), 1);
+
+    let started = std::time::Instant::now();
+    let (st, ()) = tokio::join!(
+        offer_status_waiting(
+            &client,
+            &relay,
+            &who,
+            &posted.id,
+            &posted.poster_token,
+            OfferStatus::Arrived,
+            20,
+        ),
+        async {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            sub.ack(&posted.id).await.expect("ack");
+        }
+    );
+    let waited = started.elapsed();
+
+    assert_eq!(st.expect("status"), OfferStatus::Taken);
+    assert!(
+        waited < std::time::Duration::from_secs(6),
+        "the accept took {waited:?} to reach the sender: the ack did not wake the held poll"
+    );
+}
+
+/// The recipient with no daemon never acks until the file is saved — much too late
+/// to start the sender. What they do first is *list* their inbox, so that step has
+/// to travel too.
+#[tokio::test]
+async fn a_listing_wakes_a_poster_waiting_from_pending() {
+    let relay = spawn_relay().await;
+    let sender = Identity::generate();
+    let recipient = Identity::generate();
+    let client = reqwest::Client::new();
+    let posted = post_live_offer(&client, &relay, &recipient, &sender).await;
+    let who = recipient.public();
+
+    let started = std::time::Instant::now();
+    let (st, ()) = tokio::join!(
+        offer_status_waiting(
+            &client,
+            &relay,
+            &who,
+            &posted.id,
+            &posted.poster_token,
+            OfferStatus::Pending,
+            20,
+        ),
+        async {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            let sub = InboxSubscription::new(relay.clone(), &recipient);
+            assert_eq!(sub.poll_wait(0).await.expect("poll").len(), 1);
+        }
+    );
+    let waited = started.elapsed();
+
+    assert_eq!(st.expect("status"), OfferStatus::Arrived);
+    assert!(
+        waited < std::time::Duration::from_secs(6),
+        "the listing took {waited:?} to reach the sender: it did not wake the held poll"
+    );
+}
+
+/// And the half that keeps the relay standing: with nothing happening, the wait is
+/// paid in full. A caller loops on this to pace itself, so an early return with no
+/// news is not a wasted round trip — it is a request storm.
+#[tokio::test]
+async fn a_quiet_offer_holds_the_poll_for_the_whole_wait() {
+    let relay = spawn_relay().await;
+    let sender = Identity::generate();
+    let recipient = Identity::generate();
+    let client = reqwest::Client::new();
+    let posted = post_live_offer(&client, &relay, &recipient, &sender).await;
+
+    let started = std::time::Instant::now();
+    let st = offer_status_waiting(
+        &client,
+        &relay,
+        &recipient.public(),
+        &posted.id,
+        &posted.poster_token,
+        OfferStatus::Pending,
+        3,
+    )
+    .await
+    .expect("status");
+    let waited = started.elapsed();
+
+    assert_eq!(st, OfferStatus::Pending, "nobody touched it");
+    assert!(
+        waited >= std::time::Duration::from_secs(3),
+        "returned after {waited:?} with no news: a loop on this would hammer the relay"
+    );
+}
+
+/// The floor is the client's, not the relay's — it has to hold even when the answer
+/// arrives instantly, which is exactly what a relay too old to know `wait` does.
+/// Unreachable stands in for that here: it fails as fast as an instant answer.
+#[tokio::test]
+async fn no_news_from_an_unhelpful_relay_still_costs_the_full_wait() {
+    let recipient = Identity::generate();
+    let client = reqwest::Client::new();
+
+    let started = std::time::Instant::now();
+    let out = offer_status_waiting(
+        &client,
+        "http://127.0.0.1:1",
+        &recipient.public(),
+        "nosuchoffer",
+        "token",
+        OfferStatus::Pending,
+        3,
+    )
+    .await;
+    let waited = started.elapsed();
+
+    assert!(out.is_err(), "a dead relay cannot answer");
+    assert!(
+        waited >= std::time::Duration::from_secs(3),
+        "gave up after {waited:?}: the caller's pacing must not depend on the relay"
     );
 }
 

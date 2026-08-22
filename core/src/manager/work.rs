@@ -211,18 +211,79 @@ pub(super) async fn deliver_to(
     note: String,
     pause_flag: Arc<std::sync::atomic::AtomicBool>,
 ) {
+    // The offer outlives the individual attempts now (see `deliver_to_inner`), so
+    // somebody has to own its end. The loop has a dozen ways out and every one of
+    // them means the same thing for the offer — nobody is serving it any more — so
+    // the withdrawal belongs here, once, rather than at each `return`.
+    let mut standing: Option<StandingOffer> = None;
+    deliver_to_inner(
+        &inner,
+        id,
+        &cancel,
+        &relay,
+        &recipient,
+        &payload,
+        &name,
+        archive,
+        &note,
+        &pause_flag,
+        &mut standing,
+    )
+    .await;
+    if let Some(s) = standing {
+        let _ = presence::retract_offer(
+            &inner.client,
+            &relay,
+            &recipient,
+            &s.posted.id,
+            &s.posted.poster_token,
+        )
+        .await;
+    }
+}
+
+/// The offer a held `send --to` keeps on the relay, and the last status we read
+/// for it. The pair travels together because the wake-up is a *change* of status:
+/// asking "is it still what I last saw?" needs both halves, and separating them
+/// invites asking with a reading that belongs to an offer already replaced.
+pub(super) struct StandingOffer {
+    posted: presence::PostedOffer,
+    seen: presence::OfferStatus,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn deliver_to_inner(
+    inner: &Arc<Inner>,
+    id: u64,
+    cancel: &CancellationToken,
+    relay: &str,
+    recipient: &PublicId,
+    payload: &crate::source::SendSource,
+    name: &str,
+    archive: bool,
+    note: &str,
+    pause_flag: &Arc<std::sync::atomic::AtomicBool>,
+    standing: &mut Option<StandingOffer>,
+) {
     use std::time::{Duration, Instant};
     let mut too_big = false;
     let mut next_relay_try = Instant::now();
     let give_up_at = Instant::now() + Duration::from_secs(MAX_WAITING_SECS);
-    // Backoff for live attempts that find nobody. Each attempt posts a fresh offer
-    // into the recipient's inbox, so retrying on the plain poll interval against a
-    // presence beacon that says "online" while nobody ever connects churns one
-    // offer every few seconds — eighty-four of them, in the case that prompted
-    // this. Growing the gap costs a slower reconnect when they really do come
-    // back, which the mailbox path covers anyway.
+    // Backoff for live attempts that find nobody. Retrying on the plain poll
+    // interval against a presence beacon that says "online" while nobody ever
+    // connects spends one whole preparation every few seconds — eighty-four of
+    // them, in the case that prompted this. Growing the gap costs a slower
+    // reconnect when they really do come back, which the wake-up below and the
+    // mailbox path both cover.
     let mut live_backoff = Duration::ZERO;
     let mut next_live_try = Instant::now();
+    // Set when the standing offer's status moves under us: somebody read it, or took
+    // it. That is better evidence of a recipient being there than a presence beacon
+    // — it is them *acting on this send* — and it is the only evidence there is for
+    // one running a bare `arvolo recv`, which reads its inbox and dials without ever
+    // publishing a beacon. Without this the wake-up would fire into a presence check
+    // that says "offline" and the attempt would be skipped.
+    let mut proven_present = false;
     // Carried across attempts on purpose: the chunk digests, and the key and seed
     // they belong to. Recomputing them per attempt made a large file spend most of
     // its life re-encrypting itself between tries — and minted a new ticket each
@@ -232,14 +293,14 @@ pub(super) async fn deliver_to(
     let mut prep: Option<flow::ReusablePrep> = None;
     loop {
         if cancel.is_cancelled() {
-            handle_stop(&inner, id, &pause_flag);
+            handle_stop(inner, id, pause_flag);
             return;
         }
         // Held too long with no delivery → auto-pause (keep it, tell the user) so a
         // too-large file to a recipient who never returns doesn't retry forever.
         if Instant::now() >= give_up_at {
             set_paused(
-                &inner,
+                inner,
                 id,
                 &format!(
                     "still undelivered after {} days — paused; resume to keep trying, or cancel",
@@ -259,12 +320,14 @@ pub(super) async fn deliver_to(
         // quietly depositing it as the whole point of the setting is.
         let online = crate::transfer::p2p_enabled()
             && Instant::now() >= next_live_try
-            && presence::check_online(&inner.client, &relay, &recipient)
-                .await
-                .unwrap_or(false);
+            && (std::mem::take(&mut proven_present)
+                || presence::check_online(&inner.client, relay, recipient)
+                    .await
+                    .unwrap_or(false));
         if online {
             match serve_live_once(
-                &inner, id, &cancel, &relay, &recipient, &payload, &name, archive, &note, &mut prep,
+                inner, id, cancel, relay, recipient, payload, name, archive, note, &mut prep,
+                standing,
             )
             .await
             {
@@ -280,15 +343,15 @@ pub(super) async fn deliver_to(
                     if let Some(total) = total {
                         inner.set_progress(id, total);
                     }
-                    finish(&inner, id, false, Ok(None));
+                    finish(inner, id, false, Ok(None));
                     return;
                 }
                 LiveOutcome::Cancelled => {
-                    handle_stop(&inner, id, &pause_flag);
+                    handle_stop(inner, id, pause_flag);
                     return;
                 }
                 LiveOutcome::Fatal(e) => {
-                    finish(&inner, id, false, Err(e));
+                    finish(inner, id, false, Err(e));
                     return;
                 }
                 LiveOutcome::NotConnected => {
@@ -313,23 +376,22 @@ pub(super) async fn deliver_to(
             // the request in flight; the partial blob expires on the relay with its
             // slot, which is what an incomplete deposit does anyway.
             let opts = MailboxOpts::default();
-            let attempt = deposit_offline_and_offer(
-                &inner, &relay, &recipient, &payload, &name, &note, &opts,
-            );
+            let attempt =
+                deposit_offline_and_offer(inner, relay, recipient, payload, name, note, &opts);
             let outcome = tokio::select! {
                 _ = cancel.cancelled() => {
-                    handle_stop(&inner, id, &pause_flag);
+                    handle_stop(inner, id, pause_flag);
                     return;
                 }
                 out = attempt => out,
             };
             match outcome {
                 Ok(out) => {
-                    drop_held(&inner, id);
+                    drop_held(inner, id);
                     spawn_offline_confirm(
-                        &inner,
+                        inner,
                         id,
-                        relay.clone(),
+                        relay.to_string(),
                         out,
                         unix_now().saturating_add(OFFLINE_TTL_SECS),
                     );
@@ -338,18 +400,18 @@ pub(super) async fn deliver_to(
                 Err(flow::DepositError::TooLarge) => {
                     too_big = true;
                     set_waiting(
-                        &inner,
+                        inner,
                         id,
                         "file too large for this relay — waiting for the recipient to come online for a direct transfer",
                     );
                 }
                 Err(flow::DepositError::Fatal(e)) => {
-                    finish(&inner, id, false, Err(e));
+                    finish(inner, id, false, Err(e));
                     return;
                 }
                 Err(e @ flow::DepositError::Unavailable(_)) => {
                     set_waiting(
-                        &inner,
+                        inner,
                         id,
                         &format!(
                             "{e} — retrying later, and delivering P2P as soon as the recipient is online"
@@ -360,13 +422,72 @@ pub(super) async fn deliver_to(
             }
         }
 
-        // 3) Idle briefly, then re-check presence (react immediately to pause/cancel).
-        tokio::select! {
-            _ = cancel.cancelled() => {
-                handle_stop(&inner, id, &pause_flag);
-                return;
+        // 3) Wait for something to change, then go round again (reacting at once to
+        //    pause/cancel).
+        //
+        // "Something" is, above all, the recipient accepting. While an offer of ours
+        // stands we spend the wait held open on its status instead of asleep: the
+        // relay answers the moment they ack, so an accept lands here in a round trip
+        // rather than at the end of a backoff that grows to five minutes. That gap
+        // was the whole bug — a file too large for the mailbox can *only* move while
+        // both ends are awake together, and the sender was reliably asleep for the
+        // several minutes after the recipient said yes.
+        //
+        // `offer_status_waiting` never returns early without news, so this doubles
+        // as the idle sleep; a relay too old to hold the connection falls back to
+        // exactly the interval this used to sleep.
+        let woken = match standing.as_mut() {
+            Some(s) => {
+                let now = tokio::select! {
+                    _ = cancel.cancelled() => {
+                        handle_stop(inner, id, pause_flag);
+                        return;
+                    }
+                    st = presence::offer_status_waiting(
+                        &inner.client,
+                        relay,
+                        recipient,
+                        &s.posted.id,
+                        &s.posted.poster_token,
+                        s.seen,
+                        WAITING_POLL_SECS,
+                    ) => st.ok(),
+                };
+                match now {
+                    // An offer that expired or was withdrawn from under us is not
+                    // something to keep waiting on: forget it, and the next live
+                    // attempt posts a fresh one.
+                    Some(presence::OfferStatus::Gone) => {
+                        *standing = None;
+                        false
+                    }
+                    // A reading we did not have before: somebody on their side just
+                    // touched this offer. A relay that cannot hold the connection
+                    // answers the old reading instead, and this is false — which is
+                    // the polling behaviour this replaced.
+                    Some(st) => {
+                        let changed = st != s.seen;
+                        s.seen = st;
+                        changed
+                    }
+                    None => false,
+                }
             }
-            _ = tokio::time::sleep(Duration::from_secs(WAITING_POLL_SECS)) => {}
+            None => tokio::select! {
+                _ = cancel.cancelled() => {
+                    handle_stop(inner, id, pause_flag);
+                    return;
+                }
+                _ = tokio::time::sleep(Duration::from_secs(WAITING_POLL_SECS)) => false,
+            },
+        };
+        if woken {
+            // They are there, right now — the one moment worth spending an attempt
+            // on. Whatever the backoff had grown to was measuring how long nobody had
+            // come; that question is answered.
+            live_backoff = Duration::ZERO;
+            next_live_try = Instant::now();
+            proven_present = true;
         }
     }
 }
@@ -387,6 +508,7 @@ pub(super) async fn serve_live_once(
     archive: bool,
     note: &str,
     prep: &mut Option<flow::ReusablePrep>,
+    standing: &mut Option<StandingOffer>,
 ) -> LiveOutcome {
     // Say what this is before doing it — but only when there is something to say.
     // The first attempt reads and encrypts the whole payload (a minute and a half
@@ -423,24 +545,54 @@ pub(super) async fn serve_live_once(
         sender_name: inner.display_name.lock().unwrap().clone(),
         origin: *inner.device_id.lock().unwrap(),
     };
-    let posted = match presence::post_offer(
-        &inner.client,
-        relay,
-        recipient,
-        &inner.me,
-        &offer,
-        None,
-    )
-    .await
-    {
-        Ok(p) => p,
-        // Can't even notify them → treat as not-connected; the caller retries.
-        // Say why in the log: a silent discard here once hid a systematically
-        // failing offer as an endless quiet retry loop.
-        Err(e) => {
-            tracing::warn!("posting offer for transfer {id} failed: {e:#}");
-            return LiveOutcome::NotConnected;
+    // Post an offer only when we don't already have one standing. The ticket is
+    // byte-stable across attempts (see [`flow::prepare_send_reusing`]), so a second
+    // post says nothing new — it just leaves another copy of the same offer in the
+    // recipient's inbox, and splits the one thing the caller waits on across ids it
+    // no longer holds. Whoever accepts the copy from an hour ago is then accepting
+    // an offer nobody is listening for.
+    //
+    // `Gone` (expired, or withdrawn) is the one answer that needs a fresh post; an
+    // unreachable relay reads as gone too, and re-posting is the safe way to be
+    // wrong about that.
+    if let Some(s) = standing.as_mut() {
+        match presence::offer_status(
+            &inner.client,
+            relay,
+            recipient,
+            &s.posted.id,
+            &s.posted.poster_token,
+        )
+        .await
+        {
+            Ok(presence::OfferStatus::Gone) => *standing = None,
+            Ok(st) => s.seen = st,
+            // An unreachable relay reads like a missing offer, and re-posting is the
+            // safe way to be wrong about that: a duplicate costs the recipient a
+            // second row, a missing one costs them the file.
+            Err(_) => *standing = None,
         }
+    }
+    if standing.is_none() {
+        match presence::post_offer(&inner.client, relay, recipient, &inner.me, &offer, None).await {
+            Ok(p) => {
+                *standing = Some(StandingOffer {
+                    posted: p,
+                    seen: presence::OfferStatus::Pending,
+                })
+            }
+            // Can't even notify them → treat as not-connected; the caller retries.
+            // Say why in the log: a silent discard here once hid a systematically
+            // failing offer as an endless quiet retry loop.
+            Err(e) => {
+                tracing::warn!("posting offer for transfer {id} failed: {e:#}");
+                return LiveOutcome::NotConnected;
+            }
+        }
+    }
+    let (offer_id, poster_token) = {
+        let s = standing.as_ref().expect("an offer stands by here");
+        (s.posted.id.clone(), s.posted.poster_token.clone())
     };
     // `set_status_live`, emphatically not `set_status`: the latter is for statuses
     // that mean the task is over (terminal, or paused) and so drops the transfer's
@@ -461,8 +613,8 @@ pub(super) async fn serve_live_once(
     let wd_inner = inner.clone();
     let wd_relay = relay.to_string();
     let wd_recipient = recipient.clone();
-    let wd_offer = posted.id.clone();
-    let wd_token = posted.poster_token.clone();
+    let wd_offer = offer_id.clone();
+    let wd_token = poster_token.clone();
     let watchdog = tokio::spawn(async move {
         use std::time::{Duration, Instant};
         let phase1 = Instant::now() + Duration::from_secs(LIVE_CONFIRM_SECS);
@@ -547,14 +699,9 @@ pub(super) async fn serve_live_once(
     if recipient_cancelled.load(Ordering::Relaxed) {
         // They said no, on the wire and on purpose. Retract the standing offer
         // and end the send — retrying would re-offer a file just refused.
-        let _ = presence::retract_offer(
-            &inner.client,
-            relay,
-            recipient,
-            &posted.id,
-            &posted.poster_token,
-        )
-        .await;
+        let _ = presence::retract_offer(&inner.client, relay, recipient, &offer_id, &poster_token)
+            .await;
+        *standing = None;
         return LiveOutcome::Fatal(anyhow::anyhow!(
             "the recipient cancelled the transfer on their side"
         ));
@@ -562,16 +709,12 @@ pub(super) async fn serve_live_once(
     if cancel.is_cancelled() {
         return LiveOutcome::Cancelled;
     }
-    // Seen/served but nobody completed the pull → retract the dangling offer and
-    // report not-connected so the caller falls back to the relay / keeps waiting.
-    let _ = presence::retract_offer(
-        &inner.client,
-        relay,
-        recipient,
-        &posted.id,
-        &posted.poster_token,
-    )
-    .await;
+    // Seen/served but nobody completed the pull. The offer *stays*: this attempt is
+    // over, the send is not, and that row is the only way the recipient can say yes
+    // between attempts — and their saying yes is what wakes us (see the wait in
+    // `deliver_to_inner`). Withdrawing it here is what used to make every attempt
+    // post a new one, so the accept that did arrive named an offer this loop had
+    // already thrown away. The caller withdraws it once, when the send really ends.
     LiveOutcome::NotConnected
 }
 
