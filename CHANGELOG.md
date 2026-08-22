@@ -1,55 +1,12 @@
 # Changelog
 
-## v0.12.0-rc4
+## v0.12.0 — no silent stalls
 
-Fourth prerelease. All of it is about a held `send --to` — a file too large for the
-mailbox, which can only move while both ends are awake — and all of it came out of
-dogfooding a 10.7 GiB transfer that kept stalling.
-
-- **Accepting starts the transfer in a round trip**, instead of somewhere inside a
-  backoff that grows to five minutes. The sender now waits held open on its offer's
-  status, and the relay answers the moment the recipient touches it.
-- **One offer per send, not one per attempt.** A recipient who was away used to
-  collect a row per delivery attempt, all but one of them already dead.
-- **Pausing no longer throws away the preparation.** It used to live in the delivery
-  task, which is exactly what a pause ends: resuming re-read and re-encrypted the
-  whole payload *and* minted a fresh key and node id, so the recipient's transfer was
-  left pointing at a node nobody was serving. It now belongs to the held send, and is
-  written down beside it (22 KB of digests for 10 GB) so a daemon restart resumes the
-  same send too. Measured on a 3 GiB payload: 60 seconds of preparation before,
-  nothing after — and the recipient's download simply carried on, across both a pause
-  and a restart of the sender.
-- **An offer for a file already downloading no longer asks for approval again.** It
-  goes to the download it belongs to, sweeping the copies already parked for it.
-  Anything else — another file, or the same content from a different sender — still
-  asks.
-
-Both ends want updating: the wake-up needs the relay, and not asking twice needs the
-recipient.
-
-## v0.12.0-rc3
-
-Same code as rc2, plus the fix that lets a prerelease ship Linux packages at all:
-the .deb files were being built and then discarded when the .rpm in the same step
-rejected the hyphen in the version. Both now get `0.12.0~rc3`, which is how both
-ecosystems spell "sorts before the final release".
-
-## v0.12.0-rc2
-
-Second prerelease, on top of rc1.
-
-- **Preparing a send now uses several cores.** Reading stays sequential — that is
-  what a disk wants — while sealing and hashing the chunks runs on four threads.
-  `seal_chunk` is a pure function of `(key, index, bytes)`, so the digests are
-  identical to the single-threaded ones; only the wall clock changes. Measured
-  132 → 411 MiB/s, which takes a 10.7 GiB file from 83 seconds to 27 before the
-  recipient is offered anything.
-- **`--to me` is wired up end to end**: the two halves of sending between your own
-  devices had been written but never connected.
-- **The relay's inbox long-poll holds properly**, and a deposit wakes it.
-- A `cargo fmt` sweep: the check had been failing for a while.
-
-## Unreleased
+Four prereleases, all driven by dogfooding one stubborn 10.7 GiB `send --to`.
+The theme, in the end, was silence: a transfer that hangs without an error, a
+sender that reports a downloader doing nothing, an accept that lands in the
+middle of a five-minute backoff and wakes nobody. Everything below is about
+noticing — and acting — instead.
 
 ### Fixed
 
@@ -101,7 +58,6 @@ Second prerelease, on top of rc1.
   relay's backfill node pools the same way — it pulls hundreds of chunks from
   one sender. Parallel fetches still ride parallel connections, so the sender's
   one-request-at-a-time serve loop never becomes a shared bottleneck.
-
 - **Every client asked the relay for its inbox every two seconds, forever.** The
   long-poll ended the moment the slot was non-empty — and the contact-sync cell
   sits in that slot permanently, so for anyone with sync on it ended immediately,
@@ -165,6 +121,60 @@ Second prerelease, on top of rc1.
   a completed `device pair`/`device join` is supposed to leave was never written,
   so until the first sync round landed a snapshot from the other side, a
   freshly-paired identity still looked unpaired.
+
+### New
+
+- **The name a peer introduces themselves with is readable before approving
+  them** (GUI): it is on screen exactly when you decide, not after.
+
+## v0.12.0-rc4
+
+Fourth prerelease. All of it is about a held `send --to` — a file too large for the
+mailbox, which can only move while both ends are awake — and all of it came out of
+dogfooding a 10.7 GiB transfer that kept stalling.
+
+- **Accepting starts the transfer in a round trip**, instead of somewhere inside a
+  backoff that grows to five minutes. The sender now waits held open on its offer's
+  status, and the relay answers the moment the recipient touches it.
+- **One offer per send, not one per attempt.** A recipient who was away used to
+  collect a row per delivery attempt, all but one of them already dead.
+- **Pausing no longer throws away the preparation.** It used to live in the delivery
+  task, which is exactly what a pause ends: resuming re-read and re-encrypted the
+  whole payload *and* minted a fresh key and node id, so the recipient's transfer was
+  left pointing at a node nobody was serving. It now belongs to the held send, and is
+  written down beside it (22 KB of digests for 10 GB) so a daemon restart resumes the
+  same send too. Measured on a 3 GiB payload: 60 seconds of preparation before,
+  nothing after — and the recipient's download simply carried on, across both a pause
+  and a restart of the sender.
+- **An offer for a file already downloading no longer asks for approval again.** It
+  goes to the download it belongs to, sweeping the copies already parked for it.
+  Anything else — another file, or the same content from a different sender — still
+  asks.
+
+Both ends want updating: the wake-up needs the relay, and not asking twice needs the
+recipient.
+
+## v0.12.0-rc3
+
+Same code as rc2, plus the fix that lets a prerelease ship Linux packages at all:
+the .deb files were being built and then discarded when the .rpm in the same step
+rejected the hyphen in the version. Both now get `0.12.0~rc3`, which is how both
+ecosystems spell "sorts before the final release".
+
+## v0.12.0-rc2
+
+Second prerelease, on top of rc1.
+
+- **Preparing a send now uses several cores.** Reading stays sequential — that is
+  what a disk wants — while sealing and hashing the chunks runs on four threads.
+  `seal_chunk` is a pure function of `(key, index, bytes)`, so the digests are
+  identical to the single-threaded ones; only the wall clock changes. Measured
+  132 → 411 MiB/s, which takes a 10.7 GiB file from 83 seconds to 27 before the
+  recipient is offered anything.
+- **`--to me` is wired up end to end**: the two halves of sending between your own
+  devices had been written but never connected.
+- **The relay's inbox long-poll holds properly**, and a deposit wakes it.
+- A `cargo fmt` sweep: the check had been failing for a while.
 
 ## v0.12.0-rc1 — cancelling, and saying what is happening
 
