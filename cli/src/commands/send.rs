@@ -718,7 +718,9 @@ pub(crate) async fn serve_session(
                 eprintln!("Backfilled — you can close this.")
             }
             SendEvent::BackfillFailed { reason } => eprintln!("Relay backfill failed: {reason}"),
-            SendEvent::RelayCapped { limit_bytes } => eprintln!("{}", relay_capped_line(limit_bytes)),
+            SendEvent::RelayCapped { limit_bytes } => {
+                eprintln!("{}", relay_capped_line(limit_bytes))
+            }
             SendEvent::Peers { count } => {
                 vprintln!("{count} peer(s) downloading");
             }

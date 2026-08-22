@@ -929,6 +929,126 @@ mod packaging_tests {
             .collect()
     }
 
+    /// Every `arvolo <verb>` named in a message this binary can print names a
+    /// verb it actually has.
+    ///
+    /// Five did not. `--deposit` had been `--mailbox` for long enough that a
+    /// test was asserting on the old spelling; `arvolo code --foreground` had
+    /// become `send --code --foreground`; `arvolo name` had become `arvolo me
+    /// name`. Nothing catches this: the strings compile, the tests pass, and the
+    /// only person who finds out is the one who types what they were told.
+    ///
+    /// Source text rather than runtime output, because these live on paths that
+    /// need a relay, a peer or a refusal to reach. Deliberately shallow — it
+    /// checks the verb, not the flags — since a subcommand is what goes stale
+    /// and a false alarm here would get the test deleted rather than fixed.
+    #[test]
+    fn every_cited_command_exists() {
+        let cli = build_cli();
+        let verbs: std::collections::HashSet<String> = cli
+            .get_subcommands()
+            .map(|c| c.get_name().to_string())
+            .collect();
+        // `arvolo` followed by a lowercase word: the shape of every citation in
+        // the codebase. Placeholders (`<who>`, `--flag`) do not match.
+        let cited = regex_lite_arvolo_verbs();
+        let mut bad = Vec::new();
+        for rel in ["cli/src", "core/src"] {
+            for (file, verb) in scan_dir(rel, &cited) {
+                if !verbs.contains(&verb) {
+                    bad.push(format!("{file}: `arvolo {verb}`"));
+                }
+            }
+        }
+        assert!(
+            bad.is_empty(),
+            "messages cite commands that do not exist:\n{}",
+            bad.join("\n")
+        );
+    }
+
+    /// Words that follow `arvolo ` in source text but are not subcommands to
+    /// check: prose, and the binary's own name in a path.
+    fn regex_lite_arvolo_verbs() -> std::collections::HashSet<String> {
+        ["relay", "gui"].iter().map(|s| s.to_string()).collect()
+    }
+
+    /// Every `arvolo <word>` inside a string literal under `rel`, as
+    /// `(file, word)`. Crude on purpose: it reads the file as text, because the
+    /// alternative is running every command that can print.
+    fn scan_dir(rel: &str, skip: &std::collections::HashSet<String>) -> Vec<(String, String)> {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace root")
+            .join(rel);
+        let mut out = Vec::new();
+        let mut stack = vec![root];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for e in entries.flatten() {
+                let path = e.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().and_then(|s| s.to_str()) != Some("rs") {
+                    continue;
+                }
+                let Ok(text) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                let name = path
+                    .strip_prefix(
+                        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                            .parent()
+                            .expect("workspace root"),
+                    )
+                    .unwrap_or(&path)
+                    .display()
+                    .to_string();
+                // Backtick-quoted citations only, and not in comments.
+                //
+                // Plain "arvolo " is prose — "the arvolo binary", "an arvolo
+                // identity" — and matching it buries the real hits under a dozen
+                // false ones, which is how a test like this gets deleted rather
+                // than fixed. Comments go too: they are for whoever is reading
+                // the code, who has the source in front of them, and this test's
+                // own doc comment quotes the stale spellings on purpose.
+                for line in text.lines() {
+                    if line.trim_start().starts_with("//") {
+                        continue;
+                    }
+                    for (idx, _) in line.match_indices("arvolo ") {
+                        // Two shapes count, and between them they are every way
+                        // this codebase names a command: quoted inline with
+                        // backticks, or indented on a line of its own for the
+                        // user to copy. The second is the one that matters most
+                        // and the one a backtick-only rule misses. Prose says
+                        // "the arvolo binary" with a single space, so it is out.
+                        let before = &line[..idx];
+                        let quoted = before.ends_with('`');
+                        let indented = before.ends_with("  ") || before.ends_with("\\x20");
+                        if !quoted && !indented {
+                            continue;
+                        }
+                        let rest = &line[idx + "arvolo ".len()..];
+                        let word: String = rest
+                            .chars()
+                            .take_while(|c| c.is_ascii_lowercase() || *c == '-')
+                            .collect();
+                        if word.len() < 2 || skip.contains(&word) {
+                            continue;
+                        }
+                        out.push((name.clone(), word));
+                    }
+                }
+            }
+        }
+        out
+    }
+
     #[test]
     fn every_shipped_unit_runs_a_command_that_exists() {
         for file in [

@@ -122,7 +122,10 @@ pub(crate) async fn send_link(
     // Name the id, because `arvolo status` reprints the *address* and not just
     // the row: a link scrolled out of the terminal is otherwise assumed lost,
     // and the file gets sent a second time rather than the URL handed over.
-    eprintln!("Listed as '{}' in `arvolo status`, which reprints it.", rec.id);
+    eprintln!(
+        "Listed as '{}' in `arvolo status`, which reprints it.",
+        rec.id
+    );
     eprintln!("    arvolo cancel {}", rec.id);
     Ok(())
 }
@@ -279,10 +282,7 @@ pub(crate) async fn send_sealed(
         eprintln!("Send this ticket to the recipient:\n");
     }
     eprintln!("    arvolo recv {encoded}\n");
-    eprintln!(
-        "Listed as '{}' in `arvolo status`.",
-        rec.id
-    );
+    eprintln!("Listed as '{}' in `arvolo status`.", rec.id);
     eprintln!("    arvolo cancel {}", rec.id);
     Ok(())
 }

@@ -295,7 +295,7 @@ pub(crate) async fn contacts_cmd(action: ContactAction) -> Result<()> {
             Some(new) => {
                 book::contact_rename(&old, &new)?;
                 println!("Renamed '{old}' to '{new}'");
-            vprintln!("the verified and trusted marks stay with the key, not the name");
+                vprintln!("the verified and trusted marks stay with the key, not the name");
             }
             // No new name: adopt the display name they advertised for themselves
             // (the pending row `contacts list` shows), after asking — it is the

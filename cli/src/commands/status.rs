@@ -8,9 +8,9 @@ use crate::{book, deposits, history, sessions};
 use crate::ipc;
 
 use crate::args::StatusAction;
-use crate::output::vprintln;
 use crate::commands::daemon::{daemon_client, daemon_events, print_transfer_dto};
 use crate::commands::receive::{print_waiting, read_inbox, waiting_row, Waiting};
+use crate::output::vprintln;
 use crate::ui::*;
 use crate::util::*;
 
@@ -147,12 +147,16 @@ pub(crate) fn print_history_pointer() {
 /// with consequences on another machine, never a side effect of tidying a list.
 async fn clear_finished() -> Result<()> {
     let Some(mut client) = daemon_client().await else {
-        eprintln!("(no daemon running — the transfer list is its state, so there is nothing to clear)");
+        eprintln!(
+            "(no daemon running — the transfer list is its state, so there is nothing to clear)"
+        );
         return Ok(());
     };
     let n = client.clear_finished().await?;
     println!("Cleared {n} finished transfer(s)");
-    vprintln!("the log and any deposits are untouched: `arvolo history clear`, `arvolo cancel <id>`");
+    vprintln!(
+        "the log and any deposits are untouched: `arvolo history clear`, `arvolo cancel <id>`"
+    );
     Ok(())
 }
 
