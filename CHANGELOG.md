@@ -1,5 +1,32 @@
 # Changelog
 
+## v0.12.0-rc4
+
+Fourth prerelease. All of it is about a held `send --to` — a file too large for the
+mailbox, which can only move while both ends are awake — and all of it came out of
+dogfooding a 10.7 GiB transfer that kept stalling.
+
+- **Accepting starts the transfer in a round trip**, instead of somewhere inside a
+  backoff that grows to five minutes. The sender now waits held open on its offer's
+  status, and the relay answers the moment the recipient touches it.
+- **One offer per send, not one per attempt.** A recipient who was away used to
+  collect a row per delivery attempt, all but one of them already dead.
+- **Pausing no longer throws away the preparation.** It used to live in the delivery
+  task, which is exactly what a pause ends: resuming re-read and re-encrypted the
+  whole payload *and* minted a fresh key and node id, so the recipient's transfer was
+  left pointing at a node nobody was serving. It now belongs to the held send, and is
+  written down beside it (22 KB of digests for 10 GB) so a daemon restart resumes the
+  same send too. Measured on a 3 GiB payload: 60 seconds of preparation before,
+  nothing after — and the recipient's download simply carried on, across both a pause
+  and a restart of the sender.
+- **An offer for a file already downloading no longer asks for approval again.** It
+  goes to the download it belongs to, sweeping the copies already parked for it.
+  Anything else — another file, or the same content from a different sender — still
+  asks.
+
+Both ends want updating: the wake-up needs the relay, and not asking twice needs the
+recipient.
+
 ## v0.12.0-rc3
 
 Same code as rc2, plus the fix that lets a prerelease ship Linux packages at all:
