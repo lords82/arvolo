@@ -24,7 +24,7 @@ import { fmtBytes } from "../format";
 import { useT } from "../i18n";
 import { Icon } from "../ui/Icons";
 import { Badge, Button, Field, TextInput, TrustBadges } from "../ui/Primitives";
-import { Avatar, ExtChip, Fingerprint } from "../ui/Bits";
+import { Avatar, ClaimedName, ExtChip, Fingerprint } from "../ui/Bits";
 import { Sheet } from "../ui/Sheet";
 import { toast } from "../ui/Toasts";
 
@@ -142,6 +142,7 @@ export function IncomingDialog() {
           <div className="grow">
             <div className="hstack-sm wrap">
               <span className="t-head truncate">{label}</span>
+              {known && <ClaimedName c={contact!} />}
               {known ? (
                 <TrustBadges
                   verified={contact!.verified}
@@ -154,11 +155,19 @@ export function IncomingDialog() {
                 </Badge>
               )}
             </div>
-            {known && claimed && claimed !== contact!.name && (
-              <div className="t-xs t-mut" style={{ marginTop: 2 }}>
-                {t("incoming.claimedName", claimed)}
-              </div>
-            )}
+            {/* The brackets next to the name carry what the ledger knows. This
+                line is for the gap: a name on *this* offer that the ledger has
+                not recorded yet, which is what an arrival mid-change looks
+                like. When it agrees with the ledger it would just say the same
+                thing twice. */}
+            {known &&
+              claimed &&
+              claimed !== contact!.display_name.trim() &&
+              claimed !== contact!.pending_name.trim() && (
+                <div className="t-xs t-mut" style={{ marginTop: 2 }}>
+                  {t("incoming.claimedName", claimed)}
+                </div>
+              )}
           </div>
         </div>
 

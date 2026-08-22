@@ -45,14 +45,24 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 
 # ---- distro packages -------------------------------------------------------
 #
-# The binary plus a systemd unit that is present but NOT enabled. Shipping a
-# service means answering three questions — which user, where the data lives,
-# how it is configured — and the unit answers them without deciding anything
-# for the operator: DynamicUser (a user that exists only while it runs),
-# StateDirectory=/var/lib/arvolo-relay, and /etc/default/arvolo-relay for
-# everything an operator would want different. Nothing starts on install: a
-# relay with no domain and no TLS proxy in front has nothing useful to do, so
-# enabling it is left as the operator's explicit `systemctl enable --now`.
+# The binary plus a systemd unit, handled the way a distribution handles one.
+# Shipping a service means answering three questions — which user, where the data
+# lives, how it is configured — and the unit answers them without deciding
+# anything else for the operator: DynamicUser (a user that exists only while it
+# runs), StateDirectory=/var/lib/arvolo-relay, and /etc/default/arvolo-relay for
+# everything they would want different.
+#
+# It follows each ecosystem's own convention rather than one rule for both,
+# because the two disagree on purpose. Debian enables and starts a daemon on
+# install (`policy-rc.d` is the escape hatch, which is how container builds keep
+# it quiet); Fedora applies presets and leaves the switch to the admin. Both
+# restart on upgrade, which is the part that matters either way: replacing the
+# binary under a running relay and walking away leaves the old process serving.
+#
+# Worth knowing before the first `apt install`: the relay comes up listening in
+# plaintext HTTP on 0.0.0.0:6282 and says so in its log. It is meant to sit
+# behind a TLS-terminating proxy — /etc/default/arvolo-relay is where the address
+# and the rest are set, and it survives upgrades as a conffile.
 
 [package.metadata.deb]
 name = "arvolo-relay"
@@ -75,23 +85,18 @@ assets = [
 # generated fragments into scripts of its own when the directory holds none.
 maintainer-scripts = "../packaging/systemd"
 
-# What a distribution package is expected to do with a service, minus the part
-# this one deliberately does not want.
+# The Debian default, spelled out rather than inherited: enable and start on
+# install, restart after an upgrade. They are cargo-deb's defaults too, and they
+# are written here because a service that turns itself on is a decision someone
+# should be able to find, not one they discover by installing the package.
 #
-# `enable`/`start` false keeps the promise made above: nothing turns on at
-# install, because a relay with no domain and no TLS proxy in front has nothing
-# useful to do. What was missing is the other half — an upgrade replaced the
-# binary and left the old process running, so `apt upgrade` on a relay someone
-# had enabled changed nothing until they noticed and restarted it by hand.
-#
-# Together these two flags make cargo-deb emit `try-restart`, guarded by "is
-# there a previous version": on a fresh install nothing starts, and on an upgrade
-# the service comes back only if it was already running. Which is exactly the
-# rule an operator would write themselves.
+# `restart-after-upgrade` is the interesting one: the alternative is stop-then-
+# unpack-then-start, which is a longer outage for no benefit here — the relay
+# holds no in-memory state that a moment of overlap would corrupt.
 [package.metadata.deb.systemd-units]
 unit-scripts = "../packaging/systemd"
-enable = false
-start = false
+enable = true
+start = true
 restart-after-upgrade = true
 
 [package.metadata.generate-rpm]
@@ -103,13 +108,21 @@ assets = [
     { source = "docs/DEPLOY.md", dest = "/usr/share/doc/arvolo-relay/DEPLOY.md", mode = "644" },
 ]
 
-# The same two rules on the RPM side, written out because cargo-generate-rpm has
-# no equivalent of the systemd-units table: rpm passes the number of instances
-# that will remain, so `$1 -ge 1` is "this is an upgrade" and `$1 -eq 0` is "this
-# is the last one going away". Deliberately no `preset` on install — that is the
-# line that would enable it, and this package does not decide that.
+# The RPM side, written out because cargo-generate-rpm has no equivalent of the
+# systemd-units table. These are the %systemd_post / %systemd_preun /
+# %systemd_postun_with_restart macros by hand: rpm passes the number of instances
+# that will remain, so `$1 -eq 1` is a first install, `$1 -ge 1` an upgrade, and
+# `$1 -eq 0` the last one going away.
+#
+# `preset` and not `enable`, and that is not an oversight: on the RPM side the
+# distribution's presets decide whether a service starts, and a package that
+# forces it overrides a policy that is not its own. Fedora's convention differs
+# from Debian's here, so this file follows each rather than imposing one.
 post_install_script = """
 systemctl daemon-reload >/dev/null 2>&1 || :
+if [ $1 -eq 1 ]; then
+    systemctl --no-reload preset arvolo-relay.service >/dev/null 2>&1 || :
+fi
 """
 pre_uninstall_script = """
 if [ $1 -eq 0 ]; then

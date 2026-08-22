@@ -30,7 +30,7 @@ import {
   TextInput,
   TrustBadges,
 } from "../ui/Primitives";
-import { Avatar, CopyField, Fingerprint, ShortId } from "../ui/Bits";
+import { Avatar, ClaimedName, CopyField, Fingerprint, ShortId } from "../ui/Bits";
 import { MenuButton, type MenuItem } from "../ui/Menu";
 import { Confirm, Sheet } from "../ui/Sheet";
 import { toast } from "../ui/Toasts";
@@ -178,30 +178,25 @@ function PersonRow({ c }: { c: ContactDto }) {
           <div className="row-name hstack-sm" title={c.name}>
             <PresenceDot id={c.id} />
             <span className="truncate">{c.name}</span>
+            <ClaimedName c={c} />
           </div>
           <div className="row-meta">
-            {c.display_name && c.display_name !== c.name && (
-              <>
-                <span className="truncate">
-                  {t("people.goesBy", c.display_name)}
-                </span>
-                <span className="sep" />
-              </>
-            )}
             <ShortId value={c.id} />
           </div>
 
+          {/* The name itself is already up there in brackets, readable without
+              deciding anything. What is left for this box is the one thing the
+              brackets cannot say: that acknowledging changes nothing about how
+              the contact is named here. */}
           {c.pending_name && (
             <div
-              className="card card-pad t-xs"
+              className="card card-pad t-xs hstack-sm wrap"
               style={{ borderColor: "var(--amber)", padding: 10, marginTop: 8 }}
             >
-              {t("people.wantsToBeCalled", c.pending_name)}
-              <div className="hstack-sm" style={{ marginTop: 7 }}>
-                <Button size="sm" onClick={() => fire(acceptName(c.name))}>
-                  {t("people.approve")}
-                </Button>
-              </div>
+              <span className="grow">{t("people.claimedNote", c.name)}</span>
+              <Button size="sm" onClick={() => fire(acceptName(c.name))}>
+                {t("people.acknowledge")}
+              </Button>
             </div>
           )}
         </div>
@@ -375,6 +370,7 @@ function PersonSheet() {
   const markVerified = useStore((s) => s.markVerified);
   const markUnverified = useStore((s) => s.markUnverified);
   const renameContact = useStore((s) => s.renameContact);
+  const acceptName = useStore((s) => s.acceptName);
 
   const c = contacts.find((x) => x.name === name);
   const [checked, setChecked] = useState(false);
@@ -391,9 +387,7 @@ function PersonSheet() {
         close(null);
       }}
       title={c.name}
-      subtitle={
-        c.display_name ? t("people.goesBy", c.display_name) : undefined
-      }
+      subtitle={<ClaimedName c={c} />}
     >
       <div className="hstack">
         <Avatar name={c.display_name || c.name} id={c.id} size={48} />
@@ -405,6 +399,20 @@ function PersonSheet() {
           />
         </div>
       </div>
+
+      {/* Same offer as the row, because this panel is where someone lands when
+          they open a contact to look into exactly this. */}
+      {c.pending_name && (
+        <div
+          className="card card-pad t-sm hstack-sm wrap"
+          style={{ borderColor: "var(--amber)" }}
+        >
+          <span className="grow">{t("people.claimedNote", c.name)}</span>
+          <Button size="sm" onClick={() => fire(acceptName(c.name))}>
+            {t("people.acknowledge")}
+          </Button>
+        </div>
+      )}
 
       <Field
         label={t("person.fingerprint")}
@@ -553,6 +561,7 @@ export function PeopleView() {
       return (
         c.name.toLowerCase().includes(needle) ||
         c.display_name.toLowerCase().includes(needle) ||
+        c.pending_name.toLowerCase().includes(needle) ||
         c.id.toLowerCase().startsWith(needle)
       );
     });

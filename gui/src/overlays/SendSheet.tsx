@@ -29,7 +29,7 @@ import {
   Textarea,
   TrustBadges,
 } from "../ui/Primitives";
-import { Avatar, CodeHero } from "../ui/Bits";
+import { Avatar, ClaimedName, CodeHero } from "../ui/Bits";
 import { Sheet } from "../ui/Sheet";
 import { toast } from "../ui/Toasts";
 import type { ContactDto, PickedItem } from "../types";
@@ -88,6 +88,7 @@ function ContactPicker({
       (c) =>
         c.name.toLowerCase().includes(needle) ||
         c.display_name.toLowerCase().includes(needle) ||
+        c.pending_name.toLowerCase().includes(needle) ||
         c.id.toLowerCase().startsWith(needle)
     );
   }, [contacts, q]);
@@ -136,7 +137,10 @@ function ContactPicker({
           >
             <Avatar name={c.display_name || c.name} id={c.id} size={32} />
             <span className="row-main">
-              <span className="row-name truncate">{c.name}</span>
+              <span className="row-name hstack-sm">
+                <span className="truncate">{c.name}</span>
+                <ClaimedName c={c} />
+              </span>
               <span className="row-meta mono" style={{ fontSize: 10.5 }}>
                 {c.fingerprint}
               </span>

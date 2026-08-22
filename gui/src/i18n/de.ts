@@ -189,11 +189,17 @@ export const de: Dict = {
   "people.menuBlock": "Sperren",
   "people.menuRemove": "Aus dem Adressbuch entfernen",
   "people.rowActions": (name) => `Aktionen für ${name}`,
-  "people.goesBy": (name) => `nennt sich „${name}“`,
   "people.notVerified": "Nicht verifiziert",
   "people.notVerifiedTitle": "Der Fingerabdruck wurde nie verglichen",
-  "people.wantsToBeCalled": (name) => `Möchte „${name}“ genannt werden.`,
-  "people.approve": "Übernehmen",
+  "people.claimedPlain": (name) => `(„${name}“)`,
+  "people.claimedNew": (name) => `(nennt sich „${name}“)`,
+  "people.claimedChange": (now, before) =>
+    `(jetzt: „${now}“ — vorher: „${before}“)`,
+  "people.claimedTip": (mine) =>
+    `Der Name, den sie sich selbst gegeben haben. Er kann sich jederzeit ändern und ist kein Beweis dafür, wer sie sind — der Name, den Sie verwenden, „${mine}“, ändert sich nie von allein.`,
+  "people.claimedNote": (mine) =>
+    `Unter diesem Namen treten sie jetzt auf. Für Sie bleiben sie in jedem Fall „${mine}“ — die Kenntnisnahme nimmt nur die Hervorhebung weg, bis der Name erneut wechselt.`,
+  "people.acknowledge": "Gesehen",
   "people.send": "Senden",
   "people.details": "Details",
 

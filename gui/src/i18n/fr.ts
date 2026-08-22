@@ -190,12 +190,17 @@ export const fr: Dict = {
   "people.menuBlock": "Bloquer",
   "people.menuRemove": "Retirer du carnet d'adresses",
   "people.rowActions": (name) => `Actions pour ${name}`,
-  "people.goesBy": (name) => `se présente comme « ${name} »`,
   "people.notVerified": "Non vérifié",
   "people.notVerifiedTitle": "L'empreinte n'a jamais été comparée",
-  "people.wantsToBeCalled": (name) =>
-    `Souhaite se faire appeler « ${name} ».`,
-  "people.approve": "Approuver",
+  "people.claimedPlain": (name) => `(« ${name} »)`,
+  "people.claimedNew": (name) => `(se présente comme « ${name} »)`,
+  "people.claimedChange": (now, before) =>
+    `(maintenant : « ${now} » — avant : « ${before} »)`,
+  "people.claimedTip": (mine) =>
+    `Le nom qu'il s'est choisi. Il peut changer à tout moment et ne prouve pas son identité : le nom que vous utilisez, « ${mine} », ne change jamais tout seul.`,
+  "people.claimedNote": (mine) =>
+    `Voici le nom sous lequel il se présente désormais. Pour vous, il reste « ${mine} » dans tous les cas — en prendre acte ne fait que retirer la mise en évidence jusqu'à ce qu'il en change à nouveau.`,
+  "people.acknowledge": "J'ai vu",
   "people.send": "Envoyer",
   "people.details": "Détails",
 

@@ -874,7 +874,14 @@ async fn revoke_deposit(d: &Daemon, id: &str) -> Response {
 
 /// The saved address book, projected to serializable [`ContactDto`]s for the
 /// GUI's "Persone" grid.
+///
+/// The two advertised names go through [`sanitize_display`] on the way out, as
+/// they already do for `contacts list`. They are the sender's own text, and the
+/// GUI now prints them next to the name the user chose: a bidi override in there
+/// would reorder the line and could make the brackets read as part of the
+/// user's own petname. React escapes HTML; it does nothing about U+202E.
 fn list_contacts() -> Vec<ContactDto> {
+    use crate::ui::sanitize_display;
     crate::book::contact_list()
         .into_iter()
         .map(|(name, id)| ContactDto {
@@ -882,8 +889,12 @@ fn list_contacts() -> Vec<ContactDto> {
             verified: crate::book::is_verified(&id),
             trusted: crate::book::is_trusted(&id),
             blocked: crate::book::is_blocked(&id),
-            display_name: crate::book::display_name_of(&id).unwrap_or_default(),
-            pending_name: crate::book::pending_name_of(&id).unwrap_or_default(),
+            display_name: crate::book::display_name_of(&id)
+                .map(|n| sanitize_display(&n))
+                .unwrap_or_default(),
+            pending_name: crate::book::pending_name_of(&id)
+                .map(|n| sanitize_display(&n))
+                .unwrap_or_default(),
             name,
             id,
         })
