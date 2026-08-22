@@ -165,7 +165,7 @@ describe("an incoming offer", () => {
   it("102. opening the row and pressing Accetta tells the daemon", async () => {
     await renderAppWithOffer();
     fireEvent.click(screen.getByText("arrivo.zip"));
-    fireEvent.click(await screen.findByText("Accept and download"));
+    fireEvent.click(await screen.findByText(en["incoming.accept"]));
     await waitFor(() =>
       expect(harness.recorder.accept).toEqual([["o1", null, null]])
     );
@@ -175,7 +175,7 @@ describe("an incoming offer", () => {
     await renderAppWithOffer();
     harness.fail = new Set(["acceptOffer"]);
     fireEvent.click(screen.getByText("arrivo.zip"));
-    fireEvent.click(await screen.findByText("Accept and download"));
+    fireEvent.click(await screen.findByText(en["incoming.accept"]));
     await waitFor(() => expect(toastText()).toMatch(/reject|didn't work/i));
   });
 
@@ -183,7 +183,7 @@ describe("an incoming offer", () => {
     await renderAppWithOffer();
     harness.fail = new Set(["acceptOffer"]);
     fireEvent.click(screen.getByText("arrivo.zip"));
-    fireEvent.click(await screen.findByText("Accept and download"));
+    fireEvent.click(await screen.findByText(en["incoming.accept"]));
     await waitFor(() => expect(toastText()).toBeTruthy());
     expect(useStore.getState().transfers["oo1"]).toBeTruthy();
   });
@@ -224,13 +224,13 @@ describe("an incoming offer", () => {
     fireEvent.click(screen.getByText("arrivo.zip"));
     expect(screen.queryByLabelText("Password")).toBeNull();
 
-    fireEvent.click(await screen.findByText("Accept and download"));
+    fireEvent.click(await screen.findByText(en["incoming.accept"]));
     const field = await screen.findByLabelText("Password");
     // The offer must survive the refusal, or there is nothing left to retry.
     expect(useStore.getState().transfers["oo1"]).toBeTruthy();
 
     fireEvent.change(field, { target: { value: "segreto" } });
-    fireEvent.click(screen.getByText("Accept and download"));
+    fireEvent.click(screen.getByText(en["incoming.accept"]));
     await waitFor(() =>
       expect(
         harness.recorder.accept[harness.recorder.accept.length - 1]
@@ -257,7 +257,7 @@ describe("an incoming offer", () => {
   it("134. Accetta without picking a folder uses the daemon's default", async () => {
     await renderAppWithOffer();
     fireEvent.click(screen.getByText("arrivo.zip"));
-    fireEvent.click(await screen.findByText("Accept and download"));
+    fireEvent.click(await screen.findByText(en["incoming.accept"]));
     await waitFor(() =>
       expect(harness.recorder.accept[0][1]).toBeNull()
     );
@@ -280,7 +280,7 @@ describe("an incoming offer", () => {
           .value
       ).toBe("qui")
     );
-    fireEvent.click(screen.getByText("Accept and download"));
+    fireEvent.click(screen.getByText(en["incoming.accept"]));
     await waitFor(() =>
       expect(harness.recorder.accept).toEqual([["o1", dir.id, null]])
     );

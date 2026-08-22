@@ -606,22 +606,19 @@ export const en = {
 
   // ---- receive sheet -----------------------------------------------------
   "receive.explainEmpty":
-    "Paste a send code (like 4821-crater-mango) or an arvc… / arvm… ticket. To swap contacts with somebody, use People → I have a code instead.",
-  "receive.explainCode":
-    "Send code: I connect to whoever is showing it right now and download what they are sending.",
-  "receive.explainChunk":
-    "Peer-to-peer ticket: I download straight from the sender.",
-  "receive.explainMailbox":
-    "Mailbox ticket: I collect the file deposited on the relay.",
+    "A send code (like 4821-crater-mango) or an arvc… / arvm… ticket.",
+  "receive.explainCode": "Send code: downloads from whoever is showing it now.",
+  "receive.explainChunk": "Peer-to-peer ticket: straight from the sender.",
+  "receive.explainMailbox": "Mailbox ticket: collected from the relay.",
   "receive.explainUnknown":
-    "I don't recognise this shape. I'll try it anyway — the daemon is fussier than I am — but check you copied it whole.",
+    "Unfamiliar shape — worth trying, but check you copied it whole.",
   "receive.title": "Receive",
   "receive.subtitle": "Paste what you were given.",
   "receive.submit": "Receive",
   "receive.fieldLabel": "Code or ticket",
-  "receive.passwordLabel": "Password (only if protected)",
-  "receive.passwordHint":
-    "Whoever sent it will have told you separately. Without it, a protected deposit does not open.",
+  "receive.passwordLabel": "Password, if protected",
+  // The recipient's half of the password story; the sender's is in `send.*`.
+  "receive.passwordHint": "The sender will have told you separately.",
   "receive.passwordPlaceholder": "none",
   "receive.whereLabel": "Where to save it",
   "receive.whereHint": (dir: string) => `Default folder: ${dir}`,
@@ -637,35 +634,31 @@ export const en = {
   "incoming.title": "Somebody is sending you a file",
   "incoming.subtitle": "Only accept if you know who it is from.",
   "incoming.reject": "Reject",
-  "incoming.later": "I'll decide later",
-  "incoming.accept": "Accept and download",
+  "incoming.later": "Later",
+  "incoming.accept": "Accept",
   "incoming.notInBook": "Not in the address book",
-  "incoming.claimedName": (name: string) =>
-    `goes by “${name}” — a name they pick themselves, nothing guarantees it`,
+  "incoming.claimedName": (name: string) => `goes by “${name}” — unverified`,
   "incoming.keyFingerprint": "Fingerprint of the key",
   "incoming.senderId": "Sender's public id",
-  "incoming.hintVerified":
-    "You have already compared this fingerprint out of band: it is the same key you verified.",
+  "incoming.hintVerified": "Already compared: the same key you verified.",
   "incoming.hintKnown":
-    "Compare it out loud with whoever is sending you the file. It is the only way to be sure it really is them — a name does not prove it.",
+    "Compare it out loud with the sender. A name does not prove who they are.",
+  // Floored in copy-rules.ts: it must say this is a raw id and not a
+  // fingerprint, or the reader takes it for something that has been checked.
   "incoming.hintUnknown":
-    "This is not a fingerprint: it is the raw id of somebody who is not in your address book. Save them below and you will see the words to compare out loud with them.",
+    "Not a fingerprint — the raw id of somebody you have not saved. Save them below to get words you can compare.",
   "incoming.attachedNote": "Message attached",
   "incoming.passwordLabel": "Password",
-  "incoming.passwordHint":
-    "This file is protected: without the password it does not open. Whoever sent it will have told you separately — it does not travel with the file, and the relay does not know it.",
+  "incoming.passwordHint": "The sender will have told you separately.",
   "incoming.ifYouKnowThem": "If you know them",
   "incoming.saveAsPlaceholder": "Save to the address book as…",
   "incoming.saveAsLabel": "Name to give the contact",
   "incoming.savedAs": (name: string) => `Saved as ${name}`,
-  "incoming.savedAsDetail":
-    "They stay unverified: confirm the fingerprint out loud and then mark them under People.",
-  "incoming.saveNote":
-    "Saving them does not verify them. They become verified only when you compare the fingerprint in person or out loud.",
+  "incoming.savedAsDetail": "Still unverified until you compare the fingerprint.",
+  "incoming.saveNote": "Saving is not verifying.",
   "incoming.blockAndReject": "Block and reject",
   "incoming.blocked": "Blocked",
-  "incoming.blockedDetail":
-    "Their offers will be dropped on arrival, with no notice to you.",
+  "incoming.blockedDetail": "Their offers are dropped on arrival.",
 
   // ---- pairing sheet -----------------------------------------------------
   "pair.titleContact": "Swap contacts",

@@ -543,23 +543,17 @@ export const fr: Dict = {
   "send.noRelay": "Ce mode a besoin d'un relais. Réglez-en un depuis Réglages.",
   "send.noArvoloRelay": "Aucun relais Arvolo",
 
-  "receive.explainEmpty":
-    "Collez un code d'envoi (du type 4821-crater-mango) ou un ticket arvc… / arvm…. Pour échanger les contacts avec quelqu'un, passez plutôt par Personnes → J'ai un code.",
-  "receive.explainCode":
-    "Code d'envoi : je me connecte à qui l'affiche en ce moment et je télécharge ce qu'il envoie.",
-  "receive.explainChunk":
-    "Ticket pair-à-pair : je télécharge directement depuis l'expéditeur.",
-  "receive.explainMailbox":
-    "Ticket de boîte : je récupère le fichier déposé sur le relais.",
-  "receive.explainUnknown":
-    "Je ne reconnais pas cette forme. Je l'essaie quand même — le démon est plus précis que moi — mais vérifiez que vous l'avez copiée en entier.",
+  "receive.explainEmpty": "Un code d'envoi (du type 4821-crater-mango) ou un ticket arvc… / arvm….",
+  "receive.explainCode": "Code d'envoi : télécharge depuis qui l'affiche en ce moment.",
+  "receive.explainChunk": "Ticket pair-à-pair : directement depuis l'expéditeur.",
+  "receive.explainMailbox": "Ticket de boîte : récupéré sur le relais.",
+  "receive.explainUnknown": "Forme non reconnue — ça vaut la peine d'essayer, mais vérifiez la copie.",
   "receive.title": "Recevoir",
   "receive.subtitle": "Collez ce qu'on vous a donné.",
   "receive.submit": "Recevoir",
   "receive.fieldLabel": "Code ou ticket",
-  "receive.passwordLabel": "Mot de passe (seulement si protégé)",
-  "receive.passwordHint":
-    "Qui vous l'a envoyé vous l'aura dit à part. Sans lui, un dépôt protégé ne s'ouvre pas.",
+  "receive.passwordLabel": "Mot de passe, si protégé",
+  "receive.passwordHint": "L'expéditeur vous l'aura dit à part.",
   "receive.passwordPlaceholder": "aucun",
   "receive.whereLabel": "Où l'enregistrer",
   "receive.whereHint": (dir) => `Dossier par défaut : ${dir}`,
@@ -574,36 +568,27 @@ export const fr: Dict = {
   "incoming.title": "On vous envoie un fichier",
   "incoming.subtitle": "N'acceptez que si vous savez de qui ça vient.",
   "incoming.reject": "Refuser",
-  "incoming.later": "Je décide plus tard",
-  "incoming.accept": "Accepter et télécharger",
+  "incoming.later": "Plus tard",
+  "incoming.accept": "Accepter",
   "incoming.notInBook": "Pas dans le carnet d'adresses",
-  "incoming.claimedName": (name) =>
-    `se présente comme « ${name} » — un nom qu'il choisit lui-même, rien ne le garantit`,
+  "incoming.claimedName": (name) => `se présente comme « ${name} » — non vérifié`,
   "incoming.keyFingerprint": "Empreinte de la clé",
   "incoming.senderId": "Identifiant public de l'expéditeur",
-  "incoming.hintVerified":
-    "Vous avez déjà comparé cette empreinte hors bande : c'est la même clé que vous avez vérifiée.",
-  "incoming.hintKnown":
-    "Comparez-la à voix haute avec la personne qui vous envoie le fichier. C'est le seul moyen d'être sûr que c'est bien elle — un nom ne le prouve pas.",
-  "incoming.hintUnknown":
-    "Ce n'est pas une empreinte : c'est l'identifiant brut de quelqu'un qui n'est pas dans votre carnet d'adresses. Enregistrez-le ci-dessous et vous verrez les mots à comparer à voix haute avec lui.",
+  "incoming.hintVerified": "Déjà comparée : c'est la clé que vous avez vérifiée.",
+  "incoming.hintKnown": "Comparez-la à voix haute avec l'expéditeur. Un nom ne prouve rien.",
+  "incoming.hintUnknown": "Pas une empreinte — l'identifiant brut de quelqu'un que vous n'avez pas enregistré. Enregistrez-le pour obtenir des mots à comparer.",
   "incoming.attachedNote": "Message joint",
   "incoming.passwordLabel": "Mot de passe",
-  "incoming.passwordHint":
-    "Ce fichier est protégé : sans le mot de passe, il ne s'ouvre pas. Qui vous l'a envoyé vous l'aura dit à part — il ne voyage pas avec le fichier, et le relais ne le connaît pas.",
+  "incoming.passwordHint": "L'expéditeur vous l'aura dit à part.",
   "incoming.ifYouKnowThem": "Si vous le connaissez",
   "incoming.saveAsPlaceholder": "L'enregistrer dans le carnet comme…",
   "incoming.saveAsLabel": "Nom à donner au contact",
   "incoming.savedAs": (name) => `Enregistré sous ${name}`,
-  "incoming.savedAsDetail":
-    "Reste non vérifié : confirmez l'empreinte à voix haute, puis marquez-le depuis Personnes.",
-  "incoming.saveNote":
-    "L'enregistrer ne le vérifie pas. Il devient vérifié seulement quand vous comparez l'empreinte en personne ou à voix haute.",
+  "incoming.savedAsDetail": "Non vérifié tant que vous n'avez pas comparé l'empreinte.",
+  "incoming.saveNote": "Enregistrer n'est pas vérifier.",
   "incoming.blockAndReject": "Bloquer et refuser",
   "incoming.blocked": "Bloqué",
-  "incoming.blockedDetail":
-    "Ses offres seront écartées à l'arrivée, sans vous prévenir.",
-
+  "incoming.blockedDetail": "Ses offres sont écartées à l'arrivée.",
   "pair.titleContact": "Échanger les contacts",
   "pair.titleDeviceHost": "Relier un autre de vos appareils",
   "pair.titleDeviceJoin": "Relier cet appareil",

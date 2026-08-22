@@ -543,23 +543,17 @@ export const de: Dict = {
     "Diese Versandart braucht ein Relay. Richten Sie eines unter Einstellungen ein.",
   "send.noArvoloRelay": "Kein Arvolo-Relay",
 
-  "receive.explainEmpty":
-    "Fügen Sie einen Sendecode ein (etwa 4821-crater-mango) oder ein arvc… / arvm…-Ticket. Um mit jemandem Kontakte zu tauschen, nehmen Sie stattdessen Personen → Ich habe einen Code.",
-  "receive.explainCode":
-    "Sendecode: ich verbinde mich mit dem, der ihn gerade zeigt, und lade herunter, was er schickt.",
-  "receive.explainChunk":
-    "Peer-to-Peer-Ticket: ich lade direkt von der Gegenseite.",
-  "receive.explainMailbox":
-    "Postfach-Ticket: ich hole die auf dem Relay abgelegte Datei.",
-  "receive.explainUnknown":
-    "Diese Form erkenne ich nicht. Ich versuche es trotzdem — der Daemon ist genauer als ich — aber prüfen Sie, ob Sie sie vollständig kopiert haben.",
+  "receive.explainEmpty": "Ein Sendecode (etwa 4821-crater-mango) oder ein arvc… / arvm…-Ticket.",
+  "receive.explainCode": "Sendecode: lädt von dem, der ihn gerade zeigt.",
+  "receive.explainChunk": "Peer-to-Peer-Ticket: direkt von der Gegenseite.",
+  "receive.explainMailbox": "Postfach-Ticket: vom Relay geholt.",
+  "receive.explainUnknown": "Unbekannte Form — einen Versuch wert, aber prüfen Sie die Kopie.",
   "receive.title": "Empfangen",
   "receive.subtitle": "Fügen Sie ein, was man Ihnen gegeben hat.",
   "receive.submit": "Empfangen",
   "receive.fieldLabel": "Code oder Ticket",
-  "receive.passwordLabel": "Passwort (nur wenn geschützt)",
-  "receive.passwordHint":
-    "Wer es geschickt hat, wird es Ihnen getrennt gesagt haben. Ohne das geht eine geschützte Ablage nicht auf.",
+  "receive.passwordLabel": "Passwort, falls geschützt",
+  "receive.passwordHint": "Die Gegenseite wird es Ihnen getrennt gesagt haben.",
   "receive.passwordPlaceholder": "keines",
   "receive.whereLabel": "Wohin damit",
   "receive.whereHint": (dir) => `Standardordner: ${dir}`,
@@ -575,36 +569,27 @@ export const de: Dict = {
   "incoming.title": "Jemand schickt Ihnen eine Datei",
   "incoming.subtitle": "Nehmen Sie nur an, wenn Sie wissen, von wem sie kommt.",
   "incoming.reject": "Ablehnen",
-  "incoming.later": "Ich entscheide später",
-  "incoming.accept": "Annehmen und laden",
+  "incoming.later": "Später",
+  "incoming.accept": "Annehmen",
   "incoming.notInBook": "Nicht im Adressbuch",
-  "incoming.claimedName": (name) =>
-    `nennt sich „${name}“ — ein selbst gewählter Name, nichts bürgt dafür`,
+  "incoming.claimedName": (name) => `nennt sich „${name}“ — unverifiziert`,
   "incoming.keyFingerprint": "Fingerabdruck des Schlüssels",
   "incoming.senderId": "Öffentliche ID des Absenders",
-  "incoming.hintVerified":
-    "Sie haben diesen Fingerabdruck bereits außerhalb des Kanals verglichen: es ist derselbe Schlüssel, den Sie verifiziert haben.",
-  "incoming.hintKnown":
-    "Vergleichen Sie ihn mündlich mit der Person, die Ihnen die Datei schickt. Nur so sind Sie sicher, dass sie es wirklich ist — ein Name beweist das nicht.",
-  "incoming.hintUnknown":
-    "Das ist kein Fingerabdruck: es ist die rohe ID von jemandem, den Sie nicht im Adressbuch haben. Speichern Sie ihn unten, dann sehen Sie die Wörter, die Sie mündlich vergleichen können.",
+  "incoming.hintVerified": "Bereits verglichen: derselbe Schlüssel, den Sie verifiziert haben.",
+  "incoming.hintKnown": "Mündlich mit der Gegenseite vergleichen. Ein Name beweist nichts.",
+  "incoming.hintUnknown": "Kein Fingerabdruck — die rohe ID von jemandem, den Sie nicht gespeichert haben. Speichern Sie sie, um Wörter zum Vergleichen zu bekommen.",
   "incoming.attachedNote": "Beigelegte Nachricht",
   "incoming.passwordLabel": "Passwort",
-  "incoming.passwordHint":
-    "Diese Datei ist geschützt: ohne das Passwort geht sie nicht auf. Wer sie geschickt hat, wird es Ihnen getrennt gesagt haben — es reist nicht mit der Datei, und das Relay kennt es nicht.",
+  "incoming.passwordHint": "Die Gegenseite wird es Ihnen getrennt gesagt haben.",
   "incoming.ifYouKnowThem": "Wenn Sie die Person kennen",
   "incoming.saveAsPlaceholder": "Ins Adressbuch speichern als…",
   "incoming.saveAsLabel": "Name für den Kontakt",
   "incoming.savedAs": (name) => `Als ${name} gespeichert`,
-  "incoming.savedAsDetail":
-    "Bleibt unverifiziert: bestätigen Sie den Fingerabdruck mündlich und markieren Sie ihn dann unter Personen.",
-  "incoming.saveNote":
-    "Speichern verifiziert nicht. Verifiziert wird die Person erst, wenn Sie den Fingerabdruck persönlich oder mündlich vergleichen.",
+  "incoming.savedAsDetail": "Unverifiziert, bis Sie den Fingerabdruck vergleichen.",
+  "incoming.saveNote": "Speichern ist nicht Verifizieren.",
   "incoming.blockAndReject": "Sperren und ablehnen",
   "incoming.blocked": "Gesperrt",
-  "incoming.blockedDetail":
-    "Angebote dieser Person werden bei Ankunft verworfen, ohne Hinweis an Sie.",
-
+  "incoming.blockedDetail": "Angebote dieser Person werden bei Ankunft verworfen.",
   "pair.titleContact": "Kontakte tauschen",
   "pair.titleDeviceHost": "Ein weiteres eigenes Gerät verbinden",
   "pair.titleDeviceJoin": "Dieses Gerät verbinden",

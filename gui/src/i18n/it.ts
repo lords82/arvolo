@@ -538,23 +538,17 @@ export const it: Dict = {
   "send.noRelay": "Questa modalità richiede un relay. Impostane uno da Impostazioni.",
   "send.noArvoloRelay": "Nessun relay Arvolo",
 
-  "receive.explainEmpty":
-    "Incolla un codice di invio (tipo 4821-crater-mango) oppure un ticket arvc… / arvm…. Per scambiare i contatti con qualcuno usa invece Persone → Ho un codice.",
-  "receive.explainCode":
-    "Codice di invio: mi collego a chi lo sta mostrando adesso e scarico quello che manda.",
-  "receive.explainChunk":
-    "Ticket peer-to-peer: scarico direttamente dal mittente.",
-  "receive.explainMailbox":
-    "Ticket di casella: recupero il file depositato sul relay.",
-  "receive.explainUnknown":
-    "Non riconosco questa forma. La provo lo stesso — il daemon è più preciso di me — ma controlla di averla copiata per intero.",
+  "receive.explainEmpty": "Un codice di invio (tipo 4821-crater-mango) o un ticket arvc… / arvm….",
+  "receive.explainCode": "Codice di invio: scarica da chi lo sta mostrando adesso.",
+  "receive.explainChunk": "Ticket peer-to-peer: dritto dal mittente.",
+  "receive.explainMailbox": "Ticket di casella: recuperato dal relay.",
+  "receive.explainUnknown": "Forma non riconosciuta — vale la pena provare, ma controlla di averla copiata tutta.",
   "receive.title": "Ricevi",
   "receive.subtitle": "Incolla quello che ti hanno dato.",
   "receive.submit": "Ricevi",
   "receive.fieldLabel": "Codice o ticket",
-  "receive.passwordLabel": "Password (solo se protetto)",
-  "receive.passwordHint":
-    "Chi te l'ha mandato te l'avrà detta a parte. Senza, un deposito protetto non si apre.",
+  "receive.passwordLabel": "Password, se protetto",
+  "receive.passwordHint": "Te l'avrà detta a parte chi te l'ha mandato.",
   "receive.passwordPlaceholder": "nessuna",
   "receive.whereLabel": "Dove salvarlo",
   "receive.whereHint": (dir) => `Cartella predefinita: ${dir}`,
@@ -569,36 +563,27 @@ export const it: Dict = {
   "incoming.title": "Ti stanno mandando un file",
   "incoming.subtitle": "Accetta solo se sai da chi arriva.",
   "incoming.reject": "Rifiuta",
-  "incoming.later": "Decido dopo",
-  "incoming.accept": "Accetta e scarica",
+  "incoming.later": "Dopo",
+  "incoming.accept": "Accetta",
   "incoming.notInBook": "Non in rubrica",
-  "incoming.claimedName": (name) =>
-    `si presenta come “${name}” — è un nome che sceglie da sé, niente lo garantisce`,
+  "incoming.claimedName": (name) => `si presenta come “${name}” — non verificato`,
   "incoming.keyFingerprint": "Impronta della chiave",
   "incoming.senderId": "Id pubblico del mittente",
-  "incoming.hintVerified":
-    "Hai già confrontato questa impronta fuori banda: è la stessa chiave che hai verificato.",
-  "incoming.hintKnown":
-    "Confrontala a voce con chi ti sta mandando il file. È l'unico modo per essere certi che sia davvero lui — un nome non lo dimostra.",
-  "incoming.hintUnknown":
-    "Questa non è un'impronta: è l'id grezzo di qualcuno che non hai in rubrica. Salvalo qui sotto e vedrai le parole da confrontare a voce con lui.",
+  "incoming.hintVerified": "Già confrontata: è la stessa chiave che hai verificato.",
+  "incoming.hintKnown": "Confrontala a voce con il mittente. Un nome non prova chi sia.",
+  "incoming.hintUnknown": "Non è un'impronta — è l'id grezzo di qualcuno che non hai salvato. Salvalo qui sotto per ottenere parole da confrontare.",
   "incoming.attachedNote": "Messaggio allegato",
   "incoming.passwordLabel": "Password",
-  "incoming.passwordHint":
-    "Questo file è protetto: senza la password non si apre. Te l'avrà detta a parte chi te l'ha mandato — non viaggia con il file, e il relay non la conosce.",
+  "incoming.passwordHint": "Te l'avrà detta a parte chi te l'ha mandato.",
   "incoming.ifYouKnowThem": "Se lo conosci",
   "incoming.saveAsPlaceholder": "Salvalo in rubrica come…",
   "incoming.saveAsLabel": "Nome da dare al contatto",
   "incoming.savedAs": (name) => `Salvato come ${name}`,
-  "incoming.savedAsDetail":
-    "Resta non verificato: conferma l'impronta a voce e poi segnalo da Persone.",
-  "incoming.saveNote":
-    "Salvarlo non lo verifica. Diventa verificato solo quando confronti l'impronta di persona o a voce.",
+  "incoming.savedAsDetail": "Resta non verificato finché non confronti l'impronta.",
+  "incoming.saveNote": "Salvare non è verificare.",
   "incoming.blockAndReject": "Blocca e rifiuta",
   "incoming.blocked": "Bloccato",
-  "incoming.blockedDetail":
-    "Le sue offerte verranno scartate all'arrivo, senza avvisarti.",
-
+  "incoming.blockedDetail": "Le sue offerte vengono scartate all'arrivo.",
   "pair.titleContact": "Scambia contatti",
   "pair.titleDeviceHost": "Collega un altro tuo dispositivo",
   "pair.titleDeviceJoin": "Collega questo dispositivo",

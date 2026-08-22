@@ -46,20 +46,15 @@ function worst(key: string): number {
 /** What was over the cap when this gate was written. Shrinks to nothing. */
 const DEBT: Record<string, number> = {
   "transfers.firstRunBody": 176,
-  "incoming.passwordHint": 176,
-  "incoming.hintUnknown": 162,
   "deposits.intro": 154,
   "deposits.confirmRevokeLink": 139,
   "deposits.confirmRevokeSealed": 139,
-  "receive.explainEmpty": 138,
   "deposits.ticketDetail": 134,
-  "incoming.hintKnown": 133,
   "deposits.emptyBody": 124,
   "app.disconnected": 93,
   "meta.preparing": 82,
   "app.versionMismatch": 81,
   "share.fromDownload": 77,
-  "incoming.claimedName": 63,
   "transfers.saveSenderSub": 61,
   "transfers.reorder": 53,
   "store.loadTransfers": 47,
@@ -71,7 +66,6 @@ const DEBT: Record<string, number> = {
   "palette.sync": 37,
   "palette.pauseAll": 32,
   "palette.placeholder": 32,
-  "receive.passwordLabel": 30,
   "palette.pairContact": 30,
   "palette.clearFinished": 29,
 };
@@ -84,11 +78,6 @@ const VOICE_DEBT: string[] = [
   "transfers.openFileFailed",
   "transfers.openFolderFailed",
   "deposits.openFailed",
-  "receive.explainEmpty",
-  "receive.explainCode",
-  "receive.explainChunk",
-  "receive.explainMailbox",
-  "receive.explainUnknown",
   "store.loadTransfers",
   "store.loadHistory",
   "store.loadDeposits",
@@ -144,7 +133,6 @@ describe("the app speaks in no voice of its own", () => {
   const USER_VOICE = new Set([
     "person.compared", // the claim the user signs by ticking the box
     "people.confirmForceCancel", // "I'll verify first" — a choice, in their words
-    "incoming.later",
     "pair.understood", // "I understand: this device loses its identity."
     "pair.captionDevice", // quotes the button above, which is the user's words
     "people.menuUntrust", // "ask me every time" — the user setting their own terms
