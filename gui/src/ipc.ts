@@ -119,6 +119,12 @@ export const api = {
   saveTicket: (defaultName: string, ticket: string) =>
     invoke<string | null>("save_ticket", { defaultName, ticket }),
   guiVersion: () => invoke<string>("gui_version"),
+  // Open a file (or folder) with whatever the system uses for it. Goes through
+  // the bridge, not `@tauri-apps/plugin-opener`: the plugin's `openPath` is behind
+  // an ACL scope that has to be written out at build time, and the paths here —
+  // download folder, a received file, `config.toml` — are only known at runtime.
+  // The Rust side checks the path against the daemon before opening it.
+  openPath: (path: string) => invoke<void>("open_path", { path }),
   // The ticket of a .arvolo the app was LAUNCHED with (double click before the
   // window existed). One-shot: the backend hands it over once.
   takePendingTicket: () => invoke<string | null>("take_pending_ticket"),

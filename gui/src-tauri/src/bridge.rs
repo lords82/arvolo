@@ -676,6 +676,38 @@ pub fn gui_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
+/// Hand a path to the system opener (`open` on macOS, `xdg-open` on Linux).
+///
+/// The opener plugin's own `open_path` command is not used: its ACL wants a
+/// *static* scope in `capabilities/`, and none of the three paths this app opens
+/// is knowable at build time — the download folder is configurable, a receive can
+/// be saved anywhere the accept dialog pointed, and `config.toml` follows the
+/// platform's config dir. `reveal_item_in_dir` (the "open folder" action) has no
+/// scope at all, which is why only "open file" was failing.
+///
+/// So the check happens here instead, against the daemon rather than against a
+/// glob: the path must be one the daemon itself reports — a completed receive's
+/// resting place, the download folder, or `config.toml`. Same stance as
+/// `PickedFiles`: the webview never gets to name a path of its own choosing.
+#[tauri::command]
+pub async fn open_path(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    let mut c = client().await?;
+    let cfg = c.get_config().await.or_else(err)?;
+    let known = path == cfg.download_dir
+        || path == cfg.config_path
+        || c.list()
+            .await
+            .or_else(err)?
+            .iter()
+            .any(|t| t.path.as_deref() == Some(path.as_str()));
+    if !known {
+        return Err(format!("path not open-able from here: {path}"));
+    }
+    tauri_plugin_opener::OpenerExt::opener(&app)
+        .open_path(&path, None::<&str>)
+        .map_err(|e| format!("{path}: {e}"))
+}
+
 #[cfg(test)]
 mod picked_tests {
     use super::*;

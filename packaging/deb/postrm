@@ -1,0 +1,17 @@
+#!/bin/sh
+# Undo what postinst did: drop the symlinks on removal, forget the state on purge.
+set -e
+
+if [ -d /run/systemd/system ] && command -v deb-systemd-helper >/dev/null; then
+    case "$1" in
+    remove)
+        deb-systemd-helper --user mask arvolo.service >/dev/null || true
+        ;;
+    purge)
+        deb-systemd-helper --user purge arvolo.service >/dev/null || true
+        deb-systemd-helper --user unmask arvolo.service >/dev/null || true
+        ;;
+    esac
+fi
+
+exit 0

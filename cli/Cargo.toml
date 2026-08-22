@@ -82,6 +82,11 @@ assets = [
     ["../docs/MANUAL.md", "usr/share/doc/arvolo/MANUAL.md", "644"],
     ["../docs/QUICKSTART.md", "usr/share/doc/arvolo/QUICKSTART.md", "644"],
 ]
+# Hand-written, because the unit above is a *user* unit and cargo-deb's
+# `systemd-units` table only knows system ones — pointed at this, it would install
+# the service under /usr/lib/systemd/system and start it as root. See the scripts
+# for what they do and why they cannot restart anything.
+maintainer-scripts = "../packaging/deb"
 
 [package.metadata.generate-rpm]
 name = "arvolo"
@@ -92,3 +97,15 @@ assets = [
     { source = "docs/MANUAL.md", dest = "/usr/share/doc/arvolo/MANUAL.md", mode = "644" },
     { source = "docs/QUICKSTART.md", dest = "/usr/share/doc/arvolo/QUICKSTART.md", mode = "644" },
 ]
+
+# The same registration on the RPM side. `--global` is the user-unit equivalent
+# of enable: it links the unit for every user's session manager, which is all a
+# root scriptlet can do — starting it belongs to the session, not to here.
+post_install_script = """
+systemctl --global enable arvolo.service >/dev/null 2>&1 || :
+"""
+pre_uninstall_script = """
+if [ $1 -eq 0 ]; then
+    systemctl --global disable arvolo.service >/dev/null 2>&1 || :
+fi
+"""

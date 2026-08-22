@@ -185,11 +185,17 @@ export const it: Dict = {
   "people.menuBlock": "Blocca",
   "people.menuRemove": "Rimuovi dalla rubrica",
   "people.rowActions": (name) => `Azioni per ${name}`,
-  "people.goesBy": (name) => `si presenta come “${name}”`,
   "people.notVerified": "Non verificato",
   "people.notVerifiedTitle": "L'impronta non è mai stata confrontata",
-  "people.wantsToBeCalled": (name) => `Vuole farsi chiamare “${name}”.`,
-  "people.approve": "Approva",
+  "people.claimedPlain": (name) => `(“${name}”)`,
+  "people.claimedNew": (name) => `(si presenta come “${name}”)`,
+  "people.claimedChange": (now, before) =>
+    `(ora: “${now}” — prima: “${before}”)`,
+  "people.claimedTip": (mine) =>
+    `Il nome che si è scelto lui. Può cambiare in qualsiasi momento e non è una prova di chi sia: il nome che usi tu, “${mine}”, non cambia da solo.`,
+  "people.claimedNote": (mine) =>
+    `Questo è il nome con cui si presenta ora. Per te resta “${mine}” in ogni caso — prenderne atto serve solo a togliere l'evidenza finché non lo cambia di nuovo.`,
+  "people.acknowledge": "Ho visto",
   "people.send": "Invia",
   "people.details": "Dettagli",
 

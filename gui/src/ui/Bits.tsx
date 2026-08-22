@@ -4,11 +4,11 @@
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import QRCode from "qrcode";
-import { useT } from "../i18n";
+import { useT, type TFn } from "../i18n";
 import { Icon } from "./Icons";
 import { IconButton } from "./Primitives";
 import { barClass, extOf, extTint, pct, shortId } from "../format";
-import type { UITransfer } from "../types";
+import type { ContactDto, UITransfer } from "../types";
 
 // ---- Avatar ---------------------------------------------------------------
 
@@ -239,6 +239,54 @@ export function ShortId({ value }: { value: string }) {
   return (
     <span className="mono t-xs t-mut" title={value}>
       {shortId(value)}
+    </span>
+  );
+}
+
+/** What a peer calls themselves, in parentheses after what *you* call them.
+ *
+ *  The two names are not equals and the layout says so. `c.name` is yours: you
+ *  typed it, nobody else can change it, and it is the only handle in the app a
+ *  sender cannot influence — so it stays first, unadorned, in every list. The
+ *  advertised name is their own text, arriving over the wire on every offer, and
+ *  it follows in brackets where it can be read without ever being mistaken for
+ *  the thing that identifies them.
+ *
+ *  It is worth showing at all because the alternative — hiding it until the user
+ *  approves it — teaches nothing and asks for a decision with no information.
+ *  And it is worth showing *with its predecessor* because the case that actually
+ *  matters is not "they have a name", it is "the name changed since you last
+ *  looked", which is what impersonation looks like from this side. `pending`
+ *  means exactly that: seen on the wire, not yet acknowledged. */
+export function claimText(
+  c: ContactDto,
+  t: TFn
+): { text: string; fresh: boolean } | null {
+  const pinned = c.display_name.trim();
+  const pending = c.pending_name.trim();
+  if (pending) {
+    return {
+      text: pinned
+        ? t("people.claimedChange", pending, pinned)
+        : t("people.claimedNew", pending),
+      fresh: true,
+    };
+  }
+  // Nothing to add when their name is the one you already gave them.
+  if (!pinned || pinned === c.name) return null;
+  return { text: t("people.claimedPlain", pinned), fresh: false };
+}
+
+export function ClaimedName({ c }: { c: ContactDto }) {
+  const t = useT();
+  const claim = claimText(c, t);
+  if (!claim) return null;
+  return (
+    <span
+      className={`truncate t-xs ${claim.fresh ? "tone-warn" : "t-mut"}`}
+      title={t("people.claimedTip", c.name)}
+    >
+      {claim.text}
     </span>
   );
 }

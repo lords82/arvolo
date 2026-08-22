@@ -19,11 +19,9 @@ vi.mock("@tauri-apps/api/webview", () => ({
   getCurrentWebview: () => ({ onDragDropEvent: () => Promise.resolve(() => {}) }),
 }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: () => Promise.resolve(null) }));
-const openPathMock = vi.fn((_p: string) => Promise.resolve());
 vi.mock("@tauri-apps/plugin-opener", () => ({
   revealItemInDir: () => Promise.resolve(),
   openUrl: () => Promise.resolve(),
-  openPath: (p: string) => openPathMock(p),
 }));
 
 import { useStore } from "../store";
@@ -301,17 +299,12 @@ describe("a finished download", () => {
   });
 
   it("double-clicking the row opens the file", async () => {
-    const opened: string[] = [];
-    openPathMock.mockImplementation((p: string) => {
-      opened.push(p);
-      return Promise.resolve();
-    });
     useStore.setState({ transfers: {}, route: "transfers" } as never);
     harness.snapshot.transfers = [done()];
     render(<App />);
     const name = await screen.findByText("delega.pdf");
     fireEvent.doubleClick(name.closest(".row") as HTMLElement);
-    expect(opened).toEqual(["/Users/ls/Arvolo/delega.pdf"]);
+    expect(harness.recorder.openPath).toEqual(["/Users/ls/Arvolo/delega.pdf"]);
   });
 });
 

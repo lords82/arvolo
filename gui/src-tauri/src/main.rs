@@ -198,6 +198,7 @@ fn main() {
             set_ui_language,
             bridge::pick_files,
             bridge::gui_version,
+            bridge::open_path,
         ])
         .setup(move |app| {
             let has_tray = match setup_tray(app.handle()) {

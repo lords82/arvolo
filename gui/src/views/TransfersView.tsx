@@ -12,7 +12,8 @@
 
 import { useCallback, useMemo, useState } from "react";
 import type { CSSProperties } from "react";
-import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { api } from "../ipc";
 import { fire, useStore } from "../store";
 import {
   fmtBytes,
@@ -175,7 +176,7 @@ function Row({
   /** Open the received file with whatever the system uses for it. */
   const openFile = () => {
     if (!tx.path) return;
-    openPath(tx.path).catch((e: unknown) =>
+    api.openPath(tx.path).catch((e: unknown) =>
       toast.bad(t("transfers.openFileFailed"), String(e))
     );
   };

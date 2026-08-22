@@ -19,7 +19,7 @@ import {
   isEnabled as autostartIsEnabled,
 } from "@tauri-apps/plugin-autostart";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { openPath } from "@tauri-apps/plugin-opener";
+import { api } from "../ipc";
 import { fire, useStore, type ThemeChoice } from "../store";
 import {
   langNames,
@@ -348,7 +348,7 @@ export function SettingsView() {
               <Button
                 size="sm"
                 onClick={() =>
-                  openPath(config.download_dir).catch((e: unknown) =>
+                  api.openPath(config.download_dir).catch((e: unknown) =>
                     toast.bad(t("settings.cannotOpen"), String(e))
                   )
                 }
@@ -386,7 +386,7 @@ export function SettingsView() {
               <Button
                 size="sm"
                 onClick={() =>
-                  openPath(config.config_path).catch((e: unknown) =>
+                  api.openPath(config.config_path).catch((e: unknown) =>
                     toast.bad(t("settings.cannotOpen"), String(e))
                   )
                 }

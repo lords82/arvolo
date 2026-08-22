@@ -33,11 +33,11 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 }));
 const revealItemInDir = vi.fn(() => Promise.resolve());
 const openUrl = vi.fn(() => Promise.resolve());
-const openPath = vi.fn(() => Promise.resolve());
+// No `openPath` here: opening a file goes through the bridge (`api.openPath`),
+// not the plugin — see the comment on the command in `bridge.rs`.
 vi.mock("@tauri-apps/plugin-opener", () => ({
   revealItemInDir: (...a: unknown[]) => revealItemInDir(...(a as [])),
   openUrl: (...a: unknown[]) => openUrl(...(a as [])),
-  openPath: (...a: unknown[]) => openPath(...(a as [])),
 }));
 
 import { useStore } from "../store";

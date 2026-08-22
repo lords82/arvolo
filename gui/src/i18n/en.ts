@@ -205,11 +205,17 @@ export const en = {
   "people.menuBlock": "Block",
   "people.menuRemove": "Remove from the address book",
   "people.rowActions": (name: string) => `Actions for ${name}`,
-  "people.goesBy": (name: string) => `goes by “${name}”`,
   "people.notVerified": "Not verified",
   "people.notVerifiedTitle": "The fingerprint has never been compared",
-  "people.wantsToBeCalled": (name: string) => `Wants to be called “${name}”.`,
-  "people.approve": "Approve",
+  "people.claimedPlain": (name: string) => `(“${name}”)`,
+  "people.claimedNew": (name: string) => `(calls themselves “${name}”)`,
+  "people.claimedChange": (now: string, before: string) =>
+    `(now: “${now}” — was: “${before}”)`,
+  "people.claimedTip": (mine: string) =>
+    `The name they chose for themselves. It can change at any time, and it is not proof of who they are — the name you use, “${mine}”, never changes on its own.`,
+  "people.claimedNote": (mine: string) =>
+    `Here is the name they now advertise. Yours for them stays “${mine}” either way — acknowledging only stops the highlight until they change it again.`,
+  "people.acknowledge": "Got it",
   "people.send": "Send",
   "people.details": "Details",
 

@@ -56,6 +56,8 @@ export interface Recorder {
   startPairing: [PairKind, string | null, string | null][];
   cancelPairing: string[];
   restartDaemon: number;
+  /** Paths handed to the system opener ("open file", "open the download folder"). */
+  openPath: string[];
 }
 
 export interface Harness {
@@ -127,6 +129,7 @@ function freshRecorder(): Recorder {
     startPairing: [],
     cancelPairing: [],
     restartDaemon: 0,
+    openPath: [],
   };
 }
 
@@ -208,6 +211,10 @@ export function makeIpcMock() {
       listPending: () => guard("listPending", harness.snapshot.pending),
       listContacts: () => guard("listContacts", harness.snapshot.contacts),
       guiVersion: () => guard("guiVersion", "0.9.2"),
+      openPath: (path: string) => {
+        harness.recorder.openPath.push(path);
+        return guard("openPath", undefined);
+      },
       sendTo: (to: string, paths: string[], note: string) => {
         harness.recorder.sendTo.push([to, paths, note]);
         return guard("sendTo", 1);

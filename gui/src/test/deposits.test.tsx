@@ -21,7 +21,6 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({ open: () => Promise.resolve(null) 
 vi.mock("@tauri-apps/plugin-opener", () => ({
   revealItemInDir: () => Promise.resolve(),
   openUrl: () => Promise.resolve(),
-  openPath: () => Promise.resolve(),
 }));
 
 import { useStore } from "../store";
