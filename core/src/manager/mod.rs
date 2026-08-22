@@ -355,6 +355,7 @@ impl TransferManager {
                 cancels: Mutex::new(HashMap::new()),
                 recv_aborts: Mutex::new(HashMap::new()),
                 held: Mutex::new(HashMap::new()),
+                download_content: Mutex::new(HashMap::new()),
                 pending: Mutex::new(HashMap::new()),
                 events,
                 me,
@@ -1040,6 +1041,9 @@ impl TransferManager {
         let (id, _cancel) = self.register(Direction::Recv, None, rec.name.clone(), rec.size);
         // No running task to cancel for a paused download.
         self.inner.cancels.lock().unwrap().remove(&id);
+        // Paused, but still the download this content belongs to: an offer arriving
+        // for it must find it rather than ask again.
+        self.inner.note_download_content(id, &rec.ticket);
         if let Some(dir) = &self.inner.state_dir {
             persist_download(
                 dir,
@@ -1385,8 +1389,42 @@ impl TransferManager {
         {
             let inner = self.inner.clone();
             let stop = cancel.clone();
+            let ack_sub = sub.clone();
             tokio::spawn(async move {
                 sub.run(stop, move |offer| {
+                    // An offer about something already coming down is not a decision
+                    // to put in front of anybody: the user said yes to this send once,
+                    // and the sender is simply telling us where to find it now. Take
+                    // the copies already parked for it out with it — a withdrawal on
+                    // the relay never reaches those.
+                    if let Some(on) =
+                        inner.download_of_same_content(&offer.offer.ticket, Some(&offer.sender))
+                    {
+                        let paused = matches!(
+                            inner.transfers.lock().unwrap().get(&on).map(|t| &t.status),
+                            Some(TransferStatus::Paused(_))
+                        );
+                        tracing::info!(
+                            "offer {} is for transfer {on}, already downloading — not asking again",
+                            offer.id
+                        );
+                        let mut ids = inner.take_offers_for_same_content(&offer.offer.ticket);
+                        ids.push(offer.id.clone());
+                        // Ack only for a download that can act on the news. An ack
+                        // reads on the relay as *taken*, which wakes the sender and
+                        // starts an attempt at once — right for a fetch in flight,
+                        // wasted on one the user deliberately paused, which nothing
+                        // here is going to un-pause on their behalf.
+                        if !paused {
+                            let sub = ack_sub.clone();
+                            tokio::spawn(async move {
+                                for id in ids {
+                                    let _ = sub.ack(&id).await;
+                                }
+                            });
+                        }
+                        return;
+                    }
                     inner
                         .pending
                         .lock()
@@ -1429,6 +1467,25 @@ impl TransferManager {
         }
 
         Ok(cancel)
+    }
+
+    /// The download already fetching what `ticket` offers, if there is one: a fetch
+    /// in flight, or one the user paused. Terminal rows never match.
+    ///
+    /// The key is the ticket's [`content_id`](crate::chunked::ChunkTicket::content_id),
+    /// not its text — the text changes on every attempt (fresh provider address, and
+    /// HPKE re-seals the key blob), while the content id is the same for two tickets
+    /// that serve the same send and different for everything else. Because the
+    /// digests are of ciphertext under a random content key, producing the same id
+    /// means holding that key: a match says "this is that send", not merely "this is
+    /// a file with the same bytes".
+    ///
+    /// `from` is the authenticated sender of the offer that carried the ticket, when
+    /// there is one. A download that knows who it is talking to only matches an offer
+    /// from *them* — a stranger naming content we hold should be impossible, and if
+    /// the impossible happens it deserves to be seen, not swallowed.
+    pub fn download_of_same_content(&self, ticket: &str, from: Option<&PublicId>) -> Option<u64> {
+        self.inner.download_of_same_content(ticket, from)
     }
 
     /// Accept a pending offer by its handle: fetch it into `out` (or the default
@@ -1529,6 +1586,32 @@ impl TransferManager {
             let _ = sub.ack(offer_id).await;
         }
 
+        // Already fetching this very send? Then this offer is the sender saying where
+        // to find it now, not a second file. Hand back the download that exists rather
+        // than starting another onto the same path — two fetches writing one partial is
+        // not a thing that ends well. Covers the offer that was parked *before* the
+        // download started, which the inbox poll could not have matched.
+        //
+        // Paused, and accepted by hand: that is the user saying yes to it now, which is
+        // exactly the intent the passive path deliberately does not infer.
+        if let Some(on) = self.download_of_same_content(&offer.offer.ticket, Some(&offer.sender)) {
+            let paused = matches!(
+                self.get(on).map(|t| t.status),
+                Some(TransferStatus::Paused(_))
+            );
+            if paused {
+                self.resume(on);
+            }
+            if !offer.offer.sender_name.is_empty() {
+                if let Some(t) = self.inner.transfers.lock().unwrap().get_mut(&on) {
+                    if t.sender_name.is_empty() {
+                        t.sender_name = offer.offer.sender_name.clone();
+                    }
+                }
+            }
+            return Ok(on);
+        }
+
         let id = self.start_download_with_password(
             offer.offer.ticket.clone(),
             out_path,
@@ -1580,6 +1663,7 @@ impl TransferManager {
         // Persist a resume record for chunked downloads (offline one-shots aren't
         // worth resuming — they just re-fetch from the mailbox).
         if crate::chunked::ChunkTicket::looks_like(&ticket) {
+            self.inner.note_download_content(id, &ticket);
             if let Some(dir) = &self.inner.state_dir {
                 persist_download(
                     dir,
@@ -2094,6 +2178,80 @@ mod held_prep_tests {
         assert!(
             load_prep(dir.path(), 99).is_none(),
             "an orphan preparation must not outlive the restart it was found on"
+        );
+    }
+}
+
+#[cfg(test)]
+mod offer_dedup_tests {
+    use super::*;
+
+    /// The copies a sender left in the inbox before it learned to keep one offer
+    /// standing. A withdrawal on the relay never reaches the ones already parked
+    /// here, so a swallowed offer takes its own ghosts with it — and leaves
+    /// everything else exactly where it is, which is the half worth pinning.
+    #[tokio::test]
+    async fn a_swallowed_offer_sweeps_its_own_ghosts_and_nothing_else() {
+        let dir = tempfile::tempdir().unwrap();
+        let dl = tempfile::tempdir().unwrap();
+        let me = Identity::generate();
+        let my_id = me.public();
+        let sender = Identity::generate();
+        let m = TransferManager::new(me, None, dl.path().to_path_buf());
+
+        let prepare = |name: &'static str, fill: u8| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, vec![fill; 4096]).unwrap();
+            let sender = &sender;
+            let my_id = &my_id;
+            async move {
+                crate::flow::prepare_send(
+                    path.as_path(),
+                    name,
+                    false,
+                    Some((sender, my_id)),
+                    None,
+                    RelayChoice::Disabled,
+                )
+                .await
+                .unwrap()
+                .ticket
+                .clone()
+            }
+        };
+        let one = prepare("one.bin", 1).await;
+        let two = prepare("two.bin", 2).await;
+
+        let park = |id: &str, ticket: &str| {
+            m.inner.pending.lock().unwrap().insert(
+                id.to_string(),
+                crate::presence::ReceivedOffer {
+                    id: id.to_string(),
+                    sender: sender.public(),
+                    offer: crate::presence::Offer {
+                        name: "f.bin".into(),
+                        size: 4096,
+                        chunks: 1,
+                        ticket: ticket.to_string(),
+                        note: String::new(),
+                        sender_name: String::new(),
+                        origin: None,
+                    },
+                },
+            );
+        };
+        park("ghost-a", &one);
+        park("ghost-b", &one);
+        park("other", &two);
+
+        let mut swept = m.inner.take_offers_for_same_content(&one);
+        swept.sort();
+        assert_eq!(swept, vec!["ghost-a".to_string(), "ghost-b".to_string()]);
+        let left: Vec<String> = m.inner.pending.lock().unwrap().keys().cloned().collect();
+        assert_eq!(
+            left,
+            vec!["other".to_string()],
+            "another send's offer is another decision, and stays parked"
         );
     }
 }

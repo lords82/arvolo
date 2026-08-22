@@ -1451,6 +1451,11 @@ pub(super) fn finish(inner: &Inner, id: u64, cancelled: bool, result: Result<Opt
     }
     // Drop any held `send --to` delivery state (memory + its durable record).
     drop_held(inner, id);
+    // Terminal: this download stops answering for its content. A completed one
+    // deliberately included — the file may since have been deleted, and telling
+    // somebody "you already have this" is a different feature with a different way
+    // of being wrong.
+    inner.download_content.lock().unwrap().remove(&id);
     match result {
         Ok(path) if cancelled => {
             inner.set_status(id, TransferStatus::Cancelled);

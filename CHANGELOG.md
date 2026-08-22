@@ -49,6 +49,17 @@ Second prerelease, on top of rc1.
   recipient touches it: accepting starts the transfer in a round trip. Both kinds
   of recipient reach it — the daemon, which acks on accept, and a bare
   `arvolo recv`, which only lists its inbox before dialling.
+- **An offer for a file already downloading asked for approval again.** A held send
+  re-offers itself — after a pause, after a restart, after any attempt that found
+  nobody — and every one of those offers used to park as a fresh decision to make:
+  one inbox was holding three of them for a 10.7 GiB file while that very file was
+  downloading at 10.4 GiB. An offer whose ticket serves what a download already has
+  in flight (or paused) now goes to that download instead of to the user, sweeping
+  the copies already parked for it, and is acked so the sender wakes and serves
+  rather than waiting on a row nobody will answer. It is a strong match, not a
+  guess about filenames: the digests are of ciphertext under a random per-transfer
+  key, so producing them means being that send. Anything else — another file, or
+  the same content from a different sender — still asks.
 - **Every delivery attempt left another copy of the same offer.** Each attempt
   posted a fresh offer and withdrew it on the way out, so a recipient who was away
   for a while collected a row per attempt, all but one of them already dead — and

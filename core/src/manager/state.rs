@@ -50,6 +50,18 @@ pub(super) struct Inner {
     pub(super) recv_aborts: Mutex<HashMap<u64, Arc<std::sync::atomic::AtomicBool>>>,
     /// Delivery state for active/paused `send --to` transfers (for pause/resume).
     pub(super) held: Mutex<HashMap<u64, Held>>,
+    /// What each live chunked download is fetching, as
+    /// [`ChunkTicket::content_id`](crate::chunked::ChunkTicket::content_id) — so an
+    /// offer that arrives about a file already coming down can find it instead of
+    /// asking the user again.
+    ///
+    /// Keyed by transfer id and not by content: the same content can legitimately be
+    /// downloaded twice (two output paths), and a map keyed the other way would
+    /// silently drop one of them. Entries go in when a chunked download starts (or
+    /// is restored paused) and out when it reaches a terminal state — a *completed*
+    /// download deliberately stops matching, because the user may since have deleted
+    /// the file and "you already have this" is a different feature.
+    pub(super) download_content: Mutex<HashMap<u64, String>>,
     pub(super) pending: Mutex<HashMap<String, ReceivedOffer>>,
     pub(super) events: broadcast::Sender<ManagerEvent>,
     pub(super) me: Identity,
@@ -82,6 +94,86 @@ impl Inner {
     pub(super) fn emit(&self, ev: ManagerEvent) {
         // No subscribers is fine — the state map is the source of truth.
         let _ = self.events.send(ev);
+    }
+
+    /// Record what download `id` is fetching. A ticket that doesn't decode is simply
+    /// not indexed: nothing can match it either.
+    pub(super) fn note_download_content(&self, id: u64, ticket: &str) {
+        if let Ok(t) = crate::chunked::ChunkTicket::decode(ticket) {
+            self.download_content
+                .lock()
+                .unwrap()
+                .insert(id, t.content_id());
+        }
+    }
+
+    /// See [`TransferManager::download_of_same_content`], which is this with a doc
+    /// comment. Here because the inbox poll callback holds an `Inner`, not a manager.
+    pub(super) fn download_of_same_content(
+        &self,
+        ticket: &str,
+        from: Option<&PublicId>,
+    ) -> Option<u64> {
+        let want = crate::chunked::ChunkTicket::decode(ticket)
+            .ok()?
+            .content_id();
+        let ids: Vec<u64> = self
+            .download_content
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, c)| **c == want)
+            .map(|(id, _)| *id)
+            .collect();
+        let transfers = self.transfers.lock().unwrap();
+        let mut best: Option<(u8, u64)> = None;
+        for id in ids {
+            let Some(t) = transfers.get(&id) else {
+                continue;
+            };
+            if let (Some(from), Some(peer)) = (from, t.peer.as_ref()) {
+                if peer.to_bytes() != from.to_bytes() {
+                    continue;
+                }
+            }
+            // A live download first, a paused one only if there is no live one:
+            // deterministic, and it prefers the row that can act on the news.
+            let rank = match t.status {
+                TransferStatus::Active | TransferStatus::Preparing | TransferStatus::Waiting(_) => {
+                    0
+                }
+                TransferStatus::Paused(_) => 1,
+                _ => continue,
+            };
+            if best.map(|(r, bid)| (rank, id) < (r, bid)).unwrap_or(true) {
+                best = Some((rank, id));
+            }
+        }
+        best.map(|(_, id)| id)
+    }
+
+    /// The parked offers that carry the same content as `ticket` — the copies a
+    /// sender left behind before it kept one offer standing, and the ones a relay
+    /// withdrawal cannot reach because they are already in this map. Removed from
+    /// `pending` and returned, so the caller can ack them off the relay too.
+    pub(super) fn take_offers_for_same_content(&self, ticket: &str) -> Vec<String> {
+        let Ok(want) = crate::chunked::ChunkTicket::decode(ticket).map(|t| t.content_id()) else {
+            return Vec::new();
+        };
+        let mut pending = self.pending.lock().unwrap();
+        let ghosts: Vec<String> = pending
+            .iter()
+            .filter(|(_, o)| {
+                crate::chunked::ChunkTicket::decode(&o.offer.ticket)
+                    .map(|t| t.content_id() == want)
+                    .unwrap_or(false)
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &ghosts {
+            pending.remove(id);
+        }
+        ghosts
     }
 
     /// Set a **terminal-or-paused** status: also drops the cancel token, since the
