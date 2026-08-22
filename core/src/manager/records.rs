@@ -240,6 +240,69 @@ pub(super) fn load_sendtos(dir: &Path) -> Vec<SendToRecord> {
     load_records(dir, "sendto-")
 }
 
+/// The preparation behind a held `send --to`: the content key, the transport seed,
+/// and the digests taken under that key. **Beside** its [`SendToRecord`], never
+/// inside it — same reason as [`ShareRecord`]: postcard is not self-describing, so a
+/// new field would make every record an older build wrote undecodable, and
+/// `load_records` skips silently what it cannot read.
+///
+/// It is what lets a restarted daemon resume *the same send*. Recomputing the
+/// preparation mints a fresh key and seed, and the recipient is then looking at a
+/// different file under a node id nobody is serving.
+///
+/// The pass that would notice a payload changed under us is exactly the one this
+/// record exists to skip, so it also writes down what the payload looked like when
+/// the digests were taken. See `work::PayloadStamp`.
+///
+/// Holds the content key in the clear: goes through [`write_record_private`], like
+/// every other record that carries one.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(super) struct PrepRecord {
+    pub(super) id: u64,
+    pub(super) key: Vec<u8>,
+    /// Spelled like [`SendRecord::node_seed`]: 32 bytes, the transport secret.
+    pub(super) node_seed: Vec<u8>,
+    pub(super) total_size: u64,
+    /// One 32-byte digest per 16 MiB chunk — 22 KB for a 10 GB payload.
+    pub(super) chunks: Vec<crate::hash::Hash>,
+    /// The payload these digests were taken from, and what it looked like then.
+    pub(super) payload: String,
+    pub(super) len: u64,
+    pub(super) mtime_secs: u64,
+    pub(super) mtime_nanos: u32,
+    /// Device + inode on unix (0 elsewhere): a replaced file is caught outright,
+    /// which length and mtime alone can miss.
+    pub(super) dev: u64,
+    pub(super) ino: u64,
+}
+
+pub(super) fn prep_record_path(dir: &Path, id: u64) -> PathBuf {
+    dir.join(format!("prep-{id}.pc"))
+}
+
+pub(super) fn persist_prep(dir: &Path, rec: &PrepRecord) {
+    if let Ok(bytes) = postcard::to_allocvec(rec) {
+        let _ = std::fs::create_dir_all(dir);
+        let _ = write_record_private(&prep_record_path(dir, rec.id), &bytes);
+    }
+}
+
+pub(super) fn load_prep(dir: &Path, id: u64) -> Option<PrepRecord> {
+    let bytes = std::fs::read(prep_record_path(dir, id)).ok()?;
+    postcard::from_bytes(&bytes).ok()
+}
+
+pub(super) fn remove_prep(dir: &Path, id: u64) {
+    let _ = std::fs::remove_file(prep_record_path(dir, id));
+}
+
+/// Every preparation on disk — for the sweep that drops the ones whose held send
+/// did not come back. Each restore re-keys onto a fresh id, so a record left under
+/// an old one would sit there for ever, holding a content key nobody can use.
+pub(super) fn load_preps(dir: &Path) -> Vec<PrepRecord> {
+    load_records(dir, "prep-")
+}
+
 /// On-disk record of a mailbox **deposit awaiting pickup**, so a daemon restart
 /// keeps showing the transfer as Deposited (and keeps confirming its delivery)
 /// instead of silently dropping it from the list. Removed once the pickup is

@@ -943,7 +943,11 @@ impl TransferManager {
         );
     }
 
-    fn restore_sendto(&self, rec: SendToRecord) {
+    /// `prep` is the preparation this send had already paid for, if one was written
+    /// down and the payload still matches it: restoring with it means the recipient
+    /// keeps the send they were given, under the same node id, and nothing is
+    /// re-encrypted. Without it the send simply prepares again, as every restart did.
+    fn restore_sendto(&self, rec: SendToRecord, prep: Option<PrepRecord>) {
         let Ok(recipient) = PublicId::from_bytes(&rec.recipient) else {
             return;
         };
@@ -962,6 +966,10 @@ impl TransferManager {
             size,
         );
         let pause_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let slot: crate::flow::PrepSlot = Default::default();
+        if let Some(rec) = &prep {
+            *slot.lock().unwrap() = work::rebuild_prep(rec, &source);
+        }
         self.inner.held.lock().unwrap().insert(
             id,
             Held {
@@ -971,9 +979,32 @@ impl TransferManager {
                 archive: rec.archive,
                 note: rec.note.clone(),
                 pause_flag: pause_flag.clone(),
-                prep: Default::default(),
+                prep: slot.clone(),
             },
         );
+        // Re-key the preparation onto the id it now belongs to, or the next restart
+        // finds an orphan and sweeps it — losing across two restarts what survived
+        // one. Only when it actually survived the guard.
+        if let (Some(dir), Some(rec)) = (&self.inner.state_dir, &prep) {
+            if slot.lock().unwrap().is_some() {
+                persist_prep(
+                    dir,
+                    &PrepRecord {
+                        id,
+                        key: rec.key.clone(),
+                        node_seed: rec.node_seed.clone(),
+                        total_size: rec.total_size,
+                        chunks: rec.chunks.clone(),
+                        payload: rec.payload.clone(),
+                        len: rec.len,
+                        mtime_secs: rec.mtime_secs,
+                        mtime_nanos: rec.mtime_nanos,
+                        dev: rec.dev,
+                        ino: rec.ino,
+                    },
+                );
+            }
+        }
         if rec.paused {
             // Restore paused: don't run; drop the fresh token, mark Paused.
             self.inner.cancels.lock().unwrap().remove(&id);
@@ -1771,10 +1802,23 @@ impl TransferManager {
             remove_deposited(&dir, rec.id);
             self.restore_deposited(rec);
         }
+        // A preparation whose held send is not coming back has nothing to belong to,
+        // and holds a content key: drop it before anything re-keys. (Every restore
+        // allocates a fresh id — the same reason the pairing-code sweep below exists.)
+        {
+            let live: std::collections::HashSet<u64> = sendtos.iter().map(|r| r.id).collect();
+            for p in load_preps(&dir) {
+                if !live.contains(&p.id) {
+                    remove_prep(&dir, p.id);
+                }
+            }
+        }
         for rec in sendtos {
-            // Re-registers under a fresh id; drop the stale record either way.
+            // Re-registers under a fresh id; drop the stale records either way.
+            let prep = load_prep(&dir, rec.id);
+            remove_prep(&dir, rec.id);
             remove_sendto(&dir, rec.id);
-            self.restore_sendto(rec);
+            self.restore_sendto(rec, prep);
         }
         for rec in downloads {
             // A download the user paused comes back Paused (awaiting them); an active
@@ -2016,6 +2060,41 @@ mod held_prep_tests {
         // No held entry: a private slot, so reuse within one task still works.
         let (other, _c) = m.register(Direction::Send, None, "g.bin".into(), 1);
         assert!(work::held_prep(&m.inner, other).lock().unwrap().is_none());
+    }
+
+    /// Every restore re-keys onto a fresh id, so a preparation whose held send did
+    /// not come back would sit in the state dir for ever — holding a content key
+    /// nobody can use. It is swept on the way in.
+    #[tokio::test]
+    async fn a_preparation_whose_send_did_not_come_back_is_swept() {
+        let dir = tempfile::tempdir().unwrap();
+        persist_prep(
+            dir.path(),
+            &PrepRecord {
+                id: 99,
+                key: vec![1u8; crate::crypto::CHUNK_KEY_LEN],
+                node_seed: vec![2u8; 32],
+                total_size: 10,
+                chunks: vec![crate::hash::Hash::new(b"x")],
+                payload: "/gone.bin".into(),
+                len: 10,
+                mtime_secs: 1,
+                mtime_nanos: 0,
+                dev: 0,
+                ino: 0,
+            },
+        );
+        let m = TransferManager::with_state_dir(
+            Identity::generate(),
+            None,
+            dir.path().to_path_buf(),
+            Some(dir.path().to_path_buf()),
+        );
+        m.resume_incomplete();
+        assert!(
+            load_prep(dir.path(), 99).is_none(),
+            "an orphan preparation must not outlive the restart it was found on"
+        );
     }
 }
 

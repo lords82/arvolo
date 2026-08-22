@@ -62,7 +62,11 @@ Second prerelease, on top of rc1.
   recipient's transfer was then pointing at a node nobody was serving, and the only
   way back was another offer for them to approve by hand. The preparation now
   belongs to the held send, which survives the pause, so resuming carries on with
-  the same content under the same node id.
+  the same content under the same node id. It is also written down beside the
+  send's own record, so a daemon restart resumes the same send too — 22 KB of
+  digests for a 10 GB payload, guarded by what the file looked like when they were
+  taken (length, mtime, and the inode where there is one). A payload that moved on
+  in the meantime is simply prepared again, as it always was.
 - **A file from another of your own devices asked for approval.** Two halves of
   `--to me` shipped in rc1 were written but never wired up. An offer that opens
   and authenticates as your own identity can only have been sealed by something

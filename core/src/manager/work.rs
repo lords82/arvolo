@@ -155,6 +155,138 @@ pub(super) fn persist_held_record(inner: &Inner, id: u64, paused: bool, reason: 
     }
 }
 
+/// What a payload looked like when its digests were taken.
+///
+/// A persisted preparation skips the read-and-encrypt pass, and that pass is also
+/// the only thing that would notice the file changed underneath it. This is the
+/// cheap stand-in: metadata that a rewrite, a truncation or a replacement almost
+/// always disturbs. `dev`/`ino` catch replacement outright on unix; elsewhere they
+/// are zero and only length and mtime speak.
+///
+/// Not a proof. A tool that restores a file's mtime, or an in-place rewrite of
+/// identical length within one filesystem timestamp tick, gets past it — and then
+/// the sender serves ciphertext its ticket does not describe, every chunk fails the
+/// receiver's integrity check, and the transfer simply never completes. Never a
+/// file that arrives wrong.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) struct PayloadStamp {
+    pub(super) len: u64,
+    pub(super) mtime_secs: u64,
+    pub(super) mtime_nanos: u32,
+    pub(super) dev: u64,
+    pub(super) ino: u64,
+}
+
+/// Stamp the file at `path`. `None` when it cannot be stat'ed or carries no mtime —
+/// and no stamp means no persisted preparation, because an unguarded one is worse
+/// than none: it would be believed.
+pub(super) fn payload_stamp(path: &std::path::Path) -> Option<PayloadStamp> {
+    let md = std::fs::metadata(path).ok()?;
+    let mtime = md
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?;
+    #[cfg(unix)]
+    let (dev, ino) = {
+        use std::os::unix::fs::MetadataExt;
+        (md.dev() as u64, md.ino())
+    };
+    #[cfg(not(unix))]
+    let (dev, ino) = (0u64, 0u64);
+    Some(PayloadStamp {
+        len: md.len(),
+        mtime_secs: mtime.as_secs(),
+        mtime_nanos: mtime.subsec_nanos(),
+        dev,
+        ino,
+    })
+}
+
+/// Write down the preparation a held send has just paid for, so a restarted daemon
+/// resumes the same send instead of minting a new one.
+///
+/// Two stamps, not one. A single stat after the pass has a hole in it: a file
+/// rewritten *while* the pass ran would be certified by digests taken across mixed
+/// content. Taking one before and one after and requiring them to agree closes it —
+/// and when they disagree we write nothing, so the next attempt pays for the pass
+/// again, which is exactly what happened before this record existed.
+fn persist_prep_record(
+    inner: &Inner,
+    id: u64,
+    payload: &crate::source::SendSource,
+    prep: &flow::PrepSlot,
+    before: Option<PayloadStamp>,
+) {
+    let Some(dir) = &inner.state_dir else { return };
+    let path = PathBuf::from(payload.label());
+    let (Some(before), Some(after)) = (before, payload_stamp(&path)) else {
+        return;
+    };
+    if before != after {
+        tracing::info!(
+            "not writing down the preparation for {}: it changed while being read",
+            path.display()
+        );
+        return;
+    }
+    let guard = prep.lock().unwrap();
+    let Some(p) = guard.as_ref() else { return };
+    persist_prep(
+        dir,
+        &PrepRecord {
+            id,
+            key: p.key().to_vec(),
+            node_seed: p.node_seed().to_vec(),
+            total_size: p.total_size(),
+            chunks: p.chunks().to_vec(),
+            payload: path.to_string_lossy().into_owned(),
+            len: after.len,
+            mtime_secs: after.mtime_secs,
+            mtime_nanos: after.mtime_nanos,
+            dev: after.dev,
+            ino: after.ino,
+        },
+    );
+}
+
+/// Rebuild a preparation from what was written down, if the payload is still the
+/// bytes it was taken from. `None` — for any reason at all — means preparing again,
+/// which is what every restart did before.
+pub(super) fn rebuild_prep(
+    rec: &PrepRecord,
+    source: &crate::source::SendSource,
+) -> Option<flow::ReusablePrep> {
+    let path = PathBuf::from(source.label());
+    let now = payload_stamp(&path)?;
+    let then = PayloadStamp {
+        len: rec.len,
+        mtime_secs: rec.mtime_secs,
+        mtime_nanos: rec.mtime_nanos,
+        dev: rec.dev,
+        ino: rec.ino,
+    };
+    if now != then || rec.len != rec.total_size {
+        tracing::info!(
+            "preparing {} again: it is not the file the stored preparation describes",
+            path.display()
+        );
+        return None;
+    }
+    let key: [u8; crate::crypto::CHUNK_KEY_LEN] = rec.key.as_slice().try_into().ok()?;
+    let node_seed: [u8; 32] = rec.node_seed.as_slice().try_into().ok()?;
+    match flow::ReusablePrep::from_parts(key, node_seed, rec.total_size, rec.chunks.clone()) {
+        Ok(p) => Some(p),
+        Err(e) => {
+            tracing::info!(
+                "stored preparation for {} is unusable: {e:#}",
+                path.display()
+            );
+            None
+        }
+    }
+}
+
 /// The preparation slot a held `send --to` owns, so the delivery loop reads it from
 /// something that outlives the loop. A send with no held entry gets a private slot:
 /// the reuse within one task still works, which is what the slot did before it had
@@ -175,6 +307,9 @@ pub(super) fn drop_held(inner: &Inner, id: u64) {
     inner.held.lock().unwrap().remove(&id);
     if let Some(dir) = &inner.state_dir {
         remove_sendto(dir, id);
+        // The preparation goes with it: it is only meaningful as this send's, and
+        // it holds a content key.
+        remove_prep(dir, id);
     }
 }
 
@@ -536,6 +671,10 @@ pub(super) async fn serve_live_once(
         inner.set_status_live(id, TransferStatus::Preparing);
         inner.emit(ManagerEvent::Preparing { id });
     }
+    // Stamped before the pass, compared after it — see `persist_prep_record`.
+    let before = fresh
+        .then(|| payload_stamp(&PathBuf::from(payload.label())))
+        .flatten();
     let session = match flow::prepare_send_in_slot(
         payload.clone(),
         name,
@@ -550,6 +689,13 @@ pub(super) async fn serve_live_once(
         Ok(s) => s,
         Err(e) => return LiveOutcome::Fatal(e.context("prepare send")),
     };
+    // Written down *before* anyone is told about it. The invariant is that a ticket
+    // in somebody's hands can be reproduced: put the offer out first and a crash in
+    // between leaves the recipient holding a ticket this daemon can no longer serve,
+    // which is the whole bug.
+    if fresh {
+        persist_prep_record(inner, id, payload, prep, before);
+    }
 
     let offer = Offer {
         name: name.to_string(),
@@ -1429,6 +1575,127 @@ fn close_reason_text(reason: crate::code::CloseReason) -> String {
 }
 
 // ---- resumable-download persistence ---------------------------------------
+
+#[cfg(test)]
+mod prep_record_tests {
+    use super::*;
+
+    fn write(path: &std::path::Path, body: &[u8]) {
+        std::fs::write(path, body).unwrap();
+    }
+
+    /// The stamp is the whole guard: a persisted preparation is believed on its word,
+    /// and this is the word.
+    #[test]
+    fn a_stamp_notices_a_payload_that_moved_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("payload.bin");
+        write(&p, b"the original bytes");
+        let before = payload_stamp(&p).expect("stat");
+
+        assert_eq!(
+            Some(before),
+            payload_stamp(&p),
+            "an untouched file is itself"
+        );
+
+        // Different length: caught by length alone.
+        write(&p, b"the original bytes, and then some");
+        assert_ne!(Some(before), payload_stamp(&p));
+
+        // Same length, replaced file: caught by the inode on unix. (On other
+        // platforms this leans on the mtime, which a rewrite moves.)
+        let same_len = dir.path().join("same-len.bin");
+        write(&same_len, b"the original bytez");
+        std::fs::rename(&same_len, &p).unwrap();
+        assert_ne!(Some(before), payload_stamp(&p));
+
+        assert!(
+            payload_stamp(&dir.path().join("nothing-here")).is_none(),
+            "no file, no stamp — and no stamp means no persisted preparation"
+        );
+    }
+
+    /// What a restart reads. Also pins the permissions: the record carries the
+    /// content key in the clear.
+    #[test]
+    fn a_prep_record_round_trips_privately() {
+        let dir = tempfile::tempdir().unwrap();
+        let rec = PrepRecord {
+            id: 7,
+            key: vec![3u8; crate::crypto::CHUNK_KEY_LEN],
+            node_seed: vec![9u8; 32],
+            total_size: 1234,
+            chunks: vec![crate::hash::Hash::new(b"a"), crate::hash::Hash::new(b"b")],
+            payload: "/tmp/payload.bin".into(),
+            len: 1234,
+            mtime_secs: 42,
+            mtime_nanos: 7,
+            dev: 1,
+            ino: 2,
+        };
+        persist_prep(dir.path(), &rec);
+        let back = load_prep(dir.path(), 7).expect("written and read back");
+        assert_eq!(back.key, rec.key);
+        assert_eq!(back.node_seed, rec.node_seed);
+        assert_eq!(back.chunks, rec.chunks);
+        assert_eq!(back.total_size, rec.total_size);
+        assert_eq!(back.ino, rec.ino);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(prep_record_path(dir.path(), 7))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600, "it holds a content key");
+        }
+
+        remove_prep(dir.path(), 7);
+        assert!(load_prep(dir.path(), 7).is_none());
+    }
+
+    /// The guard says no to a payload that is not the one the digests came from, and
+    /// the send simply prepares again — which is what every restart used to do.
+    #[test]
+    fn a_changed_payload_is_prepared_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("payload.bin");
+        write(&p, &vec![7u8; 4096]);
+        let stamp = payload_stamp(&p).unwrap();
+        let source = crate::source::SendSource::Path(p.clone());
+        let mk = |stamp: PayloadStamp, total_size: u64| PrepRecord {
+            id: 1,
+            key: vec![3u8; crate::crypto::CHUNK_KEY_LEN],
+            node_seed: vec![9u8; 32],
+            total_size,
+            // One chunk's worth of digests for a payload well under 16 MiB.
+            chunks: vec![crate::hash::Hash::new(b"only-chunk")],
+            payload: p.to_string_lossy().into_owned(),
+            len: stamp.len,
+            mtime_secs: stamp.mtime_secs,
+            mtime_nanos: stamp.mtime_nanos,
+            dev: stamp.dev,
+            ino: stamp.ino,
+        };
+
+        assert!(
+            rebuild_prep(&mk(stamp, 4096), &source).is_some(),
+            "the file the digests were taken from is still there"
+        );
+
+        write(&p, &vec![7u8; 8192]);
+        assert!(
+            rebuild_prep(&mk(stamp, 4096), &source).is_none(),
+            "a payload that changed under us must be prepared again"
+        );
+
+        // A record whose own size and length disagree is not a preparation.
+        let stamp = payload_stamp(&p).unwrap();
+        assert!(rebuild_prep(&mk(stamp, 4096), &source).is_none());
+    }
+}
 
 #[cfg(test)]
 mod deposit_verdict_tests {
