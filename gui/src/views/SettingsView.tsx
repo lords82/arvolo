@@ -339,7 +339,7 @@ export function SettingsView() {
                   await save({ download_dir: { set: picked } });
                   toast.info(
                     t("settings.dirUpdated"),
-                    t("settings.dirUpdatedDetail")
+                    t("common.afterRestart")
                   );
                 }}
               >
@@ -367,7 +367,7 @@ export function SettingsView() {
           checked={config.seed ?? true}
           onChange={async (v) => {
             await save({ seed: { set: v } });
-            toast.info(t("settings.saved"), t("settings.savedDetail"));
+            toast.info(t("settings.saved"), t("common.afterRestart"));
           }}
         />
       </div>

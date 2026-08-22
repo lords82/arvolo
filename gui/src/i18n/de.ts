@@ -26,6 +26,7 @@ export const de: Dict = {
   "common.loading": "Wird geladen…",
   "common.to": "an",
   "common.from": "von",
+  "common.afterRestart": "Wirkt beim nächsten Start des Daemons.",
 
   "title.transfers": "Übertragungen",
   "title.people": "Personen",
@@ -396,7 +397,6 @@ export const de: Dict = {
     "Der Daemon dreht alle paar Minuten eine Runde. Wenn Sie das abschalten, gleicht sich das Adressbuch nur ab, wenn Sie oben auf den Knopf drücken.",
   "devices.autoOn": "Automatischer Abgleich aktiv",
   "devices.autoOff": "Automatischer Abgleich aus",
-  "devices.autoDetail": "Wirkt beim nächsten Start des Daemons.",
 
   "settings.sourceEnv": "durch die Variable ARVOLO_RELAY vorgegeben",
   "settings.sourceConfig": "in den Einstellungen gespeichert",
@@ -406,12 +406,10 @@ export const de: Dict = {
   "settings.nameSavedDetail":
     "Er reist ab sofort in jedem Angebot mit, das Sie senden.",
   "settings.relaySaved": "Relay gespeichert",
-  "settings.relaySavedDetail":
-    "Der Daemon benutzt es beim nächsten Start: starten Sie ihn unten neu, um es sofort anzuwenden.",
+  "settings.relaySavedDetail": "Starten Sie den Daemon unten neu, um es sofort anzuwenden.",
   "settings.whoYouAre": "Wer Sie sind",
   "settings.nameLabel": "Angezeigter Name",
-  "settings.nameHint":
-    "Er reist in jedem versiegelten Angebot mit, das Sie senden. Es ist ein Etikett, das Sie selbst wählen: die Gegenseite sieht es in Anführungszeichen, weil nichts dafür bürgt. Was Sie wirklich identifiziert, ist der Fingerabdruck darunter.",
+  "settings.nameHint": "Ein Etikett, das Sie selbst wählen: die Gegenseite sieht es in Anführungszeichen.",
   "settings.namePlaceholder": "keiner",
   "settings.fingerprintLabel": "Ihr Fingerabdruck",
   "settings.fingerprintHint":
@@ -424,55 +422,44 @@ export const de: Dict = {
   "settings.themeDark": "Dunkel",
   "settings.language": "Sprache",
   "settings.languageAuto": "System",
-  "settings.languageHint":
-    "„System“ folgt der Sprache Ihres Rechners und fällt auf Englisch zurück, wenn es eine ist, die Arvolo nicht spricht.",
+  "settings.languageHint": "„System“ folgt Ihrem Rechner und fällt auf Englisch zurück.",
   "settings.startup": "Start",
   "settings.autostartTitle": "Beim Anmelden starten",
-  "settings.autostartDesc":
-    "Beim Anmelden startet Arvolo verborgen im Infobereich, empfangsbereit ohne offenes Fenster. Unter Linux zeigt der Eintrag auf den aktuellen Ort des AppImage: Wird die Datei verschoben, den Schalter einmal aus- und wieder einschalten.",
+  "settings.autostartDesc": "Startet verborgen im Infobereich, empfangsbereit. Unter Linux aus- und wieder einschalten, wenn Sie das AppImage verschieben.",
   "settings.autostartFailed": "Automatischer Start ließ sich nicht ändern",
   "settings.network": "Netzwerk",
   "settings.relayOn": "Relay aktiv",
   "settings.relayOff": "Kein Relay",
   "settings.relayLabel": "Relay",
-  "settings.relayLocked":
-    "Im Moment entscheidet die Umgebungsvariable ARVOLO_RELAY: was Sie hier schreiben, hätte keine Wirkung, solange sie gesetzt ist.",
+  "settings.relayLocked": "ARVOLO_RELAY ist gesetzt, was Sie hier schreiben, hat also keine Wirkung.",
   "settings.relayHint": (current, source) =>
-    `Gerade in Benutzung: ${current} — ${source}. Eine Adresse ohne Schema wird zu https://; für ein unverschlüsseltes Relay schreiben Sie das Schema aus, etwa http://relay.local:6282.`,
+    `Gerade in Benutzung: ${current} — ${source}. Ohne Schema wird https://; http:// ausschreiben.`,
   "settings.relayNone": "keines",
   "settings.relayPlaceholder": "relay.beispiel.de",
-  "settings.relayNote":
-    "Das Relay vermittelt die Codes, das Postfach und die Links. Es sieht Ihre Dateien nie im Klartext: was es aufbewahrt, ist mit Schlüsseln verschlüsselt, die es nicht hat.",
+  "settings.relayNote": "Vermittelt die Codes, das Postfach und die Links. Sieht Ihre Dateien nie im Klartext.",
   "settings.files": "Dateien",
-  "settings.downloadDirLabel": "Wohin empfangene Dateien kommen",
+  "settings.downloadDirLabel": "Wohin Dateien kommen",
   "settings.downloadDirEnv":
     "Wird von der Variable ARVOLO_DOWNLOAD_DIR bestimmt.",
   "settings.downloadDirHint":
     "Gilt für alles, was Sie annehmen, ohne dabei einen Ordner zu wählen.",
   "settings.change": "Ändern",
   "settings.dirUpdated": "Ordner aktualisiert",
-  "settings.dirUpdatedDetail":
-    "Der Daemon benutzt ihn beim nächsten Start.",
-  "settings.cannotOpen": "Ich kann das nicht öffnen",
-  "settings.seedTitle": "Weiterhin teilen, was Sie geladen haben",
-  "settings.seedDesc":
-    "Aktives Seeding hilft allen, die dieselbe Datei laden. Sie können es abschalten, wenn Sie lieber nicht im Schwarm bleiben.",
+  "settings.cannotOpen": "Konnte nicht geöffnet werden",
+  "settings.seedTitle": "Weiter teilen, was Sie laden",
+  "settings.seedDesc": "Hilft allen, die dieselbe Datei laden.",
   "settings.saved": "Einstellung gespeichert",
-  "settings.savedDetail": "Wirkt beim nächsten Start des Daemons.",
   "settings.advanced": "Erweitert",
   "settings.configFileLabel": "Konfigurationsdatei",
-  "settings.configFileHint":
-    "Alles, was hier nicht auftaucht — temporärer Ordner, NAT-Relay, Log-Stufe — stellen Sie von Hand in dieser Datei ein, die Zeile für Zeile kommentiert ist.",
+  "settings.configFileHint": "Temporärer Ordner, NAT-Relay, Log-Stufe: hier von Hand einstellen, Zeile für Zeile kommentiert.",
   "settings.identityKeyLabel": "Identitätsschlüssel",
-  "settings.identityKeyHint":
-    "Ihr Geheimnis. Geben Sie es nicht weiter: wer es hat, ist Sie. Um Arvolo auf einem weiteren eigenen Rechner zu nutzen, gibt es die Geräteverbindung, die es verschlüsselt überträgt.",
+  "settings.identityKeyHint": "Ihr Geheimnis: wer es hat, ist Sie. Für einen weiteren Rechner verbinden Sie das Gerät.",
   "settings.versions": (daemon, gui) =>
     `Daemon ${daemon} · Oberfläche ${gui}`,
   "settings.daemonProcess": (pid, exe) => `pid ${pid} · ${exe}`,
   "settings.restartDaemon": "Daemon neu starten",
   "settings.confirmRestartTitle": "Daemon neu starten?",
-  "settings.confirmRestartBody":
-    "Laufende Übertragungen halten an: die fortsetzbaren machen dort weiter, wo sie waren, die übrigen müssen neu gemacht werden. Nötig, um ein gerade geändertes Relay oder einen geänderten Ordner anzuwenden.",
+  "settings.confirmRestartBody": "Laufende Übertragungen halten an. Fortsetzbare machen weiter, die übrigen beginnen neu.",
   "settings.restarting": "Daemon startet neu",
   "settings.restartingDetail": "Er kommt in ein paar Sekunden von allein zurück.",
   "settings.refreshing": "Wird aktualisiert…",

@@ -26,6 +26,7 @@ export const fr: Dict = {
   "common.loading": "Chargement…",
   "common.to": "à",
   "common.from": "de",
+  "common.afterRestart": "Prend effet au prochain démarrage du démon.",
 
   "title.transfers": "Transferts",
   "title.people": "Personnes",
@@ -400,7 +401,6 @@ export const fr: Dict = {
     "Le démon fait un tour toutes les quelques minutes. Si vous désactivez, le carnet d'adresses ne s'aligne que lorsque vous appuyez sur le bouton ci-dessus.",
   "devices.autoOn": "Synchronisation automatique activée",
   "devices.autoOff": "Synchronisation automatique désactivée",
-  "devices.autoDetail": "Prend effet au prochain démarrage du démon.",
 
   "settings.sourceEnv": "imposé par la variable ARVOLO_RELAY",
   "settings.sourceConfig": "enregistré dans les réglages",
@@ -410,12 +410,10 @@ export const fr: Dict = {
   "settings.nameSavedDetail":
     "Il voyage dans chaque offre que vous envoyez, dès maintenant.",
   "settings.relaySaved": "Relais enregistré",
-  "settings.relaySavedDetail":
-    "Le démon l'utilisera à son prochain démarrage : redémarrez-le ci-dessous pour l'appliquer tout de suite.",
+  "settings.relaySavedDetail": "Redémarrez le démon ci-dessous pour l'appliquer tout de suite.",
   "settings.whoYouAre": "Qui vous êtes",
   "settings.nameLabel": "Le nom que vous affichez",
-  "settings.nameHint":
-    "Il voyage dans chaque offre scellée que vous envoyez. C'est une étiquette que vous choisissez : qui la reçoit la voit entre guillemets, parce que rien ne la garantit. La seule chose qui vous identifie vraiment est l'empreinte ci-dessous.",
+  "settings.nameHint": "Une étiquette que vous choisissez : elle se voit entre guillemets.",
   "settings.namePlaceholder": "aucun",
   "settings.fingerprintLabel": "Votre empreinte",
   "settings.fingerprintHint":
@@ -428,54 +426,43 @@ export const fr: Dict = {
   "settings.themeDark": "Sombre",
   "settings.language": "Langue",
   "settings.languageAuto": "Système",
-  "settings.languageHint":
-    "« Système » suit la langue de votre ordinateur, et retombe sur l'anglais quand c'en est une qu'Arvolo ne parle pas.",
+  "settings.languageHint": "« Système » suit votre ordinateur, et retombe sur l'anglais.",
   "settings.startup": "Démarrage",
   "settings.autostartTitle": "Lancer à l'ouverture de session",
-  "settings.autostartDesc":
-    "À l'ouverture de session, Arvolo démarre caché dans la zone de notification, prêt à recevoir sans ouvrir de fenêtre. Sous Linux, l'entrée pointe vers l'emplacement actuel de l'AppImage : si vous déplacez le fichier, désactivez puis réactivez l'interrupteur.",
+  "settings.autostartDesc": "Démarre caché dans la zone de notification, prêt à recevoir. Sous Linux, réactivez-le si vous déplacez l'AppImage.",
   "settings.autostartFailed": "Impossible de modifier le lancement automatique",
   "settings.network": "Réseau",
   "settings.relayOn": "Relais actif",
   "settings.relayOff": "Aucun relais",
   "settings.relayLabel": "Relais",
-  "settings.relayLocked":
-    "En ce moment c'est la variable d'environnement ARVOLO_RELAY qui décide : ce que vous écrivez ici n'aurait aucun effet tant qu'elle est définie.",
+  "settings.relayLocked": "ARVOLO_RELAY est définie, donc ce que vous écrivez ici n'a aucun effet.",
   "settings.relayHint": (current, source) =>
-    `Utilisé actuellement : ${current} — ${source}. Une adresse sans schéma devient https:// ; pour un relais en clair, écrivez le schéma en entier, du type http://relay.local:6282.`,
+    `Utilisé actuellement : ${current} — ${source}. Sans schéma, ça devient https:// ; écrivez http:// en toutes lettres.`,
   "settings.relayNone": "aucun",
   "settings.relayPlaceholder": "relais.exemple.fr",
-  "settings.relayNote":
-    "Le relais achemine les codes, la boîte et les liens. Il ne voit jamais vos fichiers en clair : ce qu'il conserve est chiffré avec des clés qu'il n'a pas.",
+  "settings.relayNote": "Achemine les codes, la boîte et les liens. Il ne voit jamais vos fichiers en clair.",
   "settings.files": "Fichiers",
-  "settings.downloadDirLabel": "Où atterrissent les fichiers reçus",
+  "settings.downloadDirLabel": "Où atterrissent les fichiers",
   "settings.downloadDirEnv": "Décidé par la variable ARVOLO_DOWNLOAD_DIR.",
   "settings.downloadDirHint":
     "Vaut pour ce que vous acceptez sans choisir un dossier à la volée.",
   "settings.change": "Changer",
   "settings.dirUpdated": "Dossier mis à jour",
-  "settings.dirUpdatedDetail":
-    "Le démon l'utilisera à son prochain démarrage.",
-  "settings.cannotOpen": "Je n'arrive pas à l'ouvrir",
-  "settings.seedTitle": "Continuer à partager ce que vous avez téléchargé",
-  "settings.seedDesc":
-    "Laisser le seeding actif aide ceux qui téléchargent le même fichier. Vous pouvez l'éteindre si vous préférez ne pas rester dans l'essaim.",
+  "settings.cannotOpen": "Impossible de l'ouvrir",
+  "settings.seedTitle": "Continuer à partager ce que vous téléchargez",
+  "settings.seedDesc": "Ça aide ceux qui téléchargent le même fichier.",
   "settings.saved": "Réglage enregistré",
-  "settings.savedDetail": "Prend effet au prochain démarrage du démon.",
   "settings.advanced": "Avancé",
   "settings.configFileLabel": "Fichier de configuration",
-  "settings.configFileHint":
-    "Tout ce qui n'apparaît pas ici — dossier temporaire, relais NAT, niveau de log — se règle à la main dans ce fichier, qui est commenté ligne par ligne.",
+  "settings.configFileHint": "Dossier temporaire, relais NAT, niveau de log : à régler à la main ici, commenté ligne par ligne.",
   "settings.identityKeyLabel": "Clé d'identité",
-  "settings.identityKeyHint":
-    "Votre secret. Ne le partagez pas : qui le possède devient vous. Pour utiliser Arvolo sur une autre de vos machines, il y a le rattachement d'appareils, qui le transfère chiffré.",
+  "settings.identityKeyHint": "Votre secret : qui le possède devient vous. Pour une autre machine, rattachez l'appareil.",
   "settings.versions": (daemon, gui) =>
     `Démon ${daemon} · interface ${gui}`,
   "settings.daemonProcess": (pid, exe) => `pid ${pid} · ${exe}`,
   "settings.restartDaemon": "Redémarrer le démon",
   "settings.confirmRestartTitle": "Redémarrer le démon ?",
-  "settings.confirmRestartBody":
-    "Les transferts en cours s'arrêtent : ceux qui sont reprenables repartent d'où ils en étaient, les autres sont à refaire depuis le début. C'est ce qui applique un relais ou un dossier que vous venez de changer.",
+  "settings.confirmRestartBody": "Les transferts en cours s'arrêtent. Les reprenables repartent d'où ils en étaient, les autres depuis le début.",
   "settings.restarting": "Démon en redémarrage",
   "settings.restartingDetail":
     "Il revient tout seul dans quelques secondes.",

@@ -41,6 +41,8 @@ export const en = {
   "common.loading": "Loading…",
   "common.to": "to",
   "common.from": "from",
+  /** Said by three separate settings toasts, two of them word for word. */
+  "common.afterRestart": "It takes effect the next time the daemon starts.",
 
   // ---- app frame ---------------------------------------------------------
   "title.transfers": "Transfers",
@@ -417,7 +419,6 @@ export const en = {
     "The daemon does a round every few minutes. Turn it off and the address book only lines up when you press the button above.",
   "devices.autoOn": "Automatic sync on",
   "devices.autoOff": "Automatic sync off",
-  "devices.autoDetail": "It takes effect the next time the daemon starts.",
 
   // ---- settings ----------------------------------------------------------
   "settings.sourceEnv": "set by the ARVOLO_RELAY variable",
@@ -428,12 +429,13 @@ export const en = {
   "settings.nameSavedDetail":
     "It travels inside every offer you send, from now on.",
   "settings.relaySaved": "Relay saved",
-  "settings.relaySavedDetail":
-    "The daemon will use it at its next start: restart it below to apply it right away.",
+  "settings.relaySavedDetail": "Restart the daemon below to apply it now.",
   "settings.whoYouAre": "Who you are",
   "settings.nameLabel": "The name you show",
+  // Not "and the fingerprint is what identifies you" — that is the next field
+  // down, and it says so itself.
   "settings.nameHint":
-    "It travels inside every sealed offer you send. It is a label you pick yourself: whoever receives it sees it in quotes, because nothing guarantees it. The only thing that really identifies you is the fingerprint below.",
+    "A label you pick yourself: whoever receives it sees it in quotes.",
   "settings.namePlaceholder": "none",
   "settings.fingerprintLabel": "Your fingerprint",
   "settings.fingerprintHint":
@@ -447,52 +449,53 @@ export const en = {
   "settings.language": "Language",
   "settings.languageAuto": "System",
   "settings.languageHint":
-    "“System” follows the language your computer is set to, falling back to English when it is one Arvolo does not speak.",
+    "“System” follows your computer, falling back to English.",
   "settings.startup": "Startup",
   "settings.autostartTitle": "Start at login",
   "settings.autostartDesc":
-    "When you sign in, Arvolo starts hidden in the tray, ready to receive without opening a window. On Linux the login entry points at the AppImage's current location: if you move the file, switch this off and on again.",
+    "Starts hidden in the tray, ready to receive. On Linux, switch it off and on again if you move the AppImage.",
   "settings.autostartFailed": "Could not change the login setting",
   "settings.network": "Network",
   "settings.relayOn": "Relay live",
   "settings.relayOff": "No relay",
   "settings.relayLabel": "Relay",
   "settings.relayLocked":
-    "Right now the ARVOLO_RELAY environment variable decides: what you type here would have no effect while it is set.",
+    "ARVOLO_RELAY is set, so what you type here has no effect.",
   "settings.relayHint": (current: string, source: string) =>
-    `In use now: ${current} — ${source}. An address with no scheme becomes https://; for a plaintext relay write the scheme out in full, like http://relay.local:6282.`,
+    `In use now: ${current} — ${source}. No scheme means https://; write http:// out in full.`,
   "settings.relayNone": "none",
   "settings.relayPlaceholder": "relay.example.com",
+  // The one place this is said. Four other screens used to repeat it; this is
+  // where the relay is chosen, so this is where it belongs.
   "settings.relayNote":
-    "The relay routes the codes, the mailbox and the links. It never sees your files in the clear: what it keeps is encrypted with keys it does not have.",
+    "Routes the codes, the mailbox and the links. It never sees your files in the clear.",
   "settings.files": "Files",
-  "settings.downloadDirLabel": "Where received files land",
+  "settings.downloadDirLabel": "Where files land",
   "settings.downloadDirEnv": "Decided by the ARVOLO_DOWNLOAD_DIR variable.",
   "settings.downloadDirHint":
     "It applies to whatever you accept without picking a folder on the spot.",
   "settings.change": "Change",
   "settings.dirUpdated": "Folder updated",
-  "settings.dirUpdatedDetail": "The daemon will use it at its next start.",
-  "settings.cannotOpen": "I can't open it",
-  "settings.seedTitle": "Carry on sharing what you have downloaded",
-  "settings.seedDesc":
-    "Leaving seeding on helps whoever is downloading the same file. You can switch it off if you would rather not stay in the swarm.",
+  "settings.cannotOpen": "Couldn't open it",
+  "settings.seedTitle": "Keep sharing what you downloaded",
+  "settings.seedDesc": "It helps whoever is downloading the same file.",
   "settings.saved": "Setting saved",
-  "settings.savedDetail": "It takes effect the next time the daemon starts.",
   "settings.advanced": "Advanced",
   "settings.configFileLabel": "Configuration file",
   "settings.configFileHint":
-    "Everything that is not here — temp folder, NAT relay, log level — is set by hand in this file, which is commented line by line.",
+    "Temp folder, NAT relay, log level: set by hand here, commented line by line.",
   "settings.identityKeyLabel": "Identity key",
+  // Has a floor in copy-rules.ts: it must keep saying that the key *is* the
+  // identity, not merely that it is private.
   "settings.identityKeyHint":
-    "Your secret. Do not share it: whoever holds it becomes you. To use Arvolo on another machine of yours there is device linking, which hands it over encrypted.",
+    "Your secret: whoever holds it becomes you. To use another machine, link the device.",
   "settings.versions": (daemon: string, gui: string) =>
     `Daemon ${daemon} · interface ${gui}`,
   "settings.daemonProcess": (pid: number, exe: string) => `pid ${pid} · ${exe}`,
   "settings.restartDaemon": "Restart the daemon",
   "settings.confirmRestartTitle": "Restart the daemon?",
   "settings.confirmRestartBody":
-    "Transfers under way stop: the resumable ones pick up where they were, the rest have to be done again from scratch. It is what applies a relay or a folder you have just changed.",
+    "Transfers under way stop. Resumable ones pick up where they were; the rest start over.",
   "settings.restarting": "Daemon restarting",
   "settings.restartingDetail": "It comes back on its own in a few seconds.",
   "settings.refreshing": "Refreshing…",

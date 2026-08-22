@@ -24,6 +24,7 @@ export const it: Dict = {
   "common.loading": "Carico…",
   "common.to": "a",
   "common.from": "da",
+  "common.afterRestart": "Ha effetto al prossimo avvio del daemon.",
 
   "title.transfers": "Trasferimenti",
   "title.people": "Persone",
@@ -388,7 +389,6 @@ export const it: Dict = {
     "Il daemon fa un giro ogni pochi minuti. Se la disattivi, la rubrica si allinea solo quando premi il pulsante qui sopra.",
   "devices.autoOn": "Sincronizzazione automatica attiva",
   "devices.autoOff": "Sincronizzazione automatica disattivata",
-  "devices.autoDetail": "Ha effetto al prossimo avvio del daemon.",
 
   "settings.sourceEnv": "imposto dalla variabile ARVOLO_RELAY",
   "settings.sourceConfig": "salvato nelle impostazioni",
@@ -398,12 +398,11 @@ export const it: Dict = {
   "settings.nameSavedDetail":
     "Viaggia dentro ogni offerta che mandi, da subito.",
   "settings.relaySaved": "Relay salvato",
-  "settings.relaySavedDetail":
-    "Il daemon lo userà al prossimo avvio: riavvialo qui sotto per applicarlo subito.",
+  "settings.relaySavedDetail": "Riavvia il daemon qui sotto per applicarlo subito.",
   "settings.whoYouAre": "Chi sei",
   "settings.nameLabel": "Nome che mostri",
   "settings.nameHint":
-    "Viaggia dentro ogni offerta sigillata che mandi. È un'etichetta che scegli tu: chi la riceve la vede fra virgolette, perché niente la garantisce. L'unica cosa che ti identifica davvero è l'impronta qui sotto.",
+    "Un'etichetta che scegli tu: chi la riceve la vede fra virgolette.",
   "settings.namePlaceholder": "nessuno",
   "settings.fingerprintLabel": "La tua impronta",
   "settings.fingerprintHint":
@@ -417,52 +416,49 @@ export const it: Dict = {
   "settings.language": "Lingua",
   "settings.languageAuto": "Sistema",
   "settings.languageHint":
-    "«Sistema» segue la lingua impostata sul computer, e ripiega sull'inglese quando è una che Arvolo non parla.",
+    "«Sistema» segue il computer, e ripiega sull'inglese.",
   "settings.startup": "Avvio",
   "settings.autostartTitle": "Avvia all'accesso",
   "settings.autostartDesc":
-    "All'accesso al sistema Arvolo parte nascosto nella tray, pronto a ricevere senza aprire finestre. Su Linux il collegamento punta alla posizione attuale dell'AppImage: se sposti il file, spegni e riaccendi l'interruttore.",
+    "Parte nascosto nella tray, pronto a ricevere. Su Linux, se sposti l'AppImage spegni e riaccendi l'interruttore.",
   "settings.autostartFailed": "Impossibile cambiare l'avvio automatico",
   "settings.network": "Rete",
   "settings.relayOn": "Relay attivo",
   "settings.relayOff": "Nessun relay",
   "settings.relayLabel": "Relay",
   "settings.relayLocked":
-    "In questo momento lo decide la variabile d'ambiente ARVOLO_RELAY: quello che scrivi qui non avrebbe effetto finché è impostata.",
+    "ARVOLO_RELAY è impostata, quindi quello che scrivi qui non ha effetto.",
   "settings.relayHint": (current, source) =>
-    `In uso adesso: ${current} — ${source}. Un indirizzo senza schema diventa https://; per un relay in chiaro scrivi lo schema per esteso, tipo http://relay.local:6282.`,
+    `In uso adesso: ${current} — ${source}. Senza schema diventa https://; scrivi http:// per esteso.`,
   "settings.relayNone": "nessuno",
   "settings.relayPlaceholder": "relay.esempio.it",
   "settings.relayNote":
-    "Il relay smista i codici, la casella e i link. Non vede mai i tuoi file in chiaro: quello che conserva è cifrato con chiavi che non ha.",
+    "Smista i codici, la casella e i link. Non vede mai i tuoi file in chiaro.",
   "settings.files": "File",
-  "settings.downloadDirLabel": "Dove finiscono i file ricevuti",
+  "settings.downloadDirLabel": "Dove finiscono i file",
   "settings.downloadDirEnv": "Deciso dalla variabile ARVOLO_DOWNLOAD_DIR.",
   "settings.downloadDirHint":
     "Vale per quello che accetti senza scegliere una cartella al volo.",
   "settings.change": "Cambia",
   "settings.dirUpdated": "Cartella aggiornata",
-  "settings.dirUpdatedDetail": "Il daemon la userà al prossimo avvio.",
-  "settings.cannotOpen": "Non riesco ad aprirlo",
-  "settings.seedTitle": "Continua a condividere ciò che hai scaricato",
-  "settings.seedDesc":
-    "Lasciando attivo il seeding aiuti chi sta scaricando lo stesso file. Puoi spegnerlo se preferisci non restare nello swarm.",
+  "settings.cannotOpen": "Impossibile aprirlo",
+  "settings.seedTitle": "Continua a condividere ciò che scarichi",
+  "settings.seedDesc": "Aiuta chi sta scaricando lo stesso file.",
   "settings.saved": "Impostazione salvata",
-  "settings.savedDetail": "Ha effetto al prossimo avvio del daemon.",
   "settings.advanced": "Avanzate",
   "settings.configFileLabel": "File di configurazione",
   "settings.configFileHint":
-    "Tutto ciò che non compare qui — cartella temporanea, relay NAT, livello di log — si imposta a mano in questo file, che è commentato riga per riga.",
+    "Cartella temporanea, relay NAT, livello di log: si impostano a mano qui, commentati riga per riga.",
   "settings.identityKeyLabel": "Chiave d'identità",
   "settings.identityKeyHint":
-    "Il tuo segreto. Non condividerlo: chi lo possiede diventa te. Per usare Arvolo su un'altra tua macchina c'è il collegamento dispositivi, che lo trasferisce cifrato.",
+    "Il tuo segreto: chi lo possiede diventa te. Per un'altra tua macchina, collega il dispositivo.",
   "settings.versions": (daemon, gui) =>
     `Daemon ${daemon} · interfaccia ${gui}`,
   "settings.daemonProcess": (pid, exe) => `pid ${pid} · ${exe}`,
   "settings.restartDaemon": "Riavvia il daemon",
   "settings.confirmRestartTitle": "Riavviare il daemon?",
   "settings.confirmRestartBody":
-    "I trasferimenti in corso si fermano: quelli ripristinabili riprendono da dove erano, gli altri vanno rifatti da capo. Serve per applicare relay e cartelle appena cambiati.",
+    "I trasferimenti in corso si fermano. Quelli ripristinabili riprendono, gli altri ripartono da capo.",
   "settings.restarting": "Daemon in riavvio",
   "settings.restartingDetail": "Torna su da solo in qualche secondo.",
   "settings.refreshing": "Aggiorno…",

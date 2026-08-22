@@ -52,6 +52,11 @@ const CATEGORY: Record<string, Cat> = {
   "send.pickerEmpty": "secondary",
   "send.noRelay": "secondary",
   "send.linkTooMany": "secondary",
+  "settings.relayLocked": "secondary",
+  "settings.downloadDirEnv": "secondary",
+  // A toast's second line. `common.*` is otherwise all micro-labels, which is
+  // why the prefix alone reads it as one.
+  "common.afterRestart": "secondary",
 };
 
 /** The other end of the cap, for the handful of strings where being brief is the

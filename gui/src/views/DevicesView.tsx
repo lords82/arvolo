@@ -155,7 +155,7 @@ export function DevicesView() {
             await loadConfig();
             toast.info(
               v ? t("devices.autoOn") : t("devices.autoOff"),
-              t("devices.autoDetail")
+              t("common.afterRestart")
             );
           }}
         />
