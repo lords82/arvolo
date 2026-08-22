@@ -354,9 +354,9 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
 
     // The menu bar wants the monochrome template icon, which macOS tints for the
     // light or dark bar; elsewhere the tray shows the regular app icon. Either way
-    // this is the resting state; `attention::apply` drops the wedge into the box
-    // once the pump knows something is waiting. `icons/attention/tray-0.png` is this
-    // very file, so switching between them never resizes the mark.
+    // this is the resting state; `attention::apply` sets the mark breathing once
+    // the pump knows something is waiting. `icons/attention/tray-0.png` is this very
+    // file, so switching between them never resizes the mark.
     #[cfg(target_os = "macos")]
     {
         let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/tray.png"))?;
@@ -508,7 +508,7 @@ fn moves_the_count(ev: &EventDto) -> bool {
 /// to us, so this has to cover both kinds of arrival. `auto` separates them: a
 /// trusted sender's file is already downloading, and asking the user to approve it
 /// would be offering a choice that has already been made. Only the other kind is a
-/// question, and only that kind drops the wedge in the tray.
+/// question, and only that kind sets the tray breathing.
 ///
 /// On macOS this goes through [`notify_mac`] rather than the plugin, whose backend
 /// no longer delivers anything at all on current macOS; see that module. It needs a

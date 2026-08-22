@@ -22,6 +22,28 @@
   (4 GiB). The per-blob cap it shipped with never bounded the disk — 20k entries
   of 0.5 GiB is not a budget — and the relay had been warning about exactly this
   at every startup.
+- **A new application icon.** The mark is concept 3d, "Doppia V": two concentric
+  V's, the small one dropping into the big one, with no box drawn around either.
+  It replaces the wedge falling into an open box everywhere that one appeared —
+  the macOS squircle and the full-bleed Windows/Linux master, the menu-bar
+  template, the tray's attention frames, and the copy the relay's download and
+  disabled pages inline by hand because they may not fetch anything. The boxed
+  colour icons draw it at stroke 10.5 and the bare monochrome template at 12: a
+  glyph sitting on its own coloured tile can carry the finer line, and the
+  menu-bar mark — scaled down further, and tinted by the system — cannot. Below
+  30px there is now a third cut, at stroke 12.5 with the glyph 16% larger, used
+  for the 16px and 24px entries of the Windows `.ico` and the two 16pt layers of
+  the macOS `.icns`. Two nested V's need more room than the single shape they
+  replaced, and at 16px the regular cut lands on a one-pixel stroke that
+  antialiasing all but erases.
+- **The tray now breathes while something waits on you, instead of dropping three
+  times.** There is no box left for anything to land in, so the small V drifts
+  down toward the big one and back up, once every 3.6 seconds, for exactly as
+  long as an offer or a name change is still unanswered. The old fall ran a fixed
+  three times and then held a landed frame, which said "something arrived" but
+  not "something is still waiting". Clearing the last request no longer cuts back
+  to the resting frame either: the mark walks home the short way round, at most
+  half a breath, so the return is never a jump.
 
 ## v0.12.0 — no silent stalls
 

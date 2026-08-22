@@ -330,7 +330,7 @@ pub async fn reject_offer(app: tauri::AppHandle, offer_id: String) -> Result<(),
     let mut c = client().await?;
     let done = c.reject(offer_id).await.or_else(err);
     // Rejecting emits no engine event, so the pump never hears about it and the
-    // wedge would stay down over an offer that is gone. Accepting needs no such
+    // mark would keep breathing over an offer that is gone. Accepting needs no such
     // nudge: it turns into a `Started`, which the pump already watches.
     crate::attention::refresh(&app).await;
     done
