@@ -115,17 +115,14 @@ pub(crate) async fn send_link(
         out.name,
         human_size(out.size),
     );
-    eprintln!("Anyone with the link above can download it in a browser — no arvolo needed.");
+    eprintln!("Anyone with the link can download it in a browser.");
     if qr {
         print_qr(&out.link);
     }
-    // Say that the *address* is kept, not only the row. A link scrolled out
-    // of the terminal is otherwise assumed lost, and the file gets sent a
-    // second time rather than the URL handed over again.
-    eprintln!(
-        "Listed as '{}' in `arvolo status`, which prints this address again\nwhenever you need it — cancel the link (and delete it from the relay) with:\n",
-        rec.id
-    );
+    // Name the id, because `arvolo status` reprints the *address* and not just
+    // the row: a link scrolled out of the terminal is otherwise assumed lost,
+    // and the file gets sent a second time rather than the URL handed over.
+    eprintln!("Listed as '{}' in `arvolo status`, which reprints it.", rec.id);
     eprintln!("    arvolo cancel {}", rec.id);
     Ok(())
 }
@@ -274,7 +271,7 @@ pub(crate) async fn send_sealed(
         human_duration(ttl)
     );
     if password.is_some() {
-        eprintln!("Password-protected — share the password out-of-band (not with the ticket).");
+        eprintln!("Password-protected — send the password separately.");
     }
     if offer {
         eprintln!("The recipient's daemon will fetch it automatically. To hand it over instead:\n");
@@ -283,7 +280,7 @@ pub(crate) async fn send_sealed(
     }
     eprintln!("    arvolo recv {encoded}\n");
     eprintln!(
-        "Listed as '{}' in `arvolo status` — cancel the delivery (and delete it\nfrom the relay) with:\n",
+        "Listed as '{}' in `arvolo status`.",
         rec.id
     );
     eprintln!("    arvolo cancel {}", rec.id);

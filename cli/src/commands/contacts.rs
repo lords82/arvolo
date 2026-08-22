@@ -5,6 +5,7 @@ use anyhow::{Context, Result};
 use crate::book;
 
 use crate::args::ContactAction;
+use crate::output::vprintln;
 use crate::ui::*;
 use crate::util::*;
 
@@ -293,7 +294,8 @@ pub(crate) async fn contacts_cmd(action: ContactAction) -> Result<()> {
         ContactAction::Rename { old, new } => match new {
             Some(new) => {
                 book::contact_rename(&old, &new)?;
-                println!("Renamed '{old}' to '{new}' — verified and trusted marks kept.");
+                println!("Renamed '{old}' to '{new}'");
+            vprintln!("the verified and trusted marks stay with the key, not the name");
             }
             // No new name: adopt the display name they advertised for themselves
             // (the pending row `contacts list` shows), after asking — it is the
@@ -374,14 +376,13 @@ pub(crate) async fn contacts_cmd(action: ContactAction) -> Result<()> {
         }
         ContactAction::Block { who } => {
             let id = book::mark_blocked(&who)?;
-            println!("Blocked '{who}' — their offers are dropped on arrival, silently.");
-            eprintln!("   id: {id}");
-            eprintln!("   Undo with: arvolo contacts unblock {who}");
-            eprintln!("   See who's blocked: arvolo contacts list --blocked");
+            println!("Blocked '{who}'  ({id})");
+            eprintln!("   arvolo contacts unblock {who}");
+            vprintln!("their offers are dropped on arrival, with nothing printed");
         }
         ContactAction::Unblock { who } => {
             if book::unmark_blocked(&who)? {
-                println!("Unblocked '{who}' — their offers reach you again.");
+                println!("Unblocked '{who}'");
             } else {
                 eprintln!("'{who}' was not blocked — nothing to undo.");
             }
@@ -424,7 +425,7 @@ pub(crate) async fn contacts_cmd(action: ContactAction) -> Result<()> {
             let already = book::is_verified(&id);
             book::mark_verified(&name)?;
             if already {
-                println!("Re-verified '{name}' — the clock on that check starts again now.");
+                println!("Re-verified '{name}'");
             } else {
                 println!("Marked '{name}' verified.");
             }
@@ -433,7 +434,7 @@ pub(crate) async fn contacts_cmd(action: ContactAction) -> Result<()> {
             name, undo: true, ..
         } => {
             if book::unmark_trusted(&name)? {
-                println!("Cleared trust for '{name}' — their files will ask for approval again.");
+                println!("No longer trusting '{name}'");
             } else {
                 eprintln!("'{name}' was not trusted — nothing to clear.");
             }
@@ -454,7 +455,8 @@ pub(crate) async fn contacts_cmd(action: ContactAction) -> Result<()> {
             }
             let id = book::mark_trusted(&name)?;
             let fp = book::fingerprint_of(&id).unwrap_or_default();
-            println!("Trusting '{name}' — files from them auto-download without a prompt.");
+            println!("Trusting '{name}'");
+            vprintln!("their files now download without asking");
             eprintln!("   (fingerprint: {fp})");
             if !book::is_verified(&id) {
                 eprintln!(

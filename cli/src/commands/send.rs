@@ -84,11 +84,8 @@ pub(crate) async fn send_cmd(opts: SendOpts) -> Result<()> {
                 {
                     Ok(url) => {
                         println!("{url}");
-                        eprintln!(
-                            "\nAnyone with the link above can download it in a browser — no \
-                             arvolo needed. Deposited via the daemon; listed in `arvolo status`, \
-                             withdrawn with `arvolo cancel <id>`."
-                        );
+                        eprintln!("\nAnyone with the link can download it in a browser.");
+                        eprintln!("Listed in `arvolo status`; `arvolo cancel <id>` withdraws it.");
                         if opts.qr {
                             print_qr(&url);
                         }
@@ -683,7 +680,7 @@ pub(crate) async fn serve_session(
                     }
                 }
                 if has_relay {
-                    eprintln!("P2P-first; if the receiver drops, only the missing chunks are backfilled to the relay.");
+                    vprintln!("P2P first; only the missing chunks are backfilled to the relay");
                 }
                 vprintln!(
                     "serving {chunks} chunk(s), {} total; waiting for a receiver to connect",
@@ -693,7 +690,7 @@ pub(crate) async fn serve_session(
             }
             SendEvent::ReceiverConnected => vprintln!("receiver connected — chunk pull started"),
             SendEvent::RecipientCancelled => {
-                eprintln!("✗ The receiver cancelled on their side — stopping this send.");
+                eprintln!("✗ Receiver cancelled — stopping.");
             }
             SendEvent::Progress { transferred, total } if total > 0 => {
                 let pct = (transferred * 100 / total) as u8;
@@ -718,7 +715,7 @@ pub(crate) async fn serve_session(
                 eprintln!("Receiver dropped — backfilling {missing} missing chunks to the relay…")
             }
             SendEvent::Backfilled => {
-                eprintln!("Backfilled. You can close this; the relay can finish the delivery.")
+                eprintln!("Backfilled — you can close this.")
             }
             SendEvent::BackfillFailed { reason } => eprintln!("Relay backfill failed: {reason}"),
             SendEvent::RelayCapped { limit_bytes } => eprintln!("{}", relay_capped_line(limit_bytes)),
@@ -874,7 +871,7 @@ pub(crate) async fn send_with_code(
                 eprintln!("Receiver dropped — backfilling {missing} missing chunks to the relay…")
             }
             SendEvent::Backfilled => {
-                eprintln!("Backfilled. You can close this; the relay can finish the delivery.")
+                eprintln!("Backfilled — you can close this.")
             }
             SendEvent::BackfillFailed { reason } => eprintln!("Relay backfill failed: {reason}"),
             SendEvent::RelayCapped { limit_bytes } => {
@@ -884,10 +881,7 @@ pub(crate) async fn send_with_code(
             SendEvent::ReceiverConnected => vprintln!("receiver connected — chunk pull started"),
             SendEvent::Peers { count } => vprintln!("{count} peer(s) downloading"),
             SendEvent::RecipientCancelled => {
-                eprintln!(
-                    "A receiver cancelled on their side. Anyone still downloading is \
-                     unaffected; with nobody left, this stops serving."
-                )
+                eprintln!("A receiver cancelled. Others are unaffected.")
             }
             SendEvent::Progress { .. } => {}
             SendEvent::Ready { .. } => {} // code already printed

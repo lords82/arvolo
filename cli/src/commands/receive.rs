@@ -817,17 +817,17 @@ pub(crate) fn print_waiting(rows: &[Waiting]) {
     }
 }
 
-/// An empty list is not "nobody sent you anything" — it is "nothing *addressed to
-/// you* is queued". Say which, and say what can never be queued, or the silence
-/// reads as a bug to someone who is holding a code and waiting for it to show up.
+/// An empty list is not "nobody sent you anything" — it is "nothing *addressed
+/// to you* is queued", and somebody holding a code reads the silence as a bug.
+/// So the line says which, and the next one says what to do with a code. Why a
+/// code can never be listed is on `-v`: it is the answer to a question only
+/// someone already unstuck goes on to ask.
 fn print_nothing_waiting(scope: &str) {
-    println!("Nothing waiting for you {scope}.");
+    println!("Nothing addressed to you {scope}.");
     println!();
-    println!("Only sends addressed to your identity land here (`arvolo send <you> …`).");
-    println!("A code, ticket or link can't: it *is* the permission to fetch, so nothing");
-    println!("on the relay knows one is yours — paste it instead:");
-    println!();
+    println!("Codes, tickets and links are never listed — paste one:");
     println!("    arvolo recv <code|arvc…|arvm…|link>");
+    vprintln!("a code *is* the permission to fetch, so nothing on the relay knows one is yours");
 }
 
 /// Read one line from stdin. `None` on EOF — which is what a script or a

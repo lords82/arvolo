@@ -2,6 +2,7 @@ use arvolo_core::crypto::PublicId;
 use tokio_util::sync::CancellationToken;
 
 use crate::book;
+use crate::output::vprintln;
 
 use crate::util::encode_id;
 
@@ -158,10 +159,7 @@ pub(crate) fn cancel_on_ctrl_c() -> CancellationToken {
 pub(crate) fn print_sender_banner(id: Option<&[u8]>) -> Option<String> {
     let bytes = match id {
         None => {
-            eprintln!(
-                "⚠  From: anonymous sender — this ticket is not authenticated; anyone \
-                 holding it could have created it."
-            );
+            eprintln!("⚠  From: anonymous — anyone holding this ticket could have made it.");
             return None;
         }
         Some(b) => b,
@@ -178,21 +176,19 @@ pub(crate) fn print_sender_banner(id: Option<&[u8]>) -> Option<String> {
             eprintln!("✓ From: {name}  (verified — fingerprint: {fp})");
         }
         (Some(name), _) => {
-            eprintln!("From: {name}  (saved, not verified — fingerprint: {fp})");
-            eprintln!("      verify out-of-band, then: arvolo contacts verify {name}");
+            eprintln!("From: {name}  (not verified — {fp})");
+            eprintln!("      arvolo contacts verify {name}");
+            vprintln!("compare the fingerprint with them before verifying — a name is not proof");
         }
         (None, true) => {
-            eprintln!("From: known sender  (fingerprint: {fp})");
-            eprintln!("      id: {id_b32}");
-            eprintln!("      not in contacts — save with: arvolo contacts add <name> {id_b32}");
+            eprintln!("From: known sender, not in contacts  ({fp})");
+            eprintln!("      arvolo contacts add <name> {id_b32}");
         }
         (None, false) => {
-            eprintln!("⚠  From: NEW sender (first time you receive from this identity)");
+            eprintln!("⚠  From: NEW sender — compare the fingerprint before you trust it");
             eprintln!("      fingerprint: {fp}");
             eprintln!("      id: {id_b32}");
-            eprintln!(
-                "      Verify the fingerprint out-of-band, then: arvolo contacts add <name> {id_b32}"
-            );
+            eprintln!("      arvolo contacts add <name> {id_b32}");
         }
     }
     book::record_seen(&id_b32);

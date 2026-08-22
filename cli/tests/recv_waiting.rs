@@ -188,7 +188,7 @@ async fn lists_what_is_waiting_and_downloads_the_chosen_one() {
     let (ok, after, _) = run(cfg_recv.path(), &relay, &["recv"]).await;
     assert!(ok);
     assert!(
-        after.contains("Nothing waiting") && !after.contains("report.txt"),
+        after.contains("Nothing addressed to you") && !after.contains("report.txt"),
         "a taken offer should be gone from the relay: {after}"
     );
 }
@@ -204,7 +204,7 @@ async fn nothing_waiting_says_why_a_code_can_never_be_listed() {
     let (ok, out, err) = run(cfg.path(), &relay, &["recv"]).await;
     assert!(ok, "an empty inbox is not an error: {out}{err}");
     assert!(
-        out.contains("Nothing waiting"),
+        out.contains("Nothing addressed to you"),
         "should say the inbox is empty: {out}"
     );
     assert!(
@@ -249,7 +249,7 @@ async fn an_offer_can_be_declined_and_then_it_is_gone() {
     let (ok, after, _) = run(cfg_recv.path(), &relay, &["recv"]).await;
     assert!(ok);
     assert!(
-        after.contains("Nothing waiting") && !after.contains("unwanted.bin"),
+        after.contains("Nothing addressed to you") && !after.contains("unwanted.bin"),
         "a declined offer must not come back: {after}"
     );
 }
