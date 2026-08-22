@@ -35,10 +35,10 @@ export const fr: Dict = {
   "title.devices": "Vos appareils",
   "title.settings": "Réglages",
 
-  "app.disconnected":
-    "Je n'arrive pas à joindre le démon. Les transferts en cours continuent, mais cette fenêtre ne les voit pas.",
+  "app.disconnected": "Démon injoignable",
+  "app.disconnectedDetail": "Les transferts en cours continuent ; cette fenêtre ne les voit pas.",
   "app.versionMismatch": (daemon, gui) =>
-    `Le démon en cours d'exécution est en version ${daemon}, l'application en ${gui}. Redémarrez-le pour les aligner.`,
+    `Démon ${daemon}, app ${gui} — redémarrez-le pour les aligner.`,
   "app.versionUnknown": "antérieure",
   "app.restart": "Redémarrer",
   "app.offerWaiting": "Quelqu'un veut vous envoyer un fichier.",
@@ -59,9 +59,7 @@ export const fr: Dict = {
   "app.errOpenSettings": "Ouvrir les réglages",
 
   "crash.title": "Quelque chose a cassé dans l'interface",
-  "crash.body":
-    "Les transferts ne s'arrêtent pas : ils continuent dans le démon, en arrière-plan. Vous pouvez reprendre où vous en étiez.",
-
+  "crash.body": "Les transferts continuent dans le démon ; vous pouvez reprendre.",
   "rail.nav": "Navigation principale",
   "rail.meTitle": "Votre identité et vos réglages",
   "rail.meFallback": "Moi",
@@ -75,8 +73,7 @@ export const fr: Dict = {
 
   "status.active": "En cours",
   "status.preparing": "Préparation…",
-  "meta.preparing":
-    "lecture et chiffrement en cours — rien n'est encore parti, et le destinataire n'en sait rien",
+  "meta.preparing": "lecture et chiffrement — rien n'est encore parti",
   "status.sharing": "Partagé",
 
   "share.title": "Fichier partagé",
@@ -86,11 +83,9 @@ export const fr: Dict = {
   "share.lastPickup": "dernière récupération",
   "share.never": "jamais",
   "share.uploaded": "envoyés",
-  "share.fromDownload": (when: string) =>
-    `Vous l\u2019avez téléchargé ${when}, et votre ordinateur le met maintenant à disposition des autres.`,
+  "share.fromDownload": (when) => `Téléchargé ${when} ; votre ordinateur le partage désormais.`,
   "share.seedingSetting": "Modifier ce réglage",
-  "share.countsNote":
-    "Des copies, pas des personnes : un ticket ne porte aucune identité, donc la même personne qui récupère deux fois compte deux fois.",
+  "share.countsNote": "Copies prises, pas personnes : télécharger deux fois compte double.",
   "status.completed": "Terminé",
   "status.deposited": "Déposé",
   "status.paused": "En pause",
@@ -130,12 +125,12 @@ export const fr: Dict = {
   "transfers.pause": "Mettre en pause",
   "transfers.resume": "Reprendre",
   "transfers.openFile": "Ouvrir le fichier",
-  "transfers.openFileFailed": "Je n'arrive pas à ouvrir le fichier",
+  "transfers.openFileFailed": "Impossible d'ouvrir le fichier",
   "transfers.openFolder": "Ouvrir le dossier",
-  "transfers.openFolderFailed": "Je n'arrive pas à ouvrir le dossier",
-  "transfers.revokeDeposit": "Retirer le dépôt",
+  "transfers.openFolderFailed": "Impossible d'ouvrir le dossier",
+  "transfers.revokeDeposit": "Retirer",
   "transfers.cancel": "Annuler",
-  "transfers.removeRow": "Retirer de la liste",
+  "transfers.removeRow": "Retirer",
   "transfers.verifiedIdentity": "Identité vérifiée",
   "transfers.swarm": "Transfert réparti entre plusieurs pairs",
   "transfers.peers": (n) => (n === 1 ? "1 pair" : `${n} pairs`),
@@ -144,10 +139,8 @@ export const fr: Dict = {
   "transfers.shareDetails": "Détails du partage",
   "transfers.saveSender": "Enregistrer l'expéditeur…",
   "transfers.saveSenderTitle": "Enregistrer l'expéditeur dans vos contacts",
-  "transfers.saveSenderSub": (name) =>
-    `Cette personne vous a envoyé ${name} et vous n'avez pas encore de nom pour elle.`,
-  "transfers.reorder": (name) =>
-    `Déplacer ${name} : faites glisser, ou utilisez les flèches haut et bas`,
+  "transfers.saveSenderSub": (name) => `Il vous a envoyé ${name}.`,
+  "transfers.reorder": (name) => `Déplacer ${name} : glisser ou flèches`,
   "transfers.rowActions": (name) => `Actions pour ${name}`,
   "transfers.progressOf": (name) => `Progression de ${name}`,
   "transfers.confirmRevokeTitle": "Retirer le dépôt ?",
@@ -171,8 +164,7 @@ export const fr: Dict = {
   "transfers.emptyOutAction": "Envoyer quelque chose",
   "transfers.emptyInAction": "Coller un code",
   "transfers.firstRunTitle": "Glissez ici les fichiers à envoyer",
-  "transfers.firstRunBody":
-    "Ou choisissez un contact, générez un code court à lire à voix haute, ou créez un lien qui s'ouvre dans n'importe quel navigateur. Tout est chiffré de bout en bout : le relais ne voit que des octets illisibles.",
+  "transfers.firstRunBody": "Ou utilisez Envoyer pour choisir un contact, un code ou un lien.",
   "transfers.firstRunAction": "Envoyer quelque chose",
 
   "people.presenceUnknownTitle": "Le relais n'a pas répondu",
@@ -308,12 +300,11 @@ export const fr: Dict = {
   "deposit.active": "Actif",
 
   "deposits.openInBrowser": "Ouvrir dans le navigateur",
-  "deposits.openFailed": "Je n'arrive pas à ouvrir le lien",
+  "deposits.openFailed": "Impossible d'ouvrir le lien",
   "deposits.share": "Link",
   "deposits.shareTicket": "Code de retrait",
   "deposits.shareTicketTitle": "Le ticket, à nouveau",
-  "deposits.ticketDetail":
-    "Collez-le au destinataire : il s'ouvre dans son Arvolo, ou avec `arvolo recv`. Lui seul peut le déchiffrer — il est scellé à son identité.",
+  "deposits.ticketDetail": "Transmettez-le au destinataire. Lui seul peut le déchiffrer — c'est scellé pour son identité.",
   "deposits.shareTitle": "Le lien, à nouveau",
   "deposits.publicLink": "Lien public",
   "deposits.sealed": "Dépôt",
@@ -321,18 +312,14 @@ export const fr: Dict = {
   "deposits.sealedFor": (who, detail) => `scellé pour ${who} · ${detail}`,
   "deposits.confirmRevokeTitle": "Retirer ?",
   "deposits.confirmRemoveTitle": "Supprimer la ligne ?",
-  "deposits.confirmRevokeLink":
-    "Le lien cesse de fonctionner pour tous ceux à qui vous l'avez donné, et qui l'a déjà téléchargé garde sa copie. Le fichier reste sur votre disque.",
-  "deposits.confirmRevokeSealed":
-    "Le fichier est retiré du relais et l'offre retirée de la boîte du destinataire. S'il ne l'a pas encore récupéré, il ne le pourra plus.",
+  "deposits.confirmRevokeLink": "Le lien cesse de fonctionner pour tout le monde. Les copies déjà téléchargées restent.",
+  "deposits.confirmRevokeSealed": "Ça sort du relais et de sa boîte. S'il ne l'a pas récupéré, il ne peut plus.",
   "deposits.confirmRemoveBody":
     "Il n'y a plus rien à retirer sur le relais : seule cette ligne disparaît.",
-  "deposits.intro":
-    "Ce que vous avez laissé sur un relais et pouvez encore retirer. L'état est demandé au relais chaque fois que vous ouvrez cet écran — il n'y a pas d'autre moyen de le savoir.",
+  "deposits.intro": "Ce que vous avez laissé sur un relais et pouvez encore retirer.",
   "deposits.createLink": "Créer un lien",
   "deposits.emptyTitle": "Aucun lien ni dépôt actif",
-  "deposits.emptyBody":
-    "Quand vous créez un lien public, ou déposez un fichier dans la boîte de quelqu'un, ça apparaît ici — et c'est d'ici que vous le retirez.",
+  "deposits.emptyBody": "Les liens publics et les dépôts en boîte apparaissent ici.",
   "deposits.sectionLinks": "Liens publics",
   "deposits.sectionSealed": "Dépôts scellés",
 
@@ -633,17 +620,17 @@ export const fr: Dict = {
   "palette.receive": "Recevoir…",
   "palette.receiveHint": "coller un code ou un ticket",
   "palette.receiveKw": "telecharger download coller",
-  "palette.pairContact": "Échanger les contacts avec quelqu'un",
+  "palette.pairContact": "Échanger les contacts",
   "palette.pairContactHint": "vous vous enregistrez mutuellement, déjà vérifiés",
   "palette.pairContactKw": "pairing appairer ajouter personne verifier",
   "palette.pairDevice": "Relier un autre de vos appareils",
   "palette.pairDeviceKw": "multidevice identite synchroniser",
-  "palette.sync": "Synchroniser le carnet d'adresses maintenant",
+  "palette.sync": "Synchroniser les contacts",
   "palette.syncKw": "contacts appareils",
   "palette.resumeAll": "Reprendre tous les transferts",
-  "palette.pauseAll": "Mettre tous les transferts en pause",
+  "palette.pauseAll": "Tout mettre en pause",
   "palette.pauseAllKw": "pause tout arreter suspendre reprendre",
-  "palette.clearFinished": "Nettoyer les transferts terminés",
+  "palette.clearFinished": "Effacer les terminés",
   "palette.clearFinishedKw": "vider termines",
   "palette.navTransfersKw": "tableau envois",
   "palette.navPeopleKw": "contacts carnet adresses",
@@ -661,20 +648,15 @@ export const fr: Dict = {
   "palette.openCard": (name) => `Ouvrir la fiche de ${name}`,
   "palette.personKw": "empreinte fingerprint verifier",
   "palette.label": "Chercher et exécuter",
-  "palette.placeholder": "Chercher une commande ou une personne…",
+  "palette.placeholder": "Chercher commandes et personnes…",
   "palette.noMatch": (q) => `Rien ne correspond à « ${q} ».`,
 
   "store.unknownPeer": "inconnu",
-  "store.loadTransfers": (e) =>
-    `Je n'arrive pas à lire les transferts depuis le démon : ${e}`,
-  "store.loadHistory": (e) =>
-    `Je n'arrive pas à lire l'historique depuis le démon : ${e}`,
-  "store.loadDeposits": (e) =>
-    `Je n'arrive pas à lire les liens depuis le démon : ${e}`,
-  "store.loadConfig": (e) =>
-    `Je n'arrive pas à lire les réglages depuis le démon : ${e}`,
-  "store.loadSync": (e) =>
-    `Je n'arrive pas à lire l'état des appareils : ${e}`,
+  "store.loadTransfers": (e) => `Impossible de lire les transferts : ${e}`,
+  "store.loadHistory": (e) => `Impossible de lire l'historique : ${e}`,
+  "store.loadDeposits": (e) => `Impossible de lire les liens : ${e}`,
+  "store.loadConfig": (e) => `Impossible de lire les réglages : ${e}`,
+  "store.loadSync": (e) => `Impossible de lire l'état des appareils : ${e}`,
   "store.errClearHistory": "Impossible de vider l'historique",
   "store.errRevokeLink": "Impossible de retirer le lien",
   "store.errSaveConfig": "Impossible d'enregistrer les réglages",

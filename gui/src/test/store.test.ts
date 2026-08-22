@@ -5,6 +5,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PEER_ID, dto, harness, makeIpcMock, resetHarness } from "./mocks";
+import { en } from "../i18n/en";
 
 vi.mock("../ipc", () => makeIpcMock());
 
@@ -131,7 +132,9 @@ describe("the board never lies about what the daemon holds", () => {
   it("50. a snapshot that fails says so — it does not report an empty daemon", async () => {
     harness.fail = new Set(["listTransfers"]);
     await boot(false);
-    expect(useStore.getState().loadError).toMatch(/can't read the transfers/i);
+    expect(useStore.getState().loadError).toContain(
+      en["store.loadTransfers"]("").trim()
+    );
     expect(useStore.getState().connected).toBe(false);
   });
 

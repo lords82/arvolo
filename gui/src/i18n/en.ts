@@ -52,10 +52,10 @@ export const en = {
   "title.devices": "Your devices",
   "title.settings": "Settings",
 
-  "app.disconnected":
-    "I can't reach the daemon. Transfers already running carry on, but this window can't see them.",
+  "app.disconnected": "Daemon unreachable",
+  "app.disconnectedDetail": "Running transfers carry on; this window can't see them.",
   "app.versionMismatch": (daemon: string, gui: string) =>
-    `The running daemon is version ${daemon}, the app is ${gui}. Restart it to line them up.`,
+    `Daemon ${daemon}, app ${gui} — restart it to line them up.`,
   "app.versionUnknown": "older",
   "app.restart": "Restart",
   "app.offerWaiting": "Someone wants to send you a file.",
@@ -76,8 +76,7 @@ export const en = {
   "app.errOpenSettings": "Open Settings",
 
   "crash.title": "Something broke in the interface",
-  "crash.body":
-    "Your transfers don't stop: they carry on in the background daemon. You can pick up where you left off.",
+  "crash.body": "Transfers carry on in the daemon; you can pick up where you left off.",
 
   // ---- rail --------------------------------------------------------------
   "rail.nav": "Main navigation",
@@ -94,8 +93,7 @@ export const en = {
   // ---- transfer status ---------------------------------------------------
   "status.active": "Under way",
   "status.preparing": "Preparing…",
-  "meta.preparing":
-    "reading and encrypting it — nothing has been sent yet, and they have not been told",
+  "meta.preparing": "reading and encrypting — nothing sent yet",
   "status.sharing": "Shared",
 
   "share.title": "Shared file",
@@ -106,10 +104,9 @@ export const en = {
   "share.never": "never",
   "share.uploaded": "uploaded",
   "share.fromDownload": (when: string) =>
-    `You downloaded this ${when}, and your computer is now making it available to others.`,
+    `Downloaded ${when}; your computer is now sharing it.`,
   "share.seedingSetting": "Change this",
-  "share.countsNote":
-    "Copies taken, not people: a ticket carries no identity, so the same person fetching twice counts twice.",
+  "share.countsNote": "Copies taken, not people: fetching twice counts twice.",
   "status.completed": "Completed",
   "status.deposited": "Deposited",
   "status.paused": "Paused",
@@ -154,12 +151,12 @@ export const en = {
   "transfers.pause": "Pause",
   "transfers.resume": "Resume",
   "transfers.openFile": "Open file",
-  "transfers.openFileFailed": "I can't open the file",
-  "transfers.openFolder": "Open the folder",
-  "transfers.openFolderFailed": "I can't open the folder",
-  "transfers.revokeDeposit": "Withdraw the deposit",
+  "transfers.openFileFailed": "Couldn't open the file",
+  "transfers.openFolder": "Open folder",
+  "transfers.openFolderFailed": "Couldn't open the folder",
+  "transfers.revokeDeposit": "Withdraw",
   "transfers.cancel": "Cancel",
-  "transfers.removeRow": "Take off the list",
+  "transfers.removeRow": "Remove",
   "transfers.verifiedIdentity": "Verified identity",
   "transfers.swarm": "Transfer spread across several peers",
   "transfers.peers": (n: number) => (n === 1 ? "1 peer" : `${n} peers`),
@@ -168,10 +165,8 @@ export const en = {
   "transfers.shareDetails": "Sharing details",
   "transfers.saveSender": "Save the sender…",
   "transfers.saveSenderTitle": "Save the sender to your contacts",
-  "transfers.saveSenderSub": (name: string) =>
-    `They sent you ${name} and you have no name for them yet.`,
-  "transfers.reorder": (name: string) =>
-    `Move ${name}: drag, or use the up and down arrows`,
+  "transfers.saveSenderSub": (name: string) => `They sent you ${name}.`,
+  "transfers.reorder": (name: string) => `Move ${name}: drag or arrow keys`,
   "transfers.rowActions": (name: string) => `Actions for ${name}`,
   "transfers.progressOf": (name: string) => `Progress of ${name}`,
   "transfers.confirmRevokeTitle": "Withdraw the deposit?",
@@ -193,8 +188,9 @@ export const en = {
   "transfers.emptyOutAction": "Send something",
   "transfers.emptyInAction": "Paste a code",
   "transfers.firstRunTitle": "Drag the files you want to send here",
-  "transfers.firstRunBody":
-    "Or pick a contact, generate a short code to read out, or create a link that opens in any browser. Everything is encrypted end to end: the relay only ever sees unreadable bytes.",
+  // Not a list of the four modes: they are the four tabs of the send panel,
+  // one click away and labelled.
+  "transfers.firstRunBody": "Or use Send to pick a contact, a code, or a link.",
   "transfers.firstRunAction": "Send something",
 
   // ---- people ------------------------------------------------------------
@@ -341,12 +337,12 @@ export const en = {
   "deposit.active": "Live",
 
   "deposits.openInBrowser": "Open in the browser",
-  "deposits.openFailed": "I can't open the link",
+  "deposits.openFailed": "Couldn't open the link",
   "deposits.share": "Link",
   "deposits.shareTicket": "Pickup code",
   "deposits.shareTicketTitle": "The ticket, again",
   "deposits.ticketDetail":
-    "Paste it to the recipient: it opens in their Arvolo, or with `arvolo recv`. Only they can decrypt it — it is sealed to their identity.",
+    "Paste it to the recipient. Only they can decrypt it — it is sealed to their identity.",
   "deposits.shareTitle": "The link, again",
   "deposits.publicLink": "Public link",
   "deposits.sealed": "Deposit",
@@ -356,17 +352,15 @@ export const en = {
   "deposits.confirmRevokeTitle": "Withdraw it?",
   "deposits.confirmRemoveTitle": "Remove the row?",
   "deposits.confirmRevokeLink":
-    "The link stops working for everyone you gave it to, and anyone who has already downloaded it keeps their copy. The file stays on your disk.",
+    "The link stops working for everyone. Copies already downloaded stay downloaded.",
   "deposits.confirmRevokeSealed":
-    "The file is taken off the relay and the offer withdrawn from the recipient's mailbox. If they haven't collected it yet, they no longer can.",
+    "It comes off the relay and out of their mailbox. If they have not collected it, they cannot.",
   "deposits.confirmRemoveBody":
     "There is nothing left on the relay to take away: only this row goes.",
-  "deposits.intro":
-    "What you have left on a relay and can still take back. The state is asked of the relay every time you open this screen — there is no other way to know it.",
+  "deposits.intro": "What you have left on a relay and can still take back.",
   "deposits.createLink": "Create a link",
   "deposits.emptyTitle": "No live link or deposit",
-  "deposits.emptyBody":
-    "When you create a public link, or leave a file in somebody's mailbox, it shows up here — and this is where you take it back.",
+  "deposits.emptyBody": "Public links and mailbox deposits show up here.",
   "deposits.sectionLinks": "Public links",
   "deposits.sectionSealed": "Sealed deposits",
 
@@ -712,17 +706,17 @@ export const en = {
   "palette.receive": "Receive…",
   "palette.receiveHint": "paste a code or a ticket",
   "palette.receiveKw": "download get paste",
-  "palette.pairContact": "Swap contacts with somebody",
+  "palette.pairContact": "Swap contacts",
   "palette.pairContactHint": "you save each other, already verified",
   "palette.pairContactKw": "pairing pair add person verify",
   "palette.pairDevice": "Link another device of yours",
   "palette.pairDeviceKw": "multidevice identity sync",
-  "palette.sync": "Sync the address book now",
+  "palette.sync": "Sync contacts now",
   "palette.syncKw": "contacts devices",
   "palette.resumeAll": "Resume every transfer",
-  "palette.pauseAll": "Pause every transfer",
+  "palette.pauseAll": "Pause everything",
   "palette.pauseAllKw": "pause all stop hold resume",
-  "palette.clearFinished": "Clear the finished transfers",
+  "palette.clearFinished": "Clear finished",
   "palette.clearFinishedKw": "empty completed tidy",
   "palette.navTransfersKw": "board sends",
   "palette.navPeopleKw": "contacts address book",
@@ -740,20 +734,20 @@ export const en = {
   "palette.openCard": (name: string) => `Open ${name}'s card`,
   "palette.personKw": "fingerprint verify",
   "palette.label": "Search and run",
-  "palette.placeholder": "Search a command or a person…",
+  "palette.placeholder": "Search commands and people…",
   "palette.noMatch": (q: string) => `Nothing matches “${q}”.`,
 
   // ---- store: failures and notices ---------------------------------------
   "store.unknownPeer": "unknown",
   "store.loadTransfers": (e: string) =>
-    `I can't read the transfers from the daemon: ${e}`,
+    `Couldn't read the transfers: ${e}`,
   "store.loadHistory": (e: string) =>
-    `I can't read the history from the daemon: ${e}`,
+    `Couldn't read the history: ${e}`,
   "store.loadDeposits": (e: string) =>
-    `I can't read the links from the daemon: ${e}`,
+    `Couldn't read the links: ${e}`,
   "store.loadConfig": (e: string) =>
-    `I can't read the settings from the daemon: ${e}`,
-  "store.loadSync": (e: string) => `I can't read the device state: ${e}`,
+    `Couldn't read the settings: ${e}`,
+  "store.loadSync": (e: string) => `Couldn't read the device state: ${e}`,
   "store.errClearHistory": "Couldn't empty the history",
   "store.errRevokeLink": "Couldn't withdraw the link",
   "store.errSaveConfig": "Couldn't save the settings",
@@ -767,7 +761,7 @@ export const en = {
   "store.errAccept": "Couldn't accept the file",
   "store.errReject": "Couldn't reject the file",
   "store.declined": (who: string) => who ? `Offer from ${who} declined.` : "Offer declined.",
-  "bits.qrTooDense": "Too much data for a QR — use Copy instead.",
+  "bits.qrTooDense": "Too much data for a QR — use Copy.",
   "store.errPause": "Couldn't pause it",
   "store.errResume": "Couldn't resume it",
   "store.errCancel": "Couldn't cancel it",

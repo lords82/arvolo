@@ -35,10 +35,10 @@ export const de: Dict = {
   "title.devices": "Ihre Geräte",
   "title.settings": "Einstellungen",
 
-  "app.disconnected":
-    "Ich erreiche den Daemon nicht. Laufende Übertragungen gehen weiter, aber dieses Fenster sieht sie nicht.",
+  "app.disconnected": "Daemon nicht erreichbar",
+  "app.disconnectedDetail": "Laufende Übertragungen gehen weiter; dieses Fenster sieht sie nicht.",
   "app.versionMismatch": (daemon, gui) =>
-    `Der laufende Daemon hat Version ${daemon}, die App ${gui}. Starten Sie ihn neu, damit beide zusammenpassen.`,
+    `Daemon ${daemon}, App ${gui} — neu starten zum Angleichen.`,
   "app.versionUnknown": "älter",
   "app.restart": "Neu starten",
   "app.offerWaiting": "Jemand möchte Ihnen eine Datei schicken.",
@@ -59,9 +59,7 @@ export const de: Dict = {
   "app.errOpenSettings": "Einstellungen öffnen",
 
   "crash.title": "In der Oberfläche ist etwas kaputtgegangen",
-  "crash.body":
-    "Ihre Übertragungen halten nicht an: Sie laufen im Hintergrund im Daemon weiter. Sie können dort weitermachen, wo Sie waren.",
-
+  "crash.body": "Übertragungen laufen im Daemon weiter; Sie können fortsetzen.",
   "rail.nav": "Hauptnavigation",
   "rail.meTitle": "Ihre Identität und die Einstellungen",
   "rail.meFallback": "Ich",
@@ -75,8 +73,7 @@ export const de: Dict = {
 
   "status.active": "Läuft",
   "status.preparing": "Wird vorbereitet…",
-  "meta.preparing":
-    "wird gelesen und verschlüsselt — noch ist nichts unterwegs, und die Gegenseite weiß nichts davon",
+  "meta.preparing": "lesen und verschlüsseln — noch nichts gesendet",
   "status.sharing": "Geteilt",
 
   "share.title": "Geteilte Datei",
@@ -86,11 +83,9 @@ export const de: Dict = {
   "share.lastPickup": "zuletzt abgeholt",
   "share.never": "nie",
   "share.uploaded": "hochgeladen",
-  "share.fromDownload": (when: string) =>
-    `Sie haben das ${when} heruntergeladen, und Ihr Rechner stellt es jetzt anderen zur Verfügung.`,
+  "share.fromDownload": (when) => `${when} geladen; Ihr Rechner teilt es jetzt.`,
   "share.seedingSetting": "Einstellung ändern",
-  "share.countsNote":
-    "Kopien, keine Personen: Ein Ticket trägt keine Identität, dieselbe Person z\u00e4hlt beim zweiten Abholen erneut.",
+  "share.countsNote": "Abgeholte Kopien, nicht Personen: zweimal holen zählt zweimal.",
   "status.completed": "Abgeschlossen",
   "status.deposited": "Abgelegt",
   "status.paused": "Pausiert",
@@ -129,12 +124,12 @@ export const de: Dict = {
   "transfers.pause": "Pausieren",
   "transfers.resume": "Fortsetzen",
   "transfers.openFile": "Datei öffnen",
-  "transfers.openFileFailed": "Ich kann die Datei nicht öffnen",
+  "transfers.openFileFailed": "Datei konnte nicht geöffnet werden",
   "transfers.openFolder": "Ordner öffnen",
-  "transfers.openFolderFailed": "Ich kann den Ordner nicht öffnen",
-  "transfers.revokeDeposit": "Ablage zurückziehen",
+  "transfers.openFolderFailed": "Ordner konnte nicht geöffnet werden",
+  "transfers.revokeDeposit": "Zurückziehen",
   "transfers.cancel": "Abbrechen",
-  "transfers.removeRow": "Von der Liste nehmen",
+  "transfers.removeRow": "Entfernen",
   "transfers.verifiedIdentity": "Verifizierte Identität",
   "transfers.swarm": "Übertragung auf mehrere Peers verteilt",
   "transfers.peers": (n) => (n === 1 ? "1 Peer" : `${n} Peers`),
@@ -143,10 +138,8 @@ export const de: Dict = {
   "transfers.shareDetails": "Details zum Teilen",
   "transfers.saveSender": "Absender speichern…",
   "transfers.saveSenderTitle": "Absender in den Kontakten speichern",
-  "transfers.saveSenderSub": (name) =>
-    `Diese Person hat Ihnen ${name} geschickt, und Sie haben noch keinen Namen für sie.`,
-  "transfers.reorder": (name) =>
-    `${name} verschieben: ziehen oder die Pfeiltasten hoch/runter benutzen`,
+  "transfers.saveSenderSub": (name) => `Hat Ihnen ${name} geschickt.`,
+  "transfers.reorder": (name) => `${name} verschieben: ziehen oder Pfeiltasten`,
   "transfers.rowActions": (name) => `Aktionen für ${name}`,
   "transfers.progressOf": (name) => `Fortschritt von ${name}`,
   "transfers.confirmRevokeTitle": "Ablage zurückziehen?",
@@ -170,8 +163,7 @@ export const de: Dict = {
   "transfers.emptyOutAction": "Etwas senden",
   "transfers.emptyInAction": "Code einfügen",
   "transfers.firstRunTitle": "Ziehen Sie die Dateien zum Senden hierher",
-  "transfers.firstRunBody":
-    "Oder wählen Sie einen Kontakt, erzeugen Sie einen kurzen Code zum Vorlesen, oder erstellen Sie einen Link, der sich in jedem Browser öffnet. Alles ist Ende-zu-Ende verschlüsselt: das Relay sieht nur unlesbare Bytes.",
+  "transfers.firstRunBody": "Oder über Senden einen Kontakt, einen Code oder einen Link wählen.",
   "transfers.firstRunAction": "Etwas senden",
 
   "people.presenceUnknownTitle": "Das Relay hat nicht geantwortet",
@@ -307,12 +299,11 @@ export const de: Dict = {
   "deposit.active": "Aktiv",
 
   "deposits.openInBrowser": "Im Browser öffnen",
-  "deposits.openFailed": "Ich kann den Link nicht öffnen",
+  "deposits.openFailed": "Link konnte nicht geöffnet werden",
   "deposits.share": "Link",
   "deposits.shareTicket": "Abholcode",
   "deposits.shareTicketTitle": "Das Ticket, noch einmal",
-  "deposits.ticketDetail":
-    "Fügen Sie es der Empfängerseite ein: es öffnet sich in deren Arvolo, oder mit `arvolo recv`. Entschlüsseln kann es nur sie — es ist auf ihre Identität versiegelt.",
+  "deposits.ticketDetail": "Geben Sie es der Gegenseite. Nur sie kann es entschlüsseln — es ist auf ihre Identität versiegelt.",
   "deposits.shareTitle": "Der Link, noch einmal",
   "deposits.publicLink": "Öffentlicher Link",
   "deposits.sealed": "Ablage",
@@ -320,18 +311,14 @@ export const de: Dict = {
   "deposits.sealedFor": (who, detail) => `versiegelt für ${who} · ${detail}`,
   "deposits.confirmRevokeTitle": "Zurückziehen?",
   "deposits.confirmRemoveTitle": "Zeile entfernen?",
-  "deposits.confirmRevokeLink":
-    "Der Link hört für alle auf zu funktionieren, denen Sie ihn gegeben haben; wer schon geladen hat, behält seine Kopie. Die Datei bleibt auf Ihrer Platte.",
-  "deposits.confirmRevokeSealed":
-    "Die Datei wird vom Relay genommen und das Angebot aus dem Postfach der Empfängerseite zurückgezogen. Wer sie noch nicht abgeholt hat, kann es dann nicht mehr.",
+  "deposits.confirmRevokeLink": "Der Link funktioniert für niemanden mehr. Bereits geladene Kopien bleiben.",
+  "deposits.confirmRevokeSealed": "Kommt vom Relay und aus dem Postfach. Nicht Abgeholtes ist nicht mehr abholbar.",
   "deposits.confirmRemoveBody":
     "Auf dem Relay ist nichts mehr wegzunehmen: es verschwindet nur diese Zeile.",
-  "deposits.intro":
-    "Was Sie auf einem Relay liegen haben und noch zurückholen können. Der Zustand wird bei jedem Öffnen dieses Fensters beim Relay erfragt — anders lässt er sich nicht wissen.",
+  "deposits.intro": "Was Sie auf einem Relay liegen haben und zurückholen können.",
   "deposits.createLink": "Link erstellen",
   "deposits.emptyTitle": "Kein aktiver Link, keine Ablage",
-  "deposits.emptyBody":
-    "Wenn Sie einen öffentlichen Link erstellen oder eine Datei in jemandes Postfach legen, taucht sie hier auf — und von hier holen Sie sie zurück.",
+  "deposits.emptyBody": "Öffentliche Links und Postfach-Ablagen erscheinen hier.",
   "deposits.sectionLinks": "Öffentliche Links",
   "deposits.sectionSealed": "Versiegelte Ablagen",
 
@@ -633,17 +620,17 @@ export const de: Dict = {
   "palette.receive": "Empfangen…",
   "palette.receiveHint": "einen Code oder ein Ticket einfügen",
   "palette.receiveKw": "herunterladen download einfuegen",
-  "palette.pairContact": "Mit jemandem Kontakte tauschen",
+  "palette.pairContact": "Kontakte tauschen",
   "palette.pairContactHint": "Sie speichern einander, schon verifiziert",
   "palette.pairContactKw": "pairing koppeln person hinzufuegen verifizieren",
   "palette.pairDevice": "Ein weiteres eigenes Gerät verbinden",
   "palette.pairDeviceKw": "multidevice identitaet abgleich",
-  "palette.sync": "Adressbuch jetzt abgleichen",
+  "palette.sync": "Kontakte abgleichen",
   "palette.syncKw": "kontakte geraete",
   "palette.resumeAll": "Alle Übertragungen fortsetzen",
-  "palette.pauseAll": "Alle Übertragungen pausieren",
+  "palette.pauseAll": "Alles pausieren",
   "palette.pauseAllKw": "pause alle anhalten stoppen fortsetzen",
-  "palette.clearFinished": "Abgeschlossene Übertragungen aufräumen",
+  "palette.clearFinished": "Erledigte aufräumen",
   "palette.clearFinishedKw": "leeren fertige",
   "palette.navTransfersKw": "board sendungen",
   "palette.navPeopleKw": "kontakte adressbuch",
@@ -661,19 +648,15 @@ export const de: Dict = {
   "palette.openCard": (name) => `Karte von ${name} öffnen`,
   "palette.personKw": "fingerabdruck fingerprint verifizieren",
   "palette.label": "Suchen und ausführen",
-  "palette.placeholder": "Befehl oder Person suchen…",
+  "palette.placeholder": "Befehle und Personen suchen…",
   "palette.noMatch": (q) => `Nichts passt zu „${q}“.`,
 
   "store.unknownPeer": "unbekannt",
-  "store.loadTransfers": (e) =>
-    `Ich kann die Übertragungen nicht vom Daemon lesen: ${e}`,
-  "store.loadHistory": (e) =>
-    `Ich kann den Verlauf nicht vom Daemon lesen: ${e}`,
-  "store.loadDeposits": (e) =>
-    `Ich kann die Links nicht vom Daemon lesen: ${e}`,
-  "store.loadConfig": (e) =>
-    `Ich kann die Einstellungen nicht vom Daemon lesen: ${e}`,
-  "store.loadSync": (e) => `Ich kann den Gerätezustand nicht lesen: ${e}`,
+  "store.loadTransfers": (e) => `Übertragungen nicht lesbar: ${e}`,
+  "store.loadHistory": (e) => `Verlauf nicht lesbar: ${e}`,
+  "store.loadDeposits": (e) => `Links nicht lesbar: ${e}`,
+  "store.loadConfig": (e) => `Einstellungen nicht lesbar: ${e}`,
+  "store.loadSync": (e) => `Gerätezustand nicht lesbar: ${e}`,
   "store.errClearHistory": "Der Verlauf ließ sich nicht leeren",
   "store.errRevokeLink": "Der Link ließ sich nicht zurückziehen",
   "store.errSaveConfig": "Die Einstellungen ließen sich nicht speichern",
@@ -687,7 +670,7 @@ export const de: Dict = {
   "store.errAccept": "Die Datei ließ sich nicht annehmen",
   "store.errReject": "Die Datei ließ sich nicht ablehnen",
   "store.declined": (who: string) => who ? `Angebot von ${who} abgelehnt.` : "Angebot abgelehnt.",
-  "bits.qrTooDense": "Zu viele Daten für einen QR — nutze Kopieren.",
+  "bits.qrTooDense": "Zu viele Daten für einen QR — Kopieren benutzen.",
   "store.errPause": "Pausieren nicht möglich",
   "store.errResume": "Fortsetzen nicht möglich",
   "store.errCancel": "Abbrechen nicht möglich",

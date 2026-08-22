@@ -325,7 +325,7 @@ describe("the row menu", () => {
   it("114. Take off the list removes a concluded one", async () => {
     await renderAppWithSend({ status: "completed" });
     const menu = await openRowMenu("invio.txt");
-    fireEvent.click(within(menu).getByText("Take off the list"));
+    fireEvent.click(within(menu).getByText(en["transfers.removeRow"]));
     await waitFor(() => expect(harness.recorder.remove).toEqual([1]));
   });
 
@@ -333,7 +333,7 @@ describe("the row menu", () => {
     await renderAppWithSend({ status: "completed" });
     harness.fail = new Set(["remove"]);
     const menu = await openRowMenu("invio.txt");
-    fireEvent.click(within(menu).getByText("Take off the list"));
+    fireEvent.click(within(menu).getByText(en["transfers.removeRow"]));
     await waitFor(() => expect(toastText()).toBeTruthy());
     expect(screen.getByText("invio.txt")).toBeTruthy();
   });
@@ -348,7 +348,7 @@ describe("the row menu", () => {
       },
     }));
     const menu = await openRowMenu("invio.txt");
-    fireEvent.click(within(menu).getByText("Open the folder"));
+    fireEvent.click(within(menu).getByText(en["transfers.openFolder"]));
     await waitFor(() =>
       expect(revealItemInDir).toHaveBeenCalledWith("/Users/ls/Arvolo/invio.txt")
     );
@@ -405,7 +405,7 @@ describe("the row menu", () => {
     // one step at a time. Without it the board would be unorderable without a
     // pointer, which is what the menu items used to cover.
     const grip = screen.getByLabelText(
-      `Move ${below}: drag, or use the up and down arrows`
+      en["transfers.reorder"](below)
     );
     fireEvent.keyDown(grip, { key: "ArrowUp" });
     await waitFor(() => expect(order()[0]).toBe(below));
@@ -426,7 +426,7 @@ describe("the row menu", () => {
     const [top, mid, bottom] = order();
 
     const grip = screen.getByLabelText(
-      `Move ${top}: drag, or use the up and down arrows`
+      en["transfers.reorder"](top)
     );
     // jsdom lays nothing out — every rect is 0×0 — so the drag has to be given
     // the geometry it would read from a real window: three rows, 60px each.
@@ -459,7 +459,7 @@ describe("the row menu", () => {
     const before = order();
 
     const grip = screen.getByLabelText(
-      `Move ${before[0]}: drag, or use the up and down arrows`
+      en["transfers.reorder"](before[0])
     );
     const rows = Array.from(
       grip.closest(".rows")!.querySelectorAll<HTMLElement>(":scope > .row")

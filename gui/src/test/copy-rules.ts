@@ -69,6 +69,10 @@ const CATEGORY: Record<string, Cat> = {
   // A tooltip, and the sentence on a consent checkbox.
   "people.claimedTip": "secondary",
   "person.compared": "secondary",
+  // An intro paragraph, a banner, and a line under a stat.
+  "deposits.intro": "secondary",
+  "app.versionMismatch": "secondary",
+  "share.fromDownload": "secondary",
 };
 
 /** The other end of the cap, for the handful of strings where being brief is the
@@ -134,7 +138,11 @@ export function render(entry: unknown): string {
 
 export function categorise(key: string): Cat {
   if (CATEGORY[key]) return CATEGORY[key];
-  if (/confirm.*Body$/i.test(key)) return "confirmBody";
+  // Anything on a confirmation except its heading and its two buttons. Not
+  // just `*Body`: `deposits.confirmRevokeLink` is a confirmation body too, and
+  // naming each one here would be a list that grows with the next dialog.
+  if (/confirm/i.test(key) && !/(Title|Label|Cancel)$/.test(key))
+    return "confirmBody";
   if (/(Hint|Desc|Body|Note|Detail|Blurb|Warn[A-Z]|explain)/i.test(key))
     return "secondary";
   if (/^(blurb|sub)/i.test(key.split(".")[1] ?? "")) return "secondary";

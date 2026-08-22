@@ -296,7 +296,12 @@ export function App() {
         {!connected && (
           <div className="banner bad" role="status">
             <Icon.Alert size={14} className="tone-bad" />
-            <span className="grow">{t("app.disconnected")}</span>
+            <span className="grow">
+              {t("app.disconnected")}
+              <span className="t-xs t-mut" style={{ display: "block" }}>
+                {t("app.disconnectedDetail")}
+              </span>
+            </span>
             <Button size="sm" onClick={() => fire(reload())}>
               {t("common.retry")}
             </Button>

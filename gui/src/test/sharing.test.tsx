@@ -13,6 +13,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { harness, makeIpcMock, resetHarness } from "./mocks";
+import { en } from "../i18n/en";
 
 vi.mock("../ipc", () => makeIpcMock());
 vi.mock("@tauri-apps/api/webview", () => ({
@@ -182,7 +183,7 @@ describe("the share panel", () => {
       shareOpen: 7,
     } as never);
     render(<ShareSheet />);
-    expect(await screen.findByText(/You downloaded this/)).toBeDefined();
+    expect(await screen.findByText((t: string) => t.includes(en["share.fromDownload"]("§").split("§")[1]))).toBeDefined();
     // And the way to stop it happening at all is offered, not buried.
     expect(screen.getByText("Change this")).toBeDefined();
   });
@@ -214,7 +215,7 @@ describe("the share panel", () => {
     render(<ShareSheet />);
     // The name is both the panel's subtitle and its heading, hence "all".
     expect((await screen.findAllByText("photos.zip")).length).toBeGreaterThan(0);
-    expect(screen.queryByText(/You downloaded this/)).toBeNull();
+    expect(screen.queryByText((t: string) => t.includes(en["share.fromDownload"]("§").split("§")[1]))).toBeNull();
     expect(screen.queryByText("Change this")).toBeNull();
   });
 
@@ -285,7 +286,7 @@ describe("a finished download", () => {
     await screen.findByText("delega.pdf");
     fireEvent.click(screen.getByLabelText(/Actions for delega.pdf/i));
     expect(await screen.findByText("Open file")).toBeDefined();
-    expect(screen.getByText("Open the folder")).toBeDefined();
+    expect(screen.getByText(en["transfers.openFolder"])).toBeDefined();
   });
 
   it("a row with nowhere to point offers neither", async () => {
@@ -295,7 +296,7 @@ describe("a finished download", () => {
     await screen.findByText("delega.pdf");
     fireEvent.click(screen.getByLabelText(/Actions for delega.pdf/i));
     expect(screen.queryByText("Open file")).toBeNull();
-    expect(screen.queryByText("Open the folder")).toBeNull();
+    expect(screen.queryByText(en["transfers.openFolder"])).toBeNull();
   });
 
   it("double-clicking the row opens the file", async () => {
