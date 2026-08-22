@@ -77,6 +77,30 @@ Second prerelease, on top of rc1.
   or bytes still leaving for it mid-piece — and drops out of the count ten
   seconds after the last one. The connection bookkeeping underneath is unchanged;
   what changed is who gets called a downloader.
+- **A trickle could hold a chunk for ever.** The silence bound restarts on every
+  byte, so one byte every 29 seconds passed it indefinitely — and the scheduler
+  never reassigns a piece that still has a "working" source. The body read now
+  also enforces a floor on the average rate (1 KiB/s, judged only after 30
+  seconds of grace): a trickle is not silent, and not alive either. Deliberately
+  a floor and not a deadline — a deadline is the thing that turns a slow-but-real
+  link into a broken one, and any link that can ever finish a 16 MiB chunk clears
+  this floor by an order of magnitude.
+- **Fallback providers were tried one at a time.** A chunk whose first source was
+  dead paid that source's full 90-second open bound before the second was even
+  dialled, so the worst case grew linearly with the number of sources — all of it
+  spent knowingly waiting on timeouts. Spare providers now join the race after a
+  few seconds' stagger each, and the first verified chunk wins; a healthy first
+  provider still answers long before the second is dialled, so the common case
+  costs exactly what it did.
+- **Every 16 MiB chunk paid a fresh QUIC handshake.** The receiver opened a new
+  connection per chunk — ~680 of them for a 10.7 GiB file, each a round trip of
+  pure ceremony that high-latency links felt keenly. Connections now go back
+  into a per-provider pool on success and the next chunk rides one that is
+  already warm; a pooled connection the server has since hung up on is quietly
+  discarded and redialled, never mistaken for the provider being down. The
+  relay's backfill node pools the same way — it pulls hundreds of chunks from
+  one sender. Parallel fetches still ride parallel connections, so the sender's
+  one-request-at-a-time serve loop never becomes a shared bottleneck.
 
 - **Every client asked the relay for its inbox every two seconds, forever.** The
   long-poll ended the moment the slot was non-empty — and the contact-sync cell

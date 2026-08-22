@@ -15,7 +15,7 @@ use anyhow::{Context, Result};
 use iroh::{protocol::Router, Endpoint, EndpointAddr};
 use serde::{Deserialize, Serialize};
 
-use crate::chunked::{fetch_chunk_wire, ChunkServer, CHUNK_ALPN};
+use crate::chunked::{fetch_chunk_wire, ChunkServer, ConnPool, CHUNK_ALPN};
 use crate::node::encode_ticket;
 use crate::transfer::{bind_endpoint, RelayChoice};
 
@@ -35,6 +35,9 @@ pub struct RelayRelease {
 pub struct BlobNode {
     endpoint: Endpoint,
     dir: PathBuf,
+    /// Warm connections to the senders this node seeds from: a backfill pulls
+    /// hundreds of chunks from one peer, and without this each paid a handshake.
+    pool: ConnPool,
     _router: Router,
 }
 
@@ -57,6 +60,7 @@ impl BlobNode {
         Ok(Self {
             endpoint,
             dir,
+            pool: ConnPool::default(),
             _router: router,
         })
     }
@@ -83,7 +87,7 @@ impl BlobNode {
             if self.chunk_path(hash).exists() {
                 continue; // already held
             }
-            let (total_len, ct) = fetch_chunk_wire(&self.endpoint, &sender, *hash, 0)
+            let (total_len, ct) = fetch_chunk_wire(&self.endpoint, &self.pool, &sender, *hash, 0)
                 .await
                 .with_context(|| format!("seed chunk {hash}"))?;
             anyhow::ensure!(

@@ -596,19 +596,31 @@ fn with_causes(e: impl std::error::Error) -> String {
 /// combines with any staged prefix and checks BLAKE3).
 pub(crate) async fn fetch_chunk_wire(
     endpoint: &Endpoint,
+    pool: &ConnPool,
     addr: &EndpointAddr,
     hash: Hash,
     offset: u64,
 ) -> Result<(u64, Vec<u8>)> {
     let reach = open_after();
     let mut stream =
-        match tokio::time::timeout(reach, open_chunk_stream(endpoint, addr, hash, offset)).await {
+        match tokio::time::timeout(reach, open_chunk_stream(endpoint, pool, addr, hash, offset))
+            .await
+        {
             Err(_) => anyhow::bail!("could not reach the chunk provider in {}s", reach.as_secs()),
             Ok(r) => r?,
         };
     let want = stream.total_len.saturating_sub(offset) as usize;
     let mut buf = vec![0u8; want];
-    read_body_or_stall(&mut stream.recv, &mut buf, stall_after()).await?;
+    read_body_or_stall(
+        &mut stream.recv,
+        &mut buf,
+        stall_after(),
+        min_rate_floor(),
+        std::time::Duration::from_secs(MIN_RATE_GRACE_SECS),
+    )
+    .await?;
+    // A full body read is a connection worth keeping warm.
+    pool.checkin(addr.id, stream.conn);
     Ok((stream.total_len, buf))
 }
 
@@ -617,24 +629,96 @@ pub(crate) async fn fetch_chunk_wire(
 /// while the body is read. Lets [`ChunkReceiver::fetch_to_file`] *race* providers
 /// — open the request to all, then read the body only from the first that responds.
 struct ChunkStream {
-    _conn: Connection,
+    /// The live connection, kept while the body is read — and handed back to the
+    /// pool by the caller on success, so the next chunk skips the handshake.
+    conn: Connection,
     recv: RecvStream,
     total_len: u64,
 }
 
-/// Connect to `addr`, request chunk `hash` from `offset`, and read the response
-/// header — but not the body. Errors if the provider doesn't have it
-/// (`total_len == 0`) or is unreachable.
+/// How many idle connections to keep warm per provider. Matches the fetch
+/// concurrency's order of magnitude: more would hoard sockets nobody will use,
+/// fewer would re-pay handshakes under parallel fetches to one provider.
+const MAX_POOLED_PER_PROVIDER: usize = 4;
+
+/// Idle chunk connections, kept per provider so back-to-back fetches skip the
+/// handshake.
+///
+/// A receiver opens one connection per chunk — deliberately simple, but on a
+/// 10.7 GiB transfer that is ~680 QUIC handshakes to the same peer, and on a
+/// high-latency link each one is a round trip spent on ceremony. The pool is a
+/// checkout model, one stream per connection at a time: a fetch takes an idle
+/// connection (or dials), and puts it back only on success. That keeps the
+/// server side exactly as it is — parallel fetches to one provider still ride
+/// parallel connections, so its one-request-at-a-time serve loop never becomes a
+/// bottleneck behind a single shared connection.
+///
+/// A pooled connection can die underneath us — the server hangs up after its
+/// idle bound, the peer restarts — so checkout discards anything already closed,
+/// and the caller treats a failure on a pooled connection as "dial fresh", never
+/// as "the provider is down". Failed fetches don't check their connection back
+/// in: whatever went wrong, that connection is under suspicion and dropping it
+/// costs one handshake.
+#[derive(Default)]
+pub(crate) struct ConnPool(Mutex<HashMap<EndpointId, Vec<Connection>>>);
+
+impl ConnPool {
+    fn checkout(&self, id: &EndpointId) -> Option<Connection> {
+        let mut m = self.0.lock().unwrap();
+        let v = m.get_mut(id)?;
+        while let Some(c) = v.pop() {
+            if c.close_reason().is_none() {
+                return Some(c);
+            }
+        }
+        None
+    }
+    fn checkin(&self, id: EndpointId, conn: Connection) {
+        if conn.close_reason().is_some() {
+            return;
+        }
+        let mut m = self.0.lock().unwrap();
+        let v = m.entry(id).or_default();
+        if v.len() < MAX_POOLED_PER_PROVIDER {
+            v.push(conn);
+        }
+        // Over the cap the handle just drops; the connection closes with it.
+    }
+    #[cfg(test)]
+    fn idle(&self, id: &EndpointId) -> usize {
+        self.0.lock().unwrap().get(id).map(|v| v.len()).unwrap_or(0)
+    }
+}
+
+/// Request chunk `hash` from `offset` over a connection to `addr` — pooled when
+/// one is warm, freshly dialled otherwise — and read the response header, but not
+/// the body. Errors if the provider doesn't have it (`total_len == 0`) or is
+/// unreachable.
 async fn open_chunk_stream(
     endpoint: &Endpoint,
+    pool: &ConnPool,
     addr: &EndpointAddr,
     hash: Hash,
     offset: u64,
 ) -> Result<ChunkStream> {
+    // A warm connection first. If the exchange fails on it, that is the pooled
+    // connection having died underneath us (the server's idle bound, a restart),
+    // not the provider being down — fall through and pay the dial.
+    if let Some(conn) = pool.checkout(&addr.id) {
+        if let Ok(s) = request_chunk_on(conn, hash, offset).await {
+            return Ok(s);
+        }
+    }
     let conn = endpoint
         .connect(addr.clone(), CHUNK_ALPN)
         .await
         .map_err(|e| anyhow!("connect chunk provider: {e}"))?;
+    request_chunk_on(conn, hash, offset).await
+}
+
+/// The request/response-header exchange of [`open_chunk_stream`], on a connection
+/// already in hand.
+async fn request_chunk_on(conn: Connection, hash: Hash, offset: u64) -> Result<ChunkStream> {
     let (mut send, mut recv) = conn.open_bi().await.map_err(|e| anyhow!("open_bi: {e}"))?;
     write_frame(&mut send, &ChunkReq { hash, offset }).await?;
     send.finish().map_err(|e| anyhow!("finish req: {e}"))?;
@@ -649,7 +733,7 @@ async fn open_chunk_stream(
         "provider claims oversized chunk"
     );
     Ok(ChunkStream {
-        _conn: conn,
+        conn,
         recv,
         total_len: resp.total_len,
     })
@@ -683,13 +767,40 @@ fn secs_from_env(var: &str, default_secs: u64) -> std::time::Duration {
     std::time::Duration::from_secs(secs)
 }
 
-/// Fill `buf` from `recv`, giving up if no byte arrives for `stall`.
+/// The slowest a chunk body may arrive, on average, before the provider counts as
+/// failed: bytes per second, from `ARVOLO_CHUNK_MIN_RATE` (0 disables the floor).
+///
+/// The stall bound alone has a hole a trickle fits through: one byte every 29
+/// seconds restarts the silence clock for ever, and the scheduler never reassigns
+/// a piece that still has a "working" source — so a provider drip-feeding at
+/// nothing per second could hold a chunk indefinitely while looking alive. A
+/// *floor on the average rate* closes it without punishing anyone honest: the
+/// judgment starts only after [`MIN_RATE_GRACE_SECS`] (a healthy chunk is long
+/// finished by then; a slow starter has had its window), and a kilobyte per
+/// second is an order of magnitude under any link that can ever finish a 16 MiB
+/// chunk in tolerable time. This is deliberately a floor, not a deadline — a
+/// deadline is the thing that turns a slow provider into a broken one.
+const CHUNK_MIN_RATE_BYTES_PER_SEC: u64 = 1024;
+
+/// How long a body read runs before the rate floor starts judging it.
+const MIN_RATE_GRACE_SECS: u64 = 30;
+
+fn min_rate_floor() -> u64 {
+    std::env::var("ARVOLO_CHUNK_MIN_RATE")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(CHUNK_MIN_RATE_BYTES_PER_SEC)
+}
+
+/// Fill `buf` from `recv`, giving up if no byte arrives for `stall` — or if, after
+/// `grace`, the average rate has stayed under `floor` bytes/sec.
 ///
 /// Deliberately not `read_exact`: that waits for the whole body with no bound, so a
 /// provider that goes quiet mid-chunk parks the task for good. Bounding each read
 /// instead of the whole fetch keeps a slow-but-alive provider working — every byte
 /// received starts the clock over — while turning a silent one into an ordinary
-/// error, which is the only form the scheduler can act on.
+/// error, which is the only form the scheduler can act on. The rate floor covers
+/// what the silence clock cannot: a trickle is not silent, and not alive either.
 ///
 /// A clean end-of-stream before the promised length is a fault too, and named as
 /// one: the provider said how long the chunk was in its header.
@@ -697,10 +808,13 @@ async fn read_body_or_stall<R: tokio::io::AsyncRead + Unpin>(
     recv: &mut R,
     buf: &mut [u8],
     stall: std::time::Duration,
+    floor: u64,
+    grace: std::time::Duration,
 ) -> Result<()> {
     use tokio::io::AsyncReadExt;
     let want = buf.len();
     let mut filled = 0;
+    let started = std::time::Instant::now();
     while filled < want {
         let read = tokio::time::timeout(stall, recv.read(&mut buf[filled..])).await;
         let n = match read {
@@ -714,6 +828,17 @@ async fn read_body_or_stall<R: tokio::io::AsyncRead + Unpin>(
             anyhow::bail!("read chunk body: ended after {filled} of {want} bytes");
         }
         filled += n;
+        let elapsed = started.elapsed();
+        if floor > 0 && elapsed >= grace {
+            let rate = filled as f64 / elapsed.as_secs_f64();
+            if rate < floor as f64 {
+                anyhow::bail!(
+                    "read chunk body: {filled} of {want} bytes after {}s ({rate:.0} B/s, \
+                     floor {floor} B/s) — a trickle is not a working provider",
+                    elapsed.as_secs()
+                );
+            }
+        }
     }
     Ok(())
 }
@@ -1412,12 +1537,16 @@ impl Drop for Control {
 #[derive(Clone)]
 pub struct ChunkReceiver {
     endpoint: Endpoint,
+    /// Warm connections per provider; shared by clones, so every parallel fetch
+    /// draws from (and refills) the same pool.
+    pool: Arc<ConnPool>,
 }
 
 impl ChunkReceiver {
     pub async fn open(relay: RelayChoice) -> Result<Self> {
         Ok(Self {
             endpoint: bind_endpoint(relay).await?,
+            pool: Arc::new(ConnPool::default()),
         })
     }
 
@@ -1468,8 +1597,8 @@ impl ChunkReceiver {
         })
     }
 
-    /// Fetch a whole chunk by hash, trying each provider in order, and verify
-    /// `BLAKE3(ciphertext) == hash`. Bounded to one chunk in memory.
+    /// Fetch a whole chunk by hash from whichever provider answers first, and
+    /// verify `BLAKE3(ciphertext) == hash`. Bounded to one chunk in memory.
     pub async fn fetch_chunk(&self, providers: &[EndpointAddr], hash: Hash) -> Result<Vec<u8>> {
         let (ct, _rest) = self.fetch_from(providers, hash, &[]).await?;
         Ok(ct)
@@ -1477,21 +1606,46 @@ impl ChunkReceiver {
 
     /// Fetch the chunk `hash`, resuming from `prefix` (already-downloaded
     /// ciphertext bytes). Returns `(full_ciphertext, newly_downloaded_tail)` once
-    /// the full ciphertext is present and BLAKE3-verified. Tries providers in
-    /// order for fallback.
+    /// the full ciphertext is present and BLAKE3-verified.
+    ///
+    /// Providers are hedged, not queued: the first gets a head start of
+    /// [`FETCH_HEDGE_SECS`], each further one joins the race only if nobody has
+    /// delivered yet, and the first verified chunk wins (the rest are dropped
+    /// with the set). Tried strictly in order, a chunk whose sources were all
+    /// dead paid the full open bound *per provider* before failing — the worst
+    /// case grew linearly with the number of sources, all of it spent knowingly
+    /// waiting on timeouts. Hedged, the worst case is one open bound plus a few
+    /// seconds of stagger. The stagger is what keeps this from being a stampede:
+    /// a healthy first provider answers long before the second is even dialled,
+    /// so the common case still costs one connection.
     pub async fn fetch_from(
         &self,
         providers: &[EndpointAddr],
         hash: Hash,
         prefix: &[u8],
     ) -> Result<(Vec<u8>, Vec<u8>)> {
+        const FETCH_HEDGE_SECS: u64 = 5;
+        let offset = prefix.len() as u64;
+        let mut set = tokio::task::JoinSet::new();
+        for (i, addr) in providers.iter().cloned().enumerate() {
+            let endpoint = self.endpoint.clone();
+            let pool = self.pool.clone();
+            set.spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(FETCH_HEDGE_SECS * i as u64))
+                    .await;
+                fetch_chunk_wire(&endpoint, &pool, &addr, hash, offset).await
+            });
+        }
         let mut last_err = None;
-        for addr in providers {
-            match fetch_chunk_wire(&self.endpoint, addr, hash, prefix.len() as u64).await {
+        while let Some(joined) = set.join_next().await {
+            let Ok(res) = joined else { continue };
+            match res {
                 Ok((total_len, tail)) => {
                     let mut ct = Vec::with_capacity(total_len as usize);
                     ct.extend_from_slice(prefix);
                     ct.extend_from_slice(&tail);
+                    // An unverified winner must not end the race: whoever sent a
+                    // wrong body loses to any honest provider still running.
                     if ct.len() as u64 != total_len || Hash::new(&ct) != hash {
                         last_err = Some(anyhow!("chunk {hash} failed integrity check"));
                         continue;
@@ -1522,21 +1676,32 @@ impl ChunkReceiver {
         // clock: reaching a provider is a different fault from one that goes quiet
         // mid-chunk, and a far slower thing to do.
         let reach = open_after();
-        let mut stream =
-            match tokio::time::timeout(reach, open_chunk_stream(&self.endpoint, addr, hash, 0))
-                .await
-            {
-                Err(_) => {
-                    anyhow::bail!("could not reach the chunk provider in {}s", reach.as_secs())
-                }
-                Ok(r) => r?,
-            };
+        let mut stream = match tokio::time::timeout(
+            reach,
+            open_chunk_stream(&self.endpoint, &self.pool, addr, hash, 0),
+        )
+        .await
+        {
+            Err(_) => {
+                anyhow::bail!("could not reach the chunk provider in {}s", reach.as_secs())
+            }
+            Ok(r) => r?,
+        };
         let mut buf = vec![0u8; stream.total_len as usize];
-        read_body_or_stall(&mut stream.recv, &mut buf, stall_after()).await?;
+        read_body_or_stall(
+            &mut stream.recv,
+            &mut buf,
+            stall_after(),
+            min_rate_floor(),
+            std::time::Duration::from_secs(MIN_RATE_GRACE_SECS),
+        )
+        .await?;
         if Hash::new(&buf) != hash {
             banned.lock().unwrap().insert(addr.id.to_string());
             anyhow::bail!("chunk {hash} failed integrity check");
         }
+        // Verified whole: this connection earned its place in the pool.
+        self.pool.checkin(addr.id, stream.conn);
         out.set_len(0)?;
         out.seek(SeekFrom::Start(0))?;
         out.write_all(&buf)?;
@@ -1793,6 +1958,83 @@ mod tests {
 }
 
 #[cfg(test)]
+mod conn_pool_tests {
+    use super::*;
+    use crate::transfer::RelayChoice;
+
+    async fn small_sender(dir: &std::path::Path) -> ChunkSender {
+        let path = dir.join("f.bin");
+        std::fs::write(&path, vec![5u8; 16 * 1024]).unwrap();
+        ChunkSender::serve(&path, RelayChoice::Disabled)
+            .await
+            .expect("sender")
+    }
+
+    /// The point of the pool: the second fetch rides the first fetch's
+    /// connection. `stable_id` is quinn's identity for the underlying connection,
+    /// so equality is proof of reuse, not of two connections that look alike.
+    #[tokio::test]
+    async fn sequential_fetches_reuse_the_provider_connection() {
+        let dir = tempfile::tempdir().unwrap();
+        let sender = small_sender(dir.path()).await;
+        let hash = sender.chunks()[0];
+        let receiver = ChunkReceiver::open(RelayChoice::Disabled)
+            .await
+            .expect("receiver");
+        let banned = Mutex::new(HashSet::new());
+
+        let mut out = tempfile::tempfile().unwrap();
+        receiver
+            .fetch_one(&sender.addr(), hash, &mut out, &banned)
+            .await
+            .expect("first fetch");
+        assert_eq!(receiver.pool.idle(&sender.addr().id), 1, "kept warm");
+        let first = receiver.pool.0.lock().unwrap()[&sender.addr().id][0].stable_id();
+
+        receiver
+            .fetch_one(&sender.addr(), hash, &mut out, &banned)
+            .await
+            .expect("second fetch");
+        assert_eq!(receiver.pool.idle(&sender.addr().id), 1, "back in the pool");
+        let second = receiver.pool.0.lock().unwrap()[&sender.addr().id][0].stable_id();
+        assert_eq!(first, second, "the second fetch paid no handshake");
+    }
+
+    /// A pooled connection can die underneath us — the server's idle bound, a
+    /// restart. Checkout must shrug and dial fresh, never report the provider
+    /// down on the strength of a stale connection.
+    #[tokio::test]
+    async fn a_dead_pooled_connection_is_replaced_not_fatal() {
+        let dir = tempfile::tempdir().unwrap();
+        let sender = small_sender(dir.path()).await;
+        let hash = sender.chunks()[0];
+        let receiver = ChunkReceiver::open(RelayChoice::Disabled)
+            .await
+            .expect("receiver");
+        let banned = Mutex::new(HashSet::new());
+
+        let mut out = tempfile::tempfile().unwrap();
+        receiver
+            .fetch_one(&sender.addr(), hash, &mut out, &banned)
+            .await
+            .expect("first fetch");
+        // Kill the pooled connection from under the pool, as the server's idle
+        // bound would.
+        receiver.pool.0.lock().unwrap()[&sender.addr().id][0].close(0u32.into(), b"gone");
+
+        receiver
+            .fetch_one(&sender.addr(), hash, &mut out, &banned)
+            .await
+            .expect("a stale pooled connection must cost a dial, not the fetch");
+        assert_eq!(
+            receiver.pool.idle(&sender.addr().id),
+            1,
+            "the fresh connection took the dead one's place"
+        );
+    }
+}
+
+#[cfg(test)]
 mod prepared_chunks_tests {
     use super::*;
 
@@ -1856,7 +2098,14 @@ mod prepared_chunks_tests {
 
         let mut buf = [0u8; 16];
         let started = std::time::Instant::now();
-        let out = read_body_or_stall(&mut r, &mut buf, std::time::Duration::from_millis(200)).await;
+        let out = read_body_or_stall(
+            &mut r,
+            &mut buf,
+            std::time::Duration::from_millis(200),
+            0,
+            std::time::Duration::ZERO,
+        )
+        .await;
         let waited = started.elapsed();
 
         let err = out.expect_err("a provider that stops sending is a failed fetch");
@@ -1889,9 +2138,77 @@ mod prepared_chunks_tests {
         });
 
         let mut buf = [0u8; 16];
-        read_body_or_stall(&mut r, &mut buf, std::time::Duration::from_millis(200))
-            .await
-            .expect("a slow provider is still a working provider");
+        read_body_or_stall(
+            &mut r,
+            &mut buf,
+            std::time::Duration::from_millis(200),
+            0,
+            std::time::Duration::ZERO,
+        )
+        .await
+        .expect("a slow provider is still a working provider");
+        assert_eq!(&buf, b"abababababababab");
+    }
+
+    /// The hole the stall bound cannot see: a byte every so often restarts the
+    /// silence clock for ever, and the scheduler never reassigns a piece with a
+    /// "working" source. A trickle must fail the rate floor once the grace is up.
+    #[tokio::test]
+    async fn a_trickling_provider_fails_the_rate_floor() {
+        let (mut w, mut r) = tokio::io::duplex(64);
+        tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            // One byte at a time, never long enough apart to trip the stall bound
+            // — the exact shape that used to pass for ever.
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                if w.write_all(b"x").await.is_err() {
+                    return;
+                }
+            }
+        });
+
+        let mut buf = [0u8; 4096];
+        let err = read_body_or_stall(
+            &mut r,
+            &mut buf,
+            std::time::Duration::from_millis(500),
+            1000, // 1000 B/s floor; the trickle manages ~20
+            std::time::Duration::from_millis(200),
+        )
+        .await
+        .expect_err("a trickle is not a working provider");
+        assert!(
+            err.to_string().contains("floor"),
+            "the error should name the floor, got: {err}"
+        );
+    }
+
+    /// And the floor must not bite anyone honest: a genuinely slow link that stays
+    /// above it finishes its chunk.
+    #[tokio::test]
+    async fn an_honest_slow_link_stays_above_the_floor() {
+        let (mut w, mut r) = tokio::io::duplex(64);
+        tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            for _ in 0..8 {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                if w.write_all(b"ab").await.is_err() {
+                    return;
+                }
+            }
+        });
+
+        let mut buf = [0u8; 16];
+        read_body_or_stall(
+            &mut r,
+            &mut buf,
+            std::time::Duration::from_millis(500),
+            10, // ~40 B/s of honest slowness against a 10 B/s floor
+            std::time::Duration::from_millis(100),
+        )
+        .await
+        .expect("slow but above the floor is a working provider");
         assert_eq!(&buf, b"abababababababab");
     }
 
@@ -1907,9 +2224,15 @@ mod prepared_chunks_tests {
         });
 
         let mut buf = [0u8; 16];
-        let err = read_body_or_stall(&mut r, &mut buf, std::time::Duration::from_secs(5))
-            .await
-            .expect_err("a truncated body must not pass for a whole chunk");
+        let err = read_body_or_stall(
+            &mut r,
+            &mut buf,
+            std::time::Duration::from_secs(5),
+            0,
+            std::time::Duration::ZERO,
+        )
+        .await
+        .expect_err("a truncated body must not pass for a whole chunk");
         assert!(
             err.to_string().contains("ended after 5 of 16"),
             "got: {err}"
