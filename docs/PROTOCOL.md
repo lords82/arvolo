@@ -699,6 +699,16 @@ A blob is deleted when the **first** of these happens:
    also retracts the offer it left in the recipient's inbox — otherwise they'd be
    pointed at a blob that is no longer there.
 
+All three delete a file by naming it from its metadata row, which leaves one gap:
+a file whose row never landed — the process died between the streaming deposit's
+write and the insert, or between a backfill chunk being pulled and its `seeded`
+row being recorded — is invisible to every one of them and would hold its bytes
+for ever. So the reaper also runs an hourly **reconciliation sweep** that starts
+from what is on disk instead: any blob or seeded chunk with no row backing it,
+untouched for six hours (long enough that nothing mid-write is ever judged), is
+deleted. It is a backstop, not the mechanism — a seed that fails part-way already
+removes the chunks it wrote.
+
 The **local record** is swept an hour after its TTL, when the list is next built.
 Expiry is the only trigger: the record exists to hold the revoke token, so it dies
 with the blob, and of the three ways a blob dies only the TTL can be known locally,

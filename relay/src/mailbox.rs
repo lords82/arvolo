@@ -1,5 +1,6 @@
 //! The persistent zero-knowledge mailbox: SQLite metadata + ciphertext files.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -8,7 +9,7 @@ use rusqlite::{params, Connection};
 use crate::state::{
     max_blob_bytes, max_entries, max_total_blob_bytes, max_ttl_secs, MAX_DOWNLOADS_CAP,
 };
-use crate::util::{constant_time_eq, random_claim};
+use crate::util::{constant_time_eq, random_claim, sweep_orphan_files};
 
 /// What the sender deposits: an opaque, end-to-end-encrypted blob.
 #[derive(Clone)]
@@ -446,6 +447,69 @@ impl Mailbox {
         conn.execute("DELETE FROM entries WHERE claim = ?1", params![claim])
             .map_err(backend)?;
         Ok(())
+    }
+
+    /// Delete ciphertext files in the blob directory that no `entries` row claims
+    /// and that are older than `grace_secs`.
+    ///
+    /// [`Mailbox::reap`] only frees a file it can name from a row, so a blob whose
+    /// row never landed — the process died between the streaming deposit writing
+    /// [`Mailbox::blob_path`] and `commit_deposit` inserting — is invisible to it
+    /// and stays on disk for good. The grace period keeps a deposit still
+    /// streaming in safe: its row appears the moment the body finishes.
+    pub fn sweep_orphan_blobs(&self, grace_secs: u64) -> usize {
+        // No readable row set means no sweep: an empty one would read as "nothing
+        // is claimed" and take the whole directory with it.
+        let Some(claims) = self.claims() else {
+            return 0;
+        };
+        sweep_orphan_files(&self.blob_dir, grace_secs, |name| {
+            match name.strip_suffix(".bin") {
+                Some(claim) => claims.contains(claim),
+                // Not something this mailbox wrote — leave it alone.
+                None => true,
+            }
+        })
+    }
+
+    /// Delete chunk files in the relay's blob-store directory that no `seeded` row
+    /// covers and that are older than `grace_secs`.
+    ///
+    /// The seed path writes the chunk files first and records their rows after
+    /// (both in `seed_chunks` and across the request), so a failure in between
+    /// strands the files: the TTL backstop walks rows, and there is no row to
+    /// walk. Only names that look like a chunk hash are ever considered, so
+    /// anything else living in that directory is left untouched.
+    pub fn sweep_orphan_chunks(&self, store_dir: &Path, grace_secs: u64) -> usize {
+        let Some(seeded) = self.seeded_hashes() else {
+            return 0;
+        };
+        sweep_orphan_files(store_dir, grace_secs, |name| {
+            let looks_like_chunk =
+                name.len() == 64 && name.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+            !looks_like_chunk || seeded.contains(name)
+        })
+    }
+
+    /// Every claim currently stored; `None` if the table could not be read.
+    fn claims(&self) -> Option<HashSet<String>> {
+        self.string_column("SELECT claim FROM entries")
+    }
+
+    /// Every chunk hash currently seeded (any token, expired or not: an expired
+    /// row is the TTL backstop's job, not the sweep's).
+    fn seeded_hashes(&self) -> Option<HashSet<String>> {
+        self.string_column("SELECT hash FROM seeded")
+    }
+
+    /// One text column of a query as a set, or `None` if the query failed. A
+    /// caller sweeping files against it must not confuse "nothing there" with
+    /// "could not tell".
+    fn string_column(&self, sql: &str) -> Option<HashSet<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(sql).ok()?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0)).ok()?;
+        rows.collect::<Result<_, _>>().ok()
     }
 
     /// Number of stored entries.

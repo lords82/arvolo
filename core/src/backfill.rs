@@ -83,21 +83,45 @@ impl BlobNode {
     /// verifying `BLAKE3(ciphertext) == hash`. Returns this node's address
     /// (base32) for advertising the relay as a provider.
     pub async fn seed_chunks(&self, sender: EndpointAddr, chunks: &[Hash]) -> Result<String> {
+        // Files written by this call, so a failure part-way through can take them
+        // back out. The caller records the bookkeeping rows only once this returns
+        // Ok, so anything left behind here is a file no row will ever name again —
+        // storage that nothing can free short of the reconciliation sweep.
+        let mut written: Vec<PathBuf> = Vec::new();
         for hash in chunks {
             if self.chunk_path(hash).exists() {
                 continue; // already held
             }
-            let (total_len, ct) = fetch_chunk_wire(&self.endpoint, &self.pool, &sender, *hash, 0)
-                .await
-                .with_context(|| format!("seed chunk {hash}"))?;
-            anyhow::ensure!(
-                ct.len() as u64 == total_len && Hash::new(&ct) == *hash,
-                "seeded chunk {hash} failed integrity check"
-            );
-            std::fs::write(self.chunk_path(hash), &ct)
-                .with_context(|| format!("write chunk {hash}"))?;
+            // Recorded before the attempt, so a half-written file is cleaned up too.
+            written.push(self.chunk_path(hash));
+            if let Err(e) = self.seed_one(&sender, hash).await {
+                for path in &written {
+                    let _ = std::fs::remove_file(path);
+                }
+                return Err(e);
+            }
         }
         encode_ticket(&self.addr())
+    }
+
+    /// Pull one chunk and write it, verifying `BLAKE3(ciphertext) == hash`.
+    async fn seed_one(&self, sender: &EndpointAddr, hash: &Hash) -> Result<()> {
+        let (total_len, ct) = fetch_chunk_wire(&self.endpoint, &self.pool, sender, *hash, 0)
+            .await
+            .with_context(|| format!("seed chunk {hash}"))?;
+        anyhow::ensure!(
+            ct.len() as u64 == total_len && Hash::new(&ct) == *hash,
+            "seeded chunk {hash} failed integrity check"
+        );
+        std::fs::write(self.chunk_path(hash), &ct)
+            .with_context(|| format!("write chunk {hash}"))?;
+        Ok(())
+    }
+
+    /// Where this node keeps its chunk files. The relay reconciles this directory
+    /// against its `seeded` table to catch files no row covers any more.
+    pub fn store_dir(&self) -> &Path {
+        &self.dir
     }
 
     /// Release a chunk (by hex hash): delete its file. Idempotent.

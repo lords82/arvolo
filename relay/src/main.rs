@@ -11,6 +11,15 @@ use arvolo_core::backfill::BlobNode;
 use arvolo_core::transfer::RelayChoice;
 use arvolo_relay::{now_unix, router, AppState, Mailbox};
 
+/// How often the reaper runs the on-disk reconciliation sweep, in 60s ticks.
+const SWEEP_EVERY_TICKS: u64 = 60;
+
+/// How long a file with no row backing it is left alone before the sweep treats
+/// it as an orphan. Comfortably longer than any single write: a streaming
+/// deposit's row lands when the body ends, and a seed batch's rows land when the
+/// batch does — this only has to outlast the slowest of those, not the TTL.
+const ORPHAN_GRACE_SECS: u64 = 6 * 3600;
+
 /// Build the tracing filter from `-v` count. arvolo (`arvolo_relay`,
 /// `arvolo_core`) gets louder with each `-v`; dependencies (iroh, hyper, …) stay
 /// quiet at `warn` until `-vvv`, which raises the base to `debug` so their logs
@@ -120,8 +129,10 @@ async fn main() -> Result<()> {
         let state = state.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(60));
+            let mut ticks: u64 = 0;
             loop {
                 tick.tick().await;
+                ticks += 1;
                 let now = now_unix();
                 match state.mailbox.reap(now) {
                     Ok(n) if n > 0 => tracing::info!(removed = n, "reaped expired mailbox blobs"),
@@ -154,6 +165,25 @@ async fn main() -> Result<()> {
                 // Per-session offload meters whose TTL has passed (so a genuinely
                 // new transfer of the same file later starts with a fresh cap).
                 state.mailbox.reap_session_bytes(now);
+
+                // Hourly reconciliation. Everything above walks rows and deletes
+                // the file each row names; a file that lost its row (or never got
+                // one — a crash between the write and the insert) is invisible to
+                // all of it and would occupy the disk forever. This is the only
+                // pass that starts from what is actually on disk. It is a
+                // directory scan, hence hourly rather than every minute.
+                if ticks.is_multiple_of(SWEEP_EVERY_TICKS) {
+                    let n = state.mailbox.sweep_orphan_blobs(ORPHAN_GRACE_SECS);
+                    if n > 0 {
+                        tracing::info!(removed = n, "swept orphaned mailbox blobs");
+                    }
+                    let n = state
+                        .mailbox
+                        .sweep_orphan_chunks(state.blobs.store_dir(), ORPHAN_GRACE_SECS);
+                    if n > 0 {
+                        tracing::info!(removed = n, "swept orphaned seeded chunks");
+                    }
+                }
             }
         });
     }

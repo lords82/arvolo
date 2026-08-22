@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **A relay could strand files that nothing would ever free.** Every cleanup path
+  — the TTL reaper, burn-after-read, revoke, the seed-release the receiver calls
+  per chunk — deletes a file by naming it from its metadata row. That can only
+  free a file the database still knows about, and there are two ways a file loses
+  that: a seed request that fails part-way leaves behind the chunks it had already
+  pulled, and a crash between a write and its insert leaves a blob no row ever
+  named. Neither is visible to anything that walks rows, so those bytes were held
+  for good — on the public relay, one such chunk had been sitting there for
+  fifteen days. A failed seed now removes what it wrote, and the reaper runs an
+  hourly sweep that starts from the directory rather than the table, deleting any
+  file with no row behind it that has been untouched for six hours.
+
+### Changed
+
+- The shared-relay `docker-compose.yml` now sets `ARVOLO_MAX_TOTAL_BLOB_BYTES`
+  (4 GiB). The per-blob cap it shipped with never bounded the disk — 20k entries
+  of 0.5 GiB is not a budget — and the relay had been warning about exactly this
+  at every startup.
+
 ## v0.12.0 — no silent stalls
 
 Four prereleases, all driven by dogfooding one stubborn 10.7 GiB `send --to`.
