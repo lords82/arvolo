@@ -20,6 +20,7 @@ import {
   within,
 } from "@testing-library/react";
 import { MAILBOX_TICKET, P2P_TICKET, PEER_ID, dto, harness, makeIpcMock, resetHarness, pick } from "./mocks";
+import { en } from "../i18n/en";
 
 vi.mock("../ipc", () => makeIpcMock());
 vi.mock("@tauri-apps/api/webview", () => ({
@@ -623,7 +624,7 @@ describe("the send panel", () => {
     useStore.setState({ sheetPicks: [pick("a.txt")] });
     render(<App />);
     fireEvent.click(await screen.findByText("Ticket"));
-    fireEvent.click(screen.getByText("Create the ticket"));
+    fireEvent.click(screen.getByText(en["send.submitTicket"]));
     expect(await screen.findByText(P2P_TICKET)).toBeTruthy();
   });
 
@@ -631,7 +632,7 @@ describe("the send panel", () => {
     useStore.setState({ sheetPicks: [pick("a.txt")] });
     render(<App />);
     fireEvent.click(await screen.findByText("Link"));
-    fireEvent.click(screen.getByText("Create the link"));
+    fireEvent.click(screen.getByText(en["send.submitLink"]));
     expect(
       await screen.findByText("https://relay.test/dl/abc#key")
     ).toBeTruthy();
@@ -642,7 +643,7 @@ describe("the send panel", () => {
     useStore.setState({ sheetPicks: [pick("a.txt")] });
     render(<App />);
     fireEvent.click(await screen.findByText("Link"));
-    fireEvent.click(screen.getByText("Create the link"));
+    fireEvent.click(screen.getByText(en["send.submitLink"]));
     await waitFor(() => expect(toastText()).toBeTruthy());
   });
 
@@ -650,7 +651,7 @@ describe("the send panel", () => {
     useStore.setState({ sheetPicks: [pick("a.txt")] });
     render(<App />);
     fireEvent.click(await screen.findByText("Code"));
-    fireEvent.click(screen.getByText("Generate the code"));
+    fireEvent.click(screen.getByText(en["send.submitCode"]));
     expect(await screen.findByText("4821-crater-mango")).toBeTruthy();
   });
 
@@ -662,7 +663,7 @@ describe("the send panel", () => {
     // TTL and password protect a *deposit*; offering them on a live send would
     // promise something that is not being applied.
     expect(screen.queryByText("Expires after")).toBeNull();
-    fireEvent.click(screen.getByLabelText("Leave it in the mailbox"));
+    fireEvent.click(screen.getByLabelText(en["send.depositLabel"]));
     expect(await screen.findByText("Expires after")).toBeTruthy();
   });
 
@@ -671,11 +672,11 @@ describe("the send panel", () => {
     useStore.setState({ sheetPicks: [pick("a.txt")] });
     render(<App />);
     fireEvent.click(await screen.findByText("proj"));
-    fireEvent.click(screen.getByLabelText("Leave it in the mailbox"));
+    fireEvent.click(screen.getByLabelText(en["send.depositLabel"]));
     fireEvent.change(await screen.findByPlaceholderText("none"), {
       target: { value: "segreto" },
     });
-    fireEvent.click(screen.getByText("Leave it in their mailbox"));
+    fireEvent.click(screen.getByText(en["send.submitDeposit"]));
     await waitFor(() => expect(harness.recorder.depositTo).toHaveLength(1));
     const [to, , ttl, max, password] = harness.recorder.depositTo[0];
     expect(to).toBe("proj");
@@ -689,8 +690,8 @@ describe("the send panel", () => {
     useStore.setState({ sheetPicks: [pick("a.txt")] });
     render(<App />);
     fireEvent.click(await screen.findByText("proj"));
-    fireEvent.click(screen.getByLabelText("Leave it in the mailbox"));
-    fireEvent.click(await screen.findByText("Leave it in their mailbox"));
+    fireEvent.click(screen.getByLabelText(en["send.depositLabel"]));
+    fireEvent.click(await screen.findByText(en["send.submitDeposit"]));
     expect(await screen.findByText(MAILBOX_TICKET)).toBeTruthy();
   });
 
@@ -699,14 +700,14 @@ describe("the send panel", () => {
     useStore.setState({ sheetPicks: [pick("a.txt")] });
     render(<App />);
     fireEvent.click(await screen.findByText("proj"));
-    fireEvent.click(screen.getByLabelText("Leave it in the mailbox"));
+    fireEvent.click(screen.getByLabelText(en["send.depositLabel"]));
     fireEvent.change(await screen.findByPlaceholderText("none"), {
       target: { value: "segreto" },
     });
     useStore.getState().closeSheet();
     useStore.getState().openSheet([pick("b.txt")]);
     fireEvent.click(await screen.findByText("proj"));
-    fireEvent.click(screen.getByLabelText("Leave it in the mailbox"));
+    fireEvent.click(screen.getByLabelText(en["send.depositLabel"]));
     // A password carried over would silently protect a different file for a
     // different person.
     expect(

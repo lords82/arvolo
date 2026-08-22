@@ -41,8 +41,18 @@ export const LANG_SLACK: Record<string, number> = {
   de: 1.35,
 };
 
-/** Keys whose category the name does not give away. */
-const CATEGORY: Record<string, Cat> = {};
+/** Keys whose category the name does not give away.
+ *
+ *  The fallback below is `title`, which is the strict end — so anything landing
+ *  here is a string that reads as an explanation but is not named like one. Add
+ *  to this map rather than loosening the fallback: a wrong default that is
+ *  generous hides real cases, a wrong default that is strict shows up at once. */
+const CATEGORY: Record<string, Cat> = {
+  // Body text under a heading, or a whole explanatory block on its own.
+  "send.pickerEmpty": "secondary",
+  "send.noRelay": "secondary",
+  "send.linkTooMany": "secondary",
+};
 
 /** The other end of the cap, for the handful of strings where being brief is the
  *  failure. Each of these is the last thing a user reads before doing something

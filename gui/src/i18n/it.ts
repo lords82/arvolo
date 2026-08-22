@@ -471,52 +471,55 @@ export const it: Dict = {
   "send.modeCode": "Codice",
   "send.modeLink": "Link",
   "send.modeTicket": "Ticket",
-  "send.blurbContact":
-    "Va dritto a chi hai in rubrica. Se è collegato passa diretto da dispositivo a dispositivo; se non lo è resta nella sua casella sul relay finché non lo ritira.",
-  "send.blurbCode":
-    "Un codice corto da leggere a voce o inquadrare. Chi lo riceve lo incolla in Arvolo — non serve che sia già in rubrica, ma dovete essere entrambi collegati adesso.",
-  "send.blurbLink":
-    "Un indirizzo che si apre in qualsiasi browser: chi lo riceve non ha bisogno di Arvolo né di un account. Il file viene decifrato nel browser, la chiave viaggia nel frammento dell'URL e al relay non arriva mai.",
-  "send.blurbTicket":
-    "Un ticket arvc… peer-to-peer: non passa né dalla casella né dal relay Arvolo. Per bucare il NAT può servire un relay di collegamento, che vede solo traffico cifrato.",
+  "send.blurbContact": "Dritto a chi hai in rubrica.",
+  "send.blurbContactMore":
+    "Diretto se è collegato, altrimenti resta nella sua casella.",
+  "send.blurbCode": "Un codice corto da dettare o inquadrare.",
+  "send.blurbCodeMore":
+    "Non serve che sia in rubrica, ma dovete essere collegati entrambi adesso.",
+  "send.blurbLink": "Un indirizzo che si apre in qualsiasi browser.",
+  "send.blurbLinkMore": "Chi lo riceve non ha bisogno di account né di Arvolo.",
+  "send.blurbTicket": "Un ticket arvc…, dritto da questa macchina.",
+  "send.blurbTicketMore": "Non passa né dalla casella né dal relay Arvolo.",
   "send.ttl1h": "1 ora",
   "send.ttl1d": "1 giorno",
   "send.ttl7d": "7 giorni",
   "send.ttl30d": "30 giorni",
+  "send.pickerEmptyTitle": "La rubrica è vuota",
   "send.pickerEmpty":
-    "Non hai ancora nessuno in rubrica. Aggiungi qualcuno da Persone — il modo più rapido è lo scambio con codice, che vi salva a vicenda già verificati.",
+    "Aggiungi qualcuno da Persone. Lo scambio con codice è il modo più rapido: vi salva a vicenda, già verificati.",
   "send.pickerSearch": "Cerca un contatto…",
   "send.pickerRecipient": "Destinatario",
   "send.pickerNoMatch": (q) => `Nessun contatto corrisponde a «${q}».`,
-  "send.depositResult": (to) =>
-    `Depositato per ${to}. Il ticket qui sotto è la tua copia: serve solo se vuoi consegnarlo tu, per esempio se ${to} non riceve l'offerta.`,
+  "send.depositResult": (to) => `Depositato per ${to}`,
+  "send.depositResultDetail": (to) =>
+    `La tua copia, se ${to} non ricevesse l'offerta.`,
   "send.onItsWay": (to) => `In consegna a ${to}`,
   "send.saveArvolo": "Salva come file .arvolo…",
-  "send.arvoloSaved": (name: string) => `Salvato ${name} — condividilo su qualsiasi canale; dall'altra parte si apre con Arvolo.`,
+  "send.arvoloSaved": (name: string) => `Salvato ${name}`,
+  "send.arvoloSavedDetail":
+    "Condividilo su qualsiasi canale; si apre con Arvolo.",
   "send.onItsWayDetail":
     "Se è online passa diretto, altrimenti resta nella sua casella.",
   "send.codeKeepDetail":
-    "Il codice resta valido per più destinatari finché non annulli l'invio.",
-  "send.codeOnceDetail":
-    "Il codice vale per un solo destinatario e poi si ritira da solo.",
+    "Valido per più destinatari, finché non annulli l'invio.",
+  "send.codeOnceDetail": "Vale per un destinatario, poi si ritira.",
   "send.linkDetail":
-    "Chiunque abbia questo indirizzo può scaricare il file finché non scade, non esaurisce i download consentiti o non lo revochi da «Link e depositi».",
+    "Chi ha l'indirizzo può scaricare finché non scade, si esaurisce o lo revochi.",
   "send.ticketDetail":
-    "Ticket peer-to-peer: resta valido finché il daemon è in esecuzione e l'invio non viene annullato.",
+    "Valido finché il daemon è in esecuzione e l'invio non è annullato.",
   "send.countOne": "1 elemento",
-  "send.countMany": (n) =>
-    `${n} elementi · verranno impacchettati in un archivio`,
+  "send.countMany": (n) => `${n} elementi · in un unico archivio`,
   "send.titleReady": "Pronto",
   "send.title": "Invia",
-  "send.subtitleReady": "Consegna quello che vedi qui sotto.",
   "send.subtitle": "Cifrato end-to-end, sempre.",
-  "send.submitDeposit": "Lascia in casella",
+  "send.submitDeposit": "Deposita",
   "send.submitSend": "Invia",
-  "send.submitCode": "Genera il codice",
-  "send.submitLink": "Crea il link",
-  "send.submitTicket": "Crea il ticket",
+  "send.submitCode": "Genera codice",
+  "send.submitLink": "Crea link",
+  "send.submitTicket": "Crea ticket",
   "send.linkKeyNote":
-    "Il link contiene la chiave dopo il #: i browser non inviano quella parte al server, quindi il relay conserva solo byte che non sa leggere.",
+    "La chiave sta dopo il `#`, che i browser non mandano mai al server.",
   "send.filesLabel": "Cosa mandi",
   "send.filesHint": "Puoi anche trascinare file e cartelle nella finestra.",
   "send.filesRemove": (name) => `Togli ${name}`,
@@ -525,16 +528,14 @@ export const it: Dict = {
   "send.whoLabel": "A chi va",
   "send.modeLabel": "Modo di invio",
   "send.noteLabel": "Due righe per chi riceve (facoltativo)",
-  "send.noteHint":
-    "Viaggia dentro l'offerta sigillata: il relay non la vede.",
+  "send.noteHint": "Viaggia dentro l'offerta sigillata.",
   "send.notePlaceholder": "Ecco i file di cui parlavamo.",
   "send.keepCodeTitle": "Vale per più persone",
-  "send.keepCodeDesc":
-    "Di norma il codice vale per un solo destinatario e poi si ritira. Attivalo per lasciarlo aperto finché non annulli l'invio.",
-  "send.keepCodeLabel": "Codice valido per più persone",
-  "send.depositTitle": "Lascia in casella, non aspettare",
+  "send.keepCodeDesc": "Altrimenti il codice si ritira dopo un destinatario.",
+  "send.keepCodeLabel": "Codice per più persone",
+  "send.depositTitle": "Deposita e non aspettare",
   "send.depositDesc":
-    "Deposita subito sul relay anche se è collegato: tu chiudi e te ne dimentichi. Sblocca scadenza, numero di ritiri e password.",
+    "Lo lascia sul relay anche se è collegato, così puoi chiudere. Sblocca scadenza, ritiri e password.",
   "send.depositLabel": "Lascia in casella",
   "send.expiresAfter": "Scade dopo",
   "send.depositTtlLabel": "Scadenza del deposito",
@@ -544,15 +545,14 @@ export const it: Dict = {
     "Di norma uno solo: appena lo scarica, il relay lo cancella.",
   "send.passwordLabel": "Password (facoltativa)",
   "send.passwordHint":
-    "Cifra il deposito anche per il destinatario: senza questa password non si apre. Il relay non la conosce e non può recuperarla — se la perdi, il file è perso.",
+    "Nessuno può recuperarla, relay compreso. Se la perdi, il file è perso.",
   "send.passwordPlaceholder": "nessuna",
   "send.linkTooMany":
-    "Un link pubblica un solo elemento. Scegline uno, oppure metti tutto in una cartella e seleziona quella.",
+    "Un link pubblica un elemento solo. Scegline uno, o mettili in una cartella.",
   "send.maxDownloadsLabel": "Download consentiti",
   "send.maxDownloadsHint": "Lascia vuoto per non mettere limiti.",
   "send.maxDownloadsPlaceholder": "illimitati",
-  "send.noRelay":
-    "Serve un relay per questa modalità e non ne risulta configurato nessuno. Impostane uno da Impostazioni.",
+  "send.noRelay": "Questa modalità richiede un relay. Impostane uno da Impostazioni.",
   "send.noArvoloRelay": "Nessun relay Arvolo",
 
   "receive.explainEmpty":

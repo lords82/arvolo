@@ -485,52 +485,56 @@ export const fr: Dict = {
   "send.modeCode": "Code",
   "send.modeLink": "Lien",
   "send.modeTicket": "Ticket",
-  "send.blurbContact":
-    "Va droit à quelqu'un de votre carnet d'adresses. S'il est connecté, ça passe directement d'appareil à appareil ; sinon, ça reste dans sa boîte sur le relais jusqu'à ce qu'il le récupère.",
-  "send.blurbCode":
-    "Un code court à lire à voix haute ou à scanner. Qui le reçoit le colle dans Arvolo — pas besoin qu'il soit déjà dans votre carnet, mais vous devez être connectés tous les deux en ce moment.",
-  "send.blurbLink":
-    "Une adresse qui s'ouvre dans n'importe quel navigateur : qui la reçoit n'a besoin ni d'Arvolo ni d'un compte. Le fichier est déchiffré dans le navigateur, la clé voyage dans le fragment de l'URL et n'arrive jamais au relais.",
-  "send.blurbTicket":
-    "Un ticket arvc… pair-à-pair : il ne passe ni par la boîte ni par le relais Arvolo. Pour percer le NAT, un relais de connexion peut être nécessaire ; il ne voit que du trafic chiffré.",
+  "send.blurbContact": "Droit à quelqu'un de votre carnet d'adresses.",
+  "send.blurbContactMore":
+    "En direct s'il est connecté, sinon ça attend dans sa boîte.",
+  "send.blurbCode": "Un code court à dicter ou à scanner.",
+  "send.blurbCodeMore":
+    "Pas besoin qu'il soit un contact, mais vous devez être connectés tous les deux.",
+  "send.blurbLink": "Une adresse qui s'ouvre dans n'importe quel navigateur.",
+  "send.blurbLinkMore":
+    "Qui la reçoit n'a besoin ni de compte ni de rien à installer.",
+  "send.blurbTicket": "Un ticket arvc…, droit depuis cette machine.",
+  "send.blurbTicketMore": "Ni la boîte ni le relais Arvolo n'interviennent.",
   "send.ttl1h": "1 heure",
   "send.ttl1d": "1 jour",
   "send.ttl7d": "7 jours",
   "send.ttl30d": "30 jours",
+  "send.pickerEmptyTitle": "Votre carnet d'adresses est vide",
   "send.pickerEmpty":
-    "Vous n'avez encore personne dans votre carnet d'adresses. Ajoutez quelqu'un depuis Personnes — le plus rapide est l'échange par code, qui vous enregistre mutuellement et déjà vérifiés.",
+    "Ajoutez quelqu'un depuis Personnes. L'échange par code est le plus rapide : il vous enregistre mutuellement, déjà vérifiés.",
   "send.pickerSearch": "Chercher un contact…",
   "send.pickerRecipient": "Destinataire",
   "send.pickerNoMatch": (q) => `Aucun contact ne correspond à « ${q} ».`,
-  "send.depositResult": (to) =>
-    `Déposé pour ${to}. Le ticket ci-dessous est votre copie : il ne sert que si vous voulez le remettre vous-même, par exemple si ${to} ne reçoit pas l'offre.`,
+  "send.depositResult": (to) => `Déposé pour ${to}`,
+  "send.depositResultDetail": (to) =>
+    `Votre copie, au cas où ${to} ne recevrait pas l'offre.`,
   "send.onItsWay": (to) => `En route vers ${to}`,
   "send.saveArvolo": "Enregistrer en fichier .arvolo…",
-  "send.arvoloSaved": (name: string) => `${name} enregistré — partagez-le par n'importe quel canal ; en face, il s'ouvre avec Arvolo.`,
+  "send.arvoloSaved": (name: string) => `${name} enregistré`,
+  "send.arvoloSavedDetail":
+    "Partagez-le par n'importe quel canal ; il s'ouvre avec Arvolo.",
   "send.onItsWayDetail":
     "S'il est en ligne, ça passe en direct ; sinon, ça reste dans sa boîte.",
   "send.codeKeepDetail":
-    "Le code reste valable pour plusieurs destinataires jusqu'à ce que vous annuliez l'envoi.",
-  "send.codeOnceDetail":
-    "Le code vaut pour un seul destinataire, puis se retire tout seul.",
+    "Valable pour plusieurs destinataires, jusqu'à annulation de l'envoi.",
+  "send.codeOnceDetail": "Vaut pour un destinataire, puis se retire.",
   "send.linkDetail":
-    "Quiconque possède cette adresse peut télécharger le fichier jusqu'à son expiration, jusqu'à épuisement des téléchargements autorisés, ou jusqu'à ce que vous le retiriez depuis « Liens et dépôts ».",
+    "Qui a l'adresse peut télécharger jusqu'à expiration, épuisement ou retrait.",
   "send.ticketDetail":
-    "Ticket pair-à-pair : valable tant que le démon tourne et que l'envoi n'a pas été annulé.",
+    "Valable tant que le démon tourne et que l'envoi n'est pas annulé.",
   "send.countOne": "1 élément",
-  "send.countMany": (n) =>
-    `${n} éléments · ils seront réunis dans une archive`,
+  "send.countMany": (n) => `${n} éléments · réunis en une archive`,
   "send.titleReady": "Prêt",
   "send.title": "Envoyer",
-  "send.subtitleReady": "Transmettez ce que vous voyez ci-dessous.",
   "send.subtitle": "Chiffré de bout en bout, toujours.",
-  "send.submitDeposit": "Laisser dans sa boîte",
+  "send.submitDeposit": "Déposer",
   "send.submitSend": "Envoyer",
   "send.submitCode": "Générer le code",
   "send.submitLink": "Créer le lien",
   "send.submitTicket": "Créer le ticket",
   "send.linkKeyNote":
-    "Le lien porte la clé après le # : les navigateurs n'envoient pas cette partie au serveur, donc le relais ne conserve que des octets qu'il ne sait pas lire.",
+    "La clé est après le `#`, que les navigateurs n'envoient jamais au serveur.",
   "send.filesLabel": "Ce que vous envoyez",
   "send.filesHint":
     "Vous pouvez aussi glisser fichiers et dossiers dans la fenêtre.",
@@ -540,16 +544,14 @@ export const fr: Dict = {
   "send.whoLabel": "À qui ça va",
   "send.modeLabel": "Mode d'envoi",
   "send.noteLabel": "Deux lignes pour le destinataire (facultatif)",
-  "send.noteHint":
-    "Ça voyage dans l'offre scellée : le relais ne le voit pas.",
+  "send.noteHint": "Ça voyage dans l'offre scellée.",
   "send.notePlaceholder": "Voici les fichiers dont on parlait.",
   "send.keepCodeTitle": "Vaut pour plusieurs personnes",
-  "send.keepCodeDesc":
-    "Par défaut le code vaut pour un seul destinataire, puis se retire. Activez pour le laisser ouvert jusqu'à ce que vous annuliez l'envoi.",
-  "send.keepCodeLabel": "Code valable pour plusieurs personnes",
-  "send.depositTitle": "Laisser dans la boîte, ne pas attendre",
+  "send.keepCodeDesc": "Sinon le code se retire après un destinataire.",
+  "send.keepCodeLabel": "Code multi-destinataires",
+  "send.depositTitle": "Déposer sans attendre",
   "send.depositDesc":
-    "Dépose tout de suite sur le relais même s'il est connecté : vous fermez et vous n'y pensez plus. Débloque l'expiration, le nombre de retraits et le mot de passe.",
+    "Le laisse sur le relais même s'il est connecté, pour que vous puissiez fermer. Débloque expiration, retraits et mot de passe.",
   "send.depositLabel": "Laisser dans la boîte",
   "send.expiresAfter": "Expire après",
   "send.depositTtlLabel": "Expiration du dépôt",
@@ -559,15 +561,14 @@ export const fr: Dict = {
     "Un seul, en principe : dès qu'il le télécharge, le relais l'efface.",
   "send.passwordLabel": "Mot de passe (facultatif)",
   "send.passwordHint":
-    "Chiffre le dépôt y compris pour le destinataire : sans ce mot de passe, il ne s'ouvre pas. Le relais ne le connaît pas et ne peut pas le récupérer — si vous le perdez, le fichier est perdu.",
+    "Personne ne peut le récupérer, le relais compris. Perdu, le fichier est perdu.",
   "send.passwordPlaceholder": "aucun",
   "send.linkTooMany":
-    "Un lien publie un seul élément. Choisissez-en un, ou mettez tout dans un dossier et sélectionnez-le.",
+    "Un lien publie un seul élément. Choisissez-en un, ou mettez-les dans un dossier.",
   "send.maxDownloadsLabel": "Téléchargements autorisés",
   "send.maxDownloadsHint": "Laissez vide pour ne pas mettre de limite.",
   "send.maxDownloadsPlaceholder": "illimités",
-  "send.noRelay":
-    "Ce mode a besoin d'un relais et aucun ne semble configuré. Réglez-en un depuis Réglages.",
+  "send.noRelay": "Ce mode a besoin d'un relais. Réglez-en un depuis Réglages.",
   "send.noArvoloRelay": "Aucun relais Arvolo",
 
   "receive.explainEmpty":

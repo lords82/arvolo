@@ -502,52 +502,60 @@ export const en = {
   "send.modeCode": "Code",
   "send.modeLink": "Link",
   "send.modeTicket": "Ticket",
-  "send.blurbContact":
-    "Goes straight to somebody in your address book. If they are connected it passes directly from device to device; if they are not, it waits in their mailbox on the relay until they collect it.",
-  "send.blurbCode":
-    "A short code to read out or point a camera at. Whoever gets it pastes it into Arvolo — they need not be in your address book, but you both have to be connected right now.",
-  "send.blurbLink":
-    "An address that opens in any browser: whoever receives it needs neither Arvolo nor an account. The file is decrypted in the browser, the key travels in the URL fragment and never reaches the relay.",
-  "send.blurbTicket":
-    "An arvc… peer-to-peer ticket: it goes through neither the mailbox nor the Arvolo relay. Punching through NAT may need a connection relay, which only ever sees encrypted traffic.",
+  // Each mode gets a line saying what the *recipient* needs — the only thing
+  // that decides which one is right — and a second line for what it costs.
+  "send.blurbContact": "Straight to somebody in your address book.",
+  "send.blurbContactMore":
+    "Direct if they are online; otherwise it waits in their mailbox.",
+  "send.blurbCode": "A short code to read out or scan.",
+  "send.blurbCodeMore":
+    "They need not be a contact, but you both have to be online right now.",
+  "send.blurbLink": "An address that opens in any browser.",
+  "send.blurbLinkMore": "Whoever gets it needs no account and nothing installed.",
+  "send.blurbTicket": "An arvc… ticket, straight from this machine.",
+  "send.blurbTicketMore":
+    "Neither the mailbox nor the Arvolo relay is involved.",
   "send.ttl1h": "1 hour",
   "send.ttl1d": "1 day",
   "send.ttl7d": "7 days",
   "send.ttl30d": "30 days",
+  "send.pickerEmptyTitle": "Your address book is empty",
   "send.pickerEmpty":
-    "You have nobody in your address book yet. Add somebody from People — the quickest way is the code swap, which saves you both, already verified.",
+    "Add somebody from People. Swapping codes is quickest — it saves you both, already verified.",
   "send.pickerSearch": "Search a contact…",
   "send.pickerRecipient": "Recipient",
   "send.pickerNoMatch": (q: string) => `No contact matches “${q}”.`,
-  "send.depositResult": (to: string) =>
-    `Deposited for ${to}. The ticket below is your own copy: you only need it if you want to hand it over yourself — if ${to} never gets the offer, say.`,
+  "send.depositResult": (to: string) => `Deposited for ${to}`,
+  // Why the ticket is on screen at all when nobody has to do anything with it.
+  "send.depositResultDetail": (to: string) =>
+    `Your own copy, in case ${to} never gets the offer.`,
   "send.onItsWay": (to: string) => `On its way to ${to}`,
   "send.saveArvolo": "Save as .arvolo file…",
-  "send.arvoloSaved": (name: string) => `Saved ${name} — share it over any channel; the other side opens it with Arvolo.`,
+  "send.arvoloSaved": (name: string) => `Saved ${name}`,
+  "send.arvoloSavedDetail": "Share it over any channel; they open it with Arvolo.",
   "send.onItsWayDetail":
     "If they are online it goes direct, otherwise it waits in their mailbox.",
   "send.codeKeepDetail":
-    "The code stays good for several recipients until you cancel the send.",
-  "send.codeOnceDetail":
-    "The code is good for one recipient and then retires itself.",
+    "Good for several recipients, until you cancel the send.",
+  "send.codeOnceDetail": "Good for one recipient, then it retires.",
   "send.linkDetail":
-    "Anyone holding this address can download the file until it expires, runs out of allowed downloads, or you withdraw it from “Links and deposits”.",
+    "Anyone with the address can download it until it expires, runs out, or you withdraw it.",
   "send.ticketDetail":
-    "Peer-to-peer ticket: good for as long as the daemon is running and the send has not been cancelled.",
+    "Good for as long as the daemon runs and the send is not cancelled.",
   "send.countOne": "1 item",
-  "send.countMany": (n: number) =>
-    `${n} items · they will be packed into one archive`,
+  "send.countMany": (n: number) => `${n} items · packed into one archive`,
   "send.titleReady": "Ready",
   "send.title": "Send",
-  "send.subtitleReady": "Hand over what you see below.",
   "send.subtitle": "Encrypted end to end, always.",
-  "send.submitDeposit": "Leave it in their mailbox",
+  "send.submitDeposit": "Deposit",
   "send.submitSend": "Send",
-  "send.submitCode": "Generate the code",
-  "send.submitLink": "Create the link",
-  "send.submitTicket": "Create the ticket",
+  "send.submitCode": "Generate code",
+  "send.submitLink": "Create link",
+  "send.submitTicket": "Create ticket",
+  // The one place the `#` is explained, and the reason `send.blurbLink` above
+  // does not mention it: this is where the link actually exists.
   "send.linkKeyNote":
-    "The link carries the key after the #: browsers do not send that part to the server, so the relay keeps only bytes it cannot read.",
+    "The key rides after the `#`, which browsers never send to the server.",
   "send.filesLabel": "What you are sending",
   "send.filesHint": "You can also drag files and folders into the window.",
   "send.filesRemove": (name: string) => `Remove ${name}`,
@@ -556,16 +564,15 @@ export const en = {
   "send.whoLabel": "Who it goes to",
   "send.modeLabel": "Way of sending",
   "send.noteLabel": "A couple of lines for the recipient (optional)",
-  "send.noteHint":
-    "It travels inside the sealed offer: the relay does not see it.",
+  "send.noteHint": "It travels inside the sealed offer.",
   "send.notePlaceholder": "Here are the files we talked about.",
   "send.keepCodeTitle": "Good for several people",
   "send.keepCodeDesc":
-    "By default the code is good for one recipient and then retires. Turn this on to leave it open until you cancel the send.",
-  "send.keepCodeLabel": "Code good for several people",
-  "send.depositTitle": "Leave it in the mailbox, don't wait",
+    "Otherwise the code retires after one recipient.",
+  "send.keepCodeLabel": "Code for several people",
+  "send.depositTitle": "Deposit and don't wait",
   "send.depositDesc":
-    "Deposit on the relay straight away even if they are connected: you close the window and forget about it. It unlocks expiry, number of collections and password.",
+    "Leaves it on the relay even if they are online, so you can close the window. Unlocks expiry, collections and password.",
   "send.depositLabel": "Leave it in the mailbox",
   "send.expiresAfter": "Expires after",
   "send.depositTtlLabel": "Deposit expiry",
@@ -574,16 +581,17 @@ export const en = {
   "send.maxPickupsHint":
     "One, normally: the moment they download it, the relay deletes it.",
   "send.passwordLabel": "Password (optional)",
+  // The sender's half of the password story: you choose it, and nobody can get
+  // it back for you. The recipient's half lives in `incoming.passwordHint`.
   "send.passwordHint":
-    "It encrypts the deposit against the recipient too: without this password it does not open. The relay does not know it and cannot recover it — lose it and the file is lost.",
+    "Nobody can recover it, the relay included. Lose it and the file is lost.",
   "send.passwordPlaceholder": "none",
   "send.linkTooMany":
-    "A link publishes one single item. Pick one, or put everything in a folder and select that.",
+    "A link publishes one item. Pick one, or put them in a folder.",
   "send.maxDownloadsLabel": "Downloads allowed",
   "send.maxDownloadsHint": "Leave it empty for no limit.",
   "send.maxDownloadsPlaceholder": "unlimited",
-  "send.noRelay":
-    "This way of sending needs a relay and none appears to be configured. Set one up under Settings.",
+  "send.noRelay": "This way of sending needs a relay. Set one up in Settings.",
   "send.noArvoloRelay": "No Arvolo relay",
 
   // ---- receive sheet -----------------------------------------------------

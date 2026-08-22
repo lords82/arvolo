@@ -47,13 +47,22 @@ const MODE_KEY = {
 
 const MODE_ORDER: Mode[] = ["contact", "code", "link", "ticket"];
 
-/** The blurb under the mode switch. Each says what the recipient needs, because
- *  that is the only thing that actually decides which mode is right. */
+/** The blurb under the mode switch, on two levels. The first line says what the
+ *  *recipient* needs, which is the only thing that decides which mode is right;
+ *  the second says what it costs, for whoever is still choosing. Somebody who
+ *  already knows reads four short lines instead of four paragraphs. */
 const BLURB = {
   contact: "send.blurbContact",
   code: "send.blurbCode",
   link: "send.blurbLink",
   ticket: "send.blurbTicket",
+} as const satisfies Record<Mode, string>;
+
+const BLURB_MORE = {
+  contact: "send.blurbContactMore",
+  code: "send.blurbCodeMore",
+  link: "send.blurbLinkMore",
+  ticket: "send.blurbTicketMore",
 } as const satisfies Record<Mode, string>;
 
 const TTL_CHOICES = [
@@ -95,7 +104,12 @@ function ContactPicker({
 
   if (!contacts.length) {
     return (
-      <div className="card card-pad t-sm t-sec">{t("send.pickerEmpty")}</div>
+      <div className="card card-pad">
+        <div style={{ fontWeight: 570 }}>{t("send.pickerEmptyTitle")}</div>
+        <div className="t-sm t-sec" style={{ marginTop: 2 }}>
+          {t("send.pickerEmpty")}
+        </div>
+      </div>
     );
   }
 
@@ -243,8 +257,12 @@ export function SendSheet() {
           setResult({
             kind: "deposit",
             value: r.ticket,
-            detail: t("send.depositResult", to),
+            detail: t("send.depositResultDetail", to),
           });
+          // The outcome as a toast, the way the live send already reports it;
+          // the caption under the ticket then only has to answer "why am I
+          // being shown this at all", which is the part that is not obvious.
+          toast.ok(t("send.depositResult", to));
         } else {
           await send(to, files.map((f) => f.id), note);
           toast.ok(t("send.onItsWay", to), t("send.onItsWayDetail"));
@@ -298,7 +316,9 @@ export function SendSheet() {
       open={open}
       onClose={close}
       title={result ? t("send.titleReady") : t("send.title")}
-      subtitle={result ? t("send.subtitleReady") : t("send.subtitle")}
+      // No subtitle once there is a result: the thing to hand over is right
+      // there under it, and "Hand over what you see below" only said so again.
+      subtitle={result ? undefined : t("send.subtitle")}
       footer={
         result ? (
           <>
@@ -358,7 +378,8 @@ export function SendSheet() {
                   `${base}.arvolo`,
                   result.value
                 );
-                if (saved) toast.ok(t("send.arvoloSaved", saved));
+                if (saved)
+                  toast.ok(t("send.arvoloSaved", saved), t("send.arvoloSavedDetail"));
               }}
             >
               {t("send.saveArvolo")}
@@ -425,7 +446,10 @@ export function SendSheet() {
                     label: t(MODE_KEY[m]),
                   }))}
                 />
-                <div className="hint">{t(BLURB[mode])}</div>
+                <div className="hint">
+                  {t(BLURB[mode])}
+                  <div className="t-xs t-mut">{t(BLURB_MORE[mode])}</div>
+                </div>
               </div>
             )}
           </Field>

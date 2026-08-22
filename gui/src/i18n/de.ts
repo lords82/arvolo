@@ -481,52 +481,57 @@ export const de: Dict = {
   "send.modeCode": "Code",
   "send.modeLink": "Link",
   "send.modeTicket": "Ticket",
-  "send.blurbContact":
-    "Geht direkt an jemanden aus Ihrem Adressbuch. Ist die Person verbunden, läuft es direkt von Gerät zu Gerät; ist sie es nicht, bleibt es in ihrem Postfach auf dem Relay, bis sie es abholt.",
-  "send.blurbCode":
-    "Ein kurzer Code zum Vorlesen oder Abscannen. Wer ihn bekommt, fügt ihn in Arvolo ein — die Person muss nicht im Adressbuch stehen, aber Sie müssen beide gerade verbunden sein.",
-  "send.blurbLink":
-    "Eine Adresse, die sich in jedem Browser öffnet: wer sie bekommt, braucht weder Arvolo noch ein Konto. Die Datei wird im Browser entschlüsselt, der Schlüssel reist im URL-Fragment und erreicht das Relay nie.",
-  "send.blurbTicket":
-    "Ein arvc…-Peer-to-Peer-Ticket: es läuft weder über das Postfach noch über das Arvolo-Relay. Um NAT zu durchstoßen, kann ein Verbindungsrelay nötig sein; es sieht nur verschlüsselten Verkehr.",
+  "send.blurbContact": "Direkt an jemanden aus Ihrem Adressbuch.",
+  "send.blurbContactMore":
+    "Direkt, wenn die Person online ist; sonst wartet es im Postfach.",
+  "send.blurbCode": "Ein kurzer Code zum Vorlesen oder Scannen.",
+  "send.blurbCodeMore":
+    "Kein Kontakt nötig, aber Sie müssen beide gerade online sein.",
+  "send.blurbLink": "Eine Adresse, die sich in jedem Browser öffnet.",
+  "send.blurbLinkMore":
+    "Wer sie bekommt, braucht kein Konto und muss nichts installieren.",
+  "send.blurbTicket": "Ein arvc…-Ticket, direkt von diesem Rechner.",
+  "send.blurbTicketMore":
+    "Weder das Postfach noch das Arvolo-Relay sind beteiligt.",
   "send.ttl1h": "1 Stunde",
   "send.ttl1d": "1 Tag",
   "send.ttl7d": "7 Tage",
   "send.ttl30d": "30 Tage",
+  "send.pickerEmptyTitle": "Ihr Adressbuch ist leer",
   "send.pickerEmpty":
-    "Sie haben noch niemanden im Adressbuch. Fügen Sie unter Personen jemanden hinzu — am schnellsten über den Code-Tausch, der Sie beide speichert und gleich verifiziert.",
+    "Fügen Sie unter Personen jemanden hinzu. Am schnellsten geht der Code-Tausch: er speichert Sie beide, gleich verifiziert.",
   "send.pickerSearch": "Kontakt suchen…",
   "send.pickerRecipient": "Empfänger",
   "send.pickerNoMatch": (q) => `Kein Kontakt passt zu „${q}“.`,
-  "send.depositResult": (to) =>
-    `Für ${to} abgelegt. Das Ticket unten ist Ihre eigene Kopie: Sie brauchen es nur, wenn Sie es selbst übergeben wollen — etwa, wenn ${to} das Angebot nicht erhält.`,
+  "send.depositResult": (to) => `Für ${to} abgelegt`,
+  "send.depositResultDetail": (to) =>
+    `Ihre eigene Kopie, falls ${to} das Angebot nicht erhält.`,
   "send.onItsWay": (to) => `Unterwegs zu ${to}`,
   "send.saveArvolo": "Als .arvolo-Datei speichern…",
-  "send.arvoloSaved": (name: string) => `${name} gespeichert — teile sie über einen beliebigen Kanal; drüben öffnet man sie mit Arvolo.`,
+  "send.arvoloSaved": (name: string) => `${name} gespeichert`,
+  "send.arvoloSavedDetail":
+    "Über jeden Kanal teilbar; drüben öffnet man sie mit Arvolo.",
   "send.onItsWayDetail":
     "Ist die Person online, geht es direkt, sonst bleibt es in ihrem Postfach.",
   "send.codeKeepDetail":
-    "Der Code bleibt für mehrere Empfänger gültig, bis Sie den Versand abbrechen.",
-  "send.codeOnceDetail":
-    "Der Code gilt für einen einzigen Empfänger und zieht sich dann selbst zurück.",
+    "Für mehrere Empfänger gültig, bis Sie den Versand abbrechen.",
+  "send.codeOnceDetail": "Gilt für einen Empfänger, dann zieht er sich zurück.",
   "send.linkDetail":
-    "Wer diese Adresse hat, kann die Datei laden, bis sie abläuft, bis die erlaubten Downloads aufgebraucht sind, oder bis Sie sie unter „Links und Ablagen“ zurückziehen.",
+    "Wer die Adresse hat, kann laden, bis sie abläuft, aufgebraucht oder zurückgezogen ist.",
   "send.ticketDetail":
-    "Peer-to-Peer-Ticket: gültig, solange der Daemon läuft und der Versand nicht abgebrochen wurde.",
+    "Gültig, solange der Daemon läuft und der Versand nicht abgebrochen ist.",
   "send.countOne": "1 Element",
-  "send.countMany": (n) =>
-    `${n} Elemente · sie werden in ein Archiv gepackt`,
+  "send.countMany": (n) => `${n} Elemente · in ein Archiv gepackt`,
   "send.titleReady": "Fertig",
   "send.title": "Senden",
-  "send.subtitleReady": "Geben Sie weiter, was Sie unten sehen.",
   "send.subtitle": "Immer Ende-zu-Ende verschlüsselt.",
-  "send.submitDeposit": "Im Postfach hinterlegen",
+  "send.submitDeposit": "Hinterlegen",
   "send.submitSend": "Senden",
   "send.submitCode": "Code erzeugen",
   "send.submitLink": "Link erstellen",
   "send.submitTicket": "Ticket erstellen",
   "send.linkKeyNote":
-    "Der Link trägt den Schlüssel hinter dem #: Browser schicken diesen Teil nicht an den Server, das Relay verwahrt also nur Bytes, die es nicht lesen kann.",
+    "Der Schlüssel steht hinter dem `#`, den Browser nie an den Server schicken.",
   "send.filesLabel": "Was Sie senden",
   "send.filesHint":
     "Sie können Dateien und Ordner auch ins Fenster ziehen.",
@@ -536,16 +541,15 @@ export const de: Dict = {
   "send.whoLabel": "An wen es geht",
   "send.modeLabel": "Versandart",
   "send.noteLabel": "Zwei Zeilen für die Gegenseite (optional)",
-  "send.noteHint":
-    "Reisen im versiegelten Angebot mit: das Relay sieht sie nicht.",
+  "send.noteHint": "Reisen im versiegelten Angebot mit.",
   "send.notePlaceholder": "Hier sind die Dateien, von denen wir sprachen.",
   "send.keepCodeTitle": "Gilt für mehrere Personen",
   "send.keepCodeDesc":
-    "Normalerweise gilt der Code für einen Empfänger und zieht sich dann zurück. Schalten Sie das ein, um ihn offen zu lassen, bis Sie den Versand abbrechen.",
-  "send.keepCodeLabel": "Code für mehrere Personen gültig",
-  "send.depositTitle": "Ins Postfach legen, nicht warten",
+    "Sonst zieht sich der Code nach einem Empfänger zurück.",
+  "send.keepCodeLabel": "Mehrfachcode",
+  "send.depositTitle": "Hinterlegen, nicht warten",
   "send.depositDesc":
-    "Legt sofort auf dem Relay ab, auch wenn die Gegenseite verbunden ist: Sie schließen das Fenster und vergessen es. Schaltet Ablauf, Zahl der Abholungen und Passwort frei.",
+    "Bleibt auch bei verbundener Gegenseite auf dem Relay, Sie können also schließen. Schaltet Ablauf, Abholungen und Passwort frei.",
   "send.depositLabel": "Ins Postfach legen",
   "send.expiresAfter": "Läuft ab nach",
   "send.depositTtlLabel": "Ablauf der Ablage",
@@ -555,15 +559,15 @@ export const de: Dict = {
     "Normalerweise nur eine: sobald geladen wurde, löscht das Relay sie.",
   "send.passwordLabel": "Passwort (optional)",
   "send.passwordHint":
-    "Verschlüsselt die Ablage auch gegen die Empfängerseite: ohne dieses Passwort geht sie nicht auf. Das Relay kennt es nicht und kann es nicht wiederherstellen — verlieren Sie es, ist die Datei verloren.",
+    "Niemand kann es wiederherstellen, das Relay eingeschlossen. Verloren heißt verloren.",
   "send.passwordPlaceholder": "keines",
   "send.linkTooMany":
-    "Ein Link veröffentlicht genau ein Element. Wählen Sie eines, oder packen Sie alles in einen Ordner und wählen Sie den.",
+    "Ein Link veröffentlicht ein Element. Wählen Sie eines, oder nehmen Sie einen Ordner.",
   "send.maxDownloadsLabel": "Erlaubte Downloads",
   "send.maxDownloadsHint": "Leer lassen für kein Limit.",
   "send.maxDownloadsPlaceholder": "unbegrenzt",
   "send.noRelay":
-    "Diese Versandart braucht ein Relay, und es scheint keines konfiguriert zu sein. Richten Sie eines unter Einstellungen ein.",
+    "Diese Versandart braucht ein Relay. Richten Sie eines unter Einstellungen ein.",
   "send.noArvoloRelay": "Kein Arvolo-Relay",
 
   "receive.explainEmpty":
