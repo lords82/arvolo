@@ -119,6 +119,52 @@ pub const CHUNK_ALPN: &[u8] = b"arvolo/chunk/1";
 /// so a malicious provider can't drive the receiver to OOM or fill the disk.
 const MAX_CHUNK_CT: u64 = CHUNK_SIZE as u64 + 16;
 
+/// How long a chunk fetch may go without receiving a single byte before it is
+/// treated as dead.
+///
+/// Not a deadline on the fetch: a chunk on a slow link can legitimately take
+/// minutes, and cutting it off mid-flow would turn a slow provider into a failing
+/// one. This bounds *silence*, which is a different thing and always a fault.
+///
+/// A fetch had no bound at all before this, and a provider that stopped sending
+/// without closing hung the task holding it — forever, since QUIC keeps a
+/// connection alive as long as the peer answers at the transport level. That is
+/// worse than a failure, because a failure is something the scheduler knows what to
+/// do with: it cools the provider down, re-queues the piece and reassigns it within
+/// seconds. Silence reaches none of that machinery. Observed: a 10.7 GiB download
+/// stopped at 97.4% and sat there for hours, no progress and no error, with the
+/// sender still counting a connected peer.
+///
+/// Thirty seconds is long enough to be unambiguous — no healthy transfer pauses
+/// that long between packets — and short against the cost of being wrong, which is
+/// one re-fetched chunk from another source.
+const CHUNK_STALL_SECS: u64 = 30;
+
+/// How long a fetch may spend *reaching* a provider before treating it as
+/// unreachable.
+///
+/// Deliberately not [`CHUNK_STALL_SECS`]: "I cannot reach you" and "you stopped
+/// talking to me half way" are different faults with different honest durations.
+/// Opening a chunk stream includes the connect, and so discovery and hole punching
+/// — which the delivery loop budgets `LIVE_CONNECT_SECS` (90s) for, calling the
+/// cross-internet cold start "highly variable". Bounding that at thirty seconds
+/// would turn a perfectly good provider behind an awkward NAT into a failing one,
+/// and where there is only one provider — the ordinary `send --to` — into a loop of
+/// thirty-second attempts in place of the wait that would have worked.
+const CHUNK_OPEN_SECS: u64 = 90;
+
+/// How long a chunk connection that has *already served a request* may go quiet
+/// before the sender hangs up on it.
+///
+/// The short bound belongs to a connection that has never asked for anything: that
+/// one has shown no purpose, and it is where the hang seen in the wild lives.
+/// Applying the same impatience afterwards would disconnect peers doing nothing
+/// wrong — a swarm seeder between requests, a provider the receiver's rarest-first
+/// ordering is not favouring at the moment — and charge them a fresh handshake for
+/// it. This is long enough that idling is not punished, and still an answer to
+/// "when does a connection nobody uses go away", which before was: never.
+const CHUNK_IDLE_SECS: u64 = 5 * 60;
+
 #[derive(Serialize, Deserialize)]
 struct ChunkReq {
     hash: Hash,
@@ -345,10 +391,64 @@ impl ProtocolHandler for ChunkServer {
         // add per flow-control window, exactly as it did when the counter was global.
         let sent = self.sent.counter(peer);
         // Serve one request per accepted bi-stream; a receiver may open several.
-        while let Ok((mut send, mut recv)) = conn.accept_bi().await {
-            let Some(req) = read_frame::<ChunkReq>(&mut recv).await else {
-                break;
+        // Every wait here is bounded, and it is the same bug the receiver's body read
+        // had, seen from this end: a peer that is present and silent used to hold this
+        // loop for ever, and with it a connection that goes on counting as an active
+        // downloader — the sender reporting someone downloading who will never ask for
+        // anything and never leave.
+        //
+        // The transport does not save us. Keep-alives run every second, so a
+        // connection with no application data on it is never *idle* by QUIC's
+        // reckoning: it answers at the transport level for as long as both processes
+        // live. Only this loop can decide that nothing is being asked.
+        //
+        // Bounding the accept, not just the read, is what actually closes it: a stream
+        // opened and never written to is invisible here — QUIC does not announce it to
+        // the peer until the first byte — so a receiver that opens one and says
+        // nothing leaves this waiting on `accept_bi`, never reaching the read at all.
+        //
+        // The first request and the ones after it get different patience, because
+        // they are different situations. A connection that has never asked for
+        // anything has not yet shown a purpose, and the one case seen in the wild sits
+        // exactly here. A connection that has already served is entitled to a quiet
+        // spell: a swarm seeder (`ARVOLO_SEED_AFTER`) or a provider the receiver's
+        // rarest-first ordering is not favouring right now can easily go longer than
+        // that between requests, and hanging up on it costs a fresh handshake every
+        // time. Within a running download the gaps are nothing like this — the
+        // receiver's own provider cooldown is three seconds — so the long branch only
+        // ever covers idling, never transferring.
+        let mut has_asked = false;
+        loop {
+            let patience = if has_asked {
+                idle_after()
+            } else {
+                stall_after()
             };
+            let accepted = match tokio::time::timeout(patience, conn.accept_bi()).await {
+                Ok(Ok(pair)) => pair,
+                Ok(Err(_)) => break,
+                Err(_) => {
+                    tracing::debug!(
+                        "chunk: connection idle for {}s with nothing asked; closing it",
+                        patience.as_secs()
+                    );
+                    break;
+                }
+            };
+            let (mut send, mut recv) = accepted;
+            let req = match tokio::time::timeout(stall_after(), read_frame::<ChunkReq>(&mut recv))
+                .await
+            {
+                Ok(Some(req)) => req,
+                Ok(None) => break,
+                Err(_) => {
+                    tracing::debug!("chunk: a receiver opened a stream and then asked nothing");
+                    break;
+                }
+            };
+            // It has asked for something: from here the connection has a purpose, and
+            // a quiet spell on it is idling rather than the shape of the hang.
+            has_asked = true;
             // Producing a chunk opens the file and re-encrypts 16 MiB (CPU-bound).
             // Run it on the blocking pool so concurrent requests (parallel receiver
             // fetches) don't stall the async runtime's worker threads.
@@ -420,14 +520,15 @@ pub(crate) async fn fetch_chunk_wire(
     hash: Hash,
     offset: u64,
 ) -> Result<(u64, Vec<u8>)> {
-    let mut stream = open_chunk_stream(endpoint, addr, hash, offset).await?;
+    let reach = open_after();
+    let mut stream =
+        match tokio::time::timeout(reach, open_chunk_stream(endpoint, addr, hash, offset)).await {
+            Err(_) => anyhow::bail!("could not reach the chunk provider in {}s", reach.as_secs()),
+            Ok(r) => r?,
+        };
     let want = stream.total_len.saturating_sub(offset) as usize;
     let mut buf = vec![0u8; want];
-    stream
-        .recv
-        .read_exact(&mut buf)
-        .await
-        .map_err(|e| anyhow!("read chunk body: {}", with_causes(e)))?;
+    read_body_or_stall(&mut stream.recv, &mut buf, stall_after()).await?;
     Ok((stream.total_len, buf))
 }
 
@@ -472,6 +573,69 @@ async fn open_chunk_stream(
         recv,
         total_len: resp.total_len,
     })
+}
+
+/// How long a fetch tolerates silence, from `ARVOLO_CHUNK_STALL_SECS` (seconds).
+/// Overridable because the only way to exercise the bound in a test is to make it
+/// small; 0 or unparseable means the default. See [`CHUNK_STALL_SECS`].
+fn stall_after() -> std::time::Duration {
+    secs_from_env("ARVOLO_CHUNK_STALL_SECS", CHUNK_STALL_SECS)
+}
+
+/// How long a fetch may spend reaching a provider, from `ARVOLO_CHUNK_OPEN_SECS`.
+/// See [`CHUNK_OPEN_SECS`].
+fn open_after() -> std::time::Duration {
+    secs_from_env("ARVOLO_CHUNK_OPEN_SECS", CHUNK_OPEN_SECS)
+}
+
+/// How long a connection that has already served may go quiet, from
+/// `ARVOLO_CHUNK_IDLE_SECS`. See [`CHUNK_IDLE_SECS`].
+fn idle_after() -> std::time::Duration {
+    secs_from_env("ARVOLO_CHUNK_IDLE_SECS", CHUNK_IDLE_SECS)
+}
+
+fn secs_from_env(var: &str, default_secs: u64) -> std::time::Duration {
+    let secs = std::env::var(var)
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(default_secs);
+    std::time::Duration::from_secs(secs)
+}
+
+/// Fill `buf` from `recv`, giving up if no byte arrives for `stall`.
+///
+/// Deliberately not `read_exact`: that waits for the whole body with no bound, so a
+/// provider that goes quiet mid-chunk parks the task for good. Bounding each read
+/// instead of the whole fetch keeps a slow-but-alive provider working — every byte
+/// received starts the clock over — while turning a silent one into an ordinary
+/// error, which is the only form the scheduler can act on.
+///
+/// A clean end-of-stream before the promised length is a fault too, and named as
+/// one: the provider said how long the chunk was in its header.
+async fn read_body_or_stall<R: tokio::io::AsyncRead + Unpin>(
+    recv: &mut R,
+    buf: &mut [u8],
+    stall: std::time::Duration,
+) -> Result<()> {
+    use tokio::io::AsyncReadExt;
+    let want = buf.len();
+    let mut filled = 0;
+    while filled < want {
+        let read = tokio::time::timeout(stall, recv.read(&mut buf[filled..])).await;
+        let n = match read {
+            Err(_) => anyhow::bail!(
+                "read chunk body: nothing for {}s after {filled} of {want} bytes",
+                stall.as_secs()
+            ),
+            Ok(r) => r.map_err(|e| anyhow!("read chunk body: {}", with_causes(e)))?,
+        };
+        if n == 0 {
+            anyhow::bail!("read chunk body: ended after {filled} of {want} bytes");
+        }
+        filled += n;
+    }
+    Ok(())
 }
 
 // ---- sender ---------------------------------------------------------------
@@ -1270,13 +1434,22 @@ impl ChunkReceiver {
         banned: &Mutex<HashSet<String>>,
     ) -> Result<()> {
         use std::io::Write;
-        let mut stream = open_chunk_stream(&self.endpoint, addr, hash, 0).await?;
+        // The open is bounded for the same reason the body is — an unbounded await
+        // there parks the task exactly as an unbounded read did — but on its own
+        // clock: reaching a provider is a different fault from one that goes quiet
+        // mid-chunk, and a far slower thing to do.
+        let reach = open_after();
+        let mut stream =
+            match tokio::time::timeout(reach, open_chunk_stream(&self.endpoint, addr, hash, 0))
+                .await
+            {
+                Err(_) => {
+                    anyhow::bail!("could not reach the chunk provider in {}s", reach.as_secs())
+                }
+                Ok(r) => r?,
+            };
         let mut buf = vec![0u8; stream.total_len as usize];
-        stream
-            .recv
-            .read_exact(&mut buf)
-            .await
-            .map_err(|e| anyhow!("read chunk body: {}", with_causes(e)))?;
+        read_body_or_stall(&mut stream.recv, &mut buf, stall_after()).await?;
         if Hash::new(&buf) != hash {
             banned.lock().unwrap().insert(addr.id.to_string());
             anyhow::bail!("chunk {hash} failed integrity check");
@@ -1516,6 +1689,85 @@ mod prepared_chunks_tests {
                 "the reverse index disagrees about where chunk {i} is"
             );
         }
+    }
+
+    /// A provider that goes quiet mid-chunk must become an error, not a wait.
+    ///
+    /// This is the whole point of the bound. The scheduler already knows how to
+    /// recover from a failed fetch — cool the provider down, re-queue the piece,
+    /// reassign it seconds later — and reaches none of that for a fetch that never
+    /// returns. A 10.7 GiB download once sat at 97.4% for hours on this.
+    #[tokio::test]
+    async fn a_silent_provider_fails_instead_of_hanging_for_ever() {
+        // Sends a few bytes, then holds the stream open saying nothing.
+        let (mut w, mut r) = tokio::io::duplex(64);
+        tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            w.write_all(b"half").await.unwrap();
+            // Never write the rest, never close: the shape of the hang.
+            std::future::pending::<()>().await;
+        });
+
+        let mut buf = [0u8; 16];
+        let started = std::time::Instant::now();
+        let out = read_body_or_stall(&mut r, &mut buf, std::time::Duration::from_millis(200)).await;
+        let waited = started.elapsed();
+
+        let err = out.expect_err("a provider that stops sending is a failed fetch");
+        assert!(
+            err.to_string().contains("nothing for"),
+            "the error should say it went quiet, got: {err}"
+        );
+        assert!(
+            err.to_string().contains("4 of 16"),
+            "and how far it got, so a log line is worth reading, got: {err}"
+        );
+        assert!(
+            waited < std::time::Duration::from_secs(5),
+            "took {waited:?}"
+        );
+    }
+
+    /// The bound is on silence, not on duration: a provider that keeps sending, even
+    /// slowly, must not be cut off. Every byte starts the clock over.
+    #[tokio::test]
+    async fn a_slow_but_talking_provider_is_not_cut_off() {
+        let (mut w, mut r) = tokio::io::duplex(64);
+        tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            // Eight writes, each well inside the window but together far past it.
+            for _ in 0..8 {
+                tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+                w.write_all(b"ab").await.unwrap();
+            }
+        });
+
+        let mut buf = [0u8; 16];
+        read_body_or_stall(&mut r, &mut buf, std::time::Duration::from_millis(200))
+            .await
+            .expect("a slow provider is still a working provider");
+        assert_eq!(&buf, b"abababababababab");
+    }
+
+    /// A provider that closes early is a fault too — it promised a length in the
+    /// header — and must not leave the caller with a half-filled buffer it believes.
+    #[tokio::test]
+    async fn a_truncated_body_is_an_error_not_a_short_chunk() {
+        let (mut w, mut r) = tokio::io::duplex(64);
+        tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            w.write_all(b"short").await.unwrap();
+            w.shutdown().await.unwrap();
+        });
+
+        let mut buf = [0u8; 16];
+        let err = read_body_or_stall(&mut r, &mut buf, std::time::Duration::from_secs(5))
+            .await
+            .expect_err("a truncated body must not pass for a whole chunk");
+        assert!(
+            err.to_string().contains("ended after 5 of 16"),
+            "got: {err}"
+        );
     }
 
     /// An empty payload has no chunks — and must not hang waiting for one.

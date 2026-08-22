@@ -53,6 +53,22 @@ Second prerelease, on top of rc1.
 
 ### Fixed
 
+- **A peer that went quiet parked a task on both ends of a chunk transfer — for
+  good.** QUIC keep-alives run every second, so a connection with nothing moving
+  on it is never "idle" by the transport's reckoning: it stays alive as long as
+  both processes do, and "connected" says nothing about anything happening. Both
+  sides had an unbounded await on the other saying something — the receiver's
+  chunk-body read, the sender's wait for a request on an opened connection — and
+  each turned a silent peer into a task parked for ever: a 10.7 GiB download sat
+  at 97.4% for hours, no error and no progress, while the sender counted a
+  connected downloader the whole time. Every wait is now bounded — 30s of silence
+  for a first request or mid-body, 90s to reach a provider at all (connecting
+  across the internet is a slower, different thing than a stream going quiet),
+  five minutes of quiet for a connection that has already served — and each bound
+  turns silence into an ordinary error, which is the one form the scheduler's
+  existing recovery (cool the provider down, re-queue the piece, reassign) knows
+  what to do with.
+
 - **Every client asked the relay for its inbox every two seconds, forever.** The
   long-poll ended the moment the slot was non-empty — and the contact-sync cell
   sits in that slot permanently, so for anyone with sync on it ended immediately,
