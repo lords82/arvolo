@@ -30,7 +30,14 @@ import {
   TextInput,
   TrustBadges,
 } from "../ui/Primitives";
-import { Avatar, ClaimedName, CopyField, Fingerprint, ShortId } from "../ui/Bits";
+import {
+  Avatar,
+  ClaimedName,
+  claimText,
+  CopyField,
+  Fingerprint,
+  ShortId,
+} from "../ui/Bits";
 import { MenuButton, type MenuItem } from "../ui/Menu";
 import { Confirm, Sheet } from "../ui/Sheet";
 import { toast } from "../ui/Toasts";
@@ -387,7 +394,9 @@ function PersonSheet() {
         close(null);
       }}
       title={c.name}
-      subtitle={<ClaimedName c={c} />}
+      // `<ClaimedName>` is always a truthy element even when it renders
+      // nothing, and `Sheet` would keep an empty subtitle line for it.
+      subtitle={claimText(c, t) ? <ClaimedName c={c} /> : undefined}
     >
       <div className="hstack">
         <Avatar name={c.display_name || c.name} id={c.id} size={48} />

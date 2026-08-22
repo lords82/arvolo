@@ -283,7 +283,7 @@ export function ClaimedName({ c }: { c: ContactDto }) {
   if (!claim) return null;
   return (
     <span
-      className={`truncate t-xs ${claim.fresh ? "tone-warn" : "t-mut"}`}
+      className={`claimed truncate t-xs ${claim.fresh ? "tone-warn" : "t-mut"}`}
       title={t("people.claimedTip", c.name)}
     >
       {claim.text}

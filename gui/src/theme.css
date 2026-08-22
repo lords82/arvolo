@@ -1505,6 +1505,16 @@ select {
   user-select: text;
 }
 
+/* The name a peer advertises for itself, in brackets after the name the user
+   gave them. Shrinks twice as readily as its neighbour on a narrow row: both
+   names ellipsise, but the one the user chose is the one they navigate by, so
+   the sender's own text is what gives up the width first. */
+.claimed {
+  flex: 0 2 auto;
+  min-width: 0;
+  font-weight: 400;
+}
+
 .kbd {
   display: inline-flex;
   align-items: center;

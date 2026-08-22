@@ -835,6 +835,70 @@ describe("the address book", () => {
     }
   });
 
+  it("the name a peer gives itself is readable without approving anything", async () => {
+    harness.snapshot.contacts = [
+      dto.contact({ name: "proj", id: "p1", pending_name: "proj server" }),
+    ];
+    render(<App />);
+    useStore.getState().go("people");
+    // Nothing has been decided, and the claim is on screen anyway: hiding it
+    // until it is approved asks for a decision with no information behind it.
+    expect(
+      await screen.findByText("(calls themselves “proj server”)")
+    ).toBeTruthy();
+    // And the name the user typed is still the one the row is headed by.
+    expect(screen.getByText("proj")).toBeTruthy();
+  });
+
+  it("a peer that renames itself is shown against the name it had", async () => {
+    harness.snapshot.contacts = [
+      dto.contact({
+        name: "proj",
+        id: "p1",
+        display_name: "proj server",
+        pending_name: "banca",
+      }),
+    ];
+    render(<App />);
+    useStore.getState().go("people");
+    // The claim on its own is not the interesting part — the change is. This is
+    // what impersonation looks like from the receiving end.
+    expect(
+      await screen.findByText("(now: “banca” — was: “proj server”)")
+    ).toBeTruthy();
+  });
+
+  it("acknowledging a claimed name leaves the contact named as it was", async () => {
+    harness.snapshot.contacts = [
+      dto.contact({ name: "proj", id: "p1", pending_name: "proj server" }),
+    ];
+    render(<App />);
+    useStore.getState().go("people");
+    fireEvent.click(await screen.findByText("Got it"));
+    await waitFor(() =>
+      expect(harness.recorder.acceptName).toEqual(["proj"])
+    );
+    // The button takes the highlight off a name that has been read. It is not a
+    // rename, and nothing in the address book moves: `renameContact` is the only
+    // thing that touches what the user calls someone.
+    expect(harness.recorder.renameContact).toEqual([]);
+    expect(screen.getByText("proj")).toBeTruthy();
+  });
+
+  it("a claimed name is searchable before it is acknowledged", async () => {
+    harness.snapshot.contacts = [
+      dto.contact({ name: "proj", id: "p1", pending_name: "proj server" }),
+      dto.contact({ name: "luca", id: "p2" }),
+    ];
+    render(<App />);
+    useStore.getState().go("people");
+    fireEvent.change(await screen.findByPlaceholderText(/Search/i), {
+      target: { value: "server" },
+    });
+    await waitFor(() => expect(screen.queryByText("luca")).toBeNull());
+    expect(screen.getByText("proj")).toBeTruthy();
+  });
+
   it("Send from a person row opens the sheet already addressed to them", async () => {
     harness.snapshot.contacts = [dto.contact({ name: "proj" })];
     render(<App />);
