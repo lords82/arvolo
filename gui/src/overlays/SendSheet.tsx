@@ -78,6 +78,21 @@ interface Result {
   detail?: string;
 }
 
+/** The two "quanti download" fields accept exactly two things: empty, or a whole
+ *  number of at least one. Anything else is not a value the daemon can take —
+ *  the IPC field is a `u32`, so a decimal or a minus sign is a round-trip error,
+ *  and a stray letter used to turn into `NaN` and then, silently, into "no limit
+ *  at all". Filtering as the user types keeps the invalid state from existing at
+ *  all, which is why the submit path needs no second opinion about it.
+ *
+ *  Leading zeros go too: they make "0" — a deposit nobody may ever collect —
+ *  unreachable, and "007" reads back as the 7 it will actually be. Nine digits
+ *  is the ceiling because ten of them can overflow the `u32` on the wire, and a
+ *  billion downloads is already "no limit" by any reading. */
+function digitsOnly(raw: string): string {
+  return raw.replace(/\D/g, "").replace(/^0+/, "").slice(0, 9);
+}
+
 function ContactPicker({
   contacts,
   value,
@@ -245,13 +260,15 @@ export function SendSheet() {
     try {
       if (mode === "contact") {
         if (asDeposit) {
-          const max = maxDl.trim() === "" ? null : Number(maxDl);
+          // `digitsOnly` already ruled out everything but "" and a positive
+          // integer, so empty is the only case left to map — and it means "let
+          // the daemon pick", which is one pickup.
           const r = await depositAction(
             to,
             files.map((f) => f.id),
             note,
             ttl,
-            Number.isFinite(max as number) && max !== null ? max : null,
+            maxDl === "" ? null : Number(maxDl),
             password || null
           );
           setResult({
@@ -278,11 +295,12 @@ export function SendSheet() {
             : t("send.codeOnceDetail"),
         });
       } else if (mode === "link") {
-        const max = maxDlLink.trim() === "" ? null : Number(maxDlLink);
+        // Empty here is the deliberate "illimitati" the placeholder promises,
+        // and now the *only* way to ask for it.
         const url = await link(
           files[0].id,
           ttl,
-          Number.isFinite(max as number) && max !== null ? max : null
+          maxDlLink === "" ? null : Number(maxDlLink)
         );
         setResult({
           kind: "link",
@@ -541,7 +559,13 @@ export function SendSheet() {
                         className="tnum"
                         inputMode="numeric"
                         value={maxDl}
-                        onChange={(e) => setMaxDl(e.currentTarget.value)}
+                        onChange={(e) =>
+                          setMaxDl(digitsOnly(e.currentTarget.value))
+                        }
+                        /* Empty is now reachable (the "1" can be deleted) and
+                           means the daemon's default, which is this. A bare
+                           digit needs no translation. */
+                        placeholder="1"
                       />
                     )}
                   </Field>
@@ -598,7 +622,9 @@ export function SendSheet() {
                     className="tnum"
                     inputMode="numeric"
                     value={maxDlLink}
-                    onChange={(e) => setMaxDlLink(e.currentTarget.value)}
+                    onChange={(e) =>
+                      setMaxDlLink(digitsOnly(e.currentTarget.value))
+                    }
                     placeholder={t("send.maxDownloadsPlaceholder")}
                   />
                 )}

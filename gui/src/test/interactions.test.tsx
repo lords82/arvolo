@@ -685,6 +685,61 @@ describe("the send panel", () => {
     expect(password).toBe("segreto");
   });
 
+  it("a cap typed as text cannot become a silently unlimited link", async () => {
+    useStore.setState({ sheetPicks: [pick("a.txt")] });
+    render(<App />);
+    fireEvent.click(await screen.findByText("Link"));
+    const cap = (await screen.findByPlaceholderText(
+      "unlimited"
+    )) as HTMLInputElement;
+    // "tre" used to parse to NaN and fall through to null — a link anyone could
+    // download forever, from a field the user believed said three.
+    fireEvent.change(cap, { target: { value: "tre" } });
+    expect(cap.value).toBe("");
+    fireEvent.change(cap, { target: { value: "1a2" } });
+    expect(cap.value).toBe("12");
+    // A decimal or a minus is a `u32` round-trip error, not a cap.
+    fireEvent.change(cap, { target: { value: "-2.5" } });
+    expect(cap.value).toBe("25");
+    fireEvent.change(cap, { target: { value: "3" } });
+    fireEvent.click(screen.getByText(en["send.submitLink"]));
+    await waitFor(() => expect(harness.recorder.createLink).toHaveLength(1));
+    expect(harness.recorder.createLink[0]?.[1]).toBe(3);
+  });
+
+  it("a cap of zero is unreachable, in the mailbox as on a link", async () => {
+    harness.snapshot.contacts = [dto.contact({ name: "proj" })];
+    useStore.setState({ sheetPicks: [pick("a.txt")] });
+    render(<App />);
+    fireEvent.click(await screen.findByText("proj"));
+    fireEvent.click(screen.getByLabelText(en["send.depositLabel"]));
+    const cap = (await screen.findByPlaceholderText("1")) as HTMLInputElement;
+    // Zero collections is a deposit nobody may ever pick up: a way to lose a
+    // file, never a thing to ask for.
+    fireEvent.change(cap, { target: { value: "0" } });
+    expect(cap.value).toBe("");
+    fireEvent.change(cap, { target: { value: "05" } });
+    expect(cap.value).toBe("5");
+    fireEvent.click(screen.getByText(en["send.submitDeposit"]));
+    await waitFor(() => expect(harness.recorder.depositTo).toHaveLength(1));
+    expect(harness.recorder.depositTo[0]?.[3]).toBe(5);
+  });
+
+  it("an emptied cap falls back to the daemon's default, not to no limit", async () => {
+    harness.snapshot.contacts = [dto.contact({ name: "proj" })];
+    useStore.setState({ sheetPicks: [pick("a.txt")] });
+    render(<App />);
+    fireEvent.click(await screen.findByText("proj"));
+    fireEvent.click(screen.getByLabelText(en["send.depositLabel"]));
+    fireEvent.change(await screen.findByPlaceholderText("1"), {
+      target: { value: "" },
+    });
+    fireEvent.click(screen.getByText(en["send.submitDeposit"]));
+    await waitFor(() => expect(harness.recorder.depositTo).toHaveLength(1));
+    // null, which the daemon reads as one pickup — what the placeholder says.
+    expect(harness.recorder.depositTo[0]?.[3]).toBeNull();
+  });
+
   it("a deposit hands back the arvm… ticket for hand-delivery", async () => {
     harness.snapshot.contacts = [dto.contact({ name: "proj" })];
     useStore.setState({ sheetPicks: [pick("a.txt")] });
