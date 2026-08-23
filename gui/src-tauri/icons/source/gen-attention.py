@@ -43,9 +43,18 @@ FRAMES = 16
 # How far the small V drifts, in the mark's own 100-unit box. Deliberately short
 # of the ~31 units that would nest it inside the big V: the breath runs for as
 # long as something is pending, so it has to be noticeable out of the corner of
-# the eye without turning the menu bar into a place where things move. At 18pt
-# this is about four and a half pixels of travel.
-AMPLITUDE = 12
+# the eye without turning the menu bar into a place where things move.
+#
+# Read this in points, not pixels. It was 12, chosen as "about four and a half
+# pixels of travel at 18pt" — which is true on a Retina screen and is also the
+# wrong unit: a Retina pixel is half a point, so the eye was being offered 2.2
+# points. That is below what peripheral vision picks up, and the reported
+# symptom was the animation not running at all. It was running.
+#
+# 24 is 4.3 points, twice the movement, and still seven units clear of the
+# nesting depth — so at the bottom of the travel the small V is plainly a V of
+# its own rather than a shape that has merged with the big one.
+AMPLITUDE = 24
 
 # The mark, in its own 100-unit box. The two V's are the same drawing at two
 # sizes; only the stroke weight changes between the colour icon and the mono

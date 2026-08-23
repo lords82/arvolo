@@ -71,6 +71,12 @@ const BOTTOM: usize = FRAMES.len() / 2;
 /// the top and the bottom and hurry through the middle, so there is no schedule
 /// here to disagree with, and this is the one number worth retuning.
 ///
+/// The travel itself is `AMPLITUDE` in `icons/source/gen-attention.py`, and it is
+/// measured in *points*: it was set to 12 (~2.2pt) on a reading of "four and a
+/// half pixels", which is the same distance counted in Retina pixels and half the
+/// size the eye is offered. At 2.2pt the breath is running and invisible, and gets
+/// reported as an animation that does not work.
+///
 /// 3.6 seconds was picked over 2.4 and 1.6 played side by side at this exact size:
 /// slower reads as "waiting for you", faster reads as a pulse and wears out its
 /// welcome in a bar the user stares at all day. It also matters more than it used
