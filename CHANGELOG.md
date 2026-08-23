@@ -1,5 +1,61 @@
 # Changelog
 
+## v0.13.0-rc2 — a contact brings their own relay, and the app updates itself
+
+Two features and one fix that ought to have shipped years ago.
+
+### Fixed
+
+- **Every address-book snapshot an identity ever published went out under the
+  same key and nonce.** The key was derived from the identity secret alone, so it
+  was constant for the identity and identical on every device, and the nonce comes
+  from the chunk index — which for a single-chunk snapshot is always zero. Two
+  snapshots under one (key, nonce) pair is the failure AES-GCM does not survive:
+  XOR the ciphertexts and the plaintexts XOR too, so anyone holding two of them off
+  the relay learns where they differ. That is the address book. Sealing now mixes a
+  random per-message salt into the key (`seal_under` in `core/src/sync.rs`), and
+  reading still accepts the old shape so notes already in flight open.
+
+  **Update your devices together.** A device on an older build cannot open the new
+  form, and on failing it *deletes* the note — so a mixed-version pair does not
+  sync until both sides are current. The desktop app now says so on the update
+  banner rather than leaving it to these notes.
+
+### New
+
+- **A contact can carry their own relay.** There is no federation between relays,
+  so an offer has to land in an inbox the other person actually reads. An id can
+  now name where that is — `<id>@her.relay` — and `send --to`, the online marker
+  in `contacts list` and the mailbox notice all follow it. A mailbox deposit still
+  uploads to *yours*, because the `arvm…` ticket names the relay it went to and
+  you should not be spending someone else's storage. Mostly you never type it:
+  pairing trades relays, and the first file someone sends you carries theirs. It
+  is routing, not identity — getting it wrong costs a delivery that goes nowhere,
+  never a file read by the wrong person.
+
+- **The desktop app finds its own new version and installs it.** Once a week it
+  asks whether there is a newer release, and if there is, one button downloads it,
+  verifies it against a signing key compiled into the app, and restarts. Signed
+  and notarized on macOS as before; the AppImage replaces itself; the `.msi` runs
+  its own installer.
+
+  Three things it will not do. It never downloads or installs without being asked
+  — in a file-transfer tool an unrequested restart is destructive by definition.
+  It says nothing while a transfer is running, and comes back when the board is
+  quiet. And it can be turned off entirely, because that weekly request to
+  github.com is the only third party Arvolo talks to; with it off, the button in
+  Settings still works.
+
+  The daemon is stopped before the installer runs and comes back with the app,
+  which is not a detail: it runs from the files being replaced, and on Windows it
+  holds them.
+
+- **The relay says what version it is**, at `GET /v1/features`. The desktop app
+  reads it before offering an upgrade, so it cannot talk somebody into the one
+  order `docs/DEPLOY.md` asks them to avoid — clients ahead of the relay they
+  depend on. Nothing today needs a newer relay and `compat.json` says so; the
+  check is there for the release that does.
+
 ## v0.13.0-rc1 — fewer words, and they stay in the box
 
 The words in the CLI and the GUI explained too much. Almost every string said
