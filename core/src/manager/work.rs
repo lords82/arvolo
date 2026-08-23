@@ -1621,10 +1621,28 @@ mod prep_record_tests {
         write(&p, b"the original bytes, and then some");
         assert_ne!(Some(before), payload_stamp(&p));
 
-        // Same length, replaced file: caught by the inode on unix. (On other
-        // platforms this leans on the mtime, which a rewrite moves.)
+        // Same length, replaced file. On unix the inode catches this on its own,
+        // whatever the clock did. Off unix there is no inode in the stamp, so the
+        // mtime is the whole of it — and a rename carries the source file's
+        // timestamp across, so writing both files back to back is not enough:
+        // Windows file times move in ~15ms ticks and two writes microseconds apart
+        // land on the same one. The test used to rely on them differing and failed
+        // on Windows for exactly that reason.
+        //
+        // So the replacement is given a plainly different mtime before it is moved
+        // into place. That is not weakening the test, it is naming what the stamp
+        // actually promises off unix: a same-length swap is caught when the clock
+        // recorded it, and a swap inside a single timestamp tick is not detectable
+        // from metadata alone.
         let same_len = dir.path().join("same-len.bin");
         write(&same_len, b"the original bytez");
+        let older = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
+        std::fs::File::options()
+            .write(true)
+            .open(&same_len)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(older))
+            .unwrap();
         std::fs::rename(&same_len, &p).unwrap();
         assert_ne!(Some(before), payload_stamp(&p));
 
