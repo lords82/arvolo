@@ -397,6 +397,18 @@ const RZ_P_TKT: &str = "t.";
 /// from the completed PAKE, so only a party that proved it knew the code can
 /// produce one the sender will open — and the relay itself never sees inside.
 const RZ_P_BACK: &str = "b.";
+/// The receiver's routing extras, receiver → sender (public write, owner read).
+///
+/// Same shape and same guarantees as `b.`, and separate from it because it is
+/// optional in a way `b.` is not: a client that has nothing to add never writes
+/// one, and a *sender* too old to know the key simply never looks. Splitting it
+/// off keeps the reply — which a mutual pairing depends on — from having to grow a
+/// format, which is the thing that would break the two ends against each other.
+///
+/// Sealed under a key derived from the completed PAKE, like `b.`, so the relay
+/// sees only ciphertext and only a party that proved it knew the code can write
+/// something the sender will open.
+const RZ_P_XTRA: &str = "x.";
 /// Body a v2 `own` GET returns. A fixed marker: the stored hash is a verifier and
 /// must never be echoed, or holding it would be as good as holding the token.
 const RZ_V2_MARKER: &[u8] = b"2";
@@ -477,9 +489,11 @@ struct RzWait {
 
 /// Whether `key` belongs to a v2 sub-session, and which side may write it.
 fn rz_session_prefix(key: &str) -> Option<&'static str> {
-    [RZ_P_RECV, RZ_P_SEND, RZ_P_CONF, RZ_P_TKT, RZ_P_BACK]
-        .into_iter()
-        .find(|p| key.starts_with(p) && key.len() > p.len())
+    [
+        RZ_P_RECV, RZ_P_SEND, RZ_P_CONF, RZ_P_TKT, RZ_P_BACK, RZ_P_XTRA,
+    ]
+    .into_iter()
+    .find(|p| key.starts_with(p) && key.len() > p.len())
 }
 
 /// Whether `k` is an acceptable rendezvous key: `^[a-z0-9][a-z0-9._-]{0,63}$`.
@@ -668,7 +682,8 @@ async fn rz_get_handler(
         // The receiver's half is addressed to the owner alone: leaking the list of
         // live session ids would undo the point of an unguessable one. `b.` is the
         // receiver's reply, so it belongs to the owner for the same reason.
-        if prefix == RZ_P_RECV || prefix == RZ_P_CONF || prefix == RZ_P_BACK {
+        if prefix == RZ_P_RECV || prefix == RZ_P_CONF || prefix == RZ_P_BACK || prefix == RZ_P_XTRA
+        {
             rz_owner(&state, &headers, &slot)?;
         }
         let Some(v) = state.mailbox.rz_get(&slot, &key, now_unix()) else {
@@ -686,7 +701,7 @@ async fn rz_get_handler(
                 .collect();
             state.mailbox.rz_delete_keys(&slot, &keys);
         }
-        if prefix == RZ_P_BACK {
+        if prefix == RZ_P_BACK || prefix == RZ_P_XTRA {
             // Reading the reply burns it, mirroring `t.`: it has reached the one
             // party entitled to it, and leaving it behind would keep a row alive
             // for the rest of the slot's lease for nobody's benefit.
@@ -1635,6 +1650,7 @@ mod rz_v2_tests {
         assert_eq!(rz_session_prefix("s.abc"), Some(RZ_P_SEND));
         assert_eq!(rz_session_prefix("c.abc"), Some(RZ_P_CONF));
         assert_eq!(rz_session_prefix("t.abc"), Some(RZ_P_TKT));
+        assert_eq!(rz_session_prefix("x.abc"), Some(RZ_P_XTRA));
         // A bare prefix is not a session, and neither is anything else.
         for not in ["r.", "s.", "own", "sessions", "ms", "mr", "tkt", "rabc"] {
             assert_eq!(rz_session_prefix(not), None, "{not:?}");

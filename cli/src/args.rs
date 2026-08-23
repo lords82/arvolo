@@ -446,6 +446,10 @@ pub(crate) enum Command {
     Me {
         #[command(subcommand)]
         action: Option<MeAction>,
+        /// Print the bare id, without the `@relay` that tells someone on another
+        /// relay where to reach you. For scripts that parse the old output.
+        #[arg(long)]
+        plain: bool,
     },
     // No `version` verb: `--version` prints this binary's, and whether the daemon
     // is up (and on which version) is a *status* question — `arvolo status`
@@ -656,6 +660,24 @@ pub(crate) enum ContactAction {
         /// Mark verified without the confirmation prompt.
         #[arg(long, short = 'y')]
         yes: bool,
+    },
+    /// Show or set which relay a contact listens on.
+    ///
+    /// Only needed when they are not on your relay: without it your offers land
+    /// in an inbox they never read, and they look permanently offline. Usually
+    /// you never type this — the relay rides along in the `<id>@<relay>` they
+    /// copied from `arvolo me`, and arrives on its own once they have sent you
+    /// something. This is routing, not identity: getting it wrong costs a
+    /// delivery, and changes nothing about who they are.
+    Relay {
+        #[arg(add = ArgValueCandidates::new(completions::contact_candidates))]
+        name: String,
+        /// The relay host or URL. Omit to show what is recorded now.
+        #[arg(value_name = "HOST|URL")]
+        url: Option<String>,
+        /// Forget it, falling back to your own relay.
+        #[arg(long, conflicts_with = "url")]
+        clear: bool,
     },
     /// Trust a contact so the daemon auto-downloads their files without asking.
     /// Refuses an unverified contact unless `--force` is given (auto-downloading

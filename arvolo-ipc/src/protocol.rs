@@ -574,6 +574,13 @@ pub struct ContactDto {
     /// surfaced so a UI can offer [`Request::AcceptName`].
     #[serde(default)]
     pub pending_name: String,
+    /// The relay this contact listens on, when one is recorded. Empty means
+    /// "wherever you do", which is the ordinary case and worth no UI.
+    ///
+    /// Routing, not identity: it never affects verification, and a UI showing it
+    /// should read as an address, not as a credential.
+    #[serde(default)]
+    pub relay: String,
 }
 
 /// One finished transfer from the history log — read-only by construction (the
@@ -990,6 +997,11 @@ impl From<&ManagerEvent> for EventDto {
                 size,
                 note,
                 sender_name,
+                // Not forwarded: the daemon records it in the address book as the
+                // offer arrives, so a front-end reads it from `ContactDto::relay`
+                // rather than being handed a routing hint it would have to store
+                // itself. Same reasoning as `auto` below, in the other direction.
+                relay: _,
             } => EventDto::OfferReceived {
                 id: id.clone(),
                 from: encode_id(from),
@@ -1353,6 +1365,7 @@ mod tests {
             blocked: false,
             display_name: "Alice A.".into(),
             pending_name: String::new(),
+            relay: String::new(),
         }]);
         let s = serde_json::to_string(&r).unwrap();
         assert_eq!(serde_json::from_str::<Response>(&s).unwrap(), r);

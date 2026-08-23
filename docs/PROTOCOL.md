@@ -159,10 +159,32 @@ Produced by `arvolo send` (mailbox path). A base32 postcard of
 HPKE-sealed **directly** to the recipient (no separate content key); the relay
 stores that ciphertext under `claim`.
 
-### 4.3 Pairing code — `N-word-word[@relay]`
-A leading digit plus two words from a fixed wordlist, optionally `@relay` so the
+### 4.3 Pairing code — `N-word-word@relay`
+A leading digit plus two words from a fixed wordlist, followed by `@relay` so the
 receiver needs no configuration. It is **not** the ticket; it is the SPAKE2
 password used to fetch the ticket from a relay rendezvous (§7.2).
+
+The relay is always present now. It used to be appended only when `--relay` was
+passed explicitly, which made the same command self-contained or not depending on
+whether a daemon happened to be hosting it. A bare `N-word-word` is still
+*accepted* — codes minted by older builds, and anything typed by hand — and falls
+back to the receiver's own default relay.
+
+### 4.3.1 Shareable id — `<id>@<relay>`
+What `arvolo me` prints and `arvolo contacts add` reads back: the base32 public id
+and the relay that identity listens on. `@` cannot occur in base32, so the split is
+unambiguous.
+
+The relay half is **routing, not identity**. The id half is what proves who
+somebody is and what `verified`/`trusted` key off; a wrong relay costs a delivery
+that goes nowhere and nothing else, because a file is sealed to the recipient's
+key before any relay is chosen. A contact stored without one routes through your
+own relay, which is what every send did before this existed.
+
+Recipients learn it three ways, all optional: pasted in by hand, carried in the
+`@relay` of a pairing code (host → joiner), or sealed inside an offer
+([`Offer::relay`](../core/src/presence.rs), sender → recipient). Between two of
+your own devices it rides the address-book CRDT (§8).
 
 ### 4.4 Download link — `https://<relay>/dl/<claim>#<key>`
 Produced by `arvolo link`. The `claim` addresses a relay blob (a

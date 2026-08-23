@@ -51,6 +51,7 @@ async fn offer_round_trips_and_acks() {
         // tiebreak, and every offer here comes from a different sender.
         origin: None,
         target: None,
+        relay: String::new(),
     };
     post_offer(&client, &relay, &recipient.public(), &sender, &offer, None)
         .await
@@ -96,6 +97,7 @@ async fn poster_can_retract_its_own_offer() {
             // tiebreak, and every offer here comes from a different sender.
             origin: None,
             target: None,
+            relay: String::new(),
         },
         None,
     )
@@ -168,6 +170,7 @@ async fn offer_status_walks_pending_then_arrived_then_taken() {
             // tiebreak, and every offer here comes from a different sender.
             origin: None,
             target: None,
+            relay: String::new(),
         },
         None,
     )
@@ -267,6 +270,7 @@ async fn a_retracted_offer_is_gone_not_taken() {
             // tiebreak, and every offer here comes from a different sender.
             origin: None,
             target: None,
+            relay: String::new(),
         },
         None,
     )
@@ -322,6 +326,7 @@ async fn wrong_recipient_sees_nothing_in_its_own_inbox() {
             // tiebreak, and every offer here comes from a different sender.
             origin: None,
             target: None,
+            relay: String::new(),
         },
         None,
     )
@@ -581,6 +586,7 @@ async fn a_new_offer_wakes_a_held_poll_at_once() {
                 sender_name: String::new(),
                 origin: None,
                 target: None,
+                relay: String::new(),
             },
             None,
         )
@@ -624,6 +630,7 @@ async fn post_live_offer(
             sender_name: String::new(),
             origin: None,
             target: None,
+            relay: String::new(),
         },
         None,
     )
@@ -807,6 +814,7 @@ async fn an_aimed_offer_waits_for_the_device_it_names() {
         sender_name: String::new(),
         origin: None,
         target: Some(desktop),
+        relay: String::new(),
     };
     post_offer(&client, &relay, &me.public(), &sender, &offer, None)
         .await

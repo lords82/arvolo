@@ -39,14 +39,15 @@ async fn code_roundtrip_delivers_ticket() {
     let relay = spawn_relay().await;
     let ticket = "arvcTHISISAFAKETICKETBUTITROUNDTRIPS";
 
-    let (code, complete) = publish_ticket(ticket, &relay, false)
-        .await
-        .expect("publish");
-    // Code is `N-word-word` (no @relay when embed=false).
-    assert!(!code.contains('@'));
+    let (code, complete) = publish_ticket(ticket, &relay).await.expect("publish");
+    // Every code minted now carries its relay. Strip it back off to get the shape
+    // older builds handed out — those are still in people's messages, and they
+    // have to keep resolving against a configured default.
+    let bare = code.split_once('@').expect("a code carries its relay").0;
+    assert_eq!(bare.matches('-').count(), 2);
     let sender = tokio::spawn(complete.run());
 
-    let got = resolve_code(&code, Some(&relay)).await.expect("resolve");
+    let got = resolve_code(bare, Some(&relay)).await.expect("resolve");
     assert_eq!(got, ticket, "receiver recovers the exact ticket");
     sender.await.unwrap().expect("sender completes");
 }
@@ -56,8 +57,8 @@ async fn self_contained_code_needs_no_default_relay() {
     let relay = spawn_relay().await;
     let ticket = "arvcSELFCONTAINEDTICKET";
 
-    // embed_relay=true -> code carries the relay; receiver passes no default.
-    let (code, complete) = publish_ticket(ticket, &relay, true).await.expect("publish");
+    // Every code carries its relay, so the receiver passes no default at all.
+    let (code, complete) = publish_ticket(ticket, &relay).await.expect("publish");
     assert!(code.contains('@'), "self-contained code embeds the relay");
     let sender = tokio::spawn(complete.run());
 
@@ -113,10 +114,10 @@ async fn code_v2_roundtrip_delivers_ticket() {
     let relay = spawn_relay().await;
     let ticket = "arvcV2TICKETROUNDTRIP";
 
-    let (code, host) = claim_code(&relay, false).await.expect("claim");
-    assert!(!code.contains('@'));
+    let (code, host) = claim_code(&relay).await.expect("claim");
     // The code grammar is untouched: an existing parser still reads it.
-    assert_eq!(code.matches('-').count(), 2);
+    let bare = code.split_once('@').map_or(code.as_str(), |(l, _)| l);
+    assert_eq!(bare.matches('-').count(), 2);
 
     let (handle, events, _) = spawn_host(
         host,
@@ -138,7 +139,7 @@ async fn code_v2_roundtrip_delivers_ticket() {
         .any(|e| matches!(e, HostEvent::Paired { done: 1, .. })));
 
     // …and the nameplate is handed back rather than squatted.
-    let (code2, host2) = claim_code(&relay, false).await.expect("reclaim space");
+    let (code2, host2) = claim_code(&relay).await.expect("reclaim space");
     drop((code2, host2));
 }
 
@@ -147,7 +148,7 @@ async fn code_v2_serves_several_receivers() {
     let relay = spawn_relay().await;
     let ticket = "arvcKEEPSERVINGTHISONE";
 
-    let (code, host) = claim_code(&relay, false).await.expect("claim");
+    let (code, host) = claim_code(&relay).await.expect("claim");
     let (handle, _, _) = spawn_host(
         host,
         ticket.as_bytes().to_vec(),
@@ -173,7 +174,7 @@ async fn code_v2_serves_several_receivers() {
 #[tokio::test]
 async fn code_v2_retires_itself_after_three_wrong_codes() {
     let relay = spawn_relay().await;
-    let (code, host) = claim_code(&relay, false).await.expect("claim");
+    let (code, host) = claim_code(&relay).await.expect("claim");
     let (handle, events, states) = spawn_host(
         host,
         b"arvcSECRET".to_vec(),
@@ -231,7 +232,7 @@ async fn code_v2_retires_itself_after_three_wrong_codes() {
 #[tokio::test]
 async fn code_v2_reflection_and_abandonment_do_not_spend_the_guess_budget() {
     let relay = spawn_relay().await;
-    let (code, host) = claim_code(&relay, false).await.expect("claim");
+    let (code, host) = claim_code(&relay).await.expect("claim");
     let slot = host.slot.clone();
     let (handle, events, states) = spawn_host(
         host,
@@ -318,7 +319,7 @@ async fn code_v2_reflection_and_abandonment_do_not_spend_the_guess_budget() {
 async fn code_v2_survives_the_sender_restarting() {
     let relay = spawn_relay().await;
     let ticket = "arvcSURVIVESARESTART";
-    let (code, host) = claim_code(&relay, false).await.expect("claim");
+    let (code, host) = claim_code(&relay).await.expect("claim");
 
     // Round one: serve nobody, then lose the process. Cancelling drops the task
     // and everything it held — in v1 that included the SPAKE2 scalar, which is
@@ -368,7 +369,7 @@ async fn code_v2_survives_the_sender_restarting() {
 #[tokio::test]
 async fn code_v2_failure_budget_persists_across_a_restart() {
     let relay = spawn_relay().await;
-    let (code, host) = claim_code(&relay, false).await.expect("claim");
+    let (code, host) = claim_code(&relay).await.expect("claim");
     let bad = wrong_code(&code);
 
     // Two guesses before the restart.
@@ -433,7 +434,7 @@ async fn publish_auto_picks_v2_and_the_receiver_follows() {
     let ticket = b"arvcPUBLISHAUTO".to_vec();
 
     assert_eq!(relay_rz_version(&relay).await, RzVersion::V2);
-    let (code, sender) = publish_auto(&ticket, &relay, true).await.expect("publish");
+    let (code, sender) = publish_auto(&ticket, &relay).await.expect("publish");
     assert!(code.contains('@'), "self-contained code embeds the relay");
     let CodeSender::V2(host) = sender else {
         panic!("a v2 relay must yield a v2 sender");
@@ -456,7 +457,7 @@ async fn publish_auto_picks_v2_and_the_receiver_follows() {
 #[tokio::test]
 async fn code_v2_cancel_frees_the_nameplate() {
     let relay = spawn_relay().await;
-    let (_code, host) = claim_code(&relay, false).await.expect("claim");
+    let (_code, host) = claim_code(&relay).await.expect("claim");
     let slot = host.slot.clone();
 
     let cancel = CancellationToken::new();
@@ -504,13 +505,12 @@ async fn device_pair_payload_roundtrips() {
             seen: vec![],
             names: vec![],
             devices: vec![],
+            relays: vec![],
         },
     };
     let bytes = payload.encode().unwrap();
 
-    let (code, complete) = publish_bytes(bytes.clone(), &relay, true)
-        .await
-        .expect("publish");
+    let (code, complete) = publish_bytes(bytes.clone(), &relay).await.expect("publish");
     let sender = tokio::spawn(complete.run());
 
     let got = resolve_bytes(&code, None).await.expect("resolve");

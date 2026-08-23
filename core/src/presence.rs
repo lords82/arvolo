@@ -249,6 +249,56 @@ pub struct Offer {
     /// holding the identity.
     #[serde(default)]
     pub target: Option<crate::sync::DeviceId>,
+    /// Where the **sender** listens, so a reply can find them. Empty when they
+    /// have no relay to name.
+    ///
+    /// Without it, two people on different relays can only ever talk in the
+    /// direction someone configured by hand: you can reach me because you typed my
+    /// `<id>@<relay>`, and I still cannot reach you. This closes that loop — the
+    /// first thing you send me tells my client where to answer.
+    ///
+    /// Routing, not identity, and it rides inside the HPKE seal like the note: the
+    /// relay never sees it, and it is sender-authenticated, so it is exactly as
+    /// trustworthy as the key it came from. Believing a wrong one costs a delivery
+    /// that goes nowhere, never a disclosure — the file is sealed to the recipient's
+    /// key before any relay is chosen.
+    #[serde(default)]
+    pub relay: String,
+}
+
+/// [`Offer`] as it was before it carried the sender's relay.
+///
+/// Postcard decodes positionally, so an offer written by an older client stops
+/// where this struct stops and reading it as an [`Offer`] runs off the end. An
+/// offer can sit in an inbox for up to its TTL, so upgrading without this would
+/// silently drop everything already in flight — the same reason
+/// [`crate::offline::OfflineTicket`] keeps its own earlier shape.
+#[derive(Deserialize)]
+struct OfferV1 {
+    name: String,
+    size: u64,
+    chunks: u64,
+    ticket: String,
+    note: String,
+    sender_name: String,
+    origin: Option<crate::sync::DeviceId>,
+    target: Option<crate::sync::DeviceId>,
+}
+
+impl From<OfferV1> for Offer {
+    fn from(o: OfferV1) -> Self {
+        Offer {
+            name: o.name,
+            size: o.size,
+            chunks: o.chunks,
+            ticket: o.ticket,
+            note: o.note,
+            sender_name: o.sender_name,
+            origin: o.origin,
+            target: o.target,
+            relay: String::new(),
+        }
+    }
 }
 
 /// The authenticated **inner** envelope: the sender's public key plus the
@@ -1319,7 +1369,13 @@ fn decode_offer(blob: &[u8], me: &Identity) -> Option<(PublicId, Offer)> {
         ciphertext: env.ciphertext,
     };
     let plaintext = open(&sealed, me, &sender, OFFER_AAD).ok()?;
-    let offer: Offer = postcard::from_bytes(&plaintext).ok()?;
+    // Newest shape first: postcard ignores trailing bytes, so trying the older one
+    // first would read a current offer as "everything I know, plus junk" and throw
+    // the relay away silently.
+    let offer = match postcard::from_bytes::<Offer>(&plaintext) {
+        Ok(o) => o,
+        Err(_) => postcard::from_bytes::<OfferV1>(&plaintext).ok()?.into(),
+    };
     Some((sender, offer))
 }
 
@@ -1540,6 +1596,7 @@ mod tests {
             sender_name: "Lorenzo".into(),
             origin: None,
             target: None,
+            relay: "https://relay.example".into(),
         }
     }
 
@@ -1595,5 +1652,81 @@ mod tests {
         let (got_sender, got_offer) = decode_offer(&blob, &recipient).expect("legacy decode");
         assert_eq!(got_sender.to_bytes(), sender.public().to_bytes());
         assert_eq!(got_offer, offer);
+    }
+
+    /// An offer written before [`Offer::relay`] existed must still open. Postcard
+    /// decodes positionally, so without the [`OfferV1`] fallback this one runs off
+    /// the end of the buffer and `decode_offer` drops it — and an offer can sit in
+    /// an inbox for its whole TTL, so an upgrade would quietly swallow everything
+    /// already in flight.
+    #[test]
+    fn an_offer_from_before_the_relay_field_still_opens() {
+        /// Exactly the shape [`Offer`] had then. Written out longhand rather than
+        /// reusing `OfferV1` so that shrinking `OfferV1` by mistake fails here.
+        #[derive(Serialize)]
+        struct OldOffer {
+            name: String,
+            size: u64,
+            chunks: u64,
+            ticket: String,
+            note: String,
+            sender_name: String,
+            origin: Option<crate::sync::DeviceId>,
+            target: Option<crate::sync::DeviceId>,
+        }
+
+        let sender = Identity::generate();
+        let recipient = Identity::generate();
+        let old = OldOffer {
+            name: "photo.jpg".into(),
+            size: 1234,
+            chunks: 1,
+            ticket: "arvc-fake".into(),
+            note: "see page 4".into(),
+            sender_name: "Lorenzo".into(),
+            origin: None,
+            target: None,
+        };
+        let plaintext = postcard::to_allocvec(&old).unwrap();
+        let sealed = seal(&plaintext, &recipient.public(), &sender, OFFER_AAD).unwrap();
+        let env = Envelope {
+            sender: sender.public().to_bytes(),
+            encapped_key: sealed.encapped_key,
+            ciphertext: sealed.ciphertext,
+        };
+        let outer = seal_anon(
+            &postcard::to_allocvec(&env).unwrap(),
+            &recipient.public(),
+            ENVELOPE_AAD,
+        )
+        .unwrap();
+        let blob = postcard::to_allocvec(&SealedEnvelope {
+            encapped_key: outer.encapped_key,
+            ciphertext: outer.ciphertext,
+        })
+        .unwrap();
+
+        let (got_sender, got) = decode_offer(&blob, &recipient).expect("an old offer still opens");
+        assert_eq!(got_sender.to_bytes(), sender.public().to_bytes());
+        assert_eq!(got.name, "photo.jpg");
+        assert_eq!(got.note, "see page 4");
+        // No relay to learn from a client that had none to name — and crucially
+        // this is empty rather than garbage read out of the next field.
+        assert_eq!(got.relay, "");
+    }
+
+    /// And the other direction: a current offer must not be mistaken for an old
+    /// one. Postcard ignores trailing bytes, so trying `OfferV1` first would parse
+    /// happily and throw the relay away without a word.
+    #[test]
+    fn a_current_offer_is_not_read_as_the_old_shape() {
+        let sender = Identity::generate();
+        let recipient = Identity::generate();
+        let offer = test_offer();
+        let blob = encode_offer_blob(&offer, &recipient.public(), &sender).unwrap();
+
+        let (_, got) = decode_offer(&blob, &recipient).expect("decode");
+        assert_eq!(got.relay, "https://relay.example");
+        assert_eq!(got, offer);
     }
 }

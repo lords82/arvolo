@@ -255,6 +255,10 @@ pub enum ManagerEvent {
         /// The sender's self-advertised display name (empty if none). A petname
         /// claim carried inside the sealed offer — never an authenticated identity.
         sender_name: String,
+        /// Where the sender said they listen, so a reply can reach them without
+        /// being configured by hand. Empty when they named none. Routing only —
+        /// see [`crate::presence::Offer::relay`].
+        relay: String,
     },
     /// A transfer started.
     Started {
@@ -604,8 +608,13 @@ impl TransferManager {
 
     /// Is `contact` currently online (a live presence beacon on the relay)? Any
     /// error or missing relay reads as offline.
-    pub async fn is_online(&self, contact: &PublicId) -> bool {
-        let Some(relay) = &self.inner.relay else {
+    ///
+    /// `relay` is where *they* listen, when that is known and is not where we do.
+    /// A beacon lives only on the relay its owner publishes it to, so asking ours
+    /// about someone else's relay does not report them offline so much as report
+    /// that we looked in the wrong place.
+    pub async fn is_online(&self, contact: &PublicId, relay: Option<&str>) -> bool {
+        let Some(relay) = relay.or(self.inner.relay.as_deref()) else {
             return false;
         };
         presence::check_online(&self.inner.client, relay, contact)
@@ -620,6 +629,11 @@ impl TransferManager {
     /// live P2P whenever the recipient is online, else the relay mailbox. If the
     /// relay can't take it (too large / unreachable / error) the send is *held*
     /// (`Waiting`) and keeps retrying rather than failing.
+    ///
+    /// `relay` is the recipient's, when they listen somewhere other than we do.
+    /// Everything it routes — the presence probe, the offer, the mailbox notice —
+    /// has to reach *them*; the payload itself is P2P and never goes through it.
+    #[allow(clippy::too_many_arguments)]
     pub async fn send_to(
         &self,
         recipient: &PublicId,
@@ -628,11 +642,19 @@ impl TransferManager {
         archive: bool,
         note: String,
         target: Option<crate::sync::DeviceId>,
+        relay: Option<String>,
     ) -> Result<u64> {
         let source = payload.into();
-        let relay = self.inner.relay.clone().context(
-            "a relay is required to send to a contact (set ARVOLO_RELAY or config `relay`)",
-        )?;
+        // Keep the override itself, not the relay it resolved to: a held send that
+        // comes back after the user moved their own relay should follow them, and
+        // only a recipient's relay is theirs to remember.
+        let theirs = relay;
+        let relay = theirs
+            .clone()
+            .or_else(|| self.inner.relay.clone())
+            .context(
+                "a relay is required to send to a contact (set ARVOLO_RELAY or config `relay`)",
+            )?;
         let size = source.len().unwrap_or(0);
         let (id, cancel) =
             self.register(Direction::Send, Some(recipient.clone()), name.clone(), size);
@@ -646,6 +668,7 @@ impl TransferManager {
                 archive,
                 note: note.clone(),
                 target,
+                relay: theirs,
                 pause_flag: pause_flag.clone(),
                 prep: Default::default(),
             },
@@ -676,6 +699,12 @@ impl TransferManager {
     /// restoring one carrying a password would mean writing that password into the
     /// state directory; retrying without it would silently deposit unprotected.
     /// Neither is acceptable, so an explicit deposit simply doesn't become held.
+    ///
+    /// With a cross-relay recipient the two halves come apart: the blob goes to
+    /// **our** relay (we pay for that storage, and the `arvm…` names it, so they
+    /// can fetch it from anywhere) while the notice goes to **theirs**, which is
+    /// the only inbox they read. If we have no relay of our own, both fall back to
+    /// theirs — an inbox POST is unauthenticated by design, so that works.
     pub async fn deposit_to(
         &self,
         recipient: &PublicId,
@@ -683,13 +712,15 @@ impl TransferManager {
         name: String,
         note: String,
         opts: MailboxOpts,
+        relay: Option<String>,
     ) -> Result<(u64, String)> {
         let payload = payload.into();
-        let relay = self
-            .inner
-            .relay
+        let mine = self.inner.relay.clone();
+        let deposit_relay = mine
             .clone()
+            .or_else(|| relay.clone())
             .context("a relay is required to deposit to a contact's mailbox")?;
+        let offer_relay = relay.or(mine).unwrap_or_else(|| deposit_relay.clone());
         let size = payload.len().unwrap_or(0);
         let (id, cancel) =
             self.register(Direction::Send, Some(recipient.clone()), name.clone(), size);
@@ -703,7 +734,8 @@ impl TransferManager {
         // inbox — after the user had been shown "annullamento in corso".
         let deposit = deposit_offline_and_offer(
             &self.inner,
-            &relay,
+            &deposit_relay,
+            &offer_relay,
             recipient,
             &payload,
             &name,
@@ -724,7 +756,7 @@ impl TransferManager {
                 // its own maximum, and a record deadlined off the request would keep
                 // watching (and keep telling the user about) a blob already reaped.
                 let expires = unix_now().saturating_add(out.ttl_secs);
-                spawn_offline_confirm(&self.inner, id, relay, out, expires);
+                spawn_offline_confirm(&self.inner, id, deposit_relay, offer_relay, out, expires);
                 Ok((id, ticket))
             }
             Err(e) => {
@@ -816,7 +848,11 @@ impl TransferManager {
 
         // A held send: re-arm its cancel token and re-spawn the delivery loop.
         let held = self.inner.held.lock().unwrap().get(&id).cloned();
-        if let (Some(h), Some(relay)) = (held, self.inner.relay.clone()) {
+        let route = held
+            .as_ref()
+            .and_then(|h| h.relay.clone())
+            .or_else(|| self.inner.relay.clone());
+        if let (Some(h), Some(relay)) = (held, route) {
             h.pause_flag.store(false, Ordering::Relaxed);
             let cancel = CancellationToken::new();
             self.inner
@@ -914,10 +950,12 @@ impl TransferManager {
         // fresh id, and resumes the pickup-confirmation poll. The revoke/retract
         // tokens ride along so a restored deposit stays cancellable.
         let relay = rec.relay.clone();
+        let offer_relay = rec.offer_relay.clone();
         spawn_offline_confirm(
             &self.inner,
             id,
             relay,
+            offer_relay,
             DepositOutcome {
                 size: rec.size,
                 claim: rec.claim,
@@ -957,7 +995,9 @@ impl TransferManager {
         let Ok(recipient) = PublicId::from_bytes(&rec.recipient) else {
             return;
         };
-        let Some(relay) = self.inner.relay.clone() else {
+        // Theirs first: a send held for a recipient on another relay has to go back
+        // to that relay, and it is also the one case where our own may be absent.
+        let Some(relay) = rec.relay.clone().or_else(|| self.inner.relay.clone()) else {
             return; // can't deliver without a relay; drop the stale record
         };
         // Records only ever hold a path (a handed-off descriptor died with the
@@ -985,6 +1025,7 @@ impl TransferManager {
                 archive: rec.archive,
                 note: rec.note.clone(),
                 target: rec.target,
+                relay: rec.relay.clone(),
                 pause_flag: pause_flag.clone(),
                 prep: slot.clone(),
             },
@@ -1142,7 +1183,6 @@ impl TransferManager {
         name: String,
         archive: bool,
         relay: String,
-        embed: bool,
         max_sessions: Option<u32>,
     ) -> Result<(u64, String)> {
         let payload = payload.into();
@@ -1153,7 +1193,7 @@ impl TransferManager {
         );
         // Claim before serving: a code that can't be minted should leave no
         // half-started transfer behind.
-        let (shown, host) = code::claim_code(&relay, embed)
+        let (shown, host) = code::claim_code(&relay)
             .await
             .context("claim a pairing code")?;
 
@@ -1443,6 +1483,7 @@ impl TransferManager {
                         size: offer.offer.size,
                         note: offer.offer.note.clone(),
                         sender_name: offer.offer.sender_name.clone(),
+                        relay: offer.offer.relay.clone(),
                     });
                 })
                 .await;
@@ -2134,6 +2175,7 @@ mod held_prep_tests {
                 archive: false,
                 note: String::new(),
                 target: None,
+                relay: None,
                 pause_flag: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 prep: slot.clone(),
             },
@@ -2243,6 +2285,7 @@ mod offer_dedup_tests {
                         sender_name: String::new(),
                         origin: None,
                         target: None,
+                        relay: String::new(),
                     },
                 },
             );
@@ -2482,6 +2525,7 @@ mod deposit_event_tests {
                 revoke_token: "revoke-me".into(),
                 offer_id: "offer-1".into(),
                 poster_token: "poster-1".into(),
+                offer_relay: "https://relay.example".into(),
             },
         );
 

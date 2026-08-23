@@ -48,7 +48,7 @@ pub(crate) async fn pair_host(name: Option<String>, relay: Option<String>, qr: b
         );
     }
 
-    let (shown, sender) = code::publish_auto(my_id.as_bytes(), &relay, true)
+    let (shown, sender) = code::publish_auto(my_id.as_bytes(), &relay)
         .await
         .context("start contact pairing")?;
 
@@ -65,6 +65,7 @@ pub(crate) async fn pair_host(name: Option<String>, relay: Option<String>, qr: b
     eprintln!("secret, and never your address book.");
     eprintln!("Waiting… (Ctrl-C to cancel)");
 
+    let mut their_relay: Option<String> = None;
     let their_id = match sender {
         // Unreachable: the version check above already refused a v1 relay. Kept as
         // a refusal rather than an `unreachable!` so a future change to
@@ -83,8 +84,16 @@ pub(crate) async fn pair_host(name: Option<String>, relay: Option<String>, qr: b
                 code::HostState::default(),
                 cancel_on_ctrl_c(),
                 |ev| {
-                    if let code::HostEvent::Paired { reply, .. } = ev {
+                    if let code::HostEvent::Paired { reply, extras, .. } = ev {
                         got = reply;
+                        // Where they listen, if they were new enough to say. The
+                        // pairing stands either way — this only decides whether
+                        // the first thing you send them has to be configured by
+                        // hand first.
+                        their_relay = extras
+                            .and_then(|b| String::from_utf8(b).ok())
+                            .map(|r| r.trim().to_string())
+                            .filter(|r| !r.is_empty());
                     }
                 },
                 |_| {},
@@ -101,7 +110,7 @@ pub(crate) async fn pair_host(name: Option<String>, relay: Option<String>, qr: b
         // or running something that isn't arvolo.
         bail!("the other side took your id but never sent theirs — nothing was saved here");
     };
-    save_the_other_side(&String::from_utf8_lossy(&bytes), name).await
+    save_the_other_side(&String::from_utf8_lossy(&bytes), name, their_relay).await
 }
 
 /// Take a code someone showed you — the side that answers.
@@ -110,12 +119,19 @@ pub(crate) async fn pair_join(code_str: String, name: Option<String>) -> Result<
     let my_id = encode_id(&me.public());
     let default_relay = book::default_relay_or_builtin();
 
+    // Their relay comes free with the code: a code is `N-word-word@relay`, and the
+    // person showing it hosts the rendezvous on the relay they listen on. So only
+    // the other direction needs carrying, and that is what `extras` is for.
+    let (_, _, relay_in_code) = code::parse_code(&code_str).context("contact pairing")?;
+    let their_relay = relay_in_code.map(|r| book::canonical_relay(&r));
+
     eprintln!("Pairing… (waiting for the other side)");
     let (their_bytes, replied) = code::exchange_bytes_with(
         &code_str,
         default_relay.as_deref(),
         PAIR_WAIT,
         Some(my_id.as_bytes()),
+        default_relay.as_deref().map(|r| r.as_bytes()),
     )
     .await
     .context("contact pairing")?;
@@ -130,13 +146,26 @@ pub(crate) async fn pair_join(code_str: String, name: Option<String>) -> Result<
              update it, or trade ids the long way with `arvolo me` + `arvolo contacts add`."
         );
     }
-    save_the_other_side(&String::from_utf8_lossy(&their_bytes), name).await
+    save_the_other_side(&String::from_utf8_lossy(&their_bytes), name, their_relay).await
 }
 
 /// Save the id we just traded for, and mark it verified.
-async fn save_the_other_side(their_id: &str, name: Option<String>) -> Result<()> {
+///
+/// `their_relay` is where they listen, when the exchange managed to say. It is
+/// recorded but never gates anything: an absent one leaves the contact routing
+/// through our own relay, which is what every pairing did before, and a present
+/// one is what makes a first send work when the two of you are not on the same
+/// relay.
+async fn save_the_other_side(
+    their_id: &str,
+    name: Option<String>,
+    their_relay: Option<String>,
+) -> Result<()> {
     let their_id = their_id.trim();
     book::decode_id(their_id).context("the other side sent something that isn't a public id")?;
+    if let Some(relay) = &their_relay {
+        book::set_relay(their_id, relay)?;
+    }
 
     if let Some(existing) = book::resolve_name(their_id) {
         // Already known: nothing to name, but the pairing did just authenticate
@@ -157,6 +186,12 @@ async fn save_the_other_side(their_id: &str, name: Option<String>) -> Result<()>
         "   fingerprint: {}",
         book::fingerprint_of(their_id).unwrap_or_default()
     );
+    match &their_relay {
+        Some(r) if Some(r) != book::default_relay_or_builtin().as_ref() => {
+            eprintln!("   listens on {}", arvolo_core::code::compact_relay(r));
+        }
+        _ => {}
+    }
     Ok(())
 }
 

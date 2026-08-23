@@ -512,7 +512,10 @@ async fn push(
     // `me` resolves here too, not only in `arvolo send --to me`: a front-end that
     // pushes through the daemon has no other way to name its own devices, and a
     // second copy of the rule is how the two would drift.
-    let recipient = match crate::resolve_recipient_or_self(&to) {
+    // The relay comes from the book here rather than over IPC: the daemon owns the
+    // address book, so a front-end naming a contact gets the same routing as the
+    // CLI without having to know about relays at all.
+    let (recipient, theirs) = match crate::resolve_recipient_or_self_with_relay(&to) {
         Ok(r) => r,
         Err(e) => return Response::Error(format!("{e:#}")),
     };
@@ -558,12 +561,12 @@ async fn push(
             target,
         };
         d.manager
-            .deposit_to(&recipient, source, name, note, mailbox)
+            .deposit_to(&recipient, source, name, note, mailbox, theirs)
             .await
             .map(|(id, ticket)| (id, Some(ticket)))
     } else {
         d.manager
-            .send_to(&recipient, source, name, archive, note, target)
+            .send_to(&recipient, source, name, archive, note, target, theirs)
             .await
             .map(|id| (id, None))
     };
@@ -915,12 +918,13 @@ async fn serve_code(
     // Same cleanup contract as `serve_ticket`: a packed archive has to stay
     // readable for the whole session, so it goes when the transfer ends.
     let watch = temp.clone().map(|t| (d.manager.subscribe(), t));
-    // The code is always self-contained (`code@relay`): the daemon knows which
-    // relay it claimed on, and the receiver shouldn't have to be configured.
+    // A code is always self-contained (`code@relay`) — on every path now, not just
+    // this one: the receiver shouldn't have to be configured, and which it got used
+    // to depend on whether a daemon happened to be running.
     let max_sessions = (!keep).then_some(1);
     match d
         .manager
-        .serve_code(source, name, archive, relay, true, max_sessions)
+        .serve_code(source, name, archive, relay, max_sessions)
         .await
     {
         Ok((id, code)) => {
@@ -995,6 +999,7 @@ fn list_contacts() -> Vec<ContactDto> {
             pending_name: crate::book::pending_name_of(&id)
                 .map(|n| sanitize_display(&n))
                 .unwrap_or_default(),
+            relay: crate::book::relay_of(&id).unwrap_or_default(),
             name,
             id,
         })
@@ -1156,6 +1161,8 @@ async fn create_link(
                 // A link is deposited directly, not through the engine: no transfer
                 // row, and no recipient, so no inbox offer. The blob is the whole job.
                 None,
+                None,
+                // Nobody's inbox, so no offer and no second relay.
                 None,
             );
             Response::Link(out.link)

@@ -177,11 +177,17 @@ pub(crate) const SELF_RECIPIENT: &str = "me";
 /// ([`crate::commands::send::send_to`]), so a front-end that talks to the daemon
 /// directly — the desktop app — asked for a contact called "me" and got an error.
 /// One rule, both callers.
-pub(crate) fn resolve_recipient_or_self(arg: &str) -> Result<PublicId> {
+///
+/// `None` means "wherever we listen", which is what every send did before a
+/// contact could carry a relay. Our own devices resolve to `None` by
+/// construction: they share our identity, so they read the inbox we do.
+pub(crate) fn resolve_recipient_or_self_with_relay(
+    arg: &str,
+) -> Result<(PublicId, Option<String>)> {
     if arg == SELF_RECIPIENT {
-        return Ok(my_identity()?.public());
+        return Ok((my_identity()?.public(), None));
     }
-    crate::book::resolve_recipient(arg)
+    crate::book::resolve_recipient_with_relay(arg)
 }
 
 /// Is this base32 public id our own identity? Used to decide that an incoming
@@ -220,7 +226,11 @@ mod tests {
 
         let me = my_identity().unwrap().public();
         assert_eq!(
-            encode_id(&resolve_recipient_or_self(SELF_RECIPIENT).unwrap()),
+            encode_id(
+                &resolve_recipient_or_self_with_relay(SELF_RECIPIENT)
+                    .unwrap()
+                    .0
+            ),
             encode_id(&me)
         );
 
@@ -228,11 +238,15 @@ mod tests {
         let other = Identity::generate().public();
         book::contact_add("proj", &encode_id(&other)).unwrap();
         assert_eq!(
-            encode_id(&resolve_recipient_or_self("proj").unwrap()),
+            encode_id(&resolve_recipient_or_self_with_relay("proj").unwrap().0),
             encode_id(&other)
         );
         assert_eq!(
-            encode_id(&resolve_recipient_or_self(&encode_id(&other)).unwrap()),
+            encode_id(
+                &resolve_recipient_or_self_with_relay(&encode_id(&other))
+                    .unwrap()
+                    .0
+            ),
             encode_id(&other)
         );
 
@@ -241,7 +255,11 @@ mod tests {
         // a file to ourselves rather than to somebody else.
         book::contact_add(SELF_RECIPIENT, &encode_id(&other)).unwrap();
         assert_eq!(
-            encode_id(&resolve_recipient_or_self(SELF_RECIPIENT).unwrap()),
+            encode_id(
+                &resolve_recipient_or_self_with_relay(SELF_RECIPIENT)
+                    .unwrap()
+                    .0
+            ),
             encode_id(&me)
         );
 

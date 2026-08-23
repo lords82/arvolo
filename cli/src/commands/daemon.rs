@@ -196,6 +196,7 @@ pub(crate) async fn daemon(
                         size,
                         note,
                         sender_name,
+                        relay,
                     }) => {
                         let from_b32 = encode_id(&from);
                         // Blocked senders are dropped before anything else: no name
@@ -210,6 +211,11 @@ pub(crate) async fn daemon(
                         // Record any advertised-name change durably (surfaced later in
                         // `contacts list` / to an attached front-end); never blocks.
                         book::observe_advertised_name(&from_b32, &sender_name);
+                        // And where to answer them. Only for a contact we already
+                        // have, so an offer cannot enrol a stranger into the book.
+                        if let Some(r) = book::learn_sender_relay(&from_b32, &relay) {
+                            tracing::debug!("{from_b32} now listens on {r}");
+                        }
                         // Supersede any older parked offer for the same (sender, file).
                         // A live→mailbox fallback posts a fresh offer and retracts the
                         // stale live one, but we may already have pulled that stale copy

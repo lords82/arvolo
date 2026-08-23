@@ -89,6 +89,7 @@ async fn an_offer_for_a_download_already_running_never_reaches_the_user() {
             sender_name: "the sender".into(),
             origin: None,
             target: None,
+            relay: String::new(),
         },
         None,
     )

@@ -258,6 +258,15 @@ arvolo device sync        # on each device; `listen`/`daemon` also sync automati
 arvolo device status      # fingerprint, contact count, last sync
 ```
 
+The book that travels includes each contact's relay, so a contact you can reach
+from the laptop is reachable from the phone without setting anything up twice.
+
+**Update your devices together.** Sync notes are now sealed with a per-message key
+(they were not, and every snapshot an identity published went out under the same
+key and nonce — see `seal_under` in `core/src/sync.rs`). A device still on an older
+build cannot open the new form, and on failing to it *deletes* the note, so a
+mixed-version pair does not sync until both sides are current.
+
 ### Sending to yourself
 
 `--to me` is your own machines. The file is sealed to your own key and lands in
@@ -318,6 +327,28 @@ download_dir = "/srv/arvolo/incoming"   # where accepted files are saved (defaul
 ```
 
 For a relay without TLS, write the scheme explicitly: `relay = "http://relay.local:6282"`.
+
+### When someone else is on a different relay
+
+There is no federation between relays, so the offer you post has to land in an
+inbox the other person actually reads. That means knowing where they listen —
+their id carries it:
+
+```sh
+arvolo me                       # -> <id>@your.relay   (--plain for the bare id)
+arvolo contacts add alice <id>@her.relay
+arvolo contacts relay alice     # show it; `<url>` to change, `--clear` to drop it
+```
+
+Without one, a contact routes through your own relay, exactly as before. With one,
+`send --to`, the online marker in `contacts list`, and the mailbox notice all go to
+theirs — while a mailbox deposit still uploads to *yours*, since the `arvm…` names
+the relay it was uploaded to and you should not be spending someone else's storage.
+
+Usually you never type any of this. `arvolo contacts add <name> <code>` trades
+relays as part of the pairing, and the first file someone sends you carries theirs,
+so it fills itself in. It is routing, not identity: getting it wrong costs a
+delivery that goes nowhere, never a file read by the wrong person.
 
 Every environment variable in the client table below has a matching `config.toml`
 key (same name, lowercased without the `ARVOLO_` prefix — e.g. `ARVOLO_SEED` →

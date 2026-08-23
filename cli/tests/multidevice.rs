@@ -108,8 +108,8 @@ async fn device_pair_join_and_sync_end_to_end() {
     let _ = tokio::time::timeout(Duration::from_secs(25), pair.wait()).await;
 
     // After pairing the two devices share ONE identity...
-    let (_, id_a) = run(cfg_a.path(), &relay, &["me"]).await;
-    let (_, id_b) = run(cfg_b.path(), &relay, &["me"]).await;
+    let (_, id_a) = run(cfg_a.path(), &relay, &["me", "--plain"]).await;
+    let (_, id_b) = run(cfg_b.path(), &relay, &["me", "--plain"]).await;
     let id_a = id_a.split_whitespace().next().unwrap_or("");
     let id_b = id_b.split_whitespace().next().unwrap_or("");
     assert!(!id_a.is_empty());

@@ -50,6 +50,7 @@ fn sample_snapshot() -> SyncSnapshot {
         seen: vec![],
         names: vec![],
         devices: vec![],
+        relays: vec![],
     }
 }
 

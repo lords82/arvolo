@@ -80,8 +80,8 @@ async fn advertised_name_shown_and_approved_end_to_end() {
     let cfg_recv = TempDir::new().unwrap();
 
     // Two distinct identities.
-    let send_id = first_word(run(cfg_send.path(), &relay, &["me"]).await.1);
-    let recv_id = first_word(run(cfg_recv.path(), &relay, &["me"]).await.1);
+    let send_id = first_word(run(cfg_send.path(), &relay, &["me", "--plain"]).await.1);
+    let recv_id = first_word(run(cfg_recv.path(), &relay, &["me", "--plain"]).await.1);
     assert!(!send_id.is_empty() && !recv_id.is_empty());
     assert_ne!(send_id, recv_id);
 
@@ -196,8 +196,8 @@ async fn a_download_remembers_what_its_sender_calls_themselves() {
     let cfg_send = TempDir::new().unwrap();
     let cfg_recv = TempDir::new().unwrap();
 
-    let send_id = first_word(run(cfg_send.path(), &relay, &["me"]).await.1);
-    let recv_id = first_word(run(cfg_recv.path(), &relay, &["me"]).await.1);
+    let send_id = first_word(run(cfg_send.path(), &relay, &["me", "--plain"]).await.1);
+    let recv_id = first_word(run(cfg_recv.path(), &relay, &["me", "--plain"]).await.1);
     let (ok, _) = run(cfg_send.path(), &relay, &["me", "name", "Lorenzo"]).await;
     assert!(ok, "arvolo me name");
 

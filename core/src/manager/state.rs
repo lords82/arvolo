@@ -27,6 +27,10 @@ pub(super) struct Held {
     /// belongs to the *send*, and both the live attempt and the mailbox fallback
     /// have to stamp the same value on the offer they post.
     pub(super) target: Option<crate::sync::DeviceId>,
+    /// Where the recipient listens, when that is not where we do. Kept here for
+    /// the same reason as `target`: it belongs to the send, and a pause/resume or
+    /// a restart has to route to the same place the first attempt did.
+    pub(super) relay: Option<String>,
     /// Flipped by [`TransferManager::pause`] so the running loop, once its token is
     /// cancelled, knows to pause (keep the transfer) rather than cancel (drop it).
     pub(super) pause_flag: Arc<std::sync::atomic::AtomicBool>,

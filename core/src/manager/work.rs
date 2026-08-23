@@ -151,6 +151,7 @@ pub(super) fn persist_held_record(inner: &Inner, id: u64, paused: bool, reason: 
                 reason: reason.to_string(),
                 note: h.note.clone(),
                 target: h.target,
+                relay: h.relay.clone(),
             },
         );
     }
@@ -534,8 +535,20 @@ async fn deliver_to_inner(
                 target: held_target(inner, id),
                 ..MailboxOpts::default()
             };
-            let attempt =
-                deposit_offline_and_offer(inner, relay, recipient, payload, name, note, &opts);
+            // `relay` here is the recipient's — that is what the offer has to
+            // reach. The blob goes to ours when we have one, so we spend our own
+            // storage and not a stranger's; the `arvm…` carries whichever it was.
+            let deposit_relay = inner.relay.as_deref().unwrap_or(relay);
+            let attempt = deposit_offline_and_offer(
+                inner,
+                deposit_relay,
+                relay,
+                recipient,
+                payload,
+                name,
+                note,
+                &opts,
+            );
             let outcome = tokio::select! {
                 _ = cancel.cancelled() => {
                     handle_stop(inner, id, pause_flag);
@@ -549,6 +562,7 @@ async fn deliver_to_inner(
                     spawn_offline_confirm(
                         inner,
                         id,
+                        deposit_relay.to_string(),
                         relay.to_string(),
                         out,
                         unix_now().saturating_add(OFFLINE_TTL_SECS),
@@ -718,6 +732,9 @@ pub(super) async fn serve_live_once(
         // below posts its own offer and has to stamp the same value, and a second
         // parameter through five functions is a second place to forget it.
         target: held_target(inner, id),
+        // Ours, not `relay` — that one is where *they* listen, and telling them to
+        // answer at their own address would teach them nothing.
+        relay: inner.relay.clone().unwrap_or_default(),
     };
     // Post an offer only when we don't already have one standing. The ticket is
     // byte-stable across attempts (see [`flow::prepare_send_reusing`]), so a second
@@ -951,9 +968,15 @@ fn held_target(inner: &Inner, id: u64) -> Option<crate::sync::DeviceId> {
     inner.held.lock().unwrap().get(&id).and_then(|h| h.target)
 }
 
+/// `deposit_relay` holds the blob, `offer_relay` holds the notice pointing at it.
+/// They are the same string in the ordinary case and must not be collapsed into
+/// one: the recipient reads only their own inbox, while the `arvm…` names the
+/// relay it was uploaded to, so a cross-relay deposit needs both.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn deposit_offline_and_offer(
     inner: &Inner,
-    relay: &str,
+    deposit_relay: &str,
+    offer_relay: &str,
     recipient: &PublicId,
     payload: &crate::source::SendSource,
     name: &str,
@@ -968,7 +991,7 @@ pub(super) async fn deposit_offline_and_offer(
         name,
         recipient,
         &inner.me,
-        relay,
+        deposit_relay,
         ttl,
         max,
         opts.password.as_deref(),
@@ -992,10 +1015,11 @@ pub(super) async fn deposit_offline_and_offer(
         sender_name: inner.display_name.lock().unwrap().clone(),
         origin: *inner.device_id.lock().unwrap(),
         target: opts.target,
+        relay: inner.relay.clone().unwrap_or_default(),
     };
     let posted = presence::post_offer(
         &inner.client,
-        relay,
+        offer_relay,
         recipient,
         &inner.me,
         &offer,
@@ -1043,9 +1067,12 @@ pub(super) fn cancel_deposited(inner: Arc<Inner>, id: u64) {
                 }
                 if !rec.offer_id.is_empty() {
                     if let Ok(recipient) = PublicId::from_bytes(&rec.recipient) {
+                        // Their relay, not the blob's: withdrawing the file and
+                        // withdrawing the notice are two calls to two servers when
+                        // the recipient is not on ours.
                         let _ = presence::retract_offer(
                             &inner.client,
-                            &rec.relay,
+                            &rec.offer_relay,
                             &recipient,
                             &rec.offer_id,
                             &rec.poster_token,
@@ -1079,10 +1106,14 @@ pub(super) fn cancel_deposited(inner: Arc<Inner>, id: u64) {
 /// and if the deadline passes without a single successful look the transfer is
 /// left Deposited. "I never saw it picked up" and "it wasn't picked up" are
 /// different claims, and only the second one earns a terminal state.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn confirm_offline_delivery(
     inner: Arc<Inner>,
     id: u64,
     relay: String,
+    // Where the offer sits — the recipient's relay, which is where "have they seen
+    // it?" is answered. `relay` above is where the blob sits.
+    offer_relay: String,
     claim: String,
     expires: u64,
     offer: Option<(PublicId, String, String)>,
@@ -1099,7 +1130,7 @@ pub(super) async fn confirm_offline_delivery(
             read_deposit(look.as_ref(), None, unix_now(), verdict_at),
         ) {
             (Some((recipient, offer_id, token)), Verdict::KeepWatching) => {
-                presence::offer_status(&inner.client, &relay, recipient, offer_id, token)
+                presence::offer_status(&inner.client, &offer_relay, recipient, offer_id, token)
                     .await
                     .ok()
             }
@@ -1212,6 +1243,9 @@ pub(super) fn spawn_offline_confirm(
     inner: &Arc<Inner>,
     id: u64,
     relay: String,
+    // The recipient's relay, holding the notice. Equal to `relay` unless they
+    // listen somewhere else.
+    offer_relay: String,
     out: DepositOutcome,
     expires: u64,
 ) {
@@ -1288,6 +1322,7 @@ pub(super) fn spawn_offline_confirm(
                 revoke_token,
                 offer_id,
                 poster_token,
+                offer_relay: offer_relay.clone(),
             },
         );
     }
@@ -1295,6 +1330,7 @@ pub(super) fn spawn_offline_confirm(
         inner.clone(),
         id,
         relay,
+        offer_relay,
         claim,
         expires,
         offer_probe,

@@ -210,11 +210,17 @@ pub(crate) async fn push(
     }
 
     let relay = require_relay(relay)?;
-    let recipient = book::resolve_recipient(&to)?;
+    // Two relays from here on: ours, which the manager is built with and which
+    // holds anything we deposit, and theirs, which is the only inbox they read.
+    // They are the same string unless the contact carries a relay of their own.
+    let (recipient, theirs) = book::resolve_recipient_with_relay(&to)?;
     vprintln!(
         "recipient {to} resolved (fingerprint {})",
         recipient.fingerprint()
     );
+    if let Some(r) = theirs.as_deref().filter(|r| *r != relay) {
+        vprintln!("{to} listens on {r}, not on our own relay");
+    }
     let me = my_identity()?;
     let (payload, name, archive, temp) = resolve_payload(&paths)?;
     if archive {
@@ -235,7 +241,7 @@ pub(crate) async fn push(
     // `send_to` decides live-vs-mailbox itself (with a presence grace window and a
     // watchdog); the up-front check is only a hint for the opening line.
     vprintln!("checking {to}'s presence on the relay…");
-    if manager.is_online(&recipient).await {
+    if manager.is_online(&recipient, theirs.as_deref()).await {
         eprintln!("{to} looks online — trying a direct transfer…");
     } else {
         eprintln!("{to} looks offline — will deposit to the mailbox…");
@@ -249,6 +255,7 @@ pub(crate) async fn push(
             archive,
             note.to_string(),
             None,
+            theirs,
         )
         .await
         .inspect_err(|_| {
@@ -890,24 +897,17 @@ pub(crate) async fn send_with_code(
     to: Option<(&Identity, &PublicId)>,
     qr: bool,
 ) -> Result<()> {
-    // An explicit --relay is embedded in the code (works with no receiver config);
-    // otherwise fall back to the default relay (short code, shared default).
-    let (relay_url, embed) = match relay {
-        Some(r) => (r, true),
-        None => match book::default_relay_or_builtin() {
-            Some(r) => (r, false),
-            None => anyhow::bail!("--code needs a relay: pass --relay <host>, set ARVOLO_RELAY, or configure `relay` in config.toml"),
-        },
+    // Always embedded, wherever the relay came from. It used to ride along only
+    // with an explicit `--relay`, which made the same command self-contained or not
+    // depending on whether a daemon happened to be running — the daemon path has
+    // always embedded it (see `ipc::server::serve_code`) — and left the receiver to
+    // discover the difference by having the code not resolve.
+    let relay_url = match relay.or_else(book::default_relay_or_builtin) {
+        Some(r) => r,
+        None => anyhow::bail!("--code needs a relay: pass --relay <host>, set ARVOLO_RELAY, or configure `relay` in config.toml"),
     };
 
-    vprintln!(
-        "rendezvous relay: {relay_url} ({})",
-        if embed {
-            "embedded in the code — receiver needs no config"
-        } else {
-            "shared default — not embedded"
-        }
-    );
+    vprintln!("rendezvous relay: {relay_url} (embedded in the code — receiver needs no config)");
     eprintln!("Splitting and serving chunks…");
     let session = flow::prepare_send(
         &payload,
@@ -923,7 +923,7 @@ pub(crate) async fn send_with_code(
         session.chunks,
         human_size(session.total_size)
     );
-    let (shown_code, complete) = code::publish_ticket(&session.ticket, &relay_url, embed)
+    let (shown_code, complete) = code::publish_ticket(&session.ticket, &relay_url)
         .await
         .context("start pairing")?;
 

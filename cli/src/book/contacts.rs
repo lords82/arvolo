@@ -34,12 +34,26 @@ pub(crate) fn decode_id(s: &str) -> Result<PublicId> {
 }
 
 /// Resolve a `--to` argument to a recipient: a saved contact name, else a raw
-/// base32 public id.
+/// base32 public id (which may carry an `@relay` suffix).
 pub fn resolve_recipient(arg: &str) -> Result<PublicId> {
-    if let Some(id) = load_contacts().contacts.get(arg) {
-        return decode_id(id).with_context(|| format!("contact '{arg}' has an invalid id"));
+    resolve_recipient_with_relay(arg).map(|(id, _)| id)
+}
+
+/// Like [`resolve_recipient`], and also says **where** that identity listens.
+///
+/// `None` means "no relay recorded for them", which every caller reads as "use
+/// mine" — the behaviour before contacts could carry a relay at all. A raw
+/// `<id>@<relay>` argument works without saving a contact first; a bare raw id
+/// still picks up a stored hint, so `send --to <id>` and `send --to <name>` route
+/// the same way.
+pub fn resolve_recipient_with_relay(arg: &str) -> Result<(PublicId, Option<String>)> {
+    if let Some(id) = load_contacts().contacts.get(arg.trim()) {
+        let public = decode_id(id).with_context(|| format!("contact '{arg}' has an invalid id"))?;
+        return Ok((public, relay_of(id)));
     }
-    decode_id(arg).context("not a known contact name or a valid public id")
+    let (id, relay) = split_id_and_relay(arg);
+    let public = decode_id(id).context("not a known contact name or a valid public id")?;
+    Ok((public, relay.or_else(|| relay_of(id))))
 }
 
 /// The word fingerprint for a stored base32 id (for display in listings).
@@ -67,7 +81,13 @@ pub struct KeyChange {
 /// Add or update a contact (validates the id). If the name already exists with a
 /// *different* id, reports the key change and drops the contact's verified mark
 /// (the new key is untrusted until re-verified).
+///
+/// `id` may be the shareable `<id>@<relay>` form, in which case the relay is
+/// recorded as where they listen. A bare id leaves any existing relay row alone —
+/// re-adding someone to fix a typo in their name must not silently forget where
+/// they are.
 pub fn contact_add(name: &str, id: &str) -> Result<Option<KeyChange>> {
+    let (id, relay) = split_id_and_relay(id);
     decode_id(id).context("invalid public id")?;
     let new_id = id.trim().to_lowercase();
     let mut c = load_contacts();
@@ -88,13 +108,21 @@ pub fn contact_add(name: &str, id: &str) -> Result<Option<KeyChange>> {
             if t.trusted.remove(old_id).is_some() {
                 save_trusted(&t)?;
             }
+            // Same reasoning one step further out: the old key's relay row says
+            // where *that* key listened. The new key has no row of its own, so it
+            // falls back to your relay until told otherwise — it must not inherit
+            // an address that belonged to the key it just replaced.
+            clear_relay(old_id)?;
             Some(change)
         }
         _ => None,
     };
 
-    c.contacts.insert(name.to_string(), new_id);
+    c.contacts.insert(name.to_string(), new_id.clone());
     save_contacts(&c)?;
+    if let Some(relay) = relay {
+        set_relay(&new_id, &relay)?;
+    }
     Ok(key_change)
 }
 
@@ -114,6 +142,9 @@ pub fn contact_remove(name: &str) -> Result<bool> {
     // Only if no other alias still points at that identity.
     if !c.contacts.values().any(|other| *other == id) {
         forget_name_row(&id)?;
+        // Their relay row is the same kind of ownerless state as a pinned name:
+        // nobody left to route to, and it would otherwise keep syncing forever.
+        clear_relay(&id)?;
     }
     Ok(true)
 }

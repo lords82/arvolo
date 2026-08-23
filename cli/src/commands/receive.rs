@@ -83,7 +83,7 @@ pub(crate) async fn listen(
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 };
                 match ev {
-                    ManagerEvent::OfferReceived { id, from, name, size, note, sender_name } => {
+                    ManagerEvent::OfferReceived { id, from, name, size, note, sender_name, relay } => {
                         let from_b32 = encode_id(&from);
                         // Same as the daemon: a blocked sender never reaches the
                         // prompt, or blocking would just be a slower "no".
@@ -101,6 +101,9 @@ pub(crate) async fn listen(
                             eprintln!("   💬 note: {}", sanitize_display(&note));
                         }
                         note_advertised_name(&from_b32, &sender_name);
+                        if let Some(r) = book::learn_sender_relay(&from_b32, &relay) {
+                            vprintln!("noted: {from_b32} listens on {r}");
+                        }
 
                         // `trusted` comes first and is unconditional: it is the
                         // standing "don't ask me about this person" the user set
@@ -415,6 +418,19 @@ pub(crate) async fn decline_cmd(handle: String) -> Result<()> {
 /// Resolve a typed handle (unique prefix) against the waiting offers — the
 /// daemon's parked list when one runs, the relay inbox otherwise — and accept or
 /// decline the one it names.
+/// Record what an incoming offer says about its sender: the advertised name, and
+/// where they listen.
+///
+/// Only for the paths that read the relay inbox directly. When a daemon is up it
+/// has already done this as the offer arrived, and the address book it wrote to is
+/// the same one this process reads.
+fn note_sender_facts(id_b32: &str, sender_name: &str, relay: &str) {
+    note_advertised_name(id_b32, sender_name);
+    if let Some(r) = book::learn_sender_relay(id_b32, relay) {
+        vprintln!("noted: {id_b32} listens on {r}");
+    }
+}
+
 async fn take_offer_by_handle(
     prefix: &str,
     out: Option<PathBuf>,
@@ -473,7 +489,11 @@ async fn take_offer_by_handle(
                 let chosen = &offers[i];
                 match decision {
                     Decision::Accept => {
-                        note_advertised_name(&encode_id(&chosen.sender), &chosen.offer.sender_name);
+                        note_sender_facts(
+                            &encode_id(&chosen.sender),
+                            &chosen.offer.sender_name,
+                            &chosen.offer.relay,
+                        );
                         recv_ticket(chosen.offer.ticket.clone(), out, password).await?;
                         // Saved, so it can be let go of; see `waiting_from_relay`.
                         if let Err(e) = inbox.ack(&chosen.id).await {
@@ -1010,7 +1030,11 @@ async fn waiting_from_relay(out: Option<PathBuf>, password: Option<String>) -> R
         }
     };
     let chosen = &offers[n];
-    note_advertised_name(&encode_id(&chosen.sender), &chosen.offer.sender_name);
+    note_sender_facts(
+        &encode_id(&chosen.sender),
+        &chosen.offer.sender_name,
+        &chosen.offer.relay,
+    );
     recv_ticket(chosen.offer.ticket.clone(), out, password).await?;
     // Saved, so it can be let go of. Acking earlier would drop it from the relay on
     // the strength of an intention, and a fetch that then failed would have taken

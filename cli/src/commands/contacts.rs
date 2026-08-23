@@ -31,6 +31,9 @@ struct Row {
     /// Seconds since the verified mark was made; `None` when unverified, or
     /// verified before the stamp was recorded.
     verified_ago: Option<u64>,
+    /// Where they listen, when it isn't wherever you listen. `None` means your
+    /// own relay, which is the ordinary case and worth no ink.
+    relay: Option<String>,
 }
 
 /// `arvolo contacts list` — the address book, and who is reachable right now.
@@ -61,6 +64,7 @@ async fn list_contacts(filter: Option<String>, no_presence: bool, json: bool) ->
             advertised: book::display_name_of(&id).map(|n| sanitize_display(&n)),
             pending: book::pending_name_of(&id).map(|n| sanitize_display(&n)),
             online: None,
+            relay: book::relay_of(&id),
             name,
             id,
         })
@@ -83,10 +87,13 @@ async fn list_contacts(filter: Option<String>, no_presence: bool, json: bool) ->
 /// `default_relay_or_builtin` rather than `default_relay`: a zero-config install
 /// still sends through the built-in relay, so reporting "unknown" for everyone
 /// would describe a machine that isn't this one.
+///
+/// Each contact is asked at **their** relay. Presence lives on the relay the
+/// person publishes their beacon to, so asking yours about someone who listens
+/// elsewhere doesn't return "offline" so much as "I looked in the wrong place" —
+/// which is precisely how a cross-relay contact used to read.
 async fn probe_presence(rows: &mut [Row]) {
-    let Some(relay) = book::default_relay_or_builtin() else {
-        return;
-    };
+    let mine = book::default_relay_or_builtin();
     let client = arvolo_core::http::client_with_timeout(PRESENCE_TIMEOUT);
 
     let mut set = tokio::task::JoinSet::new();
@@ -94,7 +101,12 @@ async fn probe_presence(rows: &mut [Row]) {
         let Ok(pk) = book::decode_id(&row.id) else {
             continue;
         };
-        let (client, relay) = (client.clone(), relay.clone());
+        // Someone with a relay of their own is still reachable on a machine that
+        // has none configured, so this is per-row rather than an early return.
+        let Some(relay) = row.relay.clone().or_else(|| mine.clone()) else {
+            continue;
+        };
+        let client = client.clone();
         set.spawn(async move {
             (
                 idx,
@@ -122,6 +134,7 @@ async fn probe_presence(rows: &mut [Row]) {
 /// Render the listing, dropping any column nothing has anything to say in — an
 /// empty column is width spent on the absence of information.
 fn print_table(rows: &[Row], asked_presence: bool) {
+    let mine = book::default_relay_or_builtin();
     // Widths from the content, so ids and fingerprints line up instead of relying
     // on tab stops that break the moment one name is long.
     let name_w = rows
@@ -184,6 +197,16 @@ fn print_table(rows: &[Row], asked_presence: bool) {
                 r.name
             );
         }
+        // Only when it differs from where we listen: printing "same relay as you"
+        // on every row would be a column that says nothing on the common path.
+        if let Some(relay) = &r.relay {
+            if Some(relay) != mine.as_ref() {
+                println!(
+                    "    ↪ listens on {}",
+                    arvolo_core::code::compact_relay(relay)
+                );
+            }
+        }
     }
 }
 
@@ -208,6 +231,7 @@ fn print_json(rows: &[Row]) {
                 "advertised_name": r.advertised,
                 "pending_name": r.pending,
                 "online": r.online,
+                "relay": r.relay,
             })
         })
         .collect();
@@ -235,8 +259,24 @@ pub(crate) async fn contacts_cmd(action: ContactAction) -> Result<()> {
                     return crate::commands::pair::pair_join(c, Some(name)).await
                 }
                 Some(id) => {
+                    // `--relay` overrides an `@relay` riding on the id: one is
+                    // what they handed you, the other is what you just typed on
+                    // purpose. Until now this flag was parsed and then dropped on
+                    // this branch, which read as "accepted, ignored".
+                    let id = match &relay.relay {
+                        Some(r) => format!("{}@{r}", book::split_id_and_relay(&id).0),
+                        None => id,
+                    };
                     let key_change = book::contact_add(&name, &id)?;
                     println!("Saved contact '{name}'.");
+                    if let (_, Some(r)) = book::split_id_and_relay(&id) {
+                        if Some(&r) != book::default_relay_or_builtin().as_ref() {
+                            eprintln!(
+                                "   They listen on {} — sends will go there.",
+                                arvolo_core::code::compact_relay(&r)
+                            );
+                        }
+                    }
                     if let Some(kc) = key_change {
                         eprintln!(
                             "\n⚠  The key for '{name}' CHANGED — this could be a reinstall, or a MITM."
@@ -351,7 +391,14 @@ pub(crate) async fn contacts_cmd(action: ContactAction) -> Result<()> {
                     skipped += 1;
                     continue;
                 }
-                if book::contact_add(name, id).is_err() {
+                // A `relay` column is honoured when present and simply absent from
+                // a book exported before this existed — the `<id>@<relay>` form
+                // carries it in without a second field to thread through.
+                let id = match row.get("relay").and_then(|v| v.as_str()) {
+                    Some(r) if !r.trim().is_empty() => format!("{}@{r}", id.trim()),
+                    _ => id.to_string(),
+                };
+                if book::contact_add(name, &id).is_err() {
                     eprintln!("   skipped '{name}' — not a valid public id");
                     skipped += 1;
                     continue;
@@ -372,6 +419,33 @@ pub(crate) async fn contacts_cmd(action: ContactAction) -> Result<()> {
                 eprintln!("   {marked} imported as verified — you did not check those fingerprints yourself.");
             } else if added > 0 {
                 eprintln!("   All unverified: verify each one out-of-band with `arvolo contacts verify <name>`.");
+            }
+        }
+        ContactAction::Relay { name, url, clear } => {
+            let id = book::resolve_recipient_id(&name)?;
+            match (url, clear) {
+                (Some(url), _) => {
+                    book::set_relay(&id, &url)?;
+                    let stored = book::relay_of(&id).unwrap_or_default();
+                    println!("'{name}' listens on {stored}");
+                    if Some(&stored) == book::default_relay_or_builtin().as_ref() {
+                        eprintln!("   That's your relay too, so nothing changes about how you reach them.");
+                    }
+                }
+                (None, true) => {
+                    if book::clear_relay(&id)? {
+                        println!("Cleared the relay for '{name}' — back to yours.");
+                    } else {
+                        println!("'{name}' had no relay of their own.");
+                    }
+                }
+                (None, false) => match book::relay_of(&id) {
+                    Some(r) => println!("{r}"),
+                    None => {
+                        eprintln!("'{name}' has no relay recorded — sends go to yours.");
+                        eprintln!("   Set one: arvolo contacts relay {name} <host>");
+                    }
+                },
             }
         }
         ContactAction::Block { who } => {

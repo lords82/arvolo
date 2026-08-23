@@ -145,8 +145,8 @@ async fn run() -> Result<()> {
             password,
         } => recv(what, out, password).await,
         Command::Decline { handle } => decline_cmd(handle).await,
-        Command::Me { action } => match action {
-            None => me(),
+        Command::Me { action, plain } => match action {
+            None => me(plain),
             Some(MeAction::Name { name }) => name_cmd(name).await,
         },
         Command::Completions { shell } => completions::completions_cmd(shell),

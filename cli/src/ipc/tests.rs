@@ -284,6 +284,7 @@ async fn revoking_a_deposit_the_engine_made_goes_through_the_engine() {
         crate::util::now_unix() + 3600,
         Some(tid),
         None,
+        None,
     )
     .unwrap();
     assert!(!rec.expired(), "an expired record skips the relay anyway");

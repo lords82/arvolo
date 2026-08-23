@@ -10,11 +10,27 @@ use crate::util::*;
 /// The id goes to **stdout** and everything else to stderr, deliberately: this
 /// is what people pipe into a message to a friend, and `arvolo me | pbcopy` has
 /// to yield the id alone.
-pub(crate) fn me() -> Result<()> {
+///
+/// That id carries `@relay` — where you listen — because the person pasting it
+/// into `arvolo contacts add` may not be on your relay, and a bare id gives them
+/// no way to find that out. It is the same shape as a pairing code's
+/// `N-word-word@relay`, and it is only routing: the id half is still what proves
+/// who you are. `--plain` prints the bare id for scripts that parsed the old
+/// output.
+pub(crate) fn me(plain: bool) -> Result<()> {
     let id = my_identity()?;
     let pubid = id.public();
-    println!("{}", encode_id(&pubid));
+    let id_b32 = encode_id(&pubid);
+    let relay = (!plain).then(book::default_relay_or_builtin).flatten();
+    println!("{}", book::shareable_id(&id_b32, relay.as_deref()));
     eprintln!("fingerprint: {}", pubid.fingerprint());
+    match &relay {
+        Some(r) => eprintln!("relay: {r}"),
+        None if plain => {}
+        // `default_relay_or_builtin` only comes up empty on a build with the
+        // built-in relay compiled out, so this is rare rather than routine.
+        None => eprintln!("relay: (none configured — set ARVOLO_RELAY or `relay` in config.toml)"),
+    }
     let name = book::my_display_name();
     if name.is_empty() {
         eprintln!("display name: (none — set one: arvolo me name \"Your Name\")");

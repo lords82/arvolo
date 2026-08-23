@@ -3,7 +3,8 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use arvolo_core::sync::{
-    self, ContactReg, DeviceId, DeviceReg, Lamport, MarkReg, NameReg, SyncSnapshot, SyncState,
+    self, ContactReg, DeviceId, DeviceReg, Lamport, MarkReg, NameReg, RelayReg, SyncSnapshot,
+    SyncState,
 };
 
 use super::*;
@@ -262,6 +263,44 @@ pub fn build_local_snapshot() -> Result<SyncSnapshot> {
         }
     }
 
+    // Contact relays: same shape again — last-writer-wins per id, tombstoning a
+    // row cleared out of band. Empty is not a value here, it is an absence: the
+    // ledger only ever holds relays somebody set or a sender advertised.
+    let relays = load_relays().relays;
+    for (id, relay) in &relays {
+        let changed = !matches!(state.relays.get(id), Some(r) if !r.deleted && &r.relay == relay);
+        if changed {
+            lamport += 1;
+            state.relays.insert(
+                id.clone(),
+                RelayReg {
+                    relay: relay.clone(),
+                    clock: Lamport {
+                        counter: lamport,
+                        device,
+                    },
+                    deleted: false,
+                },
+            );
+        }
+    }
+    let relay_removed: Vec<String> = state
+        .relays
+        .iter()
+        .filter(|(id, r)| !r.deleted && !relays.contains_key(*id))
+        .map(|(id, _)| id.clone())
+        .collect();
+    for id in relay_removed {
+        lamport += 1;
+        if let Some(r) = state.relays.get_mut(&id) {
+            r.deleted = true;
+            r.clock = Lamport {
+                counter: lamport,
+                device,
+            };
+        }
+    }
+
     register_this_device(&mut state, &mut lamport, device);
 
     save_meta(&state, lamport, device)?;
@@ -483,5 +522,13 @@ pub(crate) fn project_to_ledgers(state: &SyncState) -> Result<()> {
         }
     }
     save_names(&n)?;
+
+    let mut rl = Relays::default();
+    for (id, r) in &state.relays {
+        if !r.deleted {
+            rl.relays.insert(id.clone(), r.relay.clone());
+        }
+    }
+    save_relays(&rl)?;
     Ok(())
 }

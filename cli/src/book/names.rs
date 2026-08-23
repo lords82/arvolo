@@ -123,10 +123,12 @@ pub fn pending_name_of(id_b32: &str) -> Option<String> {
 /// Resolve a contact alias or raw base32 id to the canonical base32 id string
 /// (lowercased), so name records key consistently with the other id-keyed ledgers.
 pub(crate) fn resolve_recipient_id(who: &str) -> Result<String> {
-    if let Some(id) = load_contacts().contacts.get(who) {
+    if let Some(id) = load_contacts().contacts.get(who.trim()) {
         return Ok(id.clone());
     }
-    // Validate + normalize a raw id.
-    decode_id(who).context("not a known contact name or a valid public id")?;
-    Ok(who.trim().to_lowercase())
+    // Validate + normalize a raw id, tolerating the shareable `<id>@<relay>` form
+    // so anything you can paste into `contacts add` also works here.
+    let (id, _) = split_id_and_relay(who);
+    decode_id(id).context("not a known contact name or a valid public id")?;
+    Ok(id.trim().to_lowercase())
 }

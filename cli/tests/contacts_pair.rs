@@ -75,8 +75,8 @@ async fn pairing_saves_and_verifies_both_sides() {
     let cfg_a = TempDir::new().unwrap();
     let cfg_b = TempDir::new().unwrap();
 
-    let (_, id_a, _) = run(cfg_a.path(), &relay, &["me"]).await;
-    let (_, id_b, _) = run(cfg_b.path(), &relay, &["me"]).await;
+    let (_, id_a, _) = run(cfg_a.path(), &relay, &["me", "--plain"]).await;
+    let (_, id_b, _) = run(cfg_b.path(), &relay, &["me", "--plain"]).await;
     let (id_a, id_b) = (first_word(&id_a), first_word(&id_b));
     assert!(!id_a.is_empty() && !id_b.is_empty());
     assert_ne!(id_a, id_b, "the two sides must be different identities");
@@ -194,4 +194,67 @@ async fn a_wrong_code_saves_nobody() {
     );
 
     let _ = host.start_kill();
+}
+
+/// The same exchange with the two people on **different relays**, which is the
+/// case the routing hint exists for.
+///
+/// Each direction is learned a different way, on purpose. The joiner reads the
+/// host's relay off the code itself (`N-word-word@relay`) — free, and it works
+/// against any relay. The host learns the joiner's from the exchange's extras key,
+/// which is the half that needed a new rendezvous key. Getting either one wrong is
+/// silent in production: the send goes to an inbox nobody reads and simply waits,
+/// so it is asserted here rather than discovered there.
+#[tokio::test]
+async fn pairing_across_two_relays_teaches_each_side_where_the_other_is() {
+    let relay_a = spawn_relay().await;
+    let relay_b = spawn_relay().await;
+    assert_ne!(relay_a, relay_b);
+    let cfg_a = TempDir::new().unwrap();
+    let cfg_b = TempDir::new().unwrap();
+
+    let mut host = arvolo(cfg_a.path(), &relay_a, &["contacts", "add", "bob"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn the host side");
+
+    let mut lines = BufReader::new(host.stdout.take().unwrap()).lines();
+    let mut code = String::new();
+    while let Ok(Ok(Some(line))) = timeout(Duration::from_secs(20), lines.next_line()).await {
+        let t = line.trim();
+        if !t.is_empty() {
+            code = t.to_string();
+            break;
+        }
+    }
+    assert!(
+        code.contains('@'),
+        "a code has to carry its relay for the far side to reach it: {code:?}"
+    );
+
+    // B is configured on its *own* relay and never told about A's — the code is
+    // the only thing that crosses.
+    let (ok, _, err) = run(cfg_b.path(), &relay_b, &["contacts", "add", "alice", &code]).await;
+    assert!(ok, "the joining side failed: {err}");
+
+    let status = timeout(Duration::from_secs(30), host.wait())
+        .await
+        .expect("the host side should finish once paired")
+        .expect("host exit");
+    assert!(status.success(), "the host side failed");
+
+    // A learned where B listens, from the extras the joiner sealed back.
+    let (ok, shown, err) = run(cfg_a.path(), &relay_a, &["contacts", "relay", "bob"]).await;
+    assert!(ok, "reading back the relay failed: {err}");
+    assert_eq!(
+        shown.trim(),
+        relay_b,
+        "the host must learn the joiner's relay, or it can never send to them"
+    );
+
+    // And B learned where A listens, from the code.
+    let (ok, shown, err) = run(cfg_b.path(), &relay_b, &["contacts", "relay", "alice"]).await;
+    assert!(ok, "reading back the relay failed: {err}");
+    assert_eq!(shown.trim(), relay_a);
 }

@@ -172,7 +172,11 @@ pub(crate) fn devices_path() -> PathBuf {
     config_dir().join("devices.toml")
 }
 
-/// A content fingerprint of the address book — the four ledgers that shape what a
+pub(crate) fn relays_path() -> PathBuf {
+    config_dir().join("relays.toml")
+}
+
+/// A content fingerprint of the address book — the ledgers that shape what a
 /// front-end shows in "Persone". Any `arvolo contacts …` run is a *separate process*
 /// writing these files behind the daemon's back, so the daemon polls this stamp to
 /// notice; a change in the value means "the book moved, refetch it".
@@ -192,6 +196,7 @@ pub(crate) fn book_stamp() -> u64 {
         verified_path(),
         trusted_path(),
         blocked_path(),
+        relays_path(),
     ] {
         // A missing file is a state like any other (hashes as the empty vec), so
         // creating or deleting one moves the stamp.

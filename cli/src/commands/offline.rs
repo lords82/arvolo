@@ -99,6 +99,7 @@ pub(crate) async fn send_link(
         // there is no inbox offer to retract either. The blob is the whole of it.
         None,
         None,
+        None,
     )?;
     let cap = if max == deposits::UNLIMITED {
         "no download limit".to_string()
@@ -148,11 +149,17 @@ pub(crate) async fn send_sealed(
     let (relay, payload, name, temp, size) = prepare_deposit(&paths, relay)?;
     vprintln!("mode: sealed to recipient — TTL {}", human_duration(ttl));
     let max = max.unwrap_or(1);
-    let recipient = book::resolve_recipient(&to)?;
+    // The blob goes to `relay` (ours); the notice has to go where they listen. The
+    // `arvm…` names the relay it was uploaded to, so the two can differ.
+    let (recipient, theirs) = book::resolve_recipient_with_relay(&to)?;
+    let offer_relay = theirs.clone().unwrap_or_else(|| relay.clone());
     vprintln!(
         "recipient {to} resolved (fingerprint {})",
         recipient.fingerprint()
     );
+    if offer_relay != relay {
+        vprintln!("depositing on {relay}, leaving the notice on {offer_relay}");
+    }
     vprintln!(
         "HPKE-sealing to the recipient and depositing on the relay ({max} download(s){})…",
         if password.is_some() {
@@ -228,10 +235,13 @@ pub(crate) async fn send_sealed(
             // This path is `send --mailbox` from a one-shot command, which has no
             // way to name a device: `--device` goes through the daemon.
             target: None,
+            // Where to answer us, so a recipient on another relay can reply without
+            // being told our address by hand.
+            relay: relay.clone(),
         };
         match arvolo_core::presence::post_offer(
             &arvolo_core::http::client(),
-            &relay,
+            &offer_relay,
             &recipient,
             &me,
             &off,
@@ -269,6 +279,7 @@ pub(crate) async fn send_sealed(
         // record itself, which is why the offer below rides along in it.
         None,
         posted.as_ref(),
+        Some(offer_relay.as_str()),
     )?;
     // The `arvm…` ticket alone on stdout; the words around it go to stderr.
     println!("{encoded}");
