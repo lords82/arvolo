@@ -733,26 +733,33 @@ async fn resume_from_sidecar_fetches_only_missing() {
 #[tokio::test]
 async fn a_resumed_download_tells_the_new_sender_what_it_already_has() {
     let _heavy = heavy();
+    use arvolo_core::swarm::{bitfield_new, bitfield_set};
+    use std::path::PathBuf;
     let dir = tempfile::tempdir().unwrap();
-    let src = dir.path().join("src.bin");
-    let out = dir.path().join("out.bin");
-    let data: Vec<u8> = (0..64 * 1024).map(|i| (i * 7 + 3) as u8).collect();
+    let src = dir.path().join("res.bin");
+    let out = dir.path().join("res.out");
+    // 40 MiB -> 3 chunks (16 + 16 + 8), so there is something to hold *and*
+    // something still to fetch. One chunk would prove nothing: the replay only
+    // matters when the sender has to count pieces it never served.
+    let data: Vec<u8> = (0..40 * 1024 * 1024u64)
+        .map(|i| (i * 31 + 7) as u8)
+        .collect();
     std::fs::write(&src, &data).unwrap();
 
-    // First session: serve, and let the receiver take the whole file.
-    let first = flow::prepare_send(&src, "src.bin", false, None, None, RelayChoice::Disabled)
+    // A full receive first, only to lay down a correct output file to resume from.
+    let first = flow::prepare_send(&src, "res.bin", false, None, None, RelayChoice::Disabled)
         .await
         .expect("prepare_send");
-    let ticket = first.ticket.clone();
     let key = first.content_key();
     let seed = first.node_seed();
+    let ticket_first = first.ticket.clone();
     let cancel_first = CancellationToken::new();
     let serve_first = {
         let c = cancel_first.clone();
         tokio::spawn(async move { first.serve(c, |_| {}).await })
     };
-    let saved = flow::recv_chunked(
-        &ticket,
+    flow::recv_chunked(
+        &ticket_first,
         Some(out.clone()),
         None,
         RelayChoice::Disabled,
@@ -761,18 +768,29 @@ async fn a_resumed_download_tells_the_new_sender_what_it_already_has() {
     )
     .await
     .expect("first recv");
-    assert_eq!(std::fs::read(saved.path()).unwrap(), data, "integrity");
+    assert_eq!(std::fs::read(&out).unwrap(), data, "integrity");
     cancel_first.cancel();
     let _ = serve_first.await;
 
-    // Second session: a *fresh* sender for the same content — the same key and
-    // node seed, exactly as resuming a paused send does — so its memory of who
-    // has what is empty. The receiver already holds every chunk and will fetch
-    // nothing at all, which before this fix meant the sender heard nothing at all.
-    let expected = arvolo_core::chunked::ChunkTicket::decode(&ticket).expect("decode ticket");
+    // Now make it look like an interrupted download that already holds the first
+    // two chunks. Written by hand, as `resume_from_sidecar_fetches_only_missing`
+    // does, because a *completed* download deletes its sidecar — there is no way
+    // to arrive at this state by letting the first receive finish.
+    let sidecar = PathBuf::from(format!("{}.arvhave", out.display()));
+    let mut bf = bitfield_new(3);
+    bitfield_set(&mut bf, 0);
+    bitfield_set(&mut bf, 1);
+    std::fs::write(&sidecar, &bf).unwrap();
+
+    // A *fresh* sender for the same content — same key, same node seed, exactly as
+    // resuming a paused send does — so its memory of who has what is empty. Its own
+    // ticket, not the first one: rebinding the node id does not reopen the old
+    // socket, and with the relay disabled nothing can rediscover it.
+    let expected = arvolo_core::chunked::ChunkTicket::decode(&ticket_first).expect("decode");
     let second = flow::resume_send(&src, key, Some(seed), &expected, RelayChoice::Disabled)
         .await
         .expect("resume_send");
+    let ticket_second = second.ticket.clone();
     let delivered = Arc::new(Mutex::new(false));
     let seen = delivered.clone();
     let cancel_second = CancellationToken::new();
@@ -789,8 +807,8 @@ async fn a_resumed_download_tells_the_new_sender_what_it_already_has() {
         })
     };
 
-    let saved = flow::recv_chunked(
-        &ticket,
+    flow::recv_chunked(
+        &ticket_second,
         Some(out.clone()),
         None,
         RelayChoice::Disabled,
@@ -799,16 +817,19 @@ async fn a_resumed_download_tells_the_new_sender_what_it_already_has() {
     )
     .await
     .expect("second recv");
-    assert_eq!(std::fs::read(saved.path()).unwrap(), data, "still intact");
+    assert_eq!(std::fs::read(&out).unwrap(), data, "still intact");
 
+    // The sender served exactly one of the three chunks. Without the replay its
+    // ack count stops at one, never reaches three, and `Delivered` never fires —
+    // which is the 84%-for-ever bug, in miniature.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     while !*delivered.lock().unwrap() && std::time::Instant::now() < deadline {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
     assert!(
         *delivered.lock().unwrap(),
-        "a receiver that already holds the file must say so on connect: without \
-         that the sender never learns it arrived, and stays 'in progress' for ever"
+        "a resumed receiver must tell the new sender what it already holds: without \
+         that the sender never learns the file arrived, and stays 'in progress' for ever"
     );
 
     cancel_second.cancel();
