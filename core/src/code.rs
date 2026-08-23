@@ -539,6 +539,54 @@ pub async fn relay_rz_version(relay: &str) -> RzVersion {
     }
 }
 
+/// What a relay answered when asked about itself.
+///
+/// The two fields are separate because they are separate facts, and collapsing
+/// them loses the one distinction the caller needs. A relay that is **reachable
+/// with no version** predates the field in the relay's `features_handler` — it
+/// is running and healthy and simply cannot say how old it is. A relay that is
+/// **unreachable** said nothing at all. Reading the second as "old" would gate a
+/// laptop on a train; reading the first as "current" would recommend the upgrade
+/// this is here to prevent.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RelayProbe {
+    /// `GET /v1/features` answered with a success status.
+    pub reachable: bool,
+    /// The version it named, if it named one.
+    pub version: Option<String>,
+}
+
+/// Ask a relay what it is. One round trip; never fails.
+///
+/// Matched by hand rather than parsed, for the same reason the two probes above
+/// it are: this document has no JSON parser on the client side, and adding one
+/// for a single string would make the shape harder to change, not easier.
+pub async fn relay_probe(relay: &str) -> RelayProbe {
+    let url = format!("{}/v1/features", relay.trim_end_matches('/'));
+    let Ok(resp) = crate::http::client().get(&url).send().await else {
+        return RelayProbe::default();
+    };
+    if !resp.status().is_success() {
+        return RelayProbe::default();
+    }
+    let Ok(body) = resp.text().await else {
+        return RelayProbe::default();
+    };
+    RelayProbe {
+        reachable: true,
+        version: parse_version(&body),
+    }
+}
+
+/// Pull `"version":"…"` out of a features document, if it is in there.
+fn parse_version(body: &str) -> Option<String> {
+    let flat: String = body.split_whitespace().collect();
+    let value = flat.split("\"version\":\"").nth(1)?.split('"').next()?;
+    // A relay is free to answer nonsense, and an empty string is not a version:
+    // passing it on would look like a real answer everywhere above here.
+    (!value.is_empty()).then(|| value.to_string())
+}
+
 /// The owner token as it travels: base32, lowercase, in an `Authorization`
 /// header (never a query parameter — those get logged verbatim by proxies).
 fn token_string(token: &[u8; 32]) -> String {

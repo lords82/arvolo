@@ -104,6 +104,17 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all --check
 
+  # The version is written in five places and they have to agree. Cheap enough to
+  # sit on its own, and worth it: the one that matters most — the version the
+  # in-app updater compares — can be left behind without breaking the build, the
+  # app, or the release. It just means nobody is ever offered the update.
+  versions:
+    name: versions agree
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: scripts/check-versions.sh
+
   deny:
     name: cargo-deny
     runs-on: ubuntu-latest

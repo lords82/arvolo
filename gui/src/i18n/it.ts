@@ -39,6 +39,16 @@ export const it: Dict = {
     `Daemon ${daemon}, app ${gui} — riavvialo per allinearli.`,
   "app.versionUnknown": "precedente",
   "app.restart": "Riavvia",
+  "app.updateAvailable": (version) => `È uscito Arvolo ${version}.`,
+  "app.updateNow": "Aggiorna",
+  "app.updateLater": "Non ora",
+  "app.updateDownloading": (got, total) =>
+    `Sto scaricando l'aggiornamento — ${got} di ${total}.`,
+  "app.updateDownloadingUnknown": "Sto scaricando l'aggiornamento…",
+  "app.updateHeldBack": (latest, relay) =>
+    `È uscita la ${latest}, ma ${relay} regge solo questa.`,
+  "app.updateDevices":
+    "Aggiorna anche gli altri dispositivi, o smettono di sincronizzarsi.",
   "app.offerWaiting": "Qualcuno vuole mandarti un file.",
   "app.offersWaiting": (n) => `${n} file in attesa della tua conferma.`,
   "app.seeOffers": "Vedi",
@@ -457,6 +467,20 @@ export const it: Dict = {
     `Daemon ${daemon} · interfaccia ${gui}`,
   "settings.daemonProcess": (pid, exe) => `pid ${pid} · ${exe}`,
   "settings.restartDaemon": "Riavvia il daemon",
+  "settings.updatesTitle": "Aggiornamenti",
+  "settings.checkUpdates": "Controlla adesso",
+  "settings.updateIdle": "Controllato circa una volta a settimana.",
+  "settings.updateChecking": "Sto controllando…",
+  "settings.updateNone": "Hai l'ultima versione.",
+  "settings.updateFound": (version) => `È uscito Arvolo ${version}.`,
+  "settings.updateInstalling": "Sto installando — l'app si riavvia da sola.",
+  "settings.updateFailed": (why) => `Non ho potuto controllare: ${why}`,
+  "settings.confirmUpdateTitle": "Aggiorno con i trasferimenti in corso?",
+  "settings.confirmUpdateBody":
+    "Il daemon si ferma per farsi sostituire dall'installer. I trasferimenti in corso si interrompono e riprendono da soli quando l'app torna su.",
+  "settings.autoUpdateTitle": "Controlla da solo",
+  "settings.autoUpdateDesc":
+    "Una volta a settimana chiede a github.com se è uscita una versione nuova — l'unico terzo con cui Arvolo parla. Non installa da solo.",
   "settings.confirmRestartTitle": "Riavviare il daemon?",
   "settings.confirmRestartBody":
     "I trasferimenti in corso si fermano. Quelli ripristinabili riprendono, gli altri ripartono da capo.",

@@ -4,6 +4,7 @@
 //! the GUI window (transfers keep running, and the CLI shares the same engine).
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -12,6 +13,36 @@ use arvolo_ipc::client::DaemonClient;
 /// Rotate the daemon log past this size. Big enough to hold the history of a
 /// long-running daemon, small enough to open in an editor and to mail to someone.
 const LOG_MAX_BYTES: u64 = 5 * 1024 * 1024;
+
+/// Set while an update is being installed: leave the daemon down.
+///
+/// The daemon runs from the very files the installer is about to overwrite — on
+/// Windows it *holds* them, and an MSI that finds them in use asks for a reboot
+/// instead of installing. So it gets stopped first. But the event pump respawns
+/// a missing daemon every couple of seconds, and would happily put one back in
+/// the window between the shutdown and the install, which is exactly the failure
+/// this exists to prevent.
+///
+/// On the happy path nothing clears it: the app restarts into the new build, and
+/// the fresh process starts with it false. It is cleared only when the install
+/// fails, because an update that did not happen must not leave behind an
+/// installation that can no longer start its engine.
+static HELD_FOR_UPDATE: AtomicBool = AtomicBool::new(false);
+
+/// Stop respawning the daemon: an install is coming.
+pub fn hold_for_update() {
+    HELD_FOR_UPDATE.store(true, Ordering::SeqCst);
+}
+
+/// Give the daemon back to the pump, after an install that did not happen.
+pub fn release_hold() {
+    HELD_FOR_UPDATE.store(false, Ordering::SeqCst);
+}
+
+/// Whether the pump should leave the daemon down.
+pub fn held_for_update() -> bool {
+    HELD_FOR_UPDATE.load(Ordering::SeqCst)
+}
 
 /// Locate the `arvolo` CLI binary that hosts the daemon. In order:
 /// 1. `ARVOLO_BIN` (explicit override — handy in `tauri dev`),
@@ -98,6 +129,9 @@ fn spawn_daemon() -> Result<()> {
 /// short backoff) for the socket to come alive. Returns an error only if the
 /// daemon never answers — the UI shows a "disconnesso" banner in that case.
 pub async fn ensure_running() -> Result<()> {
+    if held_for_update() {
+        anyhow::bail!("an update is being installed");
+    }
     if is_running().await {
         return Ok(());
     }
@@ -111,6 +145,78 @@ pub async fn ensure_running() -> Result<()> {
         }
     }
     anyhow::bail!("the daemon did not come up in time{}", last_words())
+}
+
+/// Ask the daemon to stop, and don't come back until it has.
+///
+/// Politely first (`Request::Shutdown` over IPC); the pid file is the fallback
+/// for a daemon too old to know the request or too wedged to answer it. Neither
+/// path loses data: the daemon writes its resumable records as it goes, not at
+/// shutdown, because a machine can lose power mid-transfer just as easily.
+///
+/// The wait at the end is the part that matters and the part that is easy to
+/// leave out. Both `shutdown()` and `SIGTERM` return as soon as the daemon has
+/// been *told*, and a caller that proceeds there is racing a process that still
+/// holds its files open — which on Windows is the difference between an install
+/// and a reboot prompt.
+pub async fn stop() -> Result<()> {
+    let told = match DaemonClient::connect().await {
+        Ok(mut c) => c.shutdown().await.is_ok(),
+        Err(_) => false,
+    };
+    if !told {
+        signal_stop()?;
+    }
+    // Ten seconds is far longer than a clean shutdown takes and still short
+    // enough that a wedged daemon does not hang the UI forever.
+    for _ in 0..40 {
+        if !is_running().await {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    anyhow::bail!("the daemon is still running after being asked to stop")
+}
+
+/// The fallback path of [`stop`]: reach the process through the pid file.
+fn signal_stop() -> Result<()> {
+    let pid = std::fs::read_to_string(arvolo_ipc::pid_path())
+        .context("pid file")?
+        .trim()
+        .parse::<i32>()
+        .context("pid file")?;
+    #[cfg(unix)]
+    {
+        // SIGTERM — the daemon shuts down cleanly.
+        let rc = unsafe { libc::kill(pid, libc::SIGTERM) };
+        if rc != 0 {
+            anyhow::bail!(
+                "could not stop daemon (pid {pid}): {}",
+                std::io::Error::last_os_error()
+            );
+        }
+        Ok(())
+    }
+    #[cfg(windows)]
+    {
+        // No SIGTERM here, and no polite equivalent that reaches a process with
+        // no console: `taskkill` without /F asks a window to close, and the
+        // daemon has none. So this is the abrupt one — which it is built to
+        // survive. What is lost is the tidy removal of the pid file, which the
+        // next start overwrites anyway.
+        let out = std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .output()
+            .context("could not run taskkill")?;
+        if out.status.success() {
+            Ok(())
+        } else {
+            anyhow::bail!(
+                "could not stop daemon (pid {pid}): {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            )
+        }
+    }
 }
 
 /// How much of the daemon's log to quote when it fails to start.

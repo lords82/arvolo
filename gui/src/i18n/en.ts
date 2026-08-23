@@ -58,6 +58,16 @@ export const en = {
     `Daemon ${daemon}, app ${gui} — restart it to line them up.`,
   "app.versionUnknown": "older",
   "app.restart": "Restart",
+  "app.updateAvailable": (version: string) => `Arvolo ${version} is out.`,
+  "app.updateNow": "Update",
+  "app.updateLater": "Not now",
+  "app.updateDownloading": (got: string, total: string) =>
+    `Downloading the update — ${got} of ${total}.`,
+  "app.updateDownloadingUnknown": "Downloading the update…",
+  "app.updateHeldBack": (latest: string, relay: string) =>
+    `${latest} is out, but ${relay} only carries this one.`,
+  "app.updateDevices":
+    "Update your other machines too, or they stop syncing.",
   "app.offerWaiting": "Someone wants to send you a file.",
   "app.offersWaiting": (n: number) => `${n} files waiting for you to confirm.`,
   "app.seeOffers": "See",
@@ -520,6 +530,20 @@ export const en = {
     `Daemon ${daemon} · interface ${gui}`,
   "settings.daemonProcess": (pid: number, exe: string) => `pid ${pid} · ${exe}`,
   "settings.restartDaemon": "Restart the daemon",
+  "settings.updatesTitle": "Updates",
+  "settings.checkUpdates": "Check now",
+  "settings.updateIdle": "Checked about once a week.",
+  "settings.updateChecking": "Checking…",
+  "settings.updateNone": "You're on the latest version.",
+  "settings.updateFound": (version: string) => `Arvolo ${version} is out.`,
+  "settings.updateInstalling": "Installing — the app restarts itself.",
+  "settings.updateFailed": (why: string) => `Couldn't check: ${why}`,
+  "settings.confirmUpdateTitle": "Update while transfers are running?",
+  "settings.confirmUpdateBody":
+    "The daemon stops so the installer can replace it. Transfers in flight break off and pick up again when the app returns.",
+  "settings.autoUpdateTitle": "Check automatically",
+  "settings.autoUpdateDesc":
+    "Once a week, asks github.com if there's a new version — the only third party Arvolo talks to. Nothing installs itself.",
   "settings.confirmRestartTitle": "Restart the daemon?",
   "settings.confirmRestartBody":
     "Transfers under way stop. Resumable ones pick up where they were; the rest start over.",

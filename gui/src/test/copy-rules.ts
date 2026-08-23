@@ -73,6 +73,10 @@ const CATEGORY: Record<string, Cat> = {
   "deposits.intro": "secondary",
   "app.versionMismatch": "secondary",
   "share.fromDownload": "secondary",
+  // The two second lines under the update banner. Same slot as
+  // `app.versionMismatch` above: a caveat under a headline, not a headline.
+  "app.updateHeldBack": "secondary",
+  "app.updateDevices": "secondary",
 };
 
 /** The other end of the cap, for the handful of strings where being brief is the

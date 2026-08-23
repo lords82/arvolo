@@ -200,10 +200,27 @@ async fn dl_sw_handler(State(state): State<AppState>) -> Response {
 /// this endpoint assumes links are allowed (worst case: a deposit is refused
 /// later), but assumes `rz2` is absent — announcing a v2 code no relay can host
 /// would strand a receiver, so the missing field must mean "no".
+///
+/// `version` is what this relay is, and it answers a different question from the
+/// two flags: not "can you do X" but "how far along are you". The desktop app
+/// asks it before offering an update, because a client newer than the relay it
+/// depends on is the one upgrade order this project asks people not to do (see
+/// `docs/DEPLOY.md`). A relay too old to carry the field is simply older than the
+/// release that added it, which is all the caller needs to know.
+///
+/// Kept as hand-written JSON like the rest of this document, because that is how
+/// it is *read*: the two client-side probes match on substrings rather than
+/// parsing (`core::code::relay_rz_version`, `core::link::relay_allows_links`), so
+/// the shape here is load-bearing. Adding a field is safe for both; reordering or
+/// reformatting the existing two is not.
 async fn features_handler(State(state): State<AppState>) -> impl IntoResponse {
     (
         [(axum::http::header::CONTENT_TYPE, "application/json")],
-        format!("{{\"links\":{},\"rz2\":true}}", state.links_enabled),
+        format!(
+            "{{\"links\":{},\"rz2\":true,\"version\":\"{}\"}}",
+            state.links_enabled,
+            arvolo_core::VERSION
+        ),
     )
 }
 

@@ -12,7 +12,7 @@
 // through a dialog. The screen links to `config.toml` instead of half-exposing
 // them.
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   disable as autostartDisable,
   enable as autostartEnable,
@@ -21,6 +21,7 @@ import {
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { api } from "../ipc";
 import { fire, useStore, type ThemeChoice } from "../store";
+import { isBusy } from "../update";
 import {
   langNames,
   setLangChoice,
@@ -62,12 +63,38 @@ export function SettingsView() {
   const theme = useStore((s) => s.theme);
   const setTheme = useStore((s) => s.setTheme);
   const restartDaemon = useStore((s) => s.restartDaemon);
+  const update = useStore((s) => s.update);
+  const checkForUpdate = useStore((s) => s.checkForUpdate);
+  const setAutoCheck = useStore((s) => s.setAutoCheck);
+  const startUpdate = useStore((s) => s.startUpdate);
+  const transfers = useStore((s) => s.transfers);
+  const busyBoard = useMemo(
+    () => isBusy(Object.values(transfers).map((tx) => tx.status)),
+    [transfers]
+  );
+
+  // One line that says where the update flow stands. "Up to date" is only ever
+  // claimed after a check that actually completed — before that it says when the
+  // last one was, which is the honest answer and also the useful one.
+  const updateLine =
+    update.phase === "checking"
+      ? t("settings.updateChecking")
+      : update.phase === "error"
+        ? t("settings.updateFailed", update.error ?? "")
+        : update.phase === "downloading"
+          ? t("settings.updateInstalling")
+          : update.info
+            ? t("settings.updateFound", update.info.version)
+            : update.manual
+              ? t("settings.updateNone")
+              : t("settings.updateIdle");
 
   const [name, setName] = useState("");
   const [relay, setRelay] = useState("");
   const [dirty, setDirty] = useState<{ name?: boolean; relay?: boolean }>({});
   const [busy, setBusy] = useState(false);
   const [confirmRestart, setConfirmRestart] = useState(false);
+  const [confirmUpdate, setConfirmUpdate] = useState(false);
 
   // Asked of the OS, not of our config: the login entry lives in the platform's
   // own registry (Login Items, the Run key, ~/.config/autostart), so the OS is
@@ -432,7 +459,63 @@ export function SettingsView() {
             <Icon.Refresh size={13} /> {t("settings.restartDaemon")}
           </Button>
         </div>
+
+        <div className="divider" />
+
+        {/* Updates sit directly under the versions, because that is the moment
+            the question gets asked. The button ignores the weekly cadence and
+            always answers — including when the answer is "nothing new", which
+            the automatic check never says out loud. */}
+        <div className="hstack wrap">
+          <div className="grow">
+            <div style={{ fontWeight: 570 }}>{t("settings.updatesTitle")}</div>
+            <div className="t-xs t-mut">{updateLine}</div>
+          </div>
+          {update.info ? (
+            // The banner is hidden while a transfer runs, so without this the
+            // only way to reach the install would be to wait for the board to go
+            // quiet — with no hint that that was what was needed.
+            <Button
+              size="sm"
+              variant="in"
+              disabled={update.phase === "downloading"}
+              onClick={() => (busyBoard ? setConfirmUpdate(true) : startUpdate())}
+            >
+              {t("app.updateNow")}
+            </Button>
+          ) : (
+            <Button
+              size="sm"
+              disabled={update.phase === "checking"}
+              onClick={() => fire(checkForUpdate(true))}
+            >
+              <Icon.Refresh size={13} /> {t("settings.checkUpdates")}
+            </Button>
+          )}
+        </div>
+
+        <SwitchRow
+          title={t("settings.autoUpdateTitle")}
+          desc={t("settings.autoUpdateDesc")}
+          checked={update.autoCheck}
+          onChange={(v) => setAutoCheck(v)}
+        />
       </div>
+
+      {/* Nothing is lost either way — the daemon writes its resumable records as
+          it goes, not at shutdown — but interrupting a running transfer is not
+          something to do to someone without asking. */}
+      <Confirm
+        open={confirmUpdate}
+        title={t("settings.confirmUpdateTitle")}
+        body={t("settings.confirmUpdateBody")}
+        confirmLabel={t("app.updateNow")}
+        onCancel={() => setConfirmUpdate(false)}
+        onConfirm={() => {
+          setConfirmUpdate(false);
+          startUpdate();
+        }}
+      />
 
       <Confirm
         open={confirmRestart}

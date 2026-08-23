@@ -13,9 +13,11 @@
 
 mod attention;
 mod bridge;
+mod compat;
 mod daemon;
 #[cfg(target_os = "macos")]
 mod notify_mac;
+mod update;
 
 use arvolo_ipc::client::DaemonClient;
 use arvolo_ipc::protocol::EventDto;
@@ -149,6 +151,7 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             bridge::status,
             bridge::list_transfers,
@@ -202,6 +205,8 @@ fn main() {
             bridge::pick_files,
             bridge::gui_version,
             bridge::open_path,
+            update::check_update,
+            update::install_update,
         ])
         .setup(move |app| {
             let has_tray = match setup_tray(app.handle()) {
@@ -418,6 +423,15 @@ fn restore_dock_icon(app: &AppHandle) {
 /// UI recovers on its own after a daemon restart.
 async fn event_pump(app: AppHandle) {
     loop {
+        // An install is in flight and the daemon was stopped on purpose, so that
+        // the installer can replace the binary it runs from. Say nothing and wait:
+        // this is not a fault to report, and the app is on its way to restarting
+        // into the new build anyway.
+        if daemon::held_for_update() {
+            let _ = app.emit(EV_CONNECTED, false);
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            continue;
+        }
         // `arvolo daemon stop` leaves a marker: the user asked for it to be down,
         // and this loop must not win the argument by respawning it every two
         // seconds. Report disconnected and wait for the marker to go (a `daemon

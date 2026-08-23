@@ -19,8 +19,8 @@ use tokio_util::sync::CancellationToken;
 
 use super::pairing::Sessions;
 use super::protocol::{
-    ConfigDto, ConfigPatch, ContactDto, EventDto, HistoryDto, OfferDto, PresenceDto, Request,
-    RequestEnvelope, Response, ServerMessage, Setting, StatusDto, SyncDto, TransferDto,
+    ConfigDto, ConfigPatch, ContactDto, EventDto, HistoryDto, OfferDto, PresenceDto, RelayInfoDto,
+    Request, RequestEnvelope, Response, ServerMessage, Setting, StatusDto, SyncDto, TransferDto,
 };
 
 /// How long one presence probe may take. They run concurrently, so this is also
@@ -449,6 +449,7 @@ async fn dispatch(d: &Daemon, cmd: Request) -> Response {
             Ok(n) => Response::Cleared(n),
             Err(e) => Response::Error(format!("{e:#}")),
         },
+        Request::RelayInfo => Response::RelayInfo(relay_info(d).await),
         Request::SyncStatus => match sync_dto(d) {
             Ok(s) => Response::Sync(s),
             Err(e) => Response::Error(format!("{e:#}")),
@@ -812,6 +813,33 @@ async fn presence(d: &Daemon, ids: Vec<String>) -> Vec<PresenceDto> {
         }
     }
     out
+}
+
+/// Probe the configured relay and report what it is.
+///
+/// Never an error: "I could not reach it" and "it would not say" are both real
+/// answers, and the caller — the desktop app deciding whether to offer an
+/// update — needs to be able to tell them apart from each other rather than
+/// from a failure. A daemon with no relay at all answers `url: None` and the
+/// rest false/None, which reads correctly without a special case.
+///
+/// Not cached. It is asked once a week by one window, and a cached answer here
+/// would go stale exactly when it matters most: right after somebody upgrades
+/// the relay because the app told them to.
+async fn relay_info(d: &Daemon) -> RelayInfoDto {
+    let Some(url) = d.relay.clone() else {
+        return RelayInfoDto {
+            url: None,
+            reachable: false,
+            version: None,
+        };
+    };
+    let probe = arvolo_core::code::relay_probe(&url).await;
+    RelayInfoDto {
+        url: Some(url),
+        reachable: probe.reachable,
+        version: probe.version,
+    }
 }
 
 fn sync_dto(d: &Daemon) -> anyhow::Result<SyncDto> {

@@ -2,10 +2,17 @@
 // snapshot and then mutated purely by pushed engine events (no polling).
 
 import { create } from "zustand";
-import { api, onConnected, onDaemonError, onEngineEvent } from "./ipc";
+import {
+  api,
+  onConnected,
+  onDaemonError,
+  onEngineEvent,
+  onUpdateProgress,
+} from "./ipc";
 import { shortId } from "./format";
 import { t } from "./i18n";
 import { toast } from "./ui/Toasts";
+import * as updates from "./update";
 import type {
   ConfigDto,
   ConfigPatch,
@@ -22,6 +29,8 @@ import type {
   UIStatus,
   UITransfer,
   PickedItem,
+  UpdateInfo,
+  UpdateProgress,
 } from "./types";
 
 /** The six places the app can be. One at a time, always — the previous model
@@ -278,10 +287,36 @@ function toUIStatus(raw: string): { status: UIStatus; reason?: string } {
   return { status: "active" };
 }
 
+/** Where the update flow is. `error` is only ever shown for a check the user
+ *  asked for — an automatic one that failed says nothing (see `checkForUpdate`). */
+export interface UpdateState {
+  phase: "idle" | "checking" | "available" | "downloading" | "error";
+  info: UpdateInfo | null;
+  progress: UpdateProgress | null;
+  error: string | null;
+  /** True while the last check was the one behind the button in Settings. That
+   *  check is the only one allowed to report "you are up to date" and the only
+   *  one allowed to report a failure. */
+  manual: boolean;
+  /** Mirrors the stored preference, so the toggle can render without reading
+   *  localStorage on every paint. */
+  autoCheck: boolean;
+  /** The version whose banner was closed; kept in state so closing it re-renders. */
+  dismissed: string;
+}
+
 interface State {
   connected: boolean;
   status: StatusDto | null;
   guiVersion: string;
+  update: UpdateState;
+  /** Look for a newer release. `manual` marks the one the user asked for. */
+  checkForUpdate: (manual: boolean) => Promise<void>;
+  /** Close the banner for the offered version; it will not come back. */
+  dismissUpdate: () => void;
+  /** Download and install. Does not resolve on success — the process is replaced. */
+  startUpdate: () => void;
+  setAutoCheck: (on: boolean) => void;
   contacts: ContactDto[];
   contactsById: Record<string, ContactDto>;
   transfers: Record<string, UITransfer>;
@@ -617,6 +652,15 @@ export const useStore = create<State>((set, get) => {
     connected: false,
     status: null,
     guiVersion: "",
+    update: {
+      phase: "idle",
+      info: null,
+      progress: null,
+      error: null,
+      manual: false,
+      autoCheck: updates.autoCheckEnabled(),
+      dismissed: updates.dismissedVersion(),
+    },
     loadError: null,
     actionError: null,
     contacts: [],
@@ -667,6 +711,78 @@ export const useStore = create<State>((set, get) => {
     },
     isVerified: (id) => (id ? !!get().contactsById[id]?.verified : false),
 
+    setAutoCheck: (on) => {
+      updates.setAutoCheckEnabled(on);
+      set((s) => ({ update: { ...s.update, autoCheck: on } }));
+    },
+
+    dismissUpdate: () => {
+      const version = get().update.info?.version;
+      if (!version) return;
+      updates.dismissVersion(version);
+      set((s) => ({ update: { ...s.update, dismissed: version } }));
+    },
+
+    checkForUpdate: async (manual) => {
+      // The automatic triggers ask the cadence; the button never does. An
+      // explicit request that silently declines to do anything is worse than a
+      // slow one.
+      if (!manual && !updates.dueForCheck(Date.now())) return;
+      if (get().update.phase === "checking" || get().update.phase === "downloading")
+        return;
+      set((s) => ({
+        update: { ...s.update, phase: "checking", manual, error: null },
+      }));
+      try {
+        const info = await api.checkUpdate();
+        // Only a check that reached the server resets the clock: a failed one
+        // must not buy itself another week of silence.
+        updates.markChecked(Date.now());
+        // Whether this identity has other machines decides whether the banner
+        // carries the "update them together" line. Asked only when there is
+        // something to announce, and only once — the Devices view is otherwise
+        // the only thing that loads this, and it may never have been opened.
+        if (info && get().sync === null) {
+          await get().loadSync().catch(() => {});
+        }
+        set((s) => ({
+          update: {
+            ...s.update,
+            phase: info ? "available" : "idle",
+            info,
+            error: null,
+          },
+        }));
+      } catch (e) {
+        // A laptop that was closed in a tunnel is not something to interrupt
+        // anyone about — so an automatic failure goes back to idle and waits.
+        set((s) => ({
+          update: {
+            ...s.update,
+            phase: manual ? "error" : "idle",
+            error: manual ? String(e) : null,
+          },
+        }));
+      }
+    },
+
+    startUpdate: () => {
+      const info = get().update.info;
+      if (!info) return;
+      set((s) => ({
+        update: { ...s.update, phase: "downloading", progress: null, error: null },
+      }));
+      // Not awaited on purpose: on success this never resolves, because the
+      // process is replaced by the one it just installed.
+      fire(
+        api.installUpdate().catch((e) => {
+          set((s) => ({
+            update: { ...s.update, phase: "error", error: String(e) },
+          }));
+        })
+      );
+    },
+
     init: async () => {
       // Before anything paints: the stored choice has to beat the media query on
       // the very first frame, or a dark-theme user sees a white flash on launch.
@@ -691,6 +807,20 @@ export const useStore = create<State>((set, get) => {
       const unlistenDaemonErr = await onDaemonError((reason) => {
         if (!get().connected) set({ loadError: reason });
       });
+      const unlistenProgress = await onUpdateProgress((p) => {
+        set((s) => ({ update: { ...s.update, progress: p } }));
+      });
+
+      // The two automatic triggers. Both defer to `dueForCheck`, so between them
+      // they still make one request a week: the timer is not a second cadence,
+      // it is what makes the cadence reachable at all for a window that stays in
+      // the tray for months and would otherwise only ever see the launch check.
+      const startupCheck = setTimeout(() => {
+        fire(get().checkForUpdate(false));
+      }, updates.STARTUP_DELAY_MS);
+      const weekly = setInterval(() => {
+        fire(get().checkForUpdate(false));
+      }, updates.CHECK_INTERVAL_MS);
 
       // Seed the snapshot, retrying until it lands. The backend pump emits
       // `engine://connected` only on a state *change*, so a webview that loads
@@ -710,9 +840,12 @@ export const useStore = create<State>((set, get) => {
 
       return () => {
         stopped = true;
+        clearTimeout(startupCheck);
+        clearInterval(weekly);
         unlistenEv();
         unlistenConn();
         unlistenDaemonErr();
+        unlistenProgress();
       };
     },
 

@@ -507,57 +507,12 @@ pub async fn set_my_name(name: String) -> Result<(), String> {
 
 /// Stop the daemon so the event pump's `ensure_running` brings a fresh one up —
 /// which is the whole point: the pair is a restart the user doesn't have to open
-/// a terminal for. Asked politely over IPC first (`Request::Shutdown`); the pid
-/// file is only the fallback for a daemon too old or too wedged to answer. A
-/// leftover `daemon stop` marker is cleared: an in-app restart is the user
-/// asking for it to be up again.
+/// a terminal for. A leftover `daemon stop` marker is cleared first: an in-app
+/// restart is the user asking for it to be up again.
 #[tauri::command]
 pub async fn restart_daemon() -> Result<(), String> {
     let _ = std::fs::remove_file(arvolo_ipc::stop_marker_path());
-    if let Ok(mut c) = client().await {
-        if c.shutdown().await.is_ok() {
-            return Ok(());
-        }
-    }
-    let pid = std::fs::read_to_string(arvolo_ipc::pid_path())
-        .map_err(|e| format!("pid file: {e}"))?
-        .trim()
-        .parse::<i32>()
-        .map_err(|e| format!("pid file: {e}"))?;
-    #[cfg(unix)]
-    {
-        // SIGTERM — the daemon shuts down cleanly (it persists resumable state).
-        let rc = unsafe { libc::kill(pid, libc::SIGTERM) };
-        if rc != 0 {
-            return Err(format!(
-                "could not stop daemon (pid {pid}): {}",
-                std::io::Error::last_os_error()
-            ));
-        }
-        Ok(())
-    }
-    #[cfg(windows)]
-    {
-        // No SIGTERM here, and no polite equivalent that reaches a process with no
-        // console: `taskkill` without /F asks a window to close, and the daemon has
-        // none. So this is the abrupt one — which the daemon is built to survive,
-        // since a machine can lose power mid-transfer just as easily: records for
-        // resumable downloads and sends are written as it goes, not at shutdown.
-        // What is lost is the tidy removal of the pid file, which the next start
-        // overwrites anyway.
-        let out = std::process::Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/T", "/F"])
-            .output()
-            .map_err(|e| format!("could not run taskkill: {e}"))?;
-        if out.status.success() {
-            Ok(())
-        } else {
-            Err(format!(
-                "could not stop daemon (pid {pid}): {}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            ))
-        }
-    }
+    crate::daemon::stop().await.map_err(|e| format!("{e:#}"))
 }
 
 #[tauri::command]

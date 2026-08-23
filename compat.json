@@ -1,0 +1,38 @@
+{
+  "//": [
+    "Which relay each desktop release needs, so the app never talks somebody into",
+    "an upgrade their own relay cannot carry. docs/DEPLOY.md asks people to update",
+    "the relay before the clients; once the app is the main way people update, that",
+    "advice has to be enforced by something other than a paragraph.",
+    "",
+    "Read by the desktop app before it offers an update: it takes the newest entry",
+    "whose needs_relay its relay satisfies, and offers that instead of the latest.",
+    "Published as a release asset beside latest.json.",
+    "",
+    "needs_relay is null when a release has no known requirement, and that is the",
+    "default a new entry gets. Filling it in is a deliberate act: it says somebody",
+    "checked and found that this release genuinely breaks against an older relay.",
+    "A guess here is worse than the empty field, because a wrong requirement holds",
+    "people back from a release they could have had — including a security fix.",
+    "",
+    "Only versions that shipped a latest.json belong here. Nothing before 0.13.0",
+    "has one, so nothing before 0.13.0 can be installed as an update at all, and",
+    "listing it would offer a fallback that cannot be reached.",
+    "",
+    "On 0.13.0 being null: checked rather than assumed. It is the first release",
+    "whose relay speaks the `x.` rendezvous prefix, but the client treats that slot",
+    "as optional by design — a relay that rejects it costs the pairing its relay",
+    "hint and nothing else (core/src/code.rs, `P_XTRA`). So a 0.13.0 client is fine",
+    "against an older relay, and saying otherwise would be inventing a constraint.",
+    "",
+    "This file only ever records one direction, and it is worth saying why the",
+    "other one is missing rather than leaving it to be inferred. A newer relay is",
+    "backward compatible with older clients: it gains vocabulary nobody older asks",
+    "for. So updating the relay first is always safe and never needs recording —",
+    "which is what makes the order in docs/DEPLOY.md the right advice, and what",
+    "makes the reverse order the only one that can go wrong."
+  ],
+  "clients": [
+    { "version": "0.13.0", "needs_relay": null }
+  ]
+}

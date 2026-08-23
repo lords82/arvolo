@@ -9,8 +9,8 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader
 
 use crate::protocol::{
     ConfigDto, ConfigPatch, ContactDto, DepositDto, EventDto, HistoryDto, OfferDto, PairKind,
-    PresenceDto, Request, RequestEnvelope, Response, ServerMessage, StatusDto, SyncDto,
-    TransferDto,
+    PresenceDto, RelayInfoDto, Request, RequestEnvelope, Response, ServerMessage, StatusDto,
+    SyncDto, TransferDto,
 };
 
 /// The read half of a connection, whatever carried it.
@@ -548,6 +548,14 @@ impl DaemonClient {
     pub async fn presence(&mut self, ids: Vec<String>) -> Result<Vec<PresenceDto>> {
         match self.request(Request::Presence { ids }).await? {
             Response::Presence(v) => Ok(v),
+            other => unexpected(other),
+        }
+    }
+
+    /// What the configured relay is, and what version it reports.
+    pub async fn relay_info(&mut self) -> Result<RelayInfoDto> {
+        match self.request(Request::RelayInfo).await? {
+            Response::RelayInfo(info) => Ok(info),
             other => unexpected(other),
         }
     }

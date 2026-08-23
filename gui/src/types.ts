@@ -383,3 +383,33 @@ export interface PickedItem {
   size: number;
   isDir: boolean;
 }
+
+/** A release on offer, as `check_update` reports it. */
+export interface UpdateInfo {
+  /** The version to install: normally the newest, or the newest this machine's
+   *  relay can carry when those differ. */
+  version: string;
+  /** What this app is running now, so a banner can name both. */
+  current: string;
+  /** Release notes as the manifest carries them; often empty. */
+  notes: string;
+  /** Present only when a newer release exists but was passed over. */
+  heldBack?: HeldBack;
+}
+
+/** Why the newest release is not the one being offered. */
+export interface HeldBack {
+  /** The newest release — the one not on offer. */
+  latest: string;
+  /** Which relay is in the way, and what it says it is. Both are shown: "update
+   *  your relay" is not an instruction anyone can act on without knowing which. */
+  relay: string | null;
+  relayVersion: string | null;
+}
+
+/** Download progress of an update. `total` is null when the server did not say
+ *  how big the file is. */
+export interface UpdateProgress {
+  downloaded: number;
+  total: number | null;
+}

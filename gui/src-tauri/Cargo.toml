@@ -18,6 +18,11 @@ tauri-plugin-autostart = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-opener = "2"
+# In-app updates. Registered for the plugin state alone: every call goes through
+# `UpdaterExt` in `bridge.rs`, never from the webview, because pointing at one
+# release's own manifest instead of `latest.json` needs the Rust builder. So the
+# JS side of the plugin is unused and the webview is granted nothing.
+tauri-plugin-updater = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Minting unguessable ids for picked files (bridge::PickedFiles) and encoding them.
@@ -28,6 +33,12 @@ tokio.workspace = true
 tracing.workspace = true
 # The daemon client + wire contract, shared with the CLI.
 arvolo-ipc.workspace = true
+# Only for `http::client()`, to fetch the update compatibility table. Already in
+# the tree (arvolo-ipc pulls it), so this costs nothing to link — and it is the
+# right client rather than merely a convenient one: it honours ARVOLO_PROXY, so
+# someone who routed arvolo through Tor does not get one bare request to
+# github.com out the side.
+arvolo-core.workspace = true
 
 # Handing AppKit the Dock icon again after the window comes back from the tray,
 # and posting notifications through UNUserNotificationCenter — the plugin's backend

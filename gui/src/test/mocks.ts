@@ -7,6 +7,7 @@
 
 import { vi } from "vitest";
 import { normalizeEvent, type WireEvent } from "../events";
+import { STORAGE_KEYS } from "../update";
 import type {
   ConfigDto,
   ConfigPatch,
@@ -20,6 +21,8 @@ import type {
   SyncDto,
   TransferDto, PickedItem,
   DeviceDto,
+  UpdateInfo,
+  UpdateProgress,
 } from "../types";
 
 // ---- fixture values, at the size the real ones are ------------------------
@@ -88,6 +91,10 @@ export interface Recorder {
   restartDaemon: number;
   /** Paths handed to the system opener ("open file", "open the download folder"). */
   openPath: string[];
+  /** How many times the app asked whether a newer release exists. The cadence
+   *  rules are all about this number staying low. */
+  checkUpdate: number;
+  installUpdate: number;
 }
 
 export interface Harness {
@@ -104,6 +111,10 @@ export interface Harness {
   dropFiles: (items: PickedItem[]) => void;
   /** A .arvolo handed to the app (drop/double-click), as the window would emit it. */
   arvoloTicket: (ticket: string) => void;
+  /** Push download progress for an update, as the Rust side emits it. */
+  updateProgress: (p: UpdateProgress) => void;
+  /** What `check_update` will answer. `null` — the default — is "nothing new". */
+  update: UpdateInfo | null;
   /** What `reload()` will find on the daemon. */
   snapshot: {
     status: StatusDto | null;
@@ -164,6 +175,8 @@ function freshRecorder(): Recorder {
     cancelPairing: [],
     restartDaemon: 0,
     openPath: [],
+    checkUpdate: 0,
+    installUpdate: 0,
   };
 }
 
@@ -233,6 +246,8 @@ export const harness: Harness = {
   failDaemon: () => {},
   dropFiles: () => {},
   arvoloTicket: () => {},
+  updateProgress: () => {},
+  update: null,
   snapshot: freshSnapshot(),
   fail: new Set(),
 };
@@ -241,13 +256,24 @@ export function resetHarness() {
   harness.recorder = freshRecorder();
   harness.snapshot = freshSnapshot();
   harness.fail = new Set();
+  harness.update = null;
+  // The update cadence remembers itself in localStorage, which outlives a test.
+  // Leaving it would let the first test that runs a check buy the next one a
+  // week of silence — the same state leak the zustand reset below exists for.
+  for (const key of STORAGE_KEYS) {
+    try {
+      localStorage.removeItem(key);
+    } catch {
+      // A jsdom without storage is fine: nothing was remembered to begin with.
+    }
+  }
 }
 
-function guard<T>(name: string, value: T): Promise<T> {
+function guard<T>(name: string, value: T, onSuccess?: Promise<T>): Promise<T> {
   if (harness.fail.has(name)) {
     return Promise.reject(new Error(`daemon refused: ${name}`));
   }
-  return Promise.resolve(value);
+  return onSuccess ?? Promise.resolve(value);
 }
 
 /** Install the mock. Must be called from a `vi.mock` factory for "../ipc". */
@@ -259,6 +285,17 @@ export function makeIpcMock() {
       listPending: () => guard("listPending", harness.snapshot.pending),
       listContacts: () => guard("listContacts", harness.snapshot.contacts),
       guiVersion: () => guard("guiVersion", "0.9.2"),
+      checkUpdate: () => {
+        harness.recorder.checkUpdate++;
+        return guard("checkUpdate", harness.update);
+      },
+      installUpdate: () => {
+        harness.recorder.installUpdate++;
+        // The real one never resolves on success: the process is replaced. A
+        // pending promise here is the honest stand-in — a resolved one would let
+        // a test assert on a state that cannot exist.
+        return guard("installUpdate", undefined, new Promise<void>(() => {}));
+      },
       openPath: (path: string) => {
         harness.recorder.openPath.push(path);
         return guard("openPath", undefined);
@@ -472,6 +509,10 @@ export function makeIpcMock() {
     },
     onArvoloTicket: (cb: (ticket: string) => void) => {
       harness.arvoloTicket = cb;
+      return Promise.resolve(() => {});
+    },
+    onUpdateProgress: (cb: (p: UpdateProgress) => void) => {
+      harness.updateProgress = cb;
       return Promise.resolve(() => {});
     },
   };

@@ -99,6 +99,13 @@ jobs:
         run: npm ci
       - name: Bundle
         working-directory: gui
+        # The signing key is what makes the .msi installable *as an update*: the
+        # app refuses anything it cannot verify against the public key compiled
+        # into it. Unrelated to code signing — this one is ours, and the .msi is
+        # still unsigned as far as SmartScreen is concerned.
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npm run tauri build -- --bundles msi --config src-tauri/tauri.release.conf.json
       - name: Name it after the tag
         shell: bash
@@ -106,10 +113,15 @@ jobs:
           out=$(cargo metadata --format-version 1 --no-deps | jq -r .target_directory)
           src=$(ls "$out"/release/bundle/msi/*.msi | head -1)
           cp "$src" "arvolo-${{ github.ref_name }}-windows-x86_64.msi"
+          # The detached signature travels beside the installer. It is not
+          # published for people to check by hand — `latest.json` quotes its
+          # contents — but naming it after the file it signs is what lets the
+          # manifest step find it without knowing how this job is built.
+          cp "$src.sig" "arvolo-${{ github.ref_name }}-windows-x86_64.msi.sig"
       - uses: actions/upload-artifact@v4
         with:
           name: windows-msi
-          path: arvolo-${{ github.ref_name }}-*.msi
+          path: arvolo-${{ github.ref_name }}-*.msi*
 
   # .deb and .rpm of the two command-line binaries.
   #
@@ -250,7 +262,18 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: npm run tauri build -- --target universal-apple-darwin --bundles dmg --config src-tauri/tauri.release.conf.json
+          # A second key, unrelated to Apple's: this one signs the update payload
+          # so the running app can verify it against the public key compiled into
+          # it. Losing it does not break installed copies, it strands them —
+          # nothing signed with a different key will ever be accepted.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        # `app` alongside `dmg`, because they are two different deliverables from
+        # one build: the .dmg is what a person downloads, and the .app.tar.gz the
+        # updater step below picks up is what an already-installed copy replaces
+        # itself with. Asking for the app target by name rather than relying on
+        # the .dmg to produce one as a side effect.
+        run: npm run tauri build -- --target universal-apple-darwin --bundles app,dmg --config src-tauri/tauri.release.conf.json
       # Asked for rather than assumed: `arvolo-gui` is a workspace member, so its
       # artifacts land in the workspace's target directory and not in the crate's.
       # Guessing the crate-local path found nothing, and the job failed *after* a
@@ -299,10 +322,28 @@ jobs:
           xcrun notarytool submit "arvolo-${{ github.ref_name }}-macos-universal.dmg" \
             --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID" --wait
           xcrun stapler staple "arvolo-${{ github.ref_name }}-macos-universal.dmg"
+      # What an installed copy downloads when it updates itself: the .app, as a
+      # tarball, plus its signature. The .app inside was signed, notarized and
+      # *stapled* by the bundler — which is why an update lands as a Gatekeeper-
+      # clean application even on a machine with no network left to ask.
+      #
+      # The .dmg is not usable here. It is a disk image a person mounts, and the
+      # updater replaces a bundle in place.
+      - name: The update payload
+        run: |
+          out=$(cargo metadata --format-version 1 --no-deps | jq -r .target_directory)
+          src=$(find "$out" -path '*/release/bundle/macos/*.app.tar.gz' | head -1)
+          [ -n "$src" ] || { echo "::error::no updater artifact under $out"; exit 1; }
+          [ -f "$src.sig" ] || { echo "::error::$src is not signed"; exit 1; }
+          name="arvolo-${{ github.ref_name }}-macos-universal.app.tar.gz"
+          cp "$src" "$name"
+          cp "$src.sig" "$name.sig"
       - uses: actions/upload-artifact@v4
         with:
           name: macos-dmg
-          path: arvolo-${{ github.ref_name }}-*.dmg
+          path: |
+            arvolo-${{ github.ref_name }}-*.dmg
+            arvolo-${{ github.ref_name }}-*.app.tar.gz*
 
   # The desktop app for Linux, as an AppImage and nothing else.
   #
@@ -349,16 +390,23 @@ jobs:
         run: npm ci
       - name: Bundle
         working-directory: gui
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npm run tauri build -- --bundles appimage --config src-tauri/tauri.release.conf.json
       - name: Name it after the tag
         run: |
           out=$(cargo metadata --format-version 1 --no-deps | jq -r .target_directory)
           src=$(ls "$out"/release/bundle/appimage/*.AppImage | head -1)
           cp "$src" "arvolo-${{ github.ref_name }}-linux-x86_64.AppImage"
+          # Unlike macOS there is no separate payload: an AppImage *is* the
+          # application in one file, so the download and the update are the same
+          # artifact and only the signature is added.
+          cp "$src.sig" "arvolo-${{ github.ref_name }}-linux-x86_64.AppImage.sig"
       - uses: actions/upload-artifact@v4
         with:
           name: linux-appimage
-          path: arvolo-${{ github.ref_name }}-*.AppImage
+          path: arvolo-${{ github.ref_name }}-*.AppImage*
 
   release:
     name: publish
@@ -387,6 +435,58 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+      # The document every installed copy of the app reads to find out whether
+      # there is anything newer, and where it is. Written here rather than in the
+      # three bundle jobs because it is the one file that has to know about all
+      # of them at once.
+      #
+      # Each entry quotes the *contents* of a `.sig` — the signature travels
+      # inside the manifest, not beside the download, which is what lets the app
+      # verify a payload before it has finished trusting where it came from.
+      #
+      # Platforms whose signature did not arrive are left out rather than failing
+      # the step. The three app jobs are `continue-on-error` on purpose, and a
+      # Windows bundle that broke — which this workflow already tolerates — must
+      # not also take down the update path for macOS and Linux.
+      - name: The update manifest
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${tag}"
+          platforms='{}'
+          add() {
+            local asset="$2"
+            if [ ! -f "dist/$asset.sig" ]; then
+              echo "::warning::no signature for $asset — $1 will not be offered an update"
+              return
+            fi
+            for key in $1; do
+              platforms=$(jq --arg k "$key" \
+                             --arg s "$(cat "dist/$asset.sig")" \
+                             --arg u "$base/$asset" \
+                             '.[$k] = {signature: $s, url: $u}' <<<"$platforms")
+            done
+          }
+          # One universal .app answers for both kinds of Mac: same file, same
+          # signature, two keys — the updater asks by target triple and does not
+          # know that the two are the same download.
+          add "darwin-x86_64 darwin-aarch64" "arvolo-${tag}-macos-universal.app.tar.gz"
+          add "linux-x86_64" "arvolo-${tag}-linux-x86_64.AppImage"
+          add "windows-x86_64" "arvolo-${tag}-windows-x86_64.msi"
+          if [ "$platforms" = '{}' ]; then
+            echo "::error::no signed bundles at all — this release cannot be updated to"
+            exit 1
+          fi
+          jq -n --arg v "${tag#v}" \
+                --arg d "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                --argjson p "$platforms" \
+                '{version: $v, pub_date: $d, platforms: $p}' > dist/latest.json
+          cat dist/latest.json
+          # The compatibility table travels with the manifest: the app reads both
+          # from the same release, so the answer to "what is newest" and the
+          # answer to "what can my relay carry" can never come from two different
+          # points in time. Copied verbatim — it is maintained by hand, and this
+          # step is not the place to be clever about it.
+          jq . compat.json > dist/compat.json
       # Checksums so `install.sh` can verify downloads.
       - name: Checksums
         run: (cd dist && sha256sum arvolo* > SHA256SUMS)

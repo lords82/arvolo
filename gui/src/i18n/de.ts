@@ -41,6 +41,16 @@ export const de: Dict = {
     `Daemon ${daemon}, App ${gui} — neu starten zum Angleichen.`,
   "app.versionUnknown": "älter",
   "app.restart": "Neu starten",
+  "app.updateAvailable": (version) => `Arvolo ${version} ist da.`,
+  "app.updateNow": "Aktualisieren",
+  "app.updateLater": "Nicht jetzt",
+  "app.updateDownloading": (got, total) =>
+    `Update wird geladen — ${got} von ${total}.`,
+  "app.updateDownloadingUnknown": "Update wird geladen…",
+  "app.updateHeldBack": (latest, relay) =>
+    `${latest} ist da, aber ${relay} trägt nur diese hier.`,
+  "app.updateDevices":
+    "Aktualisieren Sie auch Ihre anderen Geräte, sonst synchronisieren sie nicht mehr.",
   "app.offerWaiting": "Jemand möchte Ihnen eine Datei schicken.",
   "app.offersWaiting": (n) => `${n} Dateien warten auf Ihre Bestätigung.`,
   "app.seeOffers": "Ansehen",
@@ -458,6 +468,20 @@ export const de: Dict = {
     `Daemon ${daemon} · Oberfläche ${gui}`,
   "settings.daemonProcess": (pid, exe) => `pid ${pid} · ${exe}`,
   "settings.restartDaemon": "Daemon neu starten",
+  "settings.updatesTitle": "Updates",
+  "settings.checkUpdates": "Jetzt prüfen",
+  "settings.updateIdle": "Wird etwa einmal pro Woche geprüft.",
+  "settings.updateChecking": "Wird geprüft…",
+  "settings.updateNone": "Sie haben die neueste Version.",
+  "settings.updateFound": (version) => `Arvolo ${version} ist da.`,
+  "settings.updateInstalling": "Wird installiert — die App startet neu.",
+  "settings.updateFailed": (why) => `Prüfung nicht möglich: ${why}`,
+  "settings.confirmUpdateTitle": "Aktualisieren, während Übertragungen laufen?",
+  "settings.confirmUpdateBody":
+    "Der Daemon wird beendet, damit das Installationsprogramm ihn ersetzen kann. Laufende Übertragungen brechen ab und laufen von selbst weiter, sobald die App wieder da ist.",
+  "settings.autoUpdateTitle": "Automatisch prüfen",
+  "settings.autoUpdateDesc":
+    "Fragt einmal pro Woche bei github.com nach einer neuen Version — der einzige Dritte, mit dem Arvolo spricht. Installiert nichts von selbst.",
   "settings.confirmRestartTitle": "Daemon neu starten?",
   "settings.confirmRestartBody": "Laufende Übertragungen halten an. Fortsetzbare machen weiter, die übrigen beginnen neu.",
   "settings.restarting": "Daemon startet neu",

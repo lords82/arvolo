@@ -18,6 +18,8 @@ import type {
   SyncDto,
   DeviceDto,
   TransferDto,
+  UpdateInfo,
+  UpdateProgress,
 } from "./types";
 
 export const api = {
@@ -134,6 +136,15 @@ export const api = {
   saveTicket: (defaultName: string, ticket: string) =>
     invoke<string | null>("save_ticket", { defaultName, ticket }),
   guiVersion: () => invoke<string>("gui_version"),
+  /** Whether a newer release exists; null when there is nothing on offer.
+   *  `pinned` asks one specific release's manifest instead of `latest.json` —
+   *  used to look up a version the relay can still talk to. */
+  checkUpdate: (pinned: string | null = null) =>
+    invoke<UpdateInfo | null>("check_update", { pinned }),
+  /** Download, stop the daemon, install, restart. Never resolves on success —
+   *  the process is replaced — so callers must not await it expecting a return. */
+  installUpdate: (version: string | null = null) =>
+    invoke<void>("install_update", { version }),
   // Open a file (or folder) with whatever the system uses for it. Goes through
   // the bridge, not `@tauri-apps/plugin-opener`: the plugin's `openPath` is behind
   // an ACL scope that has to be written out at build time, and the paths here —
@@ -176,4 +187,12 @@ export function onDaemonError(cb: (reason: string) => void): Promise<UnlistenFn>
 /** Subscribe to the connected/disconnected heartbeat. */
 export function onConnected(cb: (connected: boolean) => void): Promise<UnlistenFn> {
   return listen<boolean>("engine://connected", (e) => cb(e.payload));
+}
+
+/** Bytes of an update downloaded so far. `total` is absent when the server did
+ *  not say how big the file is, which is why the bar has an indeterminate form. */
+export function onUpdateProgress(
+  cb: (p: UpdateProgress) => void
+): Promise<UnlistenFn> {
+  return listen<UpdateProgress>("update://progress", (e) => cb(e.payload));
 }

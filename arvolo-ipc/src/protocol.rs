@@ -251,6 +251,18 @@ pub enum Request {
     /// while this is a network round trip per contact, and folding the two would
     /// make every address-book refresh wait on a relay.
     Presence { ids: Vec<String> },
+    /// What the configured relay is and what version it says it is
+    /// → [`Response::RelayInfo`].
+    ///
+    /// Asked by the desktop app before it offers an update. A client newer than
+    /// the relay it depends on is the one upgrade order `docs/DEPLOY.md` asks
+    /// people not to do, and the app is about to become the main way people
+    /// upgrade — so it needs to know. The probe lives here rather than in the
+    /// GUI because the relay is the daemon's business: it knows which one is in
+    /// force after the environment, the config file and the built-in default
+    /// have had their say, and it reaches it under whatever proxy the engine was
+    /// told to use.
+    RelayInfo,
     /// Read-only multi-device summary: shared identity, book size, whether auto
     /// sync is on, and when a round last succeeded → [`Response::Sync`].
     SyncStatus,
@@ -367,6 +379,8 @@ pub enum Response {
     Config(ConfigDto),
     /// The multi-device summary.
     Sync(SyncDto),
+    /// What the relay is, and what it says it is.
+    RelayInfo(RelayInfoDto),
     /// The device register, newest sighting first.
     Devices(Vec<DeviceDto>),
     /// Who is reachable right now, one entry per id asked about.
@@ -734,6 +748,26 @@ pub struct PresenceDto {
     pub id: String,
     #[serde(default)]
     pub online: Option<bool>,
+}
+
+/// What the daemon's relay is, and how far along it is.
+///
+/// The three fields answer three different questions, and the difference between
+/// the last two is the whole point of the type. `reachable` says the probe got a
+/// reply; `version` says what that reply claimed. A reachable relay with no
+/// version is one that predates the field — running, fine, just old enough that
+/// it cannot say how old. A caller that collapsed the two would either treat
+/// every unreachable relay as ancient or every silent one as current, and both
+/// readings are wrong in the direction that matters.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RelayInfoDto {
+    /// The relay in force, after env, config and the built-in default. `None`
+    /// when this daemon is configured without one at all.
+    pub url: Option<String>,
+    /// Whether `GET /v1/features` answered.
+    pub reachable: bool,
+    /// What it said it was, when it said.
+    pub version: Option<String>,
 }
 
 /// Multi-device state: one identity across several machines, and the address book

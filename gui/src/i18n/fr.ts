@@ -41,6 +41,16 @@ export const fr: Dict = {
     `Démon ${daemon}, app ${gui} — redémarrez-le pour les aligner.`,
   "app.versionUnknown": "antérieure",
   "app.restart": "Redémarrer",
+  "app.updateAvailable": (version) => `Arvolo ${version} est sorti.`,
+  "app.updateNow": "Mettre à jour",
+  "app.updateLater": "Pas maintenant",
+  "app.updateDownloading": (got, total) =>
+    `Téléchargement de la mise à jour — ${got} sur ${total}.`,
+  "app.updateDownloadingUnknown": "Téléchargement de la mise à jour…",
+  "app.updateHeldBack": (latest, relay) =>
+    `${latest} est sorti, mais ${relay} ne porte que celle-ci.`,
+  "app.updateDevices":
+    "Mettez aussi à jour vos autres appareils, sinon ils cessent de se synchroniser.",
   "app.offerWaiting": "Quelqu'un veut vous envoyer un fichier.",
   "app.offersWaiting": (n) => `${n} fichiers attendent votre confirmation.`,
   "app.seeOffers": "Voir",
@@ -460,6 +470,20 @@ export const fr: Dict = {
     `Démon ${daemon} · interface ${gui}`,
   "settings.daemonProcess": (pid, exe) => `pid ${pid} · ${exe}`,
   "settings.restartDaemon": "Redémarrer le démon",
+  "settings.updatesTitle": "Mises à jour",
+  "settings.checkUpdates": "Vérifier maintenant",
+  "settings.updateIdle": "Vérifié environ une fois par semaine.",
+  "settings.updateChecking": "Vérification…",
+  "settings.updateNone": "Vous avez la dernière version.",
+  "settings.updateFound": (version) => `Arvolo ${version} est sorti.`,
+  "settings.updateInstalling": "Installation — l'application redémarre seule.",
+  "settings.updateFailed": (why) => `Vérification impossible : ${why}`,
+  "settings.confirmUpdateTitle": "Mettre à jour pendant des transferts ?",
+  "settings.confirmUpdateBody":
+    "Le démon s'arrête pour que l'installateur le remplace. Les transferts en cours sont interrompus et reprennent tout seuls au retour de l'application.",
+  "settings.autoUpdateTitle": "Vérifier automatiquement",
+  "settings.autoUpdateDesc":
+    "Une fois par semaine, demande à github.com s'il y a une nouvelle version — le seul tiers avec lequel Arvolo communique. N'installe rien seul.",
   "settings.confirmRestartTitle": "Redémarrer le démon ?",
   "settings.confirmRestartBody": "Les transferts en cours s'arrêtent. Les reprenables repartent d'où ils en étaient, les autres depuis le début.",
   "settings.restarting": "Démon en redémarrage",
