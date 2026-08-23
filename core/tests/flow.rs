@@ -720,3 +720,97 @@ async fn resume_from_sidecar_fetches_only_missing() {
     let _ = serve2.await;
     std::env::remove_var("ARVOLO_CONCURRENCY");
 }
+
+/// A resumed download must tell the sender what it already holds — otherwise the
+/// sender's whole idea of progress, which is built from acks and from bytes it
+/// served itself, is session-local and starts over every time.
+///
+/// This is the shape of the bug as it was hit in the wild: a send was paused and
+/// resumed, the recipient carried on and finished, and the sender sat at 84% "in
+/// progress" for ever. It had served the last 84% and been acked for it, and had
+/// no way to learn about the 16% the recipient already had — so its ack count
+/// could never reach the total, and "delivered" could never fire.
+#[tokio::test]
+async fn a_resumed_download_tells_the_new_sender_what_it_already_has() {
+    let _heavy = heavy();
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src.bin");
+    let out = dir.path().join("out.bin");
+    let data: Vec<u8> = (0..64 * 1024).map(|i| (i * 7 + 3) as u8).collect();
+    std::fs::write(&src, &data).unwrap();
+
+    // First session: serve, and let the receiver take the whole file.
+    let first = flow::prepare_send(&src, "src.bin", false, None, None, RelayChoice::Disabled)
+        .await
+        .expect("prepare_send");
+    let ticket = first.ticket.clone();
+    let key = first.content_key();
+    let seed = first.node_seed();
+    let cancel_first = CancellationToken::new();
+    let serve_first = {
+        let c = cancel_first.clone();
+        tokio::spawn(async move { first.serve(c, |_| {}).await })
+    };
+    let saved = flow::recv_chunked(
+        &ticket,
+        Some(out.clone()),
+        None,
+        RelayChoice::Disabled,
+        CancellationToken::new(),
+        |_| {},
+    )
+    .await
+    .expect("first recv");
+    assert_eq!(std::fs::read(saved.path()).unwrap(), data, "integrity");
+    cancel_first.cancel();
+    let _ = serve_first.await;
+
+    // Second session: a *fresh* sender for the same content — the same key and
+    // node seed, exactly as resuming a paused send does — so its memory of who
+    // has what is empty. The receiver already holds every chunk and will fetch
+    // nothing at all, which before this fix meant the sender heard nothing at all.
+    let expected = arvolo_core::chunked::ChunkTicket::decode(&ticket).expect("decode ticket");
+    let second = flow::resume_send(&src, key, Some(seed), &expected, RelayChoice::Disabled)
+        .await
+        .expect("resume_send");
+    let delivered = Arc::new(Mutex::new(false));
+    let seen = delivered.clone();
+    let cancel_second = CancellationToken::new();
+    let serve_second = {
+        let c = cancel_second.clone();
+        tokio::spawn(async move {
+            second
+                .serve(c, move |ev| {
+                    if matches!(ev, SendEvent::Delivered) {
+                        *seen.lock().unwrap() = true;
+                    }
+                })
+                .await
+        })
+    };
+
+    let saved = flow::recv_chunked(
+        &ticket,
+        Some(out.clone()),
+        None,
+        RelayChoice::Disabled,
+        CancellationToken::new(),
+        |_| {},
+    )
+    .await
+    .expect("second recv");
+    assert_eq!(std::fs::read(saved.path()).unwrap(), data, "still intact");
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while !*delivered.lock().unwrap() && std::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(
+        *delivered.lock().unwrap(),
+        "a receiver that already holds the file must say so on connect: without \
+         that the sender never learns it arrived, and stays 'in progress' for ever"
+    );
+
+    cancel_second.cancel();
+    let _ = serve_second.await;
+}

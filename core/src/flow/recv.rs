@@ -638,11 +638,16 @@ pub async fn recv_chunked(
     // a one-shot open whose verdict is frozen for the whole transfer. A child of
     // `cancel` so it stops on cancel; we also cancel it explicitly on completion.
     let ctrl_cancel = cancel.child_token();
+    // Built before the control channel, because the channel needs it: what we
+    // already hold is the first thing the sender has to be told (see the replay in
+    // `spawn_control_supervisor`).
+    let have_bf: crate::chunked::HaveBitfield = Arc::new(Mutex::new(have_bits));
     let ctrl = sender_addr.clone().map(|s| {
         spawn_control_supervisor(
             receiver.clone(),
             s,
             on_relay.clone(),
+            have_bf.clone(),
             ctrl_cancel.clone(),
             abort_intent.clone(),
         )
@@ -667,7 +672,6 @@ pub async fn recv_chunked(
     // other peers through the relay tracker. `have_bf` is a **bitfield of verified
     // pieces** (arbitrary/disjoint, not a prefix) — the seeder serves any set bit
     // and the announce advertises the whole bitfield; the commit path sets bits.
-    let have_bf: crate::chunked::HaveBitfield = Arc::new(Mutex::new(have_bits));
     let peers: SwarmPeers = Arc::new(Mutex::new(Vec::new()));
     // Peers (by endpoint id) that served corrupt bytes; filtered out of future
     // provider lists. Populated by `fetch_to_file` on an integrity failure.

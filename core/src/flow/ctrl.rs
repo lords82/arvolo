@@ -29,6 +29,7 @@ pub(super) fn spawn_control_supervisor(
     receiver: ChunkReceiver,
     sender_addr: iroh::EndpointAddr,
     on_relay: Arc<Mutex<std::collections::HashSet<u32>>>,
+    have: crate::chunked::HaveBitfield,
     cancel: CancellationToken,
     abort_intent: Arc<std::sync::atomic::AtomicBool>,
 ) -> ControlHandle {
@@ -69,6 +70,40 @@ pub(super) fn spawn_control_supervisor(
             };
             live.store(true, Ordering::Relaxed);
             backoff = Duration::from_secs(1);
+            // Tell them what we already hold, every time the channel comes up.
+            //
+            // An ack is only ever sent for a chunk committed *in this session*, so
+            // a resumed download said nothing about the part it had before — and
+            // the sender's idea of "how far along is this" is built entirely from
+            // acks and from bytes it served itself. Both are session-local, so a
+            // resume looked like starting over: the progress bar went back to zero,
+            // and worse, the ack count could never reach the total, so the sender
+            // never concluded the file had arrived. It sat at 84% while the
+            // recipient was finished and had no way to learn otherwise.
+            //
+            // Replayed on *every* connect, not once at startup: a sender that
+            // pauses and resumes builds a fresh delivery session with an empty
+            // memory of who has what, and reconnecting is exactly when it needs
+            // telling again. `Have` is idempotent — the sender keeps a set — so
+            // repeating costs a few bytes per chunk and nothing else.
+            let already: Vec<u32> = {
+                let bf = have.lock().unwrap();
+                (0..bf.len() * 8)
+                    .filter(|&i| crate::swarm::bitfield_has(&bf, i))
+                    .map(|i| i as u32)
+                    .collect()
+            };
+            let mut replay_failed = false;
+            for idx in already {
+                if control.ack(idx).await.is_err() {
+                    replay_failed = true;
+                    break;
+                }
+            }
+            if replay_failed {
+                live.store(false, Ordering::Relaxed);
+                continue;
+            }
             // A separate clone of the connection so we can await its close without
             // holding a borrow that would block `control.ack`.
             let conn = control.connection();

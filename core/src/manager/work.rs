@@ -755,13 +755,17 @@ pub(super) async fn serve_live_once(
         let s = standing.as_ref().expect("an offer stands by here");
         (s.posted.id.clone(), s.posted.poster_token.clone())
     };
-    // `set_status_live`, emphatically not `set_status`: the latter is for statuses
-    // that mean the task is over (terminal, or paused) and so drops the transfer's
-    // cancel token. Used here it threw the token away at the exact moment the send
-    // started serving — leaving a running transfer that nothing could stop. Every
-    // live P2P send was uncancellable from this line on: `cancel` found no token,
-    // did nothing, said nothing, and the row served on for ever.
-    inner.set_status_live(id, TransferStatus::Active);
+    // The offer is out and the payload is ready, but nobody has taken it yet —
+    // which is neither "preparing" nor "active", and saying either one is a lie
+    // with consequences. This used to set `Active` *silently*: no event, and the
+    // interface is fed by pushed events between snapshots, so a screen that had
+    // just been told "preparing" went on saying it for the whole time the offer
+    // sat there waiting to be accepted — minutes, sometimes — with the reading it
+    // showed being the one state that was certainly over.
+    //
+    // `set_waiting` says the true thing and announces it. `Active` follows below,
+    // when a receiver actually connects.
+    set_waiting(inner, id, "offered — waiting for them to accept");
 
     // Per-attempt child token: the watchdog cancels *this* to stop serving on
     // fallback, leaving the caller's token (user cancel) untouched.
@@ -827,7 +831,16 @@ pub(super) async fn serve_live_once(
     let rc = recipient_cancelled.clone();
     let result = session
         .serve(attempt, move |ev| match ev {
-            SendEvent::ReceiverConnected => c.store(true, Ordering::Relaxed),
+            SendEvent::ReceiverConnected => {
+                c.store(true, Ordering::Relaxed);
+                // Somebody is on the other end now: no longer waiting on them.
+                // `set_status_live`, emphatically not `set_status`: the latter is
+                // for statuses that mean the task is over (terminal, or paused) and
+                // so drops the transfer's cancel token. Used here it threw the token
+                // away at the exact moment the send started serving — leaving a
+                // running transfer that nothing could stop.
+                inner_cb.set_status_live(id, TransferStatus::Active);
+            }
             SendEvent::Progress { transferred, total } => {
                 inner_cb.set_progress(id, transferred);
                 inner_cb.emit(ManagerEvent::Progress {
