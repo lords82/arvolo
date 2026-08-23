@@ -132,7 +132,7 @@ export const it: Dict = {
   "transfers.swarm": "Trasferimento distribuito fra più peer",
   "transfers.peers": (n) => (n === 1 ? "1 peer" : `${n} peer`),
   "transfers.liveCode": "codice attivo",
-  "transfers.review": "Rivedi",
+  "transfers.review": "Esamina",
   "transfers.shareDetails": "Dettagli condivisione",
   "transfers.saveSender": "Salva il mittente…",
   "transfers.saveSenderTitle": "Salva il mittente in rubrica",

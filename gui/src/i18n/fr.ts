@@ -135,7 +135,7 @@ export const fr: Dict = {
   "transfers.swarm": "Transfert réparti entre plusieurs pairs",
   "transfers.peers": (n) => (n === 1 ? "1 pair" : `${n} pairs`),
   "transfers.liveCode": "code actif",
-  "transfers.review": "Revoir",
+  "transfers.review": "Examiner",
   "transfers.shareDetails": "Détails du partage",
   "transfers.saveSender": "Enregistrer l'expéditeur…",
   "transfers.saveSenderTitle": "Enregistrer l'expéditeur dans vos contacts",
