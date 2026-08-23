@@ -50,6 +50,7 @@ async fn offer_round_trips_and_acks() {
         // No device id in these fixtures: the field is a same-identity
         // tiebreak, and every offer here comes from a different sender.
         origin: None,
+        target: None,
     };
     post_offer(&client, &relay, &recipient.public(), &sender, &offer, None)
         .await
@@ -94,6 +95,7 @@ async fn poster_can_retract_its_own_offer() {
             // No device id in these fixtures: the field is a same-identity
             // tiebreak, and every offer here comes from a different sender.
             origin: None,
+            target: None,
         },
         None,
     )
@@ -165,6 +167,7 @@ async fn offer_status_walks_pending_then_arrived_then_taken() {
             // No device id in these fixtures: the field is a same-identity
             // tiebreak, and every offer here comes from a different sender.
             origin: None,
+            target: None,
         },
         None,
     )
@@ -263,6 +266,7 @@ async fn a_retracted_offer_is_gone_not_taken() {
             // No device id in these fixtures: the field is a same-identity
             // tiebreak, and every offer here comes from a different sender.
             origin: None,
+            target: None,
         },
         None,
     )
@@ -317,6 +321,7 @@ async fn wrong_recipient_sees_nothing_in_its_own_inbox() {
             // No device id in these fixtures: the field is a same-identity
             // tiebreak, and every offer here comes from a different sender.
             origin: None,
+            target: None,
         },
         None,
     )
@@ -575,6 +580,7 @@ async fn a_new_offer_wakes_a_held_poll_at_once() {
                 note: String::new(),
                 sender_name: String::new(),
                 origin: None,
+                target: None,
             },
             None,
         )
@@ -617,6 +623,7 @@ async fn post_live_offer(
             note: String::new(),
             sender_name: String::new(),
             origin: None,
+            target: None,
         },
         None,
     )
@@ -770,4 +777,62 @@ fn now_unix() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// A send aimed at one of your own machines reaches that machine and no other —
+/// and, the part that makes it work at all, the machines it is not for leave the
+/// row where it is.
+///
+/// The failure this exists to stop is quiet: skip *and* ack, and the offer is
+/// deleted off the relay by a device that was never going to download it, so the
+/// machine it was meant for finds an empty inbox and the file is simply gone.
+#[tokio::test]
+async fn an_aimed_offer_waits_for_the_device_it_names() {
+    let relay = spawn_relay().await;
+    // One identity on two machines — which is the whole situation: same key, same
+    // slot, same everything except the device id.
+    let me = Identity::generate();
+    let sender = Identity::generate();
+    let client = reqwest::Client::new();
+
+    let laptop = [1u8; 16];
+    let desktop = [2u8; 16];
+
+    let offer = Offer {
+        name: "video.mov".into(),
+        size: 4096,
+        chunks: 1,
+        ticket: "arvcFAKETICKET".into(),
+        note: String::new(),
+        sender_name: String::new(),
+        origin: None,
+        target: Some(desktop),
+    };
+    post_offer(&client, &relay, &me.public(), &sender, &offer, None)
+        .await
+        .expect("post offer");
+
+    // The laptop polls first and must come away with nothing…
+    let on_laptop = InboxSubscription::new(relay.clone(), &me);
+    on_laptop.set_origin(laptop);
+    assert!(
+        on_laptop.poll().await.expect("poll").is_empty(),
+        "an offer aimed at another machine must not be delivered here"
+    );
+
+    // …and must not have taken it off the relay on its way past.
+    let on_desktop = InboxSubscription::new(relay.clone(), &me);
+    on_desktop.set_origin(desktop);
+    let got = on_desktop.poll().await.expect("poll");
+    assert_eq!(got.len(), 1, "the machine it names still finds it waiting");
+    assert_eq!(got[0].offer, offer);
+
+    // A machine that does not know which device it is takes it anyway: not
+    // knowing must never turn into refusing a delivery.
+    let unknown = InboxSubscription::new(relay.clone(), &me);
+    assert_eq!(
+        unknown.poll().await.expect("poll").len(),
+        1,
+        "a client that cannot honour the aim behaves as it did before it existed"
+    );
 }

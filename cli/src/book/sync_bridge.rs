@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use arvolo_core::sync::{
-    self, ContactReg, DeviceId, Lamport, MarkReg, NameReg, SyncSnapshot, SyncState,
+    self, ContactReg, DeviceId, DeviceReg, Lamport, MarkReg, NameReg, SyncSnapshot, SyncState,
 };
 
 use super::*;
@@ -50,13 +50,15 @@ pub(crate) fn mark_paired() {
 /// Does another device share this identity, as far as we can tell?
 ///
 /// Only ever used to decide whether to *suggest* pairing, never to refuse
-/// anything — it is evidence, not bookkeeping. There is deliberately no device
-/// roster to consult (see `core::sync`), so this reads two traces instead:
+/// anything — it is evidence, not bookkeeping. The device register would often
+/// answer it outright, but not always (a machine that has never completed a sync
+/// round has no row), so this keeps reading traces instead:
 ///
 /// 1. the marker [`mark_paired`] leaves when a pairing completes;
 /// 2. failing that — for an identity paired before the marker existed — a CRDT
 ///    entry authored by a device id that is not ours, which only a merged
-///    snapshot from another device can produce.
+///    snapshot from another device can produce. A device row is one such entry,
+///    and the most direct of them: another machine saying so itself.
 ///
 /// Both can be false negatives (a fresh pairing that has not synced, on a build
 /// that predates the marker), which is exactly why the caller only adds a hint.
@@ -260,8 +262,136 @@ pub fn build_local_snapshot() -> Result<SyncSnapshot> {
         }
     }
 
+    register_this_device(&mut state, &mut lamport, device);
+
     save_meta(&state, lamport, device)?;
     Ok(state.to_snapshot(lamport, device))
+}
+
+/// Forget a device: out of the ledger here, tombstoned in the sidecar so the
+/// removal reaches the other machines.
+///
+/// Both, in one place, because they say different things and *each is useless
+/// alone*. The ledger is what this machine shows; a row dropped from it and
+/// nowhere else comes back on the next merge. The sidecar is what this machine
+/// tells the others; a tombstone written there and nowhere else leaves the row
+/// on screen until something re-projects. Two call sites did the pair by hand
+/// until a test caught one of them doing half of it.
+pub(crate) fn forget_device(id: &DeviceId) -> Result<()> {
+    let key = sync::device_key(id);
+    let mut ledger = load_devices();
+    if ledger.devices.remove(&key).is_some() {
+        save_devices(&ledger)?;
+    }
+    tombstone_device(id)
+}
+
+/// The travelling half of [`forget_device`]. Separate only so the doc above can
+/// say why it is never the whole job.
+fn tombstone_device(id: &DeviceId) -> Result<()> {
+    let (mut state, mut lamport, device) = load_meta();
+    let key = sync::device_key(id);
+    let prev = state.devices.get(&key).cloned();
+    lamport += 1;
+    state.devices.insert(
+        key,
+        DeviceReg {
+            // Kept rather than blanked: a tombstone that also erased the name
+            // would leave "forgotten" with nothing to say it was ever a machine
+            // called anything, and the row is what a later "it came back" is
+            // compared against.
+            name: prev.as_ref().map(|r| r.name.clone()).unwrap_or_default(),
+            platform: prev
+                .as_ref()
+                .map(|r| r.platform.clone())
+                .unwrap_or_default(),
+            last_seen: prev.as_ref().map(|r| r.last_seen).unwrap_or(0),
+            clock: Lamport {
+                counter: lamport,
+                device,
+            },
+            deleted: true,
+        },
+    );
+    save_meta(&state, lamport, device)
+}
+
+/// Announce this machine in the device register, or decline to.
+///
+/// Two halves, and the second is the one worth reading. The first is ordinary:
+/// write our own row when it is missing, when the name in `devices.toml` has been
+/// edited here, or when `last_seen` has moved by more than a minute.
+///
+/// The second is what makes `arvolo device forget` mean anything. A tombstone is
+/// bookkeeping, not revocation — the forgotten machine still holds the seed and
+/// still syncs — so on its next round it would find its row deleted, write a
+/// fresh one with a higher clock, and reappear within five minutes of being
+/// removed. Finding *our own* row tombstoned, we take it as being retired and
+/// stop announcing ourselves rather than argue with it.
+///
+/// That works because these are the user's own machines running the user's own
+/// software, and it is worth being plain that this is the only reason it works:
+/// anything holding the seed can ignore this and re-register. It is not a
+/// security boundary and must never be described as one — see `docs/PROTOCOL.md`.
+/// It is enough for what it is for, which is tidying up after a machine you no
+/// longer use.
+fn register_this_device(state: &mut SyncState, lamport: &mut u64, device: DeviceId) {
+    let key = sync::device_key(&device);
+    if matches!(state.devices.get(&key), Some(r) if r.deleted) {
+        return;
+    }
+
+    let now = quantize_last_seen(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+    );
+    // The name is the one thing here a user edits, and they edit it in the
+    // ledger — so the ledger wins over the sidecar, exactly as it does for a
+    // contact renamed with `arvolo contacts`.
+    let ledger = load_devices();
+    let name = ledger
+        .devices
+        .get(&key)
+        .map(|r| r.name.clone())
+        .filter(|n| !n.trim().is_empty())
+        .unwrap_or_else(default_device_name);
+    let platform = std::env::consts::OS.to_string();
+
+    let changed = !matches!(state.devices.get(&key), Some(r)
+        if !r.deleted && r.name == name && r.platform == platform && r.last_seen >= now);
+    if !changed {
+        return;
+    }
+    *lamport += 1;
+    state.devices.insert(
+        key.clone(),
+        DeviceReg {
+            name: name.clone(),
+            platform: platform.clone(),
+            last_seen: now,
+            clock: Lamport {
+                counter: *lamport,
+                device,
+            },
+            deleted: false,
+        },
+    );
+
+    // Into the ledger as well, not only the sidecar. The ledger is what every
+    // reader of the register uses — `device list`, the daemon's `ListDevices`,
+    // the screen — and it is otherwise only written by a *merge*. A machine on
+    // its own never merges anything, so without this it would not appear in its
+    // own device list until its second sync round pulled back the note its first
+    // one published: five minutes of a screen saying no machine had announced
+    // itself, on the machine doing the announcing.
+    let mut ledger = ledger;
+    let row = ledger.devices.entry(key).or_default();
+    row.name = name;
+    row.platform = platform;
+    row.last_seen = now;
+    let _ = save_devices(&ledger);
 }
 
 /// Merge an incoming snapshot into the sidecar and re-project the merged state
@@ -315,6 +445,24 @@ pub(crate) fn project_to_ledgers(state: &SyncState) -> Result<()> {
         }
     }
     save_blocked(&b)?;
+
+    // The register, minus the tombstones: a forgotten machine leaves the ledger
+    // entirely, and the tombstone survives only in the sidecar, where it has to
+    // stay so the removal keeps propagating.
+    let mut d = Devices::default();
+    for (id, r) in &state.devices {
+        if !r.deleted {
+            d.devices.insert(
+                id.clone(),
+                DeviceRow {
+                    name: r.name.clone(),
+                    platform: r.platform.clone(),
+                    last_seen: r.last_seen,
+                },
+            );
+        }
+    }
+    save_devices(&d)?;
 
     let mut s = Seen::default();
     for (pk, cnt) in &state.seen {

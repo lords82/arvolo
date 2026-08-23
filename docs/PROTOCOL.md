@@ -549,7 +549,8 @@ for freshness; the part that named you is gone, and with it the relay's need to
 agree with anyone about what time it is.
 
 **Offers (sealed sender).** A sender posts an **offer** to the recipient's
-`inbox_slot`: a record of `{ name, size, chunks, ticket, note, sender_name }`
+`inbox_slot`: a record of
+`{ name, size, chunks, ticket, note, sender_name, origin, target }`
 sealed in **two layers** —
 
 1. an **inner auth-mode HPKE seal** to the recipient (AAD `arvolo/offer/v1`),
@@ -590,6 +591,33 @@ So no name here may imply one — which is also why the middle state is not call
 `Seen` (it claims a person) or `Received` (in a tool whose verb for taking a file
 is `recv`, it is the one word certain to be read as the state it isn't). `gone` now means only: retracted, or lapsed without being
 taken (as it also does for an offer taken on a relay that predates `taken`).
+
+**Two device fields, and why an inbox needs them.** `origin` and `target` are
+both a 16-byte *device id* — a random per-machine value, minted locally, stored
+in the encrypted address-book snapshot (§ multi-device below) and **never** seen
+by the relay: both fields live inside the HPKE seal, so nothing outside can use
+them to correlate an identity's machines.
+
+They exist because devices paired with `device pair` share the identity, and
+therefore the slot. Everything that distinguishes two people fails between two of
+your own machines: an offer you posted decodes and authenticates perfectly *for
+you*.
+
+- `origin` is which machine posted it. Its one job is negative: the poster skips
+  its own offer, which would otherwise be an auto-accepted arrival that downloads
+  a file over itself.
+- `target` is which machine it is *for* (`send --to me --device laptop`). A
+  machine that knows its own id and is not the target skips the offer **without
+  acking it**, so the machine it names still finds it waiting. Absent, or on a
+  client too old to know the field, the offer is taken as it always was: by
+  whichever machine reads the slot first — which is a race, and can be more than
+  one, since your devices all unseal the same content key and will happily
+  co-swarm the same download.
+
+So targeting is an instruction your own devices honour, never one the relay
+enforces, and it is only as good as the oldest client holding the identity. It is
+a routing convenience, not a security boundary — anything holding the seed can
+ignore it, and anything holding the seed could read the file anyway.
 
 **Two-phase watchdog (`arvolo send`).** `arvolo send` decides live-vs-mailbox on a real
 signal rather than a blind timer:

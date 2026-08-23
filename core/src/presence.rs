@@ -231,6 +231,24 @@ pub struct Offer {
     /// means the filter cannot help there.
     #[serde(default)]
     pub origin: Option<crate::sync::DeviceId>,
+    /// Which **device** this offer is meant for, when the sender aimed it at one
+    /// (`arvolo send --to me --device laptop`).
+    ///
+    /// The mirror of [`Self::origin`], and it exists because an identity's inbox
+    /// is shared: without it, every machine of yours that polls before the offer
+    /// is acked off the slot auto-accepts it — and they even co-swarm the same
+    /// download, since they all unseal the same content key — so "put this on the
+    /// desktop" was a race rather than an instruction.
+    ///
+    /// A device that knows its own id and is not the target skips the offer and,
+    /// this being the part that matters, does **not** ack it: the machine it was
+    /// meant for still finds it waiting. `None` means "any of them", which is
+    /// also what a client too old to know the field sees — it takes the offer as
+    /// it always did. So targeting is an instruction your own devices honour,
+    /// never one the relay enforces, and it is only as good as the oldest client
+    /// holding the identity.
+    #[serde(default)]
+    pub target: Option<crate::sync::DeviceId>,
 }
 
 /// The authenticated **inner** envelope: the sender's public key plus the
@@ -832,6 +850,21 @@ impl InboxSubscription {
         }
     }
 
+    /// Is this offer aimed at a *different* device of ours?
+    ///
+    /// False whenever there is no aim (`target: None` — any of them, and what
+    /// every offer from another person carries) and false whenever we do not know
+    /// our own id, for the same reason as [`Self::is_ours`]: not knowing must
+    /// never turn into declining a delivery. So an aim is honoured by the
+    /// machines that can honour it and ignored by the ones that cannot, which is
+    /// also what an old client does with a field it has never heard of.
+    fn aimed_elsewhere(&self, offer: &Offer) -> bool {
+        match (*self.origin.lock().unwrap(), offer.target) {
+            (Some(mine), Some(theirs)) => mine != theirs,
+            _ => false,
+        }
+    }
+
     /// Rebuild the owner's identity from the stored secret.
     fn me(&self) -> Result<Identity> {
         Identity::from_secret_bytes(&self.me_secret)
@@ -988,6 +1021,12 @@ impl InboxSubscription {
                 // the slot costs nothing, since the poll loop dedupes by row id
                 // and already holds a floor on how often a round may complete.
                 Some((_, offer)) if self.is_ours(&offer) => continue,
+                // Meant for another of our machines. Skipped for the same reason
+                // and, crucially, with the same restraint: no ack. Acking marks
+                // the row taken and deletes it, so the machine it was actually
+                // aimed at — which may be asleep for another day — would never
+                // see it. Leaving it costs a row on the slot until its TTL.
+                Some((_, offer)) if self.aimed_elsewhere(&offer) => continue,
                 Some((sender, offer)) => out.push(ReceivedOffer {
                     id: item.id,
                     sender,
@@ -1500,6 +1539,7 @@ mod tests {
             note: "see page 4".into(),
             sender_name: "Lorenzo".into(),
             origin: None,
+            target: None,
         }
     }
 

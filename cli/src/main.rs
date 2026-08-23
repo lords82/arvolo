@@ -106,6 +106,7 @@ async fn run() -> Result<()> {
         Command::Send {
             paths,
             to,
+            device,
             mailbox,
             link,
             code,
@@ -122,6 +123,7 @@ async fn run() -> Result<()> {
             send_cmd(SendOpts {
                 paths,
                 to,
+                device,
                 mailbox,
                 link,
                 code,
@@ -152,6 +154,9 @@ async fn run() -> Result<()> {
         Command::Device { action } => match action {
             DeviceAction::Pair { qr, relay } => sync::device_pair(relay.relay, qr).await,
             DeviceAction::Join { code, yes } => sync::device_join(code, yes).await,
+            DeviceAction::List { json } => sync::device_list(json).await,
+            DeviceAction::Rename { name } => sync::device_rename(name).await,
+            DeviceAction::Forget { who } => sync::device_forget(who).await,
             DeviceAction::Sync => sync::sync_now(None, false).await,
             DeviceAction::Status { json } => sync::sync_status(json).await,
         },

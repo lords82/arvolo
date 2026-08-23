@@ -351,6 +351,7 @@ export const fr: Dict = {
   "devices.fingerprint": "Empreinte",
   "devices.fingerprintHint": "Elle doit correspondre sur tous vos appareils. D'autres mots, c'est une autre identité.",
   "devices.publicId": "Identifiant public",
+  "devices.sendToSelf": "Envoyer à vos appareils",
   "devices.pairTitle": "Relier un appareil",
   "devices.pairBody": "Vous affichez un code ici et le saisissez sur l'autre machine.",
   "devices.showCode": "Afficher un code",
@@ -369,6 +370,32 @@ export const fr: Dict = {
     "pas encore synchronisé depuis le démarrage du démon",
   "devices.lastError": (err) => `Le dernier tour a échoué : ${err}`,
   "devices.syncNow": "Synchroniser maintenant",
+  "devices.listTitle": "Les machines",
+  "devices.listHint":
+    "Chacune s'ajoute en synchronisant. Elles se décrivent elles-mêmes : rien ici ne prouve qu'une ligne soit un ordinateur qui existe encore.",
+  "devices.listEmpty": "Aucune machine ne s'est encore annoncée.",
+  "devices.thisDevice": "cet appareil",
+  "devices.neverSeen": "jamais synchronisé",
+  "devices.seenAgo": (when) => `vu ${when}`,
+  "devices.rename": "Renommer",
+  "devices.renameTitle": "Nommer cet appareil",
+  "devices.renameHint":
+    "Celui-ci seulement : chaque machine se décrit elle-même, les autres se renomment sur elles-mêmes.",
+  "devices.forget": "Oublier",
+  "devices.confirmForgetTitle": (name) => `Oublier ${name} ?`,
+  "devices.confirmForgetBody":
+    "Elle quitte la liste sur toutes vos machines. Elle garde l'identité — cela ne se reprend pas — mais si elle tourne, elle cesse de s'annoncer.",
+  "devices.renamed": "Renommé",
+  "devices.renamedDetail":
+    "Vos autres machines le voient à la prochaine synchronisation.",
+  "devices.forgotten": "Oublié",
+  "send.deviceLabel": "Sur laquelle",
+  "send.deviceAny": "Celle qui est allumée",
+  "send.deviceAnyHint": "Une de vos machines allumées le prend.",
+  "send.deviceOneHint":
+    "Les autres n'y touchent pas. Si cette machine est éteinte, ça attend sur le relais qu'elle s'allume.",
+  "store.renameDevice": "renommer cet appareil",
+  "store.forgetDevice": "oublier cet appareil",
   "devices.autoTitle": "Synchroniser toute seule",
   "devices.autoDesc": "Un tour toutes les quelques minutes. Désactivé, ça ne s'aligne qu'au bouton.",
   "devices.autoOn": "Synchronisation automatique activée",
@@ -441,12 +468,15 @@ export const fr: Dict = {
   "settings.refreshing": "Actualisation…",
 
   "send.modeContact": "À un contact",
+  "send.modeSelf": "Vos appareils",
   "send.modeCode": "Code",
   "send.modeLink": "Lien",
   "send.modeTicket": "Ticket",
   "send.blurbContact": "Droit à quelqu'un de votre carnet d'adresses.",
   "send.blurbContactMore":
     "En direct s'il est connecté, sinon ça attend dans sa boîte.",
+  "send.blurbSelf": "Les autres machines qui portent votre identité.",
+  "send.blurbSelfMore": "Personne n'a à accepter.",
   "send.blurbCode": "Un code court à dicter ou à scanner.",
   "send.blurbCodeMore":
     "Pas besoin qu'il soit un contact, mais vous devez être connectés tous les deux.",
@@ -464,17 +494,27 @@ export const fr: Dict = {
     "Ajoutez quelqu'un depuis Personnes. L'échange par code est le plus rapide : il vous enregistre mutuellement, déjà vérifiés.",
   "send.pickerSearch": "Chercher un contact…",
   "send.pickerRecipient": "Destinataire",
+  "send.selfUnpairedHint":
+    "Aucune autre machine ne porte encore cette identité : reliez-en une depuis Appareils. Ce que vous envoyez attend sur le relais.",
+  "send.selfDepositHint":
+    "Un dépôt se retire une seule fois : à un retrait, la première machine allumée le prend et les autres ne le voient pas.",
   "send.pickerNoMatch": (q) => `Aucun contact ne correspond à « ${q} ».`,
   "send.depositResult": (to) => `Déposé pour ${to}`,
   "send.depositResultDetail": (to) =>
     `Votre copie, au cas où ${to} ne recevrait pas l'offre.`,
   "send.onItsWay": (to) => `En route vers ${to}`,
+  "send.onItsWaySelf": "En route vers vos appareils",
+  "send.depositResultSelf": "Déposé pour vos appareils",
+  "send.depositResultSelfDetail":
+    "Le ticket, au cas où aucune de vos machines ne verrait l'offre.",
   "send.saveArvolo": "Enregistrer en fichier .arvolo…",
   "send.arvoloSaved": (name: string) => `${name} enregistré`,
   "send.arvoloSavedDetail":
     "Partagez-le par n'importe quel canal ; il s'ouvre avec Arvolo.",
   "send.onItsWayDetail":
     "S'il est en ligne, ça passe en direct ; sinon, ça reste dans sa boîte.",
+  "send.onItsWaySelfDetail":
+    "Ça attend sur le relais qu'une de vos machines soit allumée pour le prendre.",
   "send.codeKeepDetail":
     "Valable pour plusieurs destinataires, jusqu'à annulation de l'envoi.",
   "send.codeOnceDetail": "Vaut pour un destinataire, puis se retire.",
@@ -652,6 +692,7 @@ export const fr: Dict = {
   "palette.noMatch": (q) => `Rien ne correspond à « ${q} ».`,
 
   "store.unknownPeer": "inconnu",
+  "store.selfPeer": "Vos appareils",
   "store.loadTransfers": (e) => `Impossible de lire les transferts : ${e}`,
   "store.loadHistory": (e) => `Impossible de lire l'historique : ${e}`,
   "store.loadDeposits": (e) => `Impossible de lire les liens : ${e}`,

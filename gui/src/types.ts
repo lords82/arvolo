@@ -219,6 +219,32 @@ export interface SyncDto {
   last_sync: number;
   last_merged: number;
   last_error: string;
+  /** Does another machine share this identity, as far as this device can tell?
+   *  Evidence, never bookkeeping: nothing enumerates the machines holding an
+   *  identity, so a pairing that has not synced yet still reads false. Used only
+   *  to warn that a file sent to yourself has nowhere to land yet. */
+  paired: boolean;
+}
+
+/** One machine holding this identity, as it describes itself.
+ *
+ *  Self-reported and unverifiable from outside: each machine writes its own row
+ *  on its sync round, so a machine that has never synced is absent and one that
+ *  stopped syncing stays until it is forgotten. */
+export interface DeviceDto {
+  id: string;
+  name: string;
+  /** `macos`, `linux`, `windows`… — for an icon, never for a decision. */
+  platform: string;
+  /** Unix seconds of that machine's last sync round, by *its* clock.
+   *
+   *  Never a presence light: it moves once per round (five minutes), it can sit
+   *  in the future if two clocks disagree, and a machine asleep for a minute
+   *  looks exactly like one still awake. Shown as elapsed time, which carries
+   *  its own uncertainty. */
+  last_seen: number;
+  /** The one row that can be renamed here, and the one not to offer to forget. */
+  is_this_device: boolean;
 }
 
 /** Which pairing. `contact_*` trades public ids between two people; `device_*`

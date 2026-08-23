@@ -7,18 +7,145 @@
 // through an encrypted cell on that shared inbox — which is why the sync state
 // and the identity live on the same screen rather than in two places.
 //
-// There is no device *list*, and that is not an omission: the relay is
-// zero-knowledge and nothing enumerates which machines hold the identity. Saying
-// "3 devices linked" would be an invention. The fingerprint is what you
-// compare, on each machine, to know they match.
+// This screen used to say, in as many words, that there was no device list and
+// that this was not an omission — the relay is zero-knowledge, nothing
+// enumerates which machines hold an identity, and "3 devices linked" would have
+// been an invention. The list below does not repeal that: it is not an
+// enumeration, it is a **self-registration**. Each machine writes its own row
+// into the same encrypted snapshot that carries the address book, so the relay
+// still learns nothing, and every claim in it is the machine's own. Which means
+// what it shows has to be read as testimony rather than as fact — a row is there
+// because something announced itself, not because anything checked.
+//
+// Three consequences the screen has to carry rather than hide: a machine that
+// has never completed a sync round is missing; one that stopped syncing months
+// ago is still listed; and "seen" is that machine's own clock, so it is shown as
+// elapsed time and never as a light that says "online now". The fingerprint is
+// still the only thing you *verify*, and it is still at the top for that reason.
 
+import { useEffect, useState } from "react";
 import { fire, useStore } from "../store";
 import { useT } from "../i18n";
 import { Icon } from "../ui/Icons";
-import { Badge, Button, Empty, SwitchRow } from "../ui/Primitives";
+import { Badge, Button, Empty, SwitchRow, TextInput } from "../ui/Primitives";
 import { CopyField, Fingerprint } from "../ui/Bits";
+import { Confirm } from "../ui/Sheet";
 import { toast } from "../ui/Toasts";
 import { fmtAgo as ago } from "../format";
+import type { DeviceDto } from "../types";
+
+/** The register: what the machines have said about themselves.
+ *
+ *  Two affordances, and both are shaped by the same rule — a row is written by
+ *  the machine it describes. So *rename* appears on this machine's row alone;
+ *  offering it on the others would be a field whose value the next sync round
+ *  would throw away. *Forget* is the opposite: it is for the machine you are not
+ *  at, usually one you no longer have. */
+function DeviceList() {
+  const t = useT();
+  const devices = useStore((s) => s.devices);
+  const rename = useStore((s) => s.renameThisDevice);
+  const forget = useStore((s) => s.forgetDevice);
+  const [editing, setEditing] = useState<string | null>(null);
+  const [draft, setDraft] = useState("");
+  const [confirmForget, setConfirmForget] = useState<DeviceDto | null>(null);
+
+  const now = Math.floor(Date.now() / 1000);
+
+  return (
+    <div className="card card-pad stack">
+      <div>
+        <div className="t-head">{t("devices.listTitle")}</div>
+        <div className="hint">{t("devices.listHint")}</div>
+      </div>
+
+      {devices.length === 0 ? (
+        <div className="t-sm t-mut">{t("devices.listEmpty")}</div>
+      ) : (
+        <div className="card rows">
+          {devices.map((d) => (
+            <div
+              key={d.id}
+              className="row"
+              style={{ gridTemplateColumns: "28px 1fr auto" }}
+            >
+              <span className="tone-in hstack" style={{ justifyContent: "center" }}>
+                <Icon.Devices size={18} />
+              </span>
+              <span className="row-main">
+                {editing === d.id ? (
+                  <TextInput
+                    autoFocus
+                    value={draft}
+                    aria-label={t("devices.renameTitle")}
+                    onChange={(e) => setDraft(e.currentTarget.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && draft.trim()) {
+                        setEditing(null);
+                        fire(rename(draft.trim()));
+                      }
+                      if (e.key === "Escape") setEditing(null);
+                    }}
+                    onBlur={() => setEditing(null)}
+                  />
+                ) : (
+                  <span className="row-name hstack-sm">
+                    <span className="truncate">{d.name}</span>
+                    {d.is_this_device && (
+                      <Badge kind="info">{t("devices.thisDevice")}</Badge>
+                    )}
+                  </span>
+                )}
+                <span className="row-meta">
+                  {/* Elapsed, never a dot: the stamp is that machine's own clock,
+                      written once per sync round, and it is clamped to now so two
+                      disagreeing clocks cannot report a sighting in the future. */}
+                  {d.last_seen === 0
+                    ? t("devices.neverSeen")
+                    : t("devices.seenAgo", ago(Math.min(d.last_seen, now)))}
+                  {d.platform && ` · ${d.platform}`}
+                </span>
+              </span>
+              <span className="hstack-sm">
+                {d.is_this_device ? (
+                  <Button
+                    size="sm"
+                    onClick={() => {
+                      setDraft(d.name);
+                      setEditing(d.id);
+                    }}
+                  >
+                    {t("devices.rename")}
+                  </Button>
+                ) : (
+                  <Button size="sm" onClick={() => setConfirmForget(d)}>
+                    {t("devices.forget")}
+                  </Button>
+                )}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {editing !== null && <div className="hint">{t("devices.renameHint")}</div>}
+
+      <Confirm
+        open={confirmForget !== null}
+        title={t("devices.confirmForgetTitle", confirmForget?.name ?? "")}
+        body={t("devices.confirmForgetBody")}
+        confirmLabel={t("devices.forget")}
+        danger
+        onCancel={() => setConfirmForget(null)}
+        onConfirm={() => {
+          const who = confirmForget;
+          setConfirmForget(null);
+          if (who) fire(forget(who.name));
+        }}
+      />
+    </div>
+  );
+}
 
 export function DevicesView() {
   const t = useT();
@@ -28,9 +155,18 @@ export function DevicesView() {
   const reload = useStore((s) => s.loadSync);
   const syncNow = useStore((s) => s.syncNow);
   const startPairing = useStore((s) => s.startPairing);
+  const openSheet = useStore((s) => s.openSheet);
   const config = useStore((s) => s.config);
   const saveConfig = useStore((s) => s.saveConfig);
   const loadConfig = useStore((s) => s.loadConfig);
+  const loadDevices = useStore((s) => s.loadDevices);
+
+  // The register is projected by the sync round, so it is stale by definition
+  // between rounds; fetching on open is what makes a pairing that just happened
+  // visible without waiting five minutes for the next one.
+  useEffect(() => {
+    void loadDevices().catch(() => {});
+  }, [loadDevices]);
 
   if (error && !sync) {
     return (
@@ -82,7 +218,18 @@ export function DevicesView() {
           <div className="t-label">{t("devices.publicId")}</div>
           <CopyField value={sync.public_id} wrap />
         </div>
+
+        {/* The one thing a shared identity is *for*, reachable from the screen
+            that explains it. It opens the ordinary send sheet with the recipient
+            already chosen — same panel, same options, nothing to learn twice. */}
+        <div className="hstack">
+          <Button onClick={() => openSheet([], undefined, "self")}>
+            <Icon.Send size={14} /> {t("devices.sendToSelf")}
+          </Button>
+        </div>
       </div>
+
+      <DeviceList />
 
       {/* ---- pairing -------------------------------------------------- */}
       <div className="card card-pad stack">

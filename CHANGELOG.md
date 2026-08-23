@@ -92,6 +92,41 @@ fails when it drifts.
 - Length limits are written for English and scaled per language, so the German
   is not squeezed into English word lengths.
 
+### New
+
+- **The desktop app can send to your own devices.** `arvolo send --to me` has
+  worked since v0.12.0-rc1, but the word `me` was resolved by the CLI before the
+  daemon ever saw it, so the app — which talks to the daemon directly — had no
+  way to name the destination: the recipient list only offered contacts. The
+  daemon now resolves the reserved word itself, one rule for both, and "your
+  devices" is the fifth entry on the send panel's switch — which answers "who is
+  this for?", and your own machines are one of the answers: the one nobody has
+  to accept, and the only one that is not a person. A transfer to yourself is
+  labelled by name rather than by a raw id, and a contact who happens to be
+  called "me" is addressed by their id so the reserved word cannot swallow them.
+- **And it can be sent to *one* of them.** Until now "send to my devices" was a
+  race: your machines share an identity, so they share an inbox, and whichever
+  read the slot first took the file — sometimes more than one at a time, since
+  they all unseal the same content key and co-swarm the download. There is now a
+  register of the machines, and a send can name one.
+
+  The register is a seventh entry in the CRDT that already syncs the address
+  book, so it rides inside the same encrypted snapshot and the relay learns
+  nothing from it. It has one rule the address book does not: **a live row is
+  only accepted from the machine it describes**. Without that it would be an
+  ordinary last-writer-wins map, and "send it to the MacBook" would have come to
+  mean "send it to whichever machine last called itself the MacBook".
+
+  Three things the screen and the docs say rather than hide. The list is
+  self-reported: a machine that has never synced is missing, one that stopped
+  syncing stays until you forget it, and "seen" is that machine's own clock, so
+  it is shown as elapsed time and never as an online light. Aiming is honoured by
+  your devices, not enforced by the relay — a client too old to know the field
+  takes the offer as it always did. And `device forget` is bookkeeping, not
+  revocation: the machine keeps the identity secret, which nothing can take back;
+  what makes it stick is that the forgotten machine sees it was retired and stops
+  announcing itself, because it is your machine running your software.
+
 ## v0.12.0 — no silent stalls
 
 Four prereleases, all driven by dogfooding one stubborn 10.7 GiB `send --to`.

@@ -1067,6 +1067,7 @@ pub(crate) async fn push_via_daemon(
     ttl: Option<u64>,
     max: Option<u32>,
     password: Option<String>,
+    device: Option<String>,
 ) -> Result<()> {
     // The daemon resolves paths on *its own* cwd (e.g. `/` under systemd), not
     // ours — so absolutize here, relative to the client's cwd, and validate the
@@ -1081,9 +1082,19 @@ pub(crate) async fn push_via_daemon(
         .collect::<Result<Vec<_>>>()
         .context("no such file or folder to push")?;
     let (handoff, _offer) = offer_sources(&paths);
-    eprintln!("Handing off to the daemon (sending to {to})…");
+    // `--to me` has already become our own base32 id by the time it gets here
+    // (the in-process fallback resolves against the address book, which does not
+    // know the reserved word), and a 52-character id is not a recipient anybody
+    // recognises as themselves. Same rule as everywhere else: never print the
+    // wire value.
+    let shown_to = if crate::is_self(&to) {
+        "your devices".to_string()
+    } else {
+        to.clone()
+    };
+    eprintln!("Handing off to the daemon (sending to {shown_to})…");
     let id = client
-        .push(to, paths_s, note, ttl, max, password, handoff)
+        .push(to, paths_s, note, ttl, max, password, device, handoff)
         .await
         .context("daemon rejected the push")?;
     let shown = handle_for(&mut client, id).await;

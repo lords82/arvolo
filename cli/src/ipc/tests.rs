@@ -413,3 +413,57 @@ async fn second_bind_on_the_same_socket_fails() {
     shutdown.cancel();
     std::env::remove_var("ARVOLO_CONFIG_DIR");
 }
+
+#[tokio::test]
+async fn the_reserved_word_names_our_own_devices_over_the_socket() {
+    let _guard = crate::testlock::ENV
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (shutdown, _dir) = spawn_test_daemon().await;
+    let mut client = DaemonClient::connect().await.expect("connect");
+
+    // The recipient is resolved before the payload is even looked at, so a path
+    // that does not exist is enough to tell the two failures apart — and needs
+    // no relay, no file and no send.
+    let missing = vec!["/nonexistent/arvolo-test-file".to_string()];
+    let err = client
+        .push(
+            "me".into(),
+            missing.clone(),
+            String::new(),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect_err("nothing to send")
+        .to_string();
+    assert!(
+        !err.contains("known contact"),
+        "`me` must resolve against our own identity, not the address book: {err}"
+    );
+
+    // The other half of the claim: an ordinary unknown name still fails at the
+    // address book, so the branch above is doing something and not swallowing
+    // every recipient.
+    let err = client
+        .push(
+            "nobody".into(),
+            missing,
+            String::new(),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect_err("unknown recipient")
+        .to_string();
+    assert!(err.contains("known contact"), "unexpected error: {err}");
+
+    shutdown.cancel();
+    std::env::remove_var("ARVOLO_CONFIG_DIR");
+}

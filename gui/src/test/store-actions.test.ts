@@ -81,8 +81,20 @@ describe("peerLabel / isVerified", () => {
   it("65. an unknown peer falls back to its claimed name, then to a short id", async () => {
     await boot();
     expect(s().peerLabel("unknownkey", "Marta")).toBe("Marta");
-    expect(s().peerLabel("if2xmnescalwohxlex5qylevzs2cypwdnjxe7sxb76wcphc7daha")).toContain("…");
+    expect(s().peerLabel(PEER_ID)).toContain("…");
     expect(s().peerLabel(null)).toBe("unknown");
+  });
+
+  it("65a. our own id is our own devices, not an unknown peer", async () => {
+    await boot();
+    // A send to yourself names the identity every one of your machines shares,
+    // so the id comes back as our own — and a shortened id in that row would
+    // read as a stranger nobody saved.
+    const mine = s().status?.public_id ?? "";
+    expect(mine).not.toBe("");
+    expect(s().peerLabel(mine)).toBe("Your devices");
+    // Even against a name the sender claimed for itself, which is us.
+    expect(s().peerLabel(mine, "Marta")).toBe("Your devices");
   });
 
   it("66. verified is only true for a contact actually marked verified", async () => {

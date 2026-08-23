@@ -219,6 +219,14 @@ pub(super) struct SendToRecord {
     pub(super) reason: String,
     #[serde(default)]
     pub(super) note: String,
+    /// The device this send is aimed at, carried across a restart.
+    ///
+    /// Without it a resumed send silently loses its aim and lands on whichever
+    /// machine wakes first — and a send that had to be resumed is exactly the one
+    /// whose target was not around to take it. `#[serde(default)]` so a record
+    /// written before this field still loads, as "aimed at none".
+    #[serde(default)]
+    pub(super) target: Option<crate::sync::DeviceId>,
 }
 
 pub(super) fn sendto_record_path(dir: &Path, id: u64) -> PathBuf {

@@ -327,6 +327,7 @@ async fn dispatch(d: &Daemon, cmd: Request) -> Response {
             ttl,
             max,
             password,
+            device,
             fd_socket,
             fd_token,
         } => {
@@ -340,11 +341,15 @@ async fn dispatch(d: &Daemon, cmd: Request) -> Response {
                     ttl,
                     max,
                     password,
+                    device,
                 },
                 (fd_socket, fd_token),
             )
             .await
         }
+        Request::ListDevices => list_devices(),
+        Request::RenameThisDevice { name } => rename_this_device(name),
+        Request::ForgetDevice { who } => forget_device(who),
         Request::ServeTicket {
             paths,
             seed_relay,
@@ -489,6 +494,8 @@ struct MailboxOpts {
     ttl: Option<u64>,
     max: Option<u32>,
     password: Option<String>,
+    /// Which of our own machines to aim at, by name or id prefix.
+    device: Option<String>,
 }
 
 async fn push(
@@ -502,9 +509,29 @@ async fn push(
     if paths.is_empty() {
         return Response::Error("provide at least one file or folder to push".into());
     }
-    let recipient = match crate::book::resolve_recipient(&to) {
+    // `me` resolves here too, not only in `arvolo send --to me`: a front-end that
+    // pushes through the daemon has no other way to name its own devices, and a
+    // second copy of the rule is how the two would drift.
+    let recipient = match crate::resolve_recipient_or_self(&to) {
         Ok(r) => r,
         Err(e) => return Response::Error(format!("{e:#}")),
+    };
+    // Aiming at a device only means anything inside our own identity: the register
+    // holds *our* machines, and somebody else's are not ours to name. Refusing is
+    // the point — accepting would post an offer stamped with an id nothing on the
+    // recipient's side matches, so every one of their devices would skip it and
+    // the file would sit on the relay until its TTL, delivered to no one.
+    let target = match &opts.device {
+        None => None,
+        Some(_) if crate::encode_id(&recipient) != crate::encode_id(&d.manager.public_id()) => {
+            return Response::Error(
+                "a device can only be named when sending to your own devices".into(),
+            )
+        }
+        Some(who) => match crate::book::resolve_device(who) {
+            Ok(id) => Some(id),
+            Err(e) => return Response::Error(format!("{e:#}")),
+        },
     };
     let paths: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
     let (payload, name, archive, temp) = match resolve_payload_for(&paths, &fds) {
@@ -528,6 +555,7 @@ async fn push(
             ttl: opts.ttl,
             max: opts.max,
             password: opts.password.filter(|p| !p.is_empty()),
+            target,
         };
         d.manager
             .deposit_to(&recipient, source, name, note, mailbox)
@@ -535,7 +563,7 @@ async fn push(
             .map(|(id, ticket)| (id, Some(ticket)))
     } else {
         d.manager
-            .send_to(&recipient, source, name, archive, note)
+            .send_to(&recipient, source, name, archive, note, target)
             .await
             .map(|id| (id, None))
     };
@@ -556,6 +584,77 @@ async fn push(
             }
             Response::Error(format!("{e:#}"))
         }
+    }
+}
+
+/// The device register, most recently seen first.
+///
+/// Read straight from the ledger the sync round projects, so it is whatever the
+/// last merge left behind — a machine that has never completed a round is not in
+/// it, and one that stopped syncing stays until somebody forgets it.
+fn list_devices() -> Response {
+    let mine = crate::book::load_or_init_device();
+    let mine_key = arvolo_core::sync::device_key(&mine);
+    let mut out: Vec<arvolo_ipc::protocol::DeviceDto> = crate::book::load_devices()
+        .devices
+        .into_iter()
+        .map(|(id, r)| arvolo_ipc::protocol::DeviceDto {
+            is_this_device: id == mine_key,
+            id,
+            name: r.name,
+            platform: r.platform,
+            last_seen: r.last_seen,
+        })
+        .collect();
+    // This machine first, then by how recently the others were heard from: the
+    // row you can act on, then the ones most likely to be meant.
+    out.sort_by(|a, b| {
+        b.is_this_device
+            .cmp(&a.is_this_device)
+            .then(b.last_seen.cmp(&a.last_seen))
+            .then(a.name.cmp(&b.name))
+    });
+    Response::Devices(out)
+}
+
+/// Rename this machine — and only this one, which is the whole shape of the
+/// register: a row belongs to the device that wrote it.
+fn rename_this_device(name: String) -> Response {
+    let name = crate::ui::sanitize_display(name.trim());
+    if name.is_empty() {
+        return Response::Error("give this device a name".into());
+    }
+    let key = arvolo_core::sync::device_key(&crate::book::load_or_init_device());
+    let mut devices = crate::book::load_devices();
+    let row = devices.devices.entry(key).or_default();
+    row.name = name;
+    if row.platform.is_empty() {
+        row.platform = std::env::consts::OS.to_string();
+    }
+    match crate::book::save_devices(&devices) {
+        // The sidecar picks the edit up on the next round, the same way a contact
+        // renamed with `arvolo contacts` reaches the other devices.
+        Ok(()) => Response::Ok,
+        Err(e) => Response::Error(format!("{e:#}")),
+    }
+}
+
+/// Retire a machine from the register. Not a revocation: see the request.
+fn forget_device(who: String) -> Response {
+    let id = match crate::book::resolve_device(&who) {
+        Ok(id) => id,
+        Err(e) => return Response::Error(format!("{e:#}")),
+    };
+    if id == crate::book::load_or_init_device() {
+        return Response::Error(
+            "this is the device you are on — forgetting it here would only make it \
+             announce itself again"
+                .into(),
+        );
+    }
+    match crate::book::forget_device(&id) {
+        Ok(()) => Response::Ok,
+        Err(e) => Response::Error(format!("{e:#}")),
     }
 }
 
@@ -723,6 +822,7 @@ fn sync_dto(d: &Daemon) -> anyhow::Result<SyncDto> {
         last_sync: st.last_sync,
         last_merged: st.last_merged,
         last_error: st.last_error,
+        paired: crate::book::paired_with_another_device(),
     })
 }
 

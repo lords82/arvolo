@@ -55,6 +55,9 @@ pub struct MailboxOpts {
     /// End-to-end password: the blob cannot be opened without it, and the relay
     /// never learns it. `None` = sealed to the recipient's key alone.
     pub password: Option<String>,
+    /// Which of our own devices the offer is aimed at — see [`Offer::target`].
+    /// `None` = any of them, which is what every send to somebody else is.
+    pub target: Option<crate::sync::DeviceId>,
 }
 
 /// Direction of a transfer, from this client's point of view.
@@ -624,6 +627,7 @@ impl TransferManager {
         name: String,
         archive: bool,
         note: String,
+        target: Option<crate::sync::DeviceId>,
     ) -> Result<u64> {
         let source = payload.into();
         let relay = self.inner.relay.clone().context(
@@ -641,6 +645,7 @@ impl TransferManager {
                 name: name.clone(),
                 archive,
                 note: note.clone(),
+                target,
                 pause_flag: pause_flag.clone(),
                 prep: Default::default(),
             },
@@ -979,6 +984,7 @@ impl TransferManager {
                 name: rec.name.clone(),
                 archive: rec.archive,
                 note: rec.note.clone(),
+                target: rec.target,
                 pause_flag: pause_flag.clone(),
                 prep: slot.clone(),
             },
@@ -2127,6 +2133,7 @@ mod held_prep_tests {
                 name: "f.bin".into(),
                 archive: false,
                 note: String::new(),
+                target: None,
                 pause_flag: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 prep: slot.clone(),
             },
@@ -2235,6 +2242,7 @@ mod offer_dedup_tests {
                         note: String::new(),
                         sender_name: String::new(),
                         origin: None,
+                        target: None,
                     },
                 },
             );

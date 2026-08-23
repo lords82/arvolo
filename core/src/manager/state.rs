@@ -22,6 +22,11 @@ pub(super) struct Held {
     pub(super) archive: bool,
     /// Optional sender note to attach to the offer.
     pub(super) note: String,
+    /// Which of our own devices this is for, when the sender named one. Lives
+    /// here rather than being threaded through the delivery functions because it
+    /// belongs to the *send*, and both the live attempt and the mailbox fallback
+    /// have to stamp the same value on the offer they post.
+    pub(super) target: Option<crate::sync::DeviceId>,
     /// Flipped by [`TransferManager::pause`] so the running loop, once its token is
     /// cancelled, knows to pause (keep the transfer) rather than cancel (drop it).
     pub(super) pause_flag: Arc<std::sync::atomic::AtomicBool>,

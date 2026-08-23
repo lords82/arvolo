@@ -76,6 +76,26 @@ pub(crate) fn contact_candidates() -> Vec<CompletionCandidate> {
         .collect()
 }
 
+/// Names for `arvolo send --device` and `arvolo device forget`: the machines
+/// this identity knows about, read from the projected register.
+pub(crate) fn device_candidates() -> Vec<CompletionCandidate> {
+    let mine = arvolo_core::sync::device_key(&book::load_or_init_device());
+    book::load_devices()
+        .devices
+        .into_iter()
+        .map(|(id, row)| {
+            let help = if id == mine {
+                "this device".to_string()
+            } else if row.platform.is_empty() {
+                id[..8.min(id.len())].to_string()
+            } else {
+                format!("{} · {}", row.platform, &id[..8.min(id.len())])
+            };
+            CompletionCandidate::new(row.name).help(Some(help.into()))
+        })
+        .collect()
+}
+
 /// Ids for `arvolo cancel`: everything that command can take back — live
 /// transfers, files still sitting on a relay, and resumable sends.
 pub(crate) fn cancelable_candidates() -> Vec<CompletionCandidate> {

@@ -202,6 +202,7 @@ impl DaemonClient {
         ttl: Option<u64>,
         max: Option<u32>,
         password: Option<String>,
+        device: Option<String>,
         fds: Option<FdHandoff>,
     ) -> Result<u64> {
         let (fd_socket, fd_token) = split(fds);
@@ -214,6 +215,7 @@ impl DaemonClient {
                 ttl,
                 max,
                 password,
+                device,
                 fd_socket,
                 fd_token,
             })
@@ -235,6 +237,7 @@ impl DaemonClient {
         ttl: Option<u64>,
         max: Option<u32>,
         password: Option<String>,
+        device: Option<String>,
         fds: Option<FdHandoff>,
     ) -> Result<(u64, String)> {
         let (fd_socket, fd_token) = split(fds);
@@ -247,12 +250,37 @@ impl DaemonClient {
                 ttl,
                 max,
                 password,
+                device,
                 fd_socket,
                 fd_token,
             })
             .await?
         {
             Response::Served { id, ticket } => Ok((id, ticket)),
+            other => unexpected(other),
+        }
+    }
+
+    /// The machines sharing this identity, as they describe themselves.
+    pub async fn list_devices(&mut self) -> Result<Vec<crate::protocol::DeviceDto>> {
+        match self.request(Request::ListDevices).await? {
+            Response::Devices(d) => Ok(d),
+            other => unexpected(other),
+        }
+    }
+
+    /// Rename the machine this daemon runs on. Only that one — see the request.
+    pub async fn rename_this_device(&mut self, name: String) -> Result<()> {
+        match self.request(Request::RenameThisDevice { name }).await? {
+            Response::Ok => Ok(()),
+            other => unexpected(other),
+        }
+    }
+
+    /// Retire a machine from the register.
+    pub async fn forget_device(&mut self, who: String) -> Result<()> {
+        match self.request(Request::ForgetDevice { who }).await? {
+            Response::Ok => Ok(()),
             other => unexpected(other),
         }
     }

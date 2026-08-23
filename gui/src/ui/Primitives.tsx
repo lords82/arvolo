@@ -213,12 +213,20 @@ export function Segmented<T extends string>({
   onChange,
   options,
   block,
+  wrap,
   label,
 }: {
   value: T;
   onChange: (v: T) => void;
   options: { value: T; label: string }[];
   block?: boolean;
+  /** Let the options run onto a second line instead of out of the container.
+   *
+   *  Opt-in, because for a row of short choices (a TTL, a unit) wrapping would
+   *  be a worse answer than fitting. It exists for the send sheet's five
+   *  destinations, where the labels are words rather than numbers and the
+   *  longest set — German, in a 480px sheet at 92vw — has nowhere to fit. */
+  wrap?: boolean;
   label: string;
 }) {
   return (
@@ -226,7 +234,9 @@ export function Segmented<T extends string>({
     // there are no tabpanels for tabs to control. A screen reader announcing
     // "tab 2 of 4" for a TTL choice is describing a widget that isn't there.
     <div
-      className={`segmented ${block ? "segmented-block" : ""}`}
+      className={`segmented ${block ? "segmented-block" : ""} ${
+        wrap ? "segmented-wrap" : ""
+      }`}
       role="radiogroup"
       aria-label={label}
     >

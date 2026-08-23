@@ -5,7 +5,14 @@
 //! snapshot of its address book as a mutable cell on that slot; the others pull
 //! it and **merge**. Merge is a state-based CRDT — commutative, associative and
 //! idempotent — so ordering, re-delivery and concurrent edits all converge with
-//! no coordination and no device roster.
+//! no coordination.
+//!
+//! The snapshot also carries a roster of the machines themselves, so a send can
+//! be aimed at one of them. It is a register like the others and rides inside the
+//! same encrypted cell, so the relay learns nothing from it — but it is *self
+//! reported*: each machine writes its own row and nothing outside proves that a
+//! row corresponds to a computer that exists. See [`DeviceEntry`] and the
+//! authorship rule in [`SyncState::merge`].
 //!
 //! This module is the pure engine: wire types, snapshot encryption (under a key
 //! derived from the identity secret, so every device derives it independently),
@@ -122,6 +129,48 @@ pub struct NameEntry {
     pub deleted: bool,
 }
 
+/// One machine holding this identity, as it describes itself.
+///
+/// The register that is **not** like the others: a contact is something you write
+/// about somebody else, a device row is something a machine writes about itself.
+/// Nobody adds a device — pairing hands over the seed and the new machine starts
+/// announcing itself on its next sync round. See [`SyncState::merge`] for the one
+/// extra rule that makes that safe.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceEntry {
+    /// Lowercase hex of the writer's [`DeviceId`] — the key, repeated in the row
+    /// so a snapshot stays a flat list.
+    pub id: String,
+    /// What the user calls this machine. Defaulted from its hostname, editable
+    /// only on the machine itself (again: see `merge`).
+    pub name: String,
+    /// `std::env::consts::OS` on the machine that wrote the row. A hint for the
+    /// icon and for telling two similarly-named rows apart, never a decision.
+    pub platform: String,
+    /// Unix seconds when that machine last published a snapshot. Self-reported —
+    /// there is no neutral clock here — so a reader clamps it to "now" and shows
+    /// it as elapsed time, never as a presence light.
+    pub last_seen: u64,
+    pub clock: Lamport,
+    pub deleted: bool,
+}
+
+/// The state-side form of [`DeviceEntry`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeviceReg {
+    pub name: String,
+    pub platform: String,
+    pub last_seen: u64,
+    pub clock: Lamport,
+    pub deleted: bool,
+}
+
+/// A [`DeviceId`] as it keys the device register: lowercase hex, so the map key
+/// and the row's own `id` are the same string everywhere.
+pub fn device_key(id: &DeviceId) -> String {
+    data_encoding::HEXLOWER.encode(id)
+}
+
 /// A full, self-contained snapshot of the address book — the on-the-wire form of
 /// [`SyncState`]. It is *state*, not a delta: it always carries the complete
 /// current book (plus tombstones), so a device that missed earlier snapshots
@@ -145,6 +194,12 @@ pub struct SyncSnapshot {
     /// merges as "no information", never as "unblock everything".
     #[serde(default)]
     pub blocked: Vec<MarkEntry>,
+    /// The machines holding this identity, each row written by the machine it
+    /// describes. `#[serde(default)]` for the same reason as the two above: a
+    /// device that predates the register sends none, which reads as "I know of no
+    /// devices" and never as "there are none".
+    #[serde(default)]
+    pub devices: Vec<DeviceEntry>,
 }
 
 /// The sealed inbox payload carrying a snapshot to the user's other devices.
@@ -226,6 +281,8 @@ pub struct SyncState {
     pub names: BTreeMap<String, NameReg>,
     /// pubkey → blocked mark.
     pub blocked: BTreeMap<String, MarkReg>,
+    /// [`device_key`] → what that machine says about itself.
+    pub devices: BTreeMap<String, DeviceReg>,
 }
 
 impl SyncState {
@@ -246,9 +303,13 @@ impl SyncState {
             .chain(self.trusted.values())
             .chain(self.blocked.values())
             .map(|r| &r.clock);
+        // A device row authored by somebody else is the least circumstantial
+        // evidence of the lot: it is another machine saying so itself.
+        let devices = self.devices.values().map(|r| &r.clock);
         contacts
             .chain(names)
             .chain(marks)
+            .chain(devices)
             .any(|c| &c.device != mine)
     }
 
@@ -306,6 +367,18 @@ impl SyncState {
                     pending: n.pending.clone(),
                     clock: n.clock,
                     deleted: n.deleted,
+                },
+            );
+        }
+        for d in &s.devices {
+            state.devices.insert(
+                d.id.clone(),
+                DeviceReg {
+                    name: d.name.clone(),
+                    platform: d.platform.clone(),
+                    last_seen: d.last_seen,
+                    clock: d.clock,
+                    deleted: d.deleted,
                 },
             );
         }
@@ -378,6 +451,18 @@ impl SyncState {
                     deleted: r.deleted,
                 })
                 .collect(),
+            devices: self
+                .devices
+                .iter()
+                .map(|(id, r)| DeviceEntry {
+                    id: id.clone(),
+                    name: r.name.clone(),
+                    platform: r.platform.clone(),
+                    last_seen: r.last_seen,
+                    clock: r.clock,
+                    deleted: r.deleted,
+                })
+                .collect(),
         }
     }
 
@@ -410,6 +495,7 @@ impl SyncState {
                 }
             }
         }
+        merge_devices(&mut self.devices, &other.devices);
     }
 
     /// The highest Lamport counter observed anywhere in this state — used to
@@ -431,7 +517,51 @@ impl SyncState {
         for r in self.blocked.values() {
             m = m.max(r.clock.counter);
         }
+        for r in self.devices.values() {
+            m = m.max(r.clock.counter);
+        }
         m
+    }
+}
+
+/// Merge the device register: last-writer-wins by [`Lamport`], like the contacts,
+/// **plus one rule the contacts do not have** — a live row is only accepted from
+/// the machine it describes.
+///
+/// Without it the register is an ordinary LWW map, so any device could rewrite
+/// any other device's row and win by holding the higher counter. That matters
+/// here in a way it does not for a contact: the rows are what a targeted send
+/// picks from, so "send it to the MacBook" would come to mean "send it to
+/// whichever machine last called itself the MacBook". Requiring `clock.device` to
+/// be the row's own id makes a device's description of itself the only one there
+/// is.
+///
+/// Tombstones are exempt, and have to be: forgetting a machine is something you
+/// do *from another machine*, usually because the one being forgotten is gone. So
+/// anyone may delete a row and nobody may write one but its owner. (What stops a
+/// forgotten-but-still-running device from simply re-announcing itself is not
+/// here — it is the retirement check on the writing side, which declines to
+/// republish a row its own identity has tombstoned.)
+fn merge_devices(into: &mut BTreeMap<String, DeviceReg>, other: &BTreeMap<String, DeviceReg>) {
+    for (id, incoming) in other {
+        // Self-authorship, checked against the key rather than against whoever
+        // handed us the snapshot: snapshots are relayed between devices, so the
+        // machine we merged this from is very often not the one that wrote it.
+        if !incoming.deleted && device_key(&incoming.clock.device) != *id {
+            continue;
+        }
+        match into.get(id) {
+            Some(cur) if cur.clock > incoming.clock => {}
+            Some(cur) if cur.clock == incoming.clock => {
+                // Exact-clock tie, as for a mark: delete wins.
+                if incoming.deleted && !cur.deleted {
+                    into.insert(id.clone(), incoming.clone());
+                }
+            }
+            _ => {
+                into.insert(id.clone(), incoming.clone());
+            }
+        }
     }
 }
 
@@ -553,6 +683,7 @@ mod tests {
             blocked: vec![],
             seen: vec![],
             names: vec![],
+            devices: vec![],
         })
     }
 
@@ -571,6 +702,7 @@ mod tests {
                 count: 2,
             }],
             names: vec![],
+            devices: vec![],
         };
         let blob = encrypt_snapshot(&key, &snap).unwrap();
         assert_ne!(blob, postcard::to_allocvec(&snap).unwrap());
@@ -588,6 +720,7 @@ mod tests {
             blocked: vec![],
             seen: vec![],
             names: vec![],
+            devices: vec![],
         };
         let blob = encrypt_snapshot(&snapshot_key(b"secret-one"), &snap).unwrap();
         assert!(decrypt_snapshot(&snapshot_key(b"secret-two"), &blob).is_err());
@@ -646,6 +779,7 @@ mod tests {
                 count: 3,
             }],
             names: vec![],
+            devices: vec![],
         });
         let b = SyncState::from_snapshot(&SyncSnapshot {
             lamport: 0,
@@ -664,6 +798,7 @@ mod tests {
                 count: 5,
             }],
             names: vec![],
+            devices: vec![],
         });
         a.merge(&b);
         assert!(a.verified["k"].deleted, "later remove wins the 2P-set");
@@ -718,6 +853,7 @@ mod tests {
                 clock,
                 deleted: false,
             }],
+            devices: vec![],
         })
     }
 
@@ -758,6 +894,7 @@ mod tests {
                 clock,
                 deleted: true,
             }],
+            devices: vec![],
         })
     }
 
@@ -813,5 +950,129 @@ mod tests {
         a.merge(&b);
         assert_eq!(a.names["k1"].pinned, "Alice");
         assert_eq!(a.names["k2"].pinned, "Bob");
+    }
+
+    fn device_state(rows: Vec<DeviceEntry>) -> SyncState {
+        SyncState::from_snapshot(&SyncSnapshot {
+            lamport: 0,
+            device: [0u8; 16],
+            contacts: vec![],
+            verified: vec![],
+            trusted: vec![],
+            blocked: vec![],
+            seen: vec![],
+            names: vec![],
+            devices: rows,
+        })
+    }
+
+    /// A device row carries its own id, so the key and the clock's device agree.
+    fn device_row(d: u8, name: &str, last_seen: u64, counter: u64, deleted: bool) -> DeviceEntry {
+        DeviceEntry {
+            id: device_key(&[d; 16]),
+            name: name.into(),
+            platform: "linux".into(),
+            last_seen,
+            clock: lam(counter, d),
+            deleted,
+        }
+    }
+
+    #[test]
+    fn a_device_row_is_last_writer_wins_from_its_own_machine() {
+        let mut a = device_state(vec![device_row(1, "laptop", 100, 1, false)]);
+        a.merge(&device_state(vec![device_row(
+            1,
+            "the laptop",
+            400,
+            2,
+            false,
+        )]));
+        assert_eq!(a.devices[&device_key(&[1u8; 16])].name, "the laptop");
+        assert_eq!(a.devices[&device_key(&[1u8; 16])].last_seen, 400);
+
+        // Two machines describing themselves are two rows, not a contest.
+        a.merge(&device_state(vec![device_row(2, "desktop", 50, 1, false)]));
+        assert_eq!(a.devices.len(), 2);
+    }
+
+    #[test]
+    fn only_a_machine_may_describe_itself() {
+        // The whole reason this register is not an ordinary LWW map. Device 2
+        // writes a *live* row for device 1's id, with a clock high enough to win
+        // every ordinary comparison — and is ignored, because a send aimed at
+        // "laptop" must not be aimed at whoever last claimed the name.
+        let forged = DeviceEntry {
+            id: device_key(&[1u8; 16]),
+            clock: lam(99, 2),
+            name: "laptop".into(),
+            platform: "linux".into(),
+            last_seen: 999,
+            deleted: false,
+        };
+        let mut a = device_state(vec![device_row(1, "laptop", 100, 1, false)]);
+        a.merge(&device_state(vec![forged]));
+        let row = &a.devices[&device_key(&[1u8; 16])];
+        assert_eq!(row.last_seen, 100, "a foreign live row must not land");
+        assert_eq!(row.clock, lam(1, 1));
+
+        // A row nobody has ever seen is not created either.
+        let mut empty = device_state(vec![]);
+        empty.merge(&device_state(vec![DeviceEntry {
+            id: device_key(&[7u8; 16]),
+            clock: lam(1, 8),
+            name: "invented".into(),
+            platform: "linux".into(),
+            last_seen: 1,
+            deleted: false,
+        }]));
+        assert!(empty.devices.is_empty());
+    }
+
+    #[test]
+    fn anyone_may_forget_a_device() {
+        // The exemption that makes `forget` possible at all: you retire a machine
+        // *from another machine*, usually because that one is gone for good.
+        let mut a = device_state(vec![device_row(1, "laptop", 100, 1, false)]);
+        a.merge(&device_state(vec![DeviceEntry {
+            id: device_key(&[1u8; 16]),
+            clock: lam(2, 2),
+            name: String::new(),
+            platform: String::new(),
+            last_seen: 0,
+            deleted: true,
+        }]));
+        assert!(
+            a.devices[&device_key(&[1u8; 16])].deleted,
+            "tombstone lands"
+        );
+
+        // And the machine itself can come back, because a tombstone is
+        // bookkeeping and not a revocation — which is why the writing side has
+        // to decline to republish (see the retirement check in the CLI).
+        a.merge(&device_state(vec![device_row(1, "laptop", 500, 3, false)]));
+        assert!(!a.devices[&device_key(&[1u8; 16])].deleted);
+    }
+
+    #[test]
+    fn devices_converge_in_any_order() {
+        let rows = [
+            device_row(1, "laptop", 100, 1, false),
+            device_row(1, "laptop renamed", 300, 4, false),
+            device_row(2, "desktop", 200, 2, false),
+        ];
+        let mut forward = device_state(vec![]);
+        for r in &rows {
+            forward.merge(&device_state(vec![r.clone()]));
+        }
+        let mut backward = device_state(vec![]);
+        for r in rows.iter().rev() {
+            backward.merge(&device_state(vec![r.clone()]));
+        }
+        assert_eq!(forward, backward, "any order → same state");
+        // Idempotent too.
+        let once = forward.clone();
+        forward.merge(&once);
+        assert_eq!(forward, once);
     }
 }

@@ -246,6 +246,122 @@ pub async fn sync_status(json: bool) -> Result<()> {
     Ok(())
 }
 
+/// `arvolo device list` — the machines this identity knows about.
+///
+/// Goes through the daemon when one is running, for the same reason `sync now`
+/// does: the register is projected by the sync round, and the daemon is the one
+/// running those. Without a daemon it reads the ledger directly, which is the
+/// same file, just possibly a round out of date.
+pub async fn device_list(json: bool) -> Result<()> {
+    let mine = sync::device_key(&book::load_or_init_device());
+    let rows: Vec<(String, book::DeviceRow)> = match crate::commands::daemon::daemon_client().await
+    {
+        Some(mut client) => client
+            .list_devices()
+            .await?
+            .into_iter()
+            .map(|d| {
+                (
+                    d.id,
+                    book::DeviceRow {
+                        name: d.name,
+                        platform: d.platform,
+                        last_seen: d.last_seen,
+                    },
+                )
+            })
+            .collect(),
+        None => book::load_devices().devices.into_iter().collect(),
+    };
+
+    if json {
+        let items: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|(id, r)| {
+                serde_json::json!({
+                    "id": id,
+                    "name": r.name,
+                    "platform": r.platform,
+                    "last_seen": r.last_seen,
+                    "this_device": *id == mine,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&items)?);
+        return Ok(());
+    }
+
+    if rows.is_empty() {
+        println!(
+            "No devices recorded yet. Each machine adds itself on its first sync round, \n\
+             so this fills in once `arvolo device pair` has been through one."
+        );
+        return Ok(());
+    }
+    for (id, r) in &rows {
+        let short = &id[..8.min(id.len())];
+        let here = if *id == mine { "  (this device)" } else { "" };
+        // "seen", not "online": it is that machine's own clock, written once per
+        // sync round, so it lags by up to five minutes and cannot tell a machine
+        // that has just gone to sleep from one that is still awake.
+        let seen = if r.last_seen == 0 {
+            "never synced".to_string()
+        } else {
+            // Clamped to now: the stamp is that machine's own clock, and two
+            // machines that disagree about the time would otherwise print a
+            // sighting in the future.
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            format!(
+                "seen {} ago",
+                crate::human_duration(now.saturating_sub(r.last_seen))
+            )
+        };
+        println!("{:<20} {short}  {:<8} {seen}{here}", r.name, r.platform);
+    }
+    Ok(())
+}
+
+/// `arvolo device rename` — name this machine. Only this one; see the command.
+pub async fn device_rename(name: String) -> Result<()> {
+    if let Some(mut client) = crate::commands::daemon::daemon_client().await {
+        client.rename_this_device(name.clone()).await?;
+    } else {
+        let key = sync::device_key(&book::load_or_init_device());
+        let mut devices = book::load_devices();
+        let row = devices.devices.entry(key).or_default();
+        row.name = crate::ui::sanitize_display(name.trim());
+        if row.platform.is_empty() {
+            row.platform = std::env::consts::OS.to_string();
+        }
+        book::save_devices(&devices)?;
+    }
+    println!("✓ This device is now called {name}. Your other devices see it after the next sync.");
+    Ok(())
+}
+
+/// `arvolo device forget` — retire a machine from the register.
+pub async fn device_forget(who: String) -> Result<()> {
+    if let Some(mut client) = crate::commands::daemon::daemon_client().await {
+        client.forget_device(who.clone()).await?;
+    } else {
+        let id = book::resolve_device(&who)?;
+        anyhow::ensure!(
+            id != book::load_or_init_device(),
+            "this is the device you are on — forgetting it here would only make it \
+             announce itself again"
+        );
+        book::forget_device(&id)?;
+    }
+    println!(
+        "✓ {who} is out of the register. It still holds this identity — forgetting is \n\
+         bookkeeping, not revocation — but if it is running it will stop announcing itself."
+    );
+    Ok(())
+}
+
 /// `arvolo sync now` — one round of the mutable-cell protocol on our shared inbox
 /// slot: pull and merge any snapshots our other devices published, publish a fresh
 /// full snapshot of the merged book, then delete the notes we merged (writer-side

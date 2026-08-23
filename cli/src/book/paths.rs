@@ -168,6 +168,10 @@ pub(crate) fn names_path() -> PathBuf {
     config_dir().join("names.toml")
 }
 
+pub(crate) fn devices_path() -> PathBuf {
+    config_dir().join("devices.toml")
+}
+
 /// A content fingerprint of the address book — the four ledgers that shape what a
 /// front-end shows in "Persone". Any `arvolo contacts …` run is a *separate process*
 /// writing these files behind the daemon's back, so the daemon polls this stamp to
@@ -176,7 +180,9 @@ pub(crate) fn names_path() -> PathBuf {
 /// It hashes the bytes rather than (len, mtime) on purpose: the files are tiny, and
 /// two edits landing inside one mtime tick with an unchanged length would otherwise
 /// read as "no change". `seen.toml` is deliberately left out — it records every
-/// receipt and would fire on traffic, not on a book edit.
+/// receipt and would fire on traffic, not on a book edit. So is `devices.toml`,
+/// for the same shape of reason: its `last_seen` moves on its own every sync
+/// round, and the address book has not changed because a machine is still awake.
 pub(crate) fn book_stamp() -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();

@@ -229,6 +229,9 @@ stdout**, narration goes to stderr, so piping always yields exactly the thing.
 | `arvolo contacts block\|unblock <who>` | Drop someone's offers on arrival — no prompt, no notification. Syncs to your other devices. |
 | `arvolo contacts import <file\|-> [--with-marks]` | Read a book back in (the JSON `list --json` writes) on a machine you don't want sharing an identity. Verified/trusted marks are **not** imported without `--with-marks`. |
 | `arvolo device pair\|join\|sync\|status [--json]` | Use arvolo on more than one device: `pair` shows a code, `join` takes it (sharing one identity), `sync` propagates the address book, `status` reports fingerprint and last sync. See [Multiple devices](#multiple-devices). |
+| &nbsp;&nbsp;`list [--json]` | The machines that share this identity, as they describe themselves: name, platform, and when each last synced. |
+| &nbsp;&nbsp;`rename <name>` | Name **this** machine. Only this one — a device is described by itself, so rename the others on themselves. |
+| &nbsp;&nbsp;`forget <who>` | Take a machine out of the register. Bookkeeping, not revocation: it keeps the identity. |
 | `arvolo me` | Your public id (on stdout, so it pipes), fingerprint and display name. `whoami` works too. |
 | &nbsp;&nbsp;`name ["…"]` | Show or set your display name — the self-chosen name advertised to recipients inside each sealed offer (a petname claim, never a verified identity; empty clears it). |
 | `arvolo completions <shell>` | Shell integration for `<TAB>`. See [Completion](#tab-completion). |
@@ -254,6 +257,33 @@ arvolo device join 4821-crater-mango
 arvolo device sync        # on each device; `listen`/`daemon` also sync automatically
 arvolo device status      # fingerprint, contact count, last sync
 ```
+
+### Sending to yourself
+
+`--to me` is your own machines. The file is sealed to your own key and lands in
+the inbox every one of them reads:
+
+```sh
+arvolo send report.pdf --to me                     # whichever machine is awake takes it
+arvolo device list                                 # who is out there
+arvolo send report.pdf --to me --device laptop     # that one, and no other
+```
+
+Without `--device`, the first machine to see it takes it — a race, not a rule,
+and more than one can end up pulling the same file. With it, the others leave the
+offer alone; if the machine you named is asleep, the file waits on the relay
+until it wakes (or until it expires).
+
+Each machine adds itself to the register on its first sync round, so the list
+fills in on its own. What it shows is **self-reported**: a machine that has never
+synced is missing, one that stopped syncing stays until you forget it, and "seen"
+is that machine's own clock — never a light that says "online now".
+
+`arvolo device forget <name>` takes one out. It is bookkeeping, not revocation:
+that machine still holds the identity secret, and nothing can take that back
+short of starting a new identity. If it is still running, it will notice it was
+retired and stop announcing itself — which works because it is your machine
+running your software, and for no stronger reason than that.
 
 ## TAB completion
 

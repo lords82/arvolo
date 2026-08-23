@@ -76,6 +76,7 @@ async fn held_when_relay_unavailable() {
             "f.bin".into(),
             false,
             String::new(),
+            None,
         )
         .await
         .unwrap();
@@ -108,6 +109,7 @@ async fn held_when_file_too_large() {
             "big.bin".into(),
             false,
             String::new(),
+            None,
         )
         .await
         .unwrap();
@@ -143,6 +145,7 @@ async fn pause_then_resume() {
             "f".into(),
             false,
             String::new(),
+            None,
         )
         .await
         .unwrap();
@@ -191,6 +194,7 @@ async fn paused_send_survives_restart() {
                 "f.bin".into(),
                 false,
                 String::new(),
+                None,
             )
             .await
             .unwrap();
@@ -248,6 +252,7 @@ async fn a_collected_deposit_completes() {
             "report.pdf".into(),
             false,
             String::new(),
+            None,
         )
         .await
         .unwrap();

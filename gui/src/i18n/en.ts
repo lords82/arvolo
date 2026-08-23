@@ -396,6 +396,7 @@ export const en = {
   "devices.fingerprintHint":
     "It must match on all your devices. Different words mean a different identity.",
   "devices.publicId": "Public id",
+  "devices.sendToSelf": "Send to your devices",
   "devices.pairTitle": "Link a device",
   // How it is done. What it *costs* is in `pair.deviceWarnRest`, on the sheet
   // where the code appears — the moment somebody is about to read one out.
@@ -415,6 +416,31 @@ export const en = {
   "devices.neverSynced": "not synced since the daemon started",
   "devices.lastError": (err: string) => `The last round failed: ${err}`,
   "devices.syncNow": "Sync now",
+  "devices.listTitle": "The machines",
+  "devices.listHint":
+    "Each one adds itself when it syncs. Self-reported: nothing here proves a row is a computer that still exists.",
+  "devices.listEmpty": "No machine has announced itself yet.",
+  "devices.thisDevice": "this device",
+  "devices.neverSeen": "never synced",
+  "devices.seenAgo": (when: string) => `seen ${when}`,
+  "devices.rename": "Rename",
+  "devices.renameTitle": "Name this device",
+  "devices.renameHint":
+    "Only this one: a device is described by itself, so the others are renamed on themselves.",
+  "devices.forget": "Forget",
+  "devices.confirmForgetTitle": (name: string) => `Forget ${name}?`,
+  "devices.confirmForgetBody":
+    "It leaves the list on every machine. It keeps the identity — nothing takes that back — but if it is running it stops announcing itself.",
+  "devices.renamed": "Renamed",
+  "devices.renamedDetail": "Your other machines see it after the next sync.",
+  "devices.forgotten": "Forgotten",
+  "send.deviceLabel": "Which of them",
+  "send.deviceAny": "Whichever is awake",
+  "send.deviceAnyHint": "Whichever of your machines is awake takes it.",
+  "send.deviceOneHint":
+    "The others leave it alone. If that machine is asleep, it waits on the relay until it wakes.",
+  "store.renameDevice": "rename this device",
+  "store.forgetDevice": "forget that device",
   "devices.autoTitle": "Sync on its own",
   "devices.autoDesc":
     "A round every few minutes. Off, it only lines up when you press the button.",
@@ -503,6 +529,7 @@ export const en = {
 
   // ---- send sheet --------------------------------------------------------
   "send.modeContact": "To a contact",
+  "send.modeSelf": "Your devices",
   "send.modeCode": "Code",
   "send.modeLink": "Link",
   "send.modeTicket": "Ticket",
@@ -511,6 +538,8 @@ export const en = {
   "send.blurbContact": "Straight to somebody in your address book.",
   "send.blurbContactMore":
     "Direct if they are online; otherwise it waits in their mailbox.",
+  "send.blurbSelf": "The other machines that hold your identity.",
+  "send.blurbSelfMore": "Nobody has to accept it.",
   "send.blurbCode": "A short code to read out or scan.",
   "send.blurbCodeMore":
     "They need not be a contact, but you both have to be online right now.",
@@ -528,17 +557,32 @@ export const en = {
     "Add somebody from People. Swapping codes is quickest — it saves you both, already verified.",
   "send.pickerSearch": "Search a contact…",
   "send.pickerRecipient": "Recipient",
+  // The machines that share this identity. Never "me": the destination is a set
+  // of computers, and one of them is the one being typed on.
+  "send.selfUnpairedHint":
+    "No other machine holds this identity yet — link one under Devices. What you send now waits on the relay.",
+  "send.selfDepositHint":
+    "A deposit is collected once: at one pickup, the first machine awake takes it and the others never see it.",
   "send.pickerNoMatch": (q: string) => `No contact matches “${q}”.`,
   "send.depositResult": (to: string) => `Deposited for ${to}`,
   // Why the ticket is on screen at all when nobody has to do anything with it.
   "send.depositResultDetail": (to: string) =>
     `Your own copy, in case ${to} never gets the offer.`,
   "send.onItsWay": (to: string) => `On its way to ${to}`,
+  // Written whole rather than splicing a name in: "On its way to Your
+  // devices" capitalises mid-sentence, and the other three languages come out
+  // ungrammatical rather than merely odd.
+  "send.onItsWaySelf": "On its way to your devices",
+  "send.depositResultSelf": "Deposited for your devices",
+  "send.depositResultSelfDetail":
+    "The ticket, in case none of your machines sees the offer.",
   "send.saveArvolo": "Save as .arvolo file…",
   "send.arvoloSaved": (name: string) => `Saved ${name}`,
   "send.arvoloSavedDetail": "Share it over any channel; they open it with Arvolo.",
   "send.onItsWayDetail":
     "If they are online it goes direct, otherwise it waits in their mailbox.",
+  "send.onItsWaySelfDetail":
+    "It waits on the relay until one of your machines is awake to take it.",
   "send.codeKeepDetail":
     "Good for several recipients, until you cancel the send.",
   "send.codeOnceDetail": "Good for one recipient, then it retires.",
@@ -739,6 +783,9 @@ export const en = {
 
   // ---- store: failures and notices ---------------------------------------
   "store.unknownPeer": "unknown",
+  // Our own id, wherever a row names its peer. Not a contact and not a stranger:
+  // the other machines that are also us.
+  "store.selfPeer": "Your devices",
   "store.loadTransfers": (e: string) =>
     `Couldn't read the transfers: ${e}`,
   "store.loadHistory": (e: string) =>

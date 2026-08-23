@@ -211,6 +211,16 @@ pub(crate) enum Command {
               conflicts_with = "artefact",
               add = ArgValueCandidates::new(completions::contact_candidates))]
         to: Option<String>,
+        /// Which of your own devices should take it: a device name, or the
+        /// start of its id (`arvolo device list`). Only with `--to me` — the
+        /// register holds your machines, not anybody else's.
+        ///
+        /// Without it, the first of your machines to be awake takes it. With it,
+        /// the others leave it where it is until the named one comes for it (or
+        /// until it expires, if that machine never wakes).
+        #[arg(long, requires = "to", value_name = "NAME", conflicts_with = "artefact",
+              add = ArgValueCandidates::new(completions::device_candidates))]
+        device: Option<String>,
         /// Deposit in the mailbox even if they're online (send-and-forget).
         /// (The explicit conflicts are needed on every `requires = "to"` flag:
         /// clap reads a required arg that sits in a group as satisfied by any
@@ -682,6 +692,36 @@ pub(crate) enum DeviceAction {
         /// (required in a non-interactive shell).
         #[arg(long, short = 'y')]
         yes: bool,
+    },
+    /// The machines that share this identity, as they describe themselves.
+    ///
+    /// Self-reported: each machine writes its own row on every sync round, so
+    /// one that has never synced is not here and one that stopped syncing stays
+    /// until you forget it. "Seen" is that machine's own clock, not a check.
+    List {
+        /// Print as JSON instead of the human view, for scripts.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Rename this device in the register.
+    ///
+    /// This one only: a row may be written by the machine it describes and by
+    /// nothing else, so another device is renamed on that device.
+    Rename {
+        /// The new name for this machine.
+        name: String,
+    },
+    /// Take a machine out of the register.
+    ///
+    /// Not a revocation, and worth being clear about: whatever is on that
+    /// machine still holds the identity secret, and there is no way to take that
+    /// back short of starting a new identity. If it is still running it will see
+    /// it was retired and stop announcing itself — which works because it is
+    /// your machine running your software, and for no stronger reason.
+    Forget {
+        /// A device name, or the start of its id.
+        #[arg(add = ArgValueCandidates::new(completions::device_candidates))]
+        who: String,
     },
     /// Publish this device's address book and merge any pending updates now.
     Sync,

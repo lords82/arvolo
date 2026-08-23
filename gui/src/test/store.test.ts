@@ -371,7 +371,9 @@ describe("actions reach the daemon", () => {
   it("15. send forwards recipient, paths and note", async () => {
     await boot();
     await useStore.getState().send("proj", ["/a.txt", "/b.txt"], "ciao");
-    expect(harness.recorder.sendTo).toEqual([["proj", ["/a.txt", "/b.txt"], "ciao"]]);
+    expect(harness.recorder.sendTo).toEqual([
+      ["proj", ["/a.txt", "/b.txt"], "ciao", null],
+    ]);
   });
 
   it("16. cancel shows it landed, then the engine's verdict wins", async () => {

@@ -512,6 +512,20 @@ describe("the board's own controls", () => {
 // ---------------------------------------------------------------------------
 
 describe("the send panel", () => {
+  /** The recipient rows, and only those: the mode switch above them is a
+   *  radiogroup as well, so an unscoped role query returns "To a contact" first. */
+  const recipientRows = async () =>
+    within(
+      await screen.findByRole("radiogroup", { name: "Recipient" })
+    ).getAllByRole("radio");
+
+  /** One of the five destinations on the mode switch. Scoped for the same reason
+   *  in reverse — and because "Your devices" is also the name of a screen. */
+  const modeButton = async (label: string) =>
+    within(
+      await screen.findByRole("radiogroup", { name: "Way of sending" })
+    ).getByText(label);
+
   const openSend = async () => {
     render(<App />);
     fireEvent.click(await screen.findByText("Send…"));
@@ -560,7 +574,9 @@ describe("the send panel", () => {
     );
     await waitFor(() =>
       expect(harness.recorder.sendTo).toEqual([
-        ["proj", [pick("a.txt").id, pick("b.txt").id], ""],
+        // The trailing null is the aim: no machine named, because this is a
+        // send to a person and only your own devices can be aimed at.
+        ["proj", [pick("a.txt").id, pick("b.txt").id], "", null],
       ])
     );
     for (const sent of harness.recorder.sendTo[0][1]) {
@@ -583,6 +599,125 @@ describe("the send panel", () => {
     await waitFor(() =>
       expect(harness.recorder.sendTo[0]?.[0]).toBe("proj")
     );
+  });
+
+  it("125a. your own devices are a mode, and travel as the reserved word", async () => {
+    // No recipient to pick: choosing the mode *is* choosing the destination, so
+    // the send goes through with an empty address book — which is exactly when a
+    // new user has nobody else to send to.
+    useStore.setState({ sheetPicks: [pick("a.txt")] });
+    render(<App />);
+    fireEvent.click(await modeButton("Your devices"));
+    fireEvent.click(
+      within(document.querySelector(".sheet-foot") as HTMLElement).getByText(
+        "Send"
+      )
+    );
+    // `me` is what the daemon resolves against its own identity. Anything else
+    // here — an id, a contact name — means the two ends stopped agreeing.
+    await waitFor(() => expect(harness.recorder.sendTo[0]?.[0]).toBe("me"));
+    // And no note rides along: the only screen that shows one never opens for
+    // your own identity, so there is no field and nothing to send.
+    expect(harness.recorder.sendTo[0]?.[2]).toBe("");
+    expect(
+      screen.queryByText("A couple of lines for the recipient (optional)")
+    ).toBeNull();
+  });
+
+  it("125b. a contact called “me” is sent by id, not by the reserved word", async () => {
+    // The word wins at the daemon, so passing the name would seal the file to
+    // ourselves and never reach them. Their id says the same thing safely.
+    harness.snapshot.contacts = [dto.contact({ name: "me", id: PEER_ID })];
+    useStore.setState({ sheetPicks: [pick("a.txt")] });
+    render(<App />);
+    await screen.findByText("me");
+    fireEvent.click((await recipientRows())[0]);
+    fireEvent.click(
+      within(document.querySelector(".sheet-foot") as HTMLElement).getByText(
+        "Send"
+      )
+    );
+    await waitFor(() => expect(harness.recorder.sendTo[0]?.[0]).toBe(PEER_ID));
+  });
+
+  it("125e. one of your machines can be named, and travels as the aim", async () => {
+    harness.snapshot.devices = [
+      ...harness.snapshot.devices,
+      {
+        id: "bb00000000000000000000000000bb00",
+        name: "the desktop",
+        platform: "linux",
+        last_seen: 1_700_000_000,
+        is_this_device: false,
+      },
+    ];
+    useStore.setState({ sheetPicks: [pick("a.txt")] });
+    render(<App />);
+    fireEvent.click(await modeButton("Your devices"));
+    fireEvent.click(await screen.findByText("the desktop"));
+    fireEvent.click(
+      within(document.querySelector(".sheet-foot") as HTMLElement).getByText(
+        "Send"
+      )
+    );
+    // The name goes on the wire; the daemon turns it into a device id. Sending
+    // the id from here would put the register's shape in the webview.
+    await waitFor(() =>
+      expect(harness.recorder.sendTo[0]?.[3]).toBe("the desktop")
+    );
+  });
+
+  it("125f. by default no machine is named, and this one is never offered", async () => {
+    harness.snapshot.devices = [
+      ...harness.snapshot.devices,
+      {
+        id: "bb00000000000000000000000000bb00",
+        name: "the desktop",
+        platform: "linux",
+        last_seen: 1_700_000_000,
+        is_this_device: false,
+      },
+    ];
+    useStore.setState({ sheetPicks: [pick("a.txt")] });
+    render(<App />);
+    fireEvent.click(await modeButton("Your devices"));
+    await screen.findByText("the desktop");
+    // This machine does not take its own offer, so aiming at it would be a send
+    // that waits for a computer already in front of you.
+    expect(screen.queryByText("this mac")).toBeNull();
+    fireEvent.click(
+      within(document.querySelector(".sheet-foot") as HTMLElement).getByText(
+        "Send"
+      )
+    );
+    await waitFor(() => expect(harness.recorder.sendTo[0]?.[3]).toBeNull());
+  });
+
+  it("125d. the Devices screen opens the sheet already on that mode", async () => {
+    render(<App />);
+    fireEvent.click(await screen.findByText("Your devices")); // the rail item
+    fireEvent.click(await screen.findByText("Send to your devices"));
+    // Not just "the sheet opened": it opened on the right destination, which is
+    // the whole reason for a button there rather than "use Send".
+    const mode = await modeButton("Your devices");
+    await waitFor(() =>
+      expect(mode.getAttribute("aria-checked")).toBe("true")
+    );
+  });
+
+  it("125c. sending to your own devices never shows the wire word", async () => {
+    useStore.setState({ sheetPicks: [pick("a.txt")] });
+    render(<App />);
+    fireEvent.click(await modeButton("Your devices"));
+    fireEvent.click(
+      within(document.querySelector(".sheet-foot") as HTMLElement).getByText(
+        "Send"
+      )
+    );
+    // "On its way to me" is the sentence this exists to prevent — and the toast
+    // is written whole rather than splicing a name in, so it reads as a sentence
+    // in every language instead of "On its way to Your devices".
+    expect(await screen.findByText("On its way to your devices")).toBeDefined();
   });
 
   it("126. the note typed in rides along with the send", async () => {

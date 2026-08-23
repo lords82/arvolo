@@ -18,7 +18,9 @@ import type {
   PairKind,
   StatusDto,
   SyncDto,
-  TransferDto, PickedItem,} from "../types";
+  TransferDto, PickedItem,
+  DeviceDto,
+} from "../types";
 
 // ---- fixture values, at the size the real ones are ------------------------
 //
@@ -54,7 +56,10 @@ export interface Recorder {
   accept: [string, string | null, string | null][];
   reject: string[];
   markVerified: string[];
-  sendTo: [string, string[], string][];
+  /** to, item ids, note, aimed device (null = whichever is awake). */
+  sendTo: [string, string[], string, string | null][];
+  renameThisDevice: string[];
+  forgetDevice: string[];
   revokeDeposit: string[];
   /** Counts fetches, so a test can prove the panel refreshes rather than trusting
    *  a list it fetched once and never again. */
@@ -109,6 +114,8 @@ export interface Harness {
     history: HistoryDto[];
     config: ConfigDto;
     sync: SyncDto;
+    /** The device register, as the daemon would project it. */
+    devices: DeviceDto[];
     /** Who the relay reports as online, by id. Absent = "could not ask". */
     presence: Record<string, boolean | null>;
   };
@@ -130,6 +137,8 @@ function freshRecorder(): Recorder {
     reject: [],
     markVerified: [],
     sendTo: [],
+    renameThisDevice: [],
+    forgetDevice: [],
     revokeDeposit: [],
     listDeposits: 0,
     recv: [],
@@ -199,7 +208,21 @@ function freshSnapshot(): Harness["snapshot"] {
       last_sync: 0,
       last_merged: 0,
       last_error: "",
+      // The default harness is one machine on its own: sending to your own
+      // devices still works, it just has the "link one first" caveat on it.
+      paired: false,
     },
+    // …and the register agrees: only this machine has announced itself, so
+    // there is nobody to aim at. Tests that need a second one add it.
+    devices: [
+      {
+        id: "aa00000000000000000000000000aa00",
+        name: "this mac",
+        platform: "macos",
+        last_seen: 0,
+        is_this_device: true,
+      },
+    ],
   };
 }
 
@@ -240,8 +263,13 @@ export function makeIpcMock() {
         harness.recorder.openPath.push(path);
         return guard("openPath", undefined);
       },
-      sendTo: (to: string, paths: string[], note: string) => {
-        harness.recorder.sendTo.push([to, paths, note]);
+      sendTo: (
+        to: string,
+        paths: string[],
+        note: string,
+        device: string | null = null
+      ) => {
+        harness.recorder.sendTo.push([to, paths, note, device]);
         return guard("sendTo", 1);
       },
       serveTicket: () => guard("serveTicket", { id: 1, ticket: P2P_TICKET }),
@@ -271,6 +299,15 @@ export function makeIpcMock() {
         return guard("pruneNames", 0);
       },
       syncStatus: () => guard("syncStatus", harness.snapshot.sync),
+      listDevices: () => guard("listDevices", harness.snapshot.devices),
+      renameThisDevice: (name: string) => {
+        harness.recorder.renameThisDevice.push(name);
+        return guard("renameThisDevice", undefined);
+      },
+      forgetDevice: (who: string) => {
+        harness.recorder.forgetDevice.push(who);
+        return guard("forgetDevice", undefined);
+      },
       syncNow: () => {
         harness.recorder.syncNow++;
         return guard("syncNow", harness.snapshot.sync);

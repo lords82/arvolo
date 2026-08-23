@@ -503,6 +503,7 @@ async fn device_pair_payload_roundtrips() {
             blocked: vec![],
             seen: vec![],
             names: vec![],
+            devices: vec![],
         },
     };
     let bytes = payload.encode().unwrap();

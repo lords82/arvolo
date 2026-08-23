@@ -9,8 +9,8 @@ use std::path::PathBuf;
 
 use arvolo_ipc::client::DaemonClient;
 use arvolo_ipc::protocol::{
-    ConfigDto, ConfigPatch, ContactDto, DepositDto, HistoryDto, OfferDto, PairKind, PresenceDto,
-    StatusDto, SyncDto, TransferDto,
+    ConfigDto, ConfigPatch, ContactDto, DepositDto, DeviceDto, HistoryDto, OfferDto, PairKind,
+    PresenceDto, StatusDto, SyncDto, TransferDto,
 };
 use serde::Serialize;
 
@@ -192,6 +192,7 @@ pub async fn send_to(
     to: String,
     items: Vec<String>,
     note: String,
+    device: Option<String>,
 ) -> Result<u64, String> {
     let paths = state.resolve(&items)?;
     let mut c = client().await?;
@@ -199,7 +200,7 @@ pub async fn send_to(
     // through `deposit` below, which has always carried them.
     // No descriptor hand-off from the GUI: its daemon is a child of the app
     // and inherits the app's own file-access grants.
-    c.push(to, paths, note, None, None, None, None)
+    c.push(to, paths, note, None, None, None, device, None)
         .await
         .or_else(err)
 }
@@ -208,6 +209,7 @@ pub async fn send_to(
 /// only mean anything there. Returns the `arvm…` ticket so the sender can also
 /// hand it over themselves.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn deposit_to(
     state: tauri::State<'_, PickedFiles>,
     to: String,
@@ -216,13 +218,39 @@ pub async fn deposit_to(
     ttl: Option<u64>,
     max: Option<u32>,
     password: Option<String>,
+    device: Option<String>,
 ) -> Result<ServedDto, String> {
     let paths = state.resolve(&items)?;
     let mut c = client().await?;
-    match c.deposit(to, paths, note, ttl, max, password, None).await {
+    match c
+        .deposit(to, paths, note, ttl, max, password, device, None)
+        .await
+    {
         Ok((id, ticket)) => Ok(ServedDto { id, ticket }),
         Err(e) => err(e),
     }
+}
+
+/// The machines sharing this identity — see `Request::ListDevices` for what this
+/// list is and, more to the point, what it is not.
+#[tauri::command]
+pub async fn list_devices() -> Result<Vec<DeviceDto>, String> {
+    let mut c = client().await?;
+    c.list_devices().await.or_else(err)
+}
+
+/// Rename the machine the daemon runs on. Only that one: a row belongs to the
+/// device that wrote it, so the UI offers this on its own row and nowhere else.
+#[tauri::command]
+pub async fn rename_this_device(name: String) -> Result<(), String> {
+    let mut c = client().await?;
+    c.rename_this_device(name).await.or_else(err)
+}
+
+#[tauri::command]
+pub async fn forget_device(who: String) -> Result<(), String> {
+    let mut c = client().await?;
+    c.forget_device(who).await.or_else(err)
 }
 
 #[tauri::command]

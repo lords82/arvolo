@@ -168,6 +168,22 @@ pub(crate) fn my_identity() -> Result<Identity> {
 /// [`crate::commands::send`] says so on stderr when the collision exists.
 pub(crate) const SELF_RECIPIENT: &str = "me";
 
+/// Resolve a `--to` argument the way `send` does: [`SELF_RECIPIENT`] first, then
+/// the address book.
+///
+/// The precedence lives here rather than in `book` because only this layer knows
+/// the identity, and it lives *at all* because two clients need the same answer.
+/// `arvolo send --to me` resolved the word before the daemon ever saw it
+/// ([`crate::commands::send::send_to`]), so a front-end that talks to the daemon
+/// directly — the desktop app — asked for a contact called "me" and got an error.
+/// One rule, both callers.
+pub(crate) fn resolve_recipient_or_self(arg: &str) -> Result<PublicId> {
+    if arg == SELF_RECIPIENT {
+        return Ok(my_identity()?.public());
+    }
+    crate::book::resolve_recipient(arg)
+}
+
 /// Is this base32 public id our own identity? Used to decide that an incoming
 /// offer came from another of our devices — the only sender we auto-accept
 /// without being asked to trust them.
@@ -181,4 +197,54 @@ pub(crate) fn encode_id(p: &PublicId) -> String {
     data_encoding::BASE32_NOPAD
         .encode(&p.to_bytes())
         .to_lowercase()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The rule `send --to` and the daemon's `Push` now share. It is worth a test
+    /// of its own because the failure it prevents is silent: before, the desktop
+    /// app's "your devices" would have resolved against the address book, found
+    /// nothing, and reported a missing contact for a destination that is always
+    /// reachable.
+    #[test]
+    fn the_reserved_word_resolves_to_our_own_identity() {
+        let _guard = crate::testlock::ENV
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("ARVOLO_CONFIG_DIR", dir.path());
+        // Or the identity would be read from whoever is running the test.
+        std::env::remove_var("ARVOLO_IDENTITY");
+
+        let me = my_identity().unwrap().public();
+        assert_eq!(
+            encode_id(&resolve_recipient_or_self(SELF_RECIPIENT).unwrap()),
+            encode_id(&me)
+        );
+
+        // An ordinary contact is untouched by the new branch, by name and by id.
+        let other = Identity::generate().public();
+        book::contact_add("proj", &encode_id(&other)).unwrap();
+        assert_eq!(
+            encode_id(&resolve_recipient_or_self("proj").unwrap()),
+            encode_id(&other)
+        );
+        assert_eq!(
+            encode_id(&resolve_recipient_or_self(&encode_id(&other)).unwrap()),
+            encode_id(&other)
+        );
+
+        // And the word wins over a contact that happens to carry it — the
+        // precedence documented on `SELF_RECIPIENT`, which fails towards sealing
+        // a file to ourselves rather than to somebody else.
+        book::contact_add(SELF_RECIPIENT, &encode_id(&other)).unwrap();
+        assert_eq!(
+            encode_id(&resolve_recipient_or_self(SELF_RECIPIENT).unwrap()),
+            encode_id(&me)
+        );
+
+        std::env::remove_var("ARVOLO_CONFIG_DIR");
+    }
 }

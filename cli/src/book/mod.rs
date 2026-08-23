@@ -3,6 +3,7 @@
 mod blocked;
 mod config;
 mod contacts;
+mod devices;
 mod marks;
 mod names;
 mod paths;
@@ -14,6 +15,7 @@ mod verified;
 pub(crate) use blocked::*;
 pub(crate) use config::*;
 pub(crate) use contacts::*;
+pub(crate) use devices::*;
 pub(crate) use marks::*;
 pub(crate) use names::*;
 pub(crate) use paths::*;
@@ -695,6 +697,76 @@ mod tests {
             .count();
         assert_eq!(occurrences, 1, "exactly one display_name line: {text:?}");
         assert_eq!(my_display_name(), "Three");
+
+        std::env::remove_var("ARVOLO_CONFIG_DIR");
+    }
+
+    #[test]
+    fn this_device_announces_itself_and_stays_announced() {
+        let _guard = crate::testlock::ENV
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("ARVOLO_CONFIG_DIR", dir.path());
+
+        let me = load_or_init_device();
+        let key = arvolo_core::sync::device_key(&me);
+
+        // Nobody adds a device: a round is all it takes.
+        let snap = build_local_snapshot().unwrap();
+        let row = snap
+            .devices
+            .iter()
+            .find(|d| d.id == key)
+            .expect("this machine announced itself");
+        assert!(!row.name.is_empty(), "a machine arrives with a name");
+        assert_eq!(row.platform, std::env::consts::OS);
+        assert_eq!(row.clock.device, me, "and it is the author of its own row");
+        // And in the ledger every reader actually uses, not only in the sidecar:
+        // a machine on its own never merges anything, so waiting for a merge to
+        // project it would leave it absent from its own device list.
+        assert_eq!(
+            load_devices().devices.get(&key).map(|r| r.name.clone()),
+            Some(row.name.clone())
+        );
+
+        // Running again inside the same minute must not churn the clock: the
+        // register would otherwise tick for ever on every machine with nothing
+        // behind it (see LAST_SEEN_GRANULARITY).
+        let before = build_local_snapshot().unwrap().lamport;
+        let after = build_local_snapshot().unwrap().lamport;
+        assert_eq!(before, after, "an unchanged register does not advance");
+
+        std::env::remove_var("ARVOLO_CONFIG_DIR");
+    }
+
+    #[test]
+    fn a_forgotten_device_does_not_re_announce_itself() {
+        // The half of `device forget` that makes it mean anything. A tombstone
+        // travels, but the forgotten machine still holds the seed and still
+        // syncs — so without this it would find its row deleted, write a fresh
+        // one, and be back within five minutes of being removed.
+        let _guard = crate::testlock::ENV
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("ARVOLO_CONFIG_DIR", dir.path());
+
+        let me = load_or_init_device();
+        let key = arvolo_core::sync::device_key(&me);
+        build_local_snapshot().unwrap();
+
+        // Somebody else retires this machine; the tombstone reaches us.
+        forget_device(&me).unwrap();
+
+        let snap = build_local_snapshot().unwrap();
+        let row = snap.devices.iter().find(|d| d.id == key).unwrap();
+        assert!(
+            row.deleted,
+            "a machine that has been retired stays retired instead of arguing"
+        );
+        // And it is gone from what the screen reads, too.
+        assert!(!load_devices().devices.contains_key(&key));
 
         std::env::remove_var("ARVOLO_CONFIG_DIR");
     }

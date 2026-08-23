@@ -11,9 +11,9 @@ import type {
   ConfigPatch,
   ContactDto,
   DepositDto,
+  DeviceDto,
   EngineEvent,
   HistoryDto,
-  
   OfferDto,
   PairKind,
   StatusDto,
@@ -49,9 +49,23 @@ export const TITLE_KEY = {
 
 export type ThemeChoice = "system" | "light" | "dark";
 
-/** The four ways a send can reach someone. Lives here rather than in the send
- *  sheet because callers elsewhere preselect one — see `sheetMode`. */
-export type SendMode = "contact" | "code" | "link" | "ticket";
+/** The five ways a send can reach someone. Lives here rather than in the send
+ *  sheet because callers elsewhere preselect one — see `sheetMode`.
+ *
+ *  `self` is a recipient, not a mechanism: underneath it is the same push as
+ *  `contact`. It earns a place beside the others because the switch answers
+ *  "who is this for?", and your own machines are one of the answers — the one
+ *  nobody has to accept, and the only one that is not a person. */
+export type SendMode = "contact" | "self" | "code" | "link" | "ticket";
+
+/** The reserved recipient standing for this identity's own machines, the way the
+ *  daemon resolves it (`resolve_recipient_or_self`).
+ *
+ *  A *wire* value, never a label. It is the same word `arvolo send --to me`
+ *  takes, so it must reach the daemon spelled exactly like this in every
+ *  language — which is also why nothing user-facing may print it: what a person
+ *  reads comes from `send.selfName`, translated. */
+export const SELF_RECIPIENT = "me";
 
 /** Fire a store action from a click handler and drop its rejection.
  *
@@ -317,6 +331,10 @@ interface State {
   sync: SyncDto | null;
   syncLoading: boolean;
   syncError: string | null;
+  /** The machines sharing this identity. Empty until loaded — and legitimately
+   *  empty on a machine that has never completed a sync round. */
+  devices: DeviceDto[];
+  devicesLoading: boolean;
 
   /** The pairing exchange currently on screen, if any. */
   pairing: PairingState | null;
@@ -396,6 +414,11 @@ interface State {
   loadSync: () => Promise<void>;
   /** Run one address-book sync round now. */
   syncNow: () => Promise<void>;
+  loadDevices: () => Promise<void>;
+  /** Rename this machine. Only this one — a device row belongs to the device
+   *  that writes it, so the others are renamed on themselves. */
+  renameThisDevice: (name: string) => Promise<void>;
+  forgetDevice: (who: string) => Promise<void>;
   /** Drop advertised-name records for contacts that no longer exist. */
   pruneNames: () => Promise<number>;
 
@@ -406,7 +429,13 @@ interface State {
   clearPairing: () => void;
 
   // actions (forward to the daemon, then let events reconcile)
-  send: (to: string, items: string[], note: string) => Promise<number>;
+  send: (
+    to: string,
+    items: string[],
+    note: string,
+    /** Aim it at one of our own machines; only with the self recipient. */
+    device?: string | null
+  ) => Promise<number>;
   /** `send --deposit`: skip the live attempt entirely. Returns the `arvm…`
    *  ticket, which is the sender's copy for hand-delivery. */
   deposit: (
@@ -415,7 +444,8 @@ interface State {
     note: string,
     ttl: number | null,
     max: number | null,
-    password: string | null
+    password: string | null,
+    device?: string | null
   ) => Promise<{ id: number; ticket: string }>;
   ticket: (items: string[]) => Promise<{ id: number; ticket: string }>;
   /** Host a short pairing code in the daemon (keep = serve every receiver). */
@@ -613,6 +643,8 @@ export const useStore = create<State>((set, get) => {
     sync: null,
     syncLoading: false,
     syncError: null,
+    devices: [],
+    devicesLoading: false,
     pairing: null,
     deposits: [],
     depositsLoading: false,
@@ -624,6 +656,10 @@ export const useStore = create<State>((set, get) => {
 
     peerLabel: (id, fallbackName) => {
       if (!id) return fallbackName || t("store.unknownPeer");
+      // Our own id is not an unknown peer and not a contact: it is the other
+      // machines holding this identity. Answered here, once, so every list that
+      // names a peer — transfers, history, deposits — says the same thing.
+      if (id === get().status?.public_id) return t("store.selfPeer");
       const c = get().contactsById[id];
       if (c) return c.name;
       if (fallbackName) return fallbackName;
@@ -1061,11 +1097,33 @@ export const useStore = create<State>((set, get) => {
         });
       }
     },
+    loadDevices: async () => {
+      set({ devicesLoading: true });
+      try {
+        set({ devices: await api.listDevices(), devicesLoading: false });
+      } catch {
+        // The register is a detail of the Devices screen, and its own card
+        // already says when sync is failing. A second error banner for the same
+        // unreachable daemon would be the same news twice.
+        set({ devicesLoading: false });
+      }
+    },
+    renameThisDevice: async (name) => {
+      await act(t("store.renameDevice"), () => api.renameThisDevice(name));
+      await get().loadDevices();
+    },
+    forgetDevice: async (who) => {
+      await act(t("store.forgetDevice"), () => api.forgetDevice(who));
+      await get().loadDevices();
+    },
     syncNow: async () => {
       set({ syncLoading: true });
       try {
         const sync = await api.syncNow();
         set({ sync, syncLoading: false, syncError: null });
+        // A round is exactly when the register moves — a machine that just
+        // announced itself appears here and nowhere else.
+        void get().loadDevices();
         // The round's own failure comes back inside the summary rather than as a
         // rejection — the rest of the state is still worth showing.
         if (sync.last_error) {
@@ -1154,21 +1212,21 @@ export const useStore = create<State>((set, get) => {
     },
     clearPairing: () => set({ pairing: null }),
 
-    send: async (to, items, note) => {
+    send: async (to, items, note, device) => {
       const id = await act(t("store.errSend", to), () =>
-        api.sendTo(to, items, note)
+        api.sendTo(to, items, note, device ?? null)
       );
       set({ sheetPicks: null, sheetTo: null, sheetMode: null });
       return id;
     },
-    deposit: async (to, items, note, ttl, max, password) => {
+    deposit: async (to, items, note, ttl, max, password, device) => {
       // Unlike `send`, this does NOT close the send sheet. A deposit hands back
       // an `arvm…` ticket — the sender's own copy, for when the inbox route is
       // not wanted or is not working — and closing the panel on success would
       // destroy it the instant it was produced. The panel closes when the user
       // says so, exactly as it does for a code, a link or a ticket.
       const r = await act(t("store.errDeposit", to), () =>
-        api.depositTo(to, items, note, ttl, max, password)
+        api.depositTo(to, items, note, ttl, max, password, device ?? null)
       );
       refreshDeposits();
       return r;

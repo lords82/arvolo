@@ -876,6 +876,18 @@ select {
   display: flex;
   width: 100%;
 }
+/* Five destinations, in four languages, in a 480px sheet that can be at 92vw:
+   the labels are words and there is a width at which they do not fit on one
+   line. Wrapping puts the overflow on a second row; `nowrap` on the buttons
+   drew it out past the border instead, where it was unreachable. Each button
+   still claims an equal share of its own row, so a wrapped row stays even. */
+.segmented-wrap {
+  flex-wrap: wrap;
+  row-gap: 2px;
+}
+.segmented-wrap button {
+  flex: 1 1 auto;
+}
 
 /* -- Badges & chips -------------------------------------------------------- */
 

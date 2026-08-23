@@ -16,6 +16,7 @@ import type {
   PresenceDto,
   StatusDto,
   SyncDto,
+  DeviceDto,
   TransferDto,
 } from "./types";
 
@@ -27,8 +28,14 @@ export const api = {
   /** Open the native picker; resolves to registered items (empty = cancelled). */
   pickFiles: (directory: boolean) =>
     invoke<PickedItem[]>("pick_files", { directory }),
-  sendTo: (to: string, items: string[], note: string) =>
-    invoke<number>("send_to", { to, items, note }),
+  /** `device` aims it at one of our own machines; only meaningful when `to` is
+   *  the reserved self recipient, and refused by the daemon otherwise. */
+  sendTo: (
+    to: string,
+    items: string[],
+    note: string,
+    device: string | null = null
+  ) => invoke<number>("send_to", { to, items, note, device }),
   /** `send --deposit`: skip the live attempt, leave it in their mailbox. Returns
    *  the `arvm…` ticket too, so it can also be handed over by other means. */
   depositTo: (
@@ -37,7 +44,8 @@ export const api = {
     note: string,
     ttl: number | null,
     max: number | null,
-    password: string | null
+    password: string | null,
+    device: string | null = null
   ) =>
     invoke<{ id: number; ticket: string }>("deposit_to", {
       to,
@@ -46,6 +54,7 @@ export const api = {
       ttl,
       max,
       password,
+      device,
     }),
   serveTicket: (items: string[], seedRelay: string | null) =>
     invoke<{ id: number; ticket: string }>("serve_ticket", {
@@ -94,6 +103,12 @@ export const api = {
   presence: (ids: string[]) => invoke<PresenceDto[]>("presence", { ids }),
   syncStatus: () => invoke<SyncDto>("sync_status"),
   syncNow: () => invoke<SyncDto>("sync_now"),
+  listDevices: () => invoke<DeviceDto[]>("list_devices"),
+  /** Rename *this* machine. The others are renamed on themselves — a device row
+   *  may only be written by the device it describes. */
+  renameThisDevice: (name: string) =>
+    invoke<void>("rename_this_device", { name }),
+  forgetDevice: (who: string) => invoke<void>("forget_device", { who }),
   /** Begin a pairing exchange; returns the session handle. The code to read out
    *  and the outcome arrive as `pairing_*` engine events, not as a return value —
    *  pairing waits on a human at another machine. */

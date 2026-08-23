@@ -30,6 +30,7 @@ use crate::output::verbosity;
 pub(crate) struct SendOpts {
     pub(crate) paths: Vec<PathBuf>,
     pub(crate) to: Option<String>,
+    pub(crate) device: Option<String>,
     pub(crate) mailbox: bool,
     pub(crate) link: bool,
     pub(crate) code: bool,
@@ -63,6 +64,7 @@ pub(crate) async fn send_cmd(opts: SendOpts) -> Result<()> {
             opts.ttl,
             opts.max,
             password,
+            opts.device,
         )
         .await;
     }
@@ -161,6 +163,7 @@ fn guard_readable(paths: &[PathBuf]) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn push(
     paths: Vec<PathBuf>,
     to: String,
@@ -169,6 +172,7 @@ pub(crate) async fn push(
     ttl: Option<u64>,
     max: Option<u32>,
     password: Option<String>,
+    device: Option<String>,
 ) -> Result<()> {
     anyhow::ensure!(
         !paths.is_empty(),
@@ -181,8 +185,28 @@ pub(crate) async fn push(
     // dropped offline in between must still get the ttl/max/password asked for.
     {
         if let Some(client) = daemon_client().await {
-            return push_via_daemon(client, paths, to, note.to_string(), ttl, max, password).await;
+            return push_via_daemon(
+                client,
+                paths,
+                to,
+                note.to_string(),
+                ttl,
+                max,
+                password,
+                device,
+            )
+            .await;
         }
+    }
+
+    // Aiming needs the daemon: the device register is resolved there, and a
+    // one-shot send has no way to be told which machine takes the offer.
+    if device.is_some() {
+        eprintln!(
+            "note: no daemon is running, so `--device` cannot be honoured — start one \
+             with `arvolo daemon start` and send again, or this goes to whichever of \
+             your devices takes it first."
+        );
     }
 
     let relay = require_relay(relay)?;
@@ -218,7 +242,14 @@ pub(crate) async fn push(
     }
     eprintln!("Sending offer to {to}… (Ctrl-C to abort)\n");
     let id = manager
-        .send_to(&recipient, payload, name.clone(), archive, note.to_string())
+        .send_to(
+            &recipient,
+            payload,
+            name.clone(),
+            archive,
+            note.to_string(),
+            None,
+        )
         .await
         .inspect_err(|_| {
             if let Some(t) = &temp {
@@ -336,6 +367,7 @@ async fn send_to(
     ttl: u64,
     max: Option<u32>,
     password: Option<String>,
+    device: Option<String>,
 ) -> Result<()> {
     // The note rides inside the sealed offer; cap it so it fits comfortably.
     let note = note.unwrap_or_default();
@@ -346,8 +378,14 @@ async fn send_to(
     // `--to me`: your own paired devices. Answered before the address book, and
     // differently all the way down — see `send_to_self`.
     if who == SELF_RECIPIENT {
-        return send_to_self(paths, mailbox, &note, relay_url, ttl, max, password).await;
+        return send_to_self(paths, mailbox, &note, relay_url, ttl, max, password, device).await;
     }
+
+    anyhow::ensure!(
+        device.is_none(),
+        "--device names one of *your* machines, so it only goes with `--to me` — \
+         {who} decides which of theirs takes it"
+    );
 
     let recipient = book::resolve_recipient(&who)?;
     book::warn_if_unverified(&who, &encode_id(&recipient));
@@ -373,7 +411,18 @@ async fn send_to(
         if max.is_some() || password.is_some() {
             eprintln!("note: --max/--password apply only if this send falls back to the mailbox.");
         }
-        return push(paths, who, Some(relay_url), &note, Some(ttl), max, password).await;
+        // No aim: `--device` is refused above for anybody but ourselves.
+        return push(
+            paths,
+            who,
+            Some(relay_url),
+            &note,
+            Some(ttl),
+            max,
+            password,
+            None,
+        )
+        .await;
     }
     send_sealed(paths, who, Some(relay_url), ttl, max, password, true, &note).await
 }
@@ -392,6 +441,7 @@ async fn send_to(
 ///   here (see `SELF_LIVE_CONNECT_SECS`).
 /// - **no verification warning.** Being told you have not verified yourself is
 ///   noise, and noise in a security warning is how the real ones stop being read.
+#[allow(clippy::too_many_arguments)]
 async fn send_to_self(
     paths: Vec<PathBuf>,
     mailbox: bool,
@@ -400,9 +450,26 @@ async fn send_to_self(
     ttl: u64,
     max: Option<u32>,
     password: Option<String>,
+    device: Option<String>,
 ) -> Result<()> {
     let me = my_identity()?;
     let my_id = encode_id(&me.public());
+
+    // First, before any advice: a device name that does not resolve is a refusal,
+    // and notes printed above a refusal are notes about a send that is not going
+    // to happen. Resolved against the *local* register — the daemon resolves it
+    // again on its side, and that is the resolution that counts — because failing
+    // here beats packing an archive first and then being told it was a typo.
+    let aimed_here = match &device {
+        Some(who) => Some(book::resolve_device(who)?),
+        None => None,
+    };
+    if aimed_here == Some(book::load_or_init_device()) {
+        eprintln!(
+            "note: that is this device — it will not take its own offer, so this waits on \
+             the relay until you send it from somewhere else."
+        );
+    }
 
     // A contact really called "me" is reachable, just not by that name any more.
     // Say it here rather than silently doing the other thing.
@@ -425,6 +492,16 @@ async fn send_to_self(
     }
 
     if mailbox {
+        // A deposit is collected once by default, so an aimed one is the same
+        // instruction said twice — but only the offer carries the aim, and the
+        // one-shot deposit path does not post through the daemon. Say so rather
+        // than aim at nothing.
+        if device.is_some() && daemon_client().await.is_none() {
+            eprintln!(
+                "note: no daemon is running, so `--device` cannot be honoured for a mailbox \
+                 deposit — whichever of your devices collects it first gets it."
+            );
+        }
         return send_sealed(
             paths,
             my_id,
@@ -445,6 +522,7 @@ async fn send_to_self(
         Some(ttl),
         max,
         password,
+        device,
     )
     .await
 }

@@ -66,6 +66,17 @@ pub enum Request {
         /// End-to-end password on the deposit; the recipient must supply it.
         #[serde(default)]
         password: Option<String>,
+        /// Aim this at one of *our own* machines: a device name, or a prefix of
+        /// its id, as [`Request::ListDevices`] reports them. Only meaningful
+        /// when `to` resolves to our own identity — a send to somebody else has
+        /// no business naming a machine on their side, and the daemon refuses
+        /// it rather than sending something that would quietly go nowhere.
+        ///
+        /// `#[serde(default)]` like the mailbox options above: an older daemon
+        /// decodes the request and ignores the aim, which lands the file on
+        /// whichever machine takes it first — the behaviour that came before.
+        #[serde(default)]
+        device: Option<String>,
         /// Descriptor hand-off (unix): a one-shot socket + pairing token where
         /// the client serves the sources' open fds, one per path in order —
         /// see [`crate::fdpass`]. The daemon then reads files the OS would not
@@ -76,6 +87,27 @@ pub enum Request {
         #[serde(default)]
         fd_token: Option<String>,
     },
+    /// The machines that share this identity → [`Response::Devices`].
+    ///
+    /// Self-reported, and the DTO says so by carrying `last_seen` rather than a
+    /// presence flag: nothing outside the encrypted snapshot knows which
+    /// computers hold an identity, so this lists what those computers have said
+    /// about themselves, and a machine that has never synced is not in it.
+    ListDevices,
+    /// Rename **this** machine in the register.
+    ///
+    /// This one and no other: a device row may only be written by the device it
+    /// describes (see the authorship rule in `arvolo_core::sync`), so renaming a
+    /// different machine is something to do on that machine. A UI should say so
+    /// rather than offer a field whose value the next sync round would discard.
+    RenameThisDevice { name: String },
+    /// Forget a machine: tombstone its row so it leaves every device's register.
+    ///
+    /// Bookkeeping, not revocation — it still holds the identity secret, and if
+    /// it is still running it will notice it was retired and stop announcing
+    /// itself, which works because it is your machine running your software and
+    /// for no stronger reason than that.
+    ForgetDevice { who: String },
     /// Serve an anonymous P2P ticket in the background (no recipient); paths are on
     /// the *daemon's* filesystem. → [`Response::Served`].
     ServeTicket {
@@ -335,6 +367,8 @@ pub enum Response {
     Config(ConfigDto),
     /// The multi-device summary.
     Sync(SyncDto),
+    /// The device register, newest sighting first.
+    Devices(Vec<DeviceDto>),
     /// Who is reachable right now, one entry per id asked about.
     Presence(Vec<PresenceDto>),
     /// A pairing session is running; its code and outcome arrive as events.
@@ -720,6 +754,39 @@ pub struct SyncDto {
     /// Why the last round failed, empty when it didn't.
     #[serde(default)]
     pub last_error: String,
+    /// Does another machine share this identity, as far as this device can tell?
+    ///
+    /// Evidence, not bookkeeping — there is no device roster to consult, so this
+    /// reads the pairing marker and the CRDT clocks, and a fresh pairing that has
+    /// not synced yet still reads `false`. Good enough for its one job: deciding
+    /// whether sending to your own devices is worth warning about, exactly as
+    /// `arvolo send --to me` warns on stderr. `#[serde(default)]` so an older
+    /// daemon (which predates the field) reads as "no evidence" rather than
+    /// failing to decode.
+    #[serde(default)]
+    pub paired: bool,
+}
+
+/// One machine holding this identity, as it describes itself.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DeviceDto {
+    /// Lowercase hex of its device id. Shown only as a short prefix, and only to
+    /// tell two machines with the same name apart.
+    pub id: String,
+    pub name: String,
+    /// `macos`, `linux`, `windows`… — for an icon, never for a decision.
+    pub platform: String,
+    /// Unix seconds of that machine's last sync round, as *it* reported them.
+    ///
+    /// Not a presence light and not to be rendered as one. It moves once per
+    /// sync round, so it lags by up to five minutes; it comes from another
+    /// machine's clock, so it can sit in the future if the clocks disagree; and
+    /// a machine that has just gone to sleep looks exactly like one that is
+    /// still awake. Show it as elapsed time, which carries its own uncertainty.
+    pub last_seen: u64,
+    /// Is this the machine the daemon is running on? The one row a UI may offer
+    /// to rename, and the one it should not offer to forget.
+    pub is_this_device: bool,
 }
 
 /// Serializable mirror of [`ManagerEvent`].
@@ -1011,6 +1078,7 @@ mod tests {
                 ttl: None,
                 max: None,
                 password: None,
+                device: None,
                 fd_socket: None,
                 fd_token: None,
             },
@@ -1040,6 +1108,7 @@ mod tests {
                 ttl: None,
                 max: None,
                 password: None,
+                device: None,
                 fd_socket: None,
                 fd_token: None,
             }

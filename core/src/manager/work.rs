@@ -150,6 +150,7 @@ pub(super) fn persist_held_record(inner: &Inner, id: u64, paused: bool, reason: 
                 paused,
                 reason: reason.to_string(),
                 note: h.note.clone(),
+                target: h.target,
             },
         );
     }
@@ -524,7 +525,15 @@ async fn deliver_to_inner(
             // UI saying "cancelling…" throughout. Dropping the future here abandons
             // the request in flight; the partial blob expires on the relay with its
             // slot, which is what an incomplete deposit does anyway.
-            let opts = MailboxOpts::default();
+            // Defaults except for the target: this deposit is standing in for the
+            // live delivery the user asked for, so it has to be aimed at the same
+            // device. Losing it here would turn "put this on the desktop" into
+            // "put this on whichever machine wakes first" precisely when the
+            // desktop was not up — the case the aim was for.
+            let opts = MailboxOpts {
+                target: held_target(inner, id),
+                ..MailboxOpts::default()
+            };
             let attempt =
                 deposit_offline_and_offer(inner, relay, recipient, payload, name, note, &opts);
             let outcome = tokio::select! {
@@ -705,6 +714,10 @@ pub(super) async fn serve_live_once(
         note: note.to_string(),
         sender_name: inner.display_name.lock().unwrap().clone(),
         origin: *inner.device_id.lock().unwrap(),
+        // Read from the held record rather than passed down: the mailbox fallback
+        // below posts its own offer and has to stamp the same value, and a second
+        // parameter through five functions is a second place to forget it.
+        target: held_target(inner, id),
     };
     // Post an offer only when we don't already have one standing. The ticket is
     // byte-stable across attempts (see [`flow::prepare_send_reusing`]), so a second
@@ -931,6 +944,13 @@ pub(super) const OFFLINE_MAX_DOWNLOADS: u32 = 1;
 /// defaults — it is standing in for a live delivery the user asked for, and a
 /// password nobody typed cannot be part of that. An explicit deposit carries
 /// whatever the user chose.
+/// The device a held send is aimed at, if any. `None` for every send to somebody
+/// else, and for a row whose held record has already been taken (a finished or
+/// cancelled send posts nothing more, so there is nothing to aim).
+fn held_target(inner: &Inner, id: u64) -> Option<crate::sync::DeviceId> {
+    inner.held.lock().unwrap().get(&id).and_then(|h| h.target)
+}
+
 pub(super) async fn deposit_offline_and_offer(
     inner: &Inner,
     relay: &str,
@@ -971,6 +991,7 @@ pub(super) async fn deposit_offline_and_offer(
         note: note.to_string(),
         sender_name: inner.display_name.lock().unwrap().clone(),
         origin: *inner.device_id.lock().unwrap(),
+        target: opts.target,
     };
     let posted = presence::post_offer(
         &inner.client,

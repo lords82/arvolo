@@ -145,6 +145,7 @@ async fn a_restarted_send_is_the_same_send_unless_the_payload_moved_on() {
                 "big.bin".into(),
                 false,
                 String::new(),
+                None,
             )
             .await
             .unwrap();

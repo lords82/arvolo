@@ -225,6 +225,9 @@ pub(crate) async fn send_sealed(
             // what stops *our own* daemon from picking this up when the recipient
             // is another device of ours.
             origin: Some(book::load_or_init_device()),
+            // This path is `send --mailbox` from a one-shot command, which has no
+            // way to name a device: `--device` goes through the daemon.
+            target: None,
         };
         match arvolo_core::presence::post_offer(
             &arvolo_core::http::client(),
