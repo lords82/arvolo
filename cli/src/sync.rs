@@ -64,7 +64,7 @@ pub async fn device_pair(relay: Option<String>, qr: bool) -> Result<()> {
     // either way — this hands over the identity secret itself — but on a v2 relay
     // it gains key confirmation, so a joiner who mistypes the code is turned away
     // instead of being handed the sealed identity blob to fail on.
-    let (code, sender) = code::publish_auto(&bytes, &relay, true)
+    let (code, sender) = code::publish_auto(&bytes, &relay)
         .await
         .context("start device pairing")?;
 

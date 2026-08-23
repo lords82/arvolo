@@ -129,6 +129,22 @@ pub struct NameEntry {
     pub deleted: bool,
 }
 
+/// Where one identity listens, keyed by pubkey. Last-writer-wins with a
+/// tombstone, exactly like [`NameEntry`].
+///
+/// Routing, not identity — it decides which relay a send is aimed at and nothing
+/// about who the far side is. It syncs for the same reason a petname does: it is
+/// something you learned about somebody, and having to relearn it on every one of
+/// your machines is the kind of chore that ends with one of them quietly unable to
+/// reach a contact the others can.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelayEntry {
+    pub pubkey: String,
+    pub relay: String,
+    pub clock: Lamport,
+    pub deleted: bool,
+}
+
 /// One machine holding this identity, as it describes itself.
 ///
 /// The register that is **not** like the others: a contact is something you write
@@ -200,6 +216,16 @@ pub struct SyncSnapshot {
     /// devices" and never as "there are none".
     #[serde(default)]
     pub devices: Vec<DeviceEntry>,
+    /// Where each contact listens, when it is not wherever you do.
+    ///
+    /// Last field, and that placement is the only thing keeping the local sidecar
+    /// readable across the upgrade: postcard decodes positionally, so
+    /// [`decode_snapshot`] reads a sidecar written without it by falling back to
+    /// the shape that had none. On the wire it needs no such care — the sealed
+    /// form changed at the same time (see `seal_under`), so a build old enough to
+    /// lack this field cannot open a note carrying it in the first place.
+    #[serde(default)]
+    pub relays: Vec<RelayEntry>,
 }
 
 /// The sealed inbox payload carrying a snapshot to the user's other devices.
@@ -265,6 +291,14 @@ pub struct NameReg {
     pub deleted: bool,
 }
 
+/// The state-side form of [`RelayEntry`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RelayReg {
+    pub relay: String,
+    pub clock: Lamport,
+    pub deleted: bool,
+}
+
 /// The canonical, in-memory CRDT state — the merge target and the source of the
 /// projection into the four TOML ledgers. Kept as maps for O(log n) merge.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -281,6 +315,8 @@ pub struct SyncState {
     pub names: BTreeMap<String, NameReg>,
     /// pubkey → blocked mark.
     pub blocked: BTreeMap<String, MarkReg>,
+    /// pubkey → the relay that identity listens on.
+    pub relays: BTreeMap<String, RelayReg>,
     /// [`device_key`] → what that machine says about itself.
     pub devices: BTreeMap<String, DeviceReg>,
 }
@@ -370,6 +406,16 @@ impl SyncState {
                 },
             );
         }
+        for r in &s.relays {
+            state.relays.insert(
+                r.pubkey.clone(),
+                RelayReg {
+                    relay: r.relay.clone(),
+                    clock: r.clock,
+                    deleted: r.deleted,
+                },
+            );
+        }
         for d in &s.devices {
             state.devices.insert(
                 d.id.clone(),
@@ -451,6 +497,16 @@ impl SyncState {
                     deleted: r.deleted,
                 })
                 .collect(),
+            relays: self
+                .relays
+                .iter()
+                .map(|(pubkey, r)| RelayEntry {
+                    pubkey: pubkey.clone(),
+                    relay: r.relay.clone(),
+                    clock: r.clock,
+                    deleted: r.deleted,
+                })
+                .collect(),
             devices: self
                 .devices
                 .iter()
@@ -495,6 +551,14 @@ impl SyncState {
                 }
             }
         }
+        for (pubkey, incoming) in &other.relays {
+            match self.relays.get(pubkey) {
+                Some(cur) if cur.clock >= incoming.clock => {}
+                _ => {
+                    self.relays.insert(pubkey.clone(), incoming.clone());
+                }
+            }
+        }
         merge_devices(&mut self.devices, &other.devices);
     }
 
@@ -515,6 +579,9 @@ impl SyncState {
             m = m.max(r.clock.counter);
         }
         for r in self.blocked.values() {
+            m = m.max(r.clock.counter);
+        }
+        for r in self.relays.values() {
             m = m.max(r.clock.counter);
         }
         for r in self.devices.values() {
@@ -591,34 +658,132 @@ pub fn encode_snapshot(snap: &SyncSnapshot) -> Result<Vec<u8>> {
 }
 
 /// Inverse of [`encode_snapshot`].
+///
+/// Falls back to the shape written before [`SyncSnapshot::relays`] existed. Only
+/// the *local* sidecar needs this — a wire note carrying relays is sealed in a
+/// form older builds cannot open at all — and it matters because the caller
+/// swallows a failure here and rebuilds from the TOML ledgers, which silently
+/// costs every Lamport clock and every tombstone this device was holding.
 pub fn decode_snapshot(bytes: &[u8]) -> Result<SyncSnapshot> {
-    postcard::from_bytes(bytes).context("deserialize sync snapshot")
+    // Newest first: postcard ignores trailing bytes, so the older shape would
+    // happily read a current sidecar and drop the relays without a word.
+    if let Ok(snap) = postcard::from_bytes::<SyncSnapshot>(bytes) {
+        return Ok(snap);
+    }
+    let v1: SyncSnapshotV1 = postcard::from_bytes(bytes).context("deserialize sync snapshot")?;
+    Ok(SyncSnapshot {
+        lamport: v1.lamport,
+        device: v1.device,
+        contacts: v1.contacts,
+        verified: v1.verified,
+        trusted: v1.trusted,
+        seen: v1.seen,
+        names: v1.names,
+        blocked: v1.blocked,
+        devices: v1.devices,
+        relays: Vec::new(),
+    })
+}
+
+/// [`SyncSnapshot`] as the local sidecar was written before it tracked relays.
+#[derive(Deserialize)]
+struct SyncSnapshotV1 {
+    lamport: u64,
+    device: DeviceId,
+    contacts: Vec<ContactEntry>,
+    verified: Vec<MarkEntry>,
+    trusted: Vec<MarkEntry>,
+    seen: Vec<SeenEntry>,
+    names: Vec<NameEntry>,
+    blocked: Vec<MarkEntry>,
+    devices: Vec<DeviceEntry>,
 }
 
 // ---- snapshot encryption --------------------------------------------------
 
+/// Marks a sealed payload as carrying its own salt. A blob without it is the
+/// unsalted shape described on [`seal_under`].
+const SALTED_MAGIC: &[u8; 4] = b"ASS1";
+/// Bytes of fresh randomness per message. Sixteen, not twelve: this is a KDF
+/// input, not a nonce, so it costs nothing to be past any birthday-bound argument.
+const SALT_LEN: usize = 16;
+
+/// Context for turning the long-lived snapshot key into a per-message one.
+const MESSAGE_KEY_CONTEXT: &str = "arvolo/contacts-sync/message-key/v1";
+
+/// Encrypt `plain` under a **fresh key per message**, derived from the long-lived
+/// one and a random salt that travels with the ciphertext.
+///
+/// The salt is what makes this safe, and it was missing. [`crypto::seal_chunk`]
+/// derives its nonce from the chunk index alone, and says why that is sound:
+/// *"the key is fresh-random per transfer, so each (key, nonce) pair is used
+/// exactly once"*. That holds for a file transfer, whose content key is random.
+/// It did not hold here — the snapshot key is `blake3(identity_secret)`, constant
+/// for the identity and identical on every device — so every snapshot this
+/// identity ever published was sealed under the same key at nonce zero.
+///
+/// AES-GCM does not survive that. Two ciphertexts under one (key, nonce) reveal
+/// the XOR of their plaintexts, and repeated reuse recovers the GHASH
+/// authentication subkey, which turns confidentiality loss into forgery. These
+/// blobs sit in an inbox slot on the relay, so the party best placed to collect
+/// them is the relay operator — the adversary the rest of this design is built
+/// against — and a forged sync note rewrites contacts and their verified marks on
+/// the user's other machines.
+///
+/// Deriving per message restores the invariant `seal_chunk` documents rather than
+/// working around it: each message gets a key used exactly once, at nonce zero.
+fn seal_under(key: &[u8; crypto::CHUNK_KEY_LEN], plain: &[u8]) -> Result<Vec<u8>> {
+    let salt: [u8; SALT_LEN] = rand::random();
+    let mut input = Vec::with_capacity(key.len() + SALT_LEN);
+    input.extend_from_slice(key);
+    input.extend_from_slice(&salt);
+    let message_key = blake3::derive_key(MESSAGE_KEY_CONTEXT, &input);
+
+    let mut out = Vec::with_capacity(SALTED_MAGIC.len() + SALT_LEN + plain.len() + 16);
+    out.extend_from_slice(SALTED_MAGIC);
+    out.extend_from_slice(&salt);
+    out.extend_from_slice(&crypto::seal_chunk(&message_key, 0, 1, plain)?);
+    Ok(out)
+}
+
+/// Inverse of [`seal_under`], accepting the unsalted shape written before it.
+///
+/// Notes already sitting in an inbox were written the old way and live for up to
+/// their TTL, so refusing them would drop a week of address-book edits at the
+/// upgrade. The fallback can go once no relay can still be holding one.
+fn open_under(key: &[u8; crypto::CHUNK_KEY_LEN], blob: &[u8]) -> Result<Vec<u8>> {
+    if let Some(rest) = blob.strip_prefix(&SALTED_MAGIC[..]) {
+        if rest.len() > SALT_LEN {
+            let (salt, ct) = rest.split_at(SALT_LEN);
+            let mut input = Vec::with_capacity(key.len() + SALT_LEN);
+            input.extend_from_slice(key);
+            input.extend_from_slice(salt);
+            let message_key = blake3::derive_key(MESSAGE_KEY_CONTEXT, &input);
+            // Only fall through on failure: a legacy ciphertext beginning with
+            // those four bytes by chance is a 1-in-2^32 nuisance, not a reason to
+            // refuse it.
+            if let Ok(plain) = crypto::open_chunk(&message_key, 0, 1, ct) {
+                return Ok(plain);
+            }
+        }
+    }
+    crypto::open_chunk(key, 0, 1, blob).context("decrypt sync payload")
+}
+
 /// Encrypt a snapshot under the identity-derived key. Reuses the AES-256-GCM
-/// chunk cipher (index 0 / total 1); the key's domain-separated derivation is
-/// what isolates this ciphertext from the chunked-transfer path.
+/// chunk cipher, with a per-message key so the (key, nonce) pair is fresh — see
+/// [`seal_under`]. The key's domain-separated derivation is what isolates this
+/// ciphertext from the chunked-transfer path.
 pub fn encrypt_snapshot(key: &[u8; crypto::CHUNK_KEY_LEN], snap: &SyncSnapshot) -> Result<Vec<u8>> {
     let plain = postcard::to_allocvec(snap).context("serialize sync snapshot")?;
-    crypto::seal_chunk(key, 0, 1, &plain)
+    seal_under(key, &plain)
 }
 
 /// Decrypt a snapshot produced by [`encrypt_snapshot`]. Fails on the wrong key or
 /// tampering (AEAD).
 pub fn decrypt_snapshot(key: &[u8; crypto::CHUNK_KEY_LEN], blob: &[u8]) -> Result<SyncSnapshot> {
-    let plain = crypto::open_chunk(key, 0, 1, blob).context("decrypt sync snapshot")?;
+    let plain = open_under(key, blob).context("decrypt sync snapshot")?;
     postcard::from_bytes(&plain).context("deserialize sync snapshot")
-}
-
-/// A stable id for a sync note, used to dedup already-merged notes. Derived from
-/// the encrypted blob so identical snapshots share an id.
-pub fn note_id(blob: &[u8]) -> [u8; 16] {
-    let h = blake3::hash(blob);
-    let mut id = [0u8; 16];
-    id.copy_from_slice(&h.as_bytes()[..16]);
-    id
 }
 
 // ---- device-join authorization seam ---------------------------------------
@@ -684,6 +849,7 @@ mod tests {
             seen: vec![],
             names: vec![],
             devices: vec![],
+            relays: vec![],
         })
     }
 
@@ -703,10 +869,91 @@ mod tests {
             }],
             names: vec![],
             devices: vec![],
+            relays: vec![],
         };
         let blob = encrypt_snapshot(&key, &snap).unwrap();
         assert_ne!(blob, postcard::to_allocvec(&snap).unwrap());
         assert_eq!(decrypt_snapshot(&key, &blob).unwrap(), snap);
+    }
+
+    /// Two snapshots sealed under one identity key must not share a keystream.
+    ///
+    /// They did. `seal_chunk` takes its nonce from the chunk index, sound only
+    /// because a transfer's content key is fresh-random — and the snapshot key is
+    /// `blake3(identity_secret)`, the same value forever on every device. So every
+    /// snapshot an identity published went out under (same key, nonce 0), and any
+    /// two of them XOR to the XOR of their plaintexts. The relay holds them.
+    ///
+    /// The check is the attack: if the keystream repeats, `c1 ^ c2 == p1 ^ p2`
+    /// over the common prefix. It has to stay false.
+    #[test]
+    fn two_snapshots_never_share_a_keystream() {
+        let key = snapshot_key(b"an identity secret 32 bytes long!");
+        let mk = |lamport: u64| SyncSnapshot {
+            lamport,
+            device: [9u8; 16],
+            contacts: vec![contact("alice", "aaaa", lam(3, 1), false)],
+            verified: vec![],
+            trusted: vec![],
+            blocked: vec![],
+            seen: vec![],
+            names: vec![],
+            devices: vec![],
+            relays: vec![],
+        };
+        let (a, b) = (mk(1), mk(2));
+        let (ca, cb) = (
+            encrypt_snapshot(&key, &a).unwrap(),
+            encrypt_snapshot(&key, &b).unwrap(),
+        );
+        let (pa, pb) = (
+            postcard::to_allocvec(&a).unwrap(),
+            postcard::to_allocvec(&b).unwrap(),
+        );
+
+        let n = pa.len().min(pb.len());
+        let body = SALTED_MAGIC.len() + SALT_LEN;
+        let ct_xor: Vec<u8> = ca[body..body + n]
+            .iter()
+            .zip(&cb[body..body + n])
+            .map(|(x, y)| x ^ y)
+            .collect();
+        let pt_xor: Vec<u8> = pa[..n].iter().zip(&pb[..n]).map(|(x, y)| x ^ y).collect();
+        assert_ne!(
+            ct_xor, pt_xor,
+            "the keystream repeats — nonce reuse is back"
+        );
+
+        // And the same plaintext twice must not produce the same ciphertext, which
+        // is the cheap tell that a salt is being generated at all.
+        assert_ne!(
+            encrypt_snapshot(&key, &a).unwrap(),
+            encrypt_snapshot(&key, &a).unwrap()
+        );
+    }
+
+    /// A note written before the salt existed still opens. They sit in an inbox
+    /// for up to their TTL, so refusing them would throw away a week of edits at
+    /// the upgrade rather than at some later, quieter moment.
+    #[test]
+    fn an_unsalted_snapshot_still_opens() {
+        let key = snapshot_key(b"an identity secret 32 bytes long!");
+        let snap = SyncSnapshot {
+            lamport: 4,
+            device: [1u8; 16],
+            contacts: vec![contact("bob", "bbbb", lam(2, 1), false)],
+            verified: vec![],
+            trusted: vec![],
+            blocked: vec![],
+            seen: vec![],
+            names: vec![],
+            devices: vec![],
+            relays: vec![],
+        };
+        // Exactly what the old `encrypt_snapshot` wrote.
+        let legacy =
+            crypto::seal_chunk(&key, 0, 1, &postcard::to_allocvec(&snap).unwrap()).unwrap();
+        assert_eq!(decrypt_snapshot(&key, &legacy).unwrap(), snap);
     }
 
     #[test]
@@ -721,6 +968,7 @@ mod tests {
             seen: vec![],
             names: vec![],
             devices: vec![],
+            relays: vec![],
         };
         let blob = encrypt_snapshot(&snapshot_key(b"secret-one"), &snap).unwrap();
         assert!(decrypt_snapshot(&snapshot_key(b"secret-two"), &blob).is_err());
@@ -780,6 +1028,7 @@ mod tests {
             }],
             names: vec![],
             devices: vec![],
+            relays: vec![],
         });
         let b = SyncState::from_snapshot(&SyncSnapshot {
             lamport: 0,
@@ -799,6 +1048,7 @@ mod tests {
             }],
             names: vec![],
             devices: vec![],
+            relays: vec![],
         });
         a.merge(&b);
         assert!(a.verified["k"].deleted, "later remove wins the 2P-set");
@@ -854,6 +1104,7 @@ mod tests {
                 deleted: false,
             }],
             devices: vec![],
+            relays: vec![],
         })
     }
 
@@ -895,6 +1146,7 @@ mod tests {
                 deleted: true,
             }],
             devices: vec![],
+            relays: vec![],
         })
     }
 
@@ -952,6 +1204,111 @@ mod tests {
         assert_eq!(a.names["k2"].pinned, "Bob");
     }
 
+    fn relay_state(rows: Vec<RelayEntry>) -> SyncState {
+        SyncState::from_snapshot(&SyncSnapshot {
+            lamport: 0,
+            device: [0u8; 16],
+            contacts: vec![],
+            verified: vec![],
+            trusted: vec![],
+            blocked: vec![],
+            seen: vec![],
+            names: vec![],
+            devices: vec![],
+            relays: rows,
+        })
+    }
+
+    fn relay_row(pubkey: &str, relay: &str, clock: Lamport, deleted: bool) -> RelayEntry {
+        RelayEntry {
+            pubkey: pubkey.into(),
+            relay: relay.into(),
+            clock,
+            deleted,
+        }
+    }
+
+    /// The relay register behaves like every other one: last writer wins, both
+    /// orders agree, and a tombstone is a value rather than an omission — a peer
+    /// still holding the old row must not put it back.
+    #[test]
+    fn relays_converge_and_tombstone() {
+        let older = relay_row("k", "https://one.example", lam(1, 1), false);
+        let newer = relay_row("k", "https://two.example", lam(2, 2), false);
+
+        let mut a = relay_state(vec![older.clone()]);
+        a.merge(&relay_state(vec![newer.clone()]));
+        let mut b = relay_state(vec![newer.clone()]);
+        b.merge(&relay_state(vec![older.clone()]));
+        assert_eq!(a, b, "merge commutes");
+        assert_eq!(a.relays["k"].relay, "https://two.example");
+
+        // Idempotent.
+        let mut again = a.clone();
+        again.merge(&relay_state(vec![newer.clone()]));
+        assert_eq!(again, a);
+
+        // A clearing wins by clock, and a later re-add beats it back.
+        let mut c = a.clone();
+        c.merge(&relay_state(vec![relay_row("k", "", lam(3, 1), true)]));
+        assert!(c.relays["k"].deleted);
+        c.merge(&relay_state(vec![relay_row(
+            "k",
+            "https://three.example",
+            lam(4, 1),
+            false,
+        )]));
+        assert!(!c.relays["k"].deleted);
+        assert_eq!(c.relays["k"].relay, "https://three.example");
+
+        // And it feeds the clock, or a device that only ever edited a relay would
+        // keep minting counters everyone else has already passed.
+        assert_eq!(c.max_counter(), 4);
+    }
+
+    /// A sidecar written before relays existed still loads, keeping the clocks and
+    /// tombstones it holds. Losing it is not loud — the caller falls back to
+    /// rebuilding from the TOML ledgers, which have neither.
+    #[test]
+    fn a_sidecar_without_relays_still_decodes() {
+        #[derive(Serialize)]
+        struct OldSidecar {
+            lamport: u64,
+            device: DeviceId,
+            contacts: Vec<ContactEntry>,
+            verified: Vec<MarkEntry>,
+            trusted: Vec<MarkEntry>,
+            seen: Vec<SeenEntry>,
+            names: Vec<NameEntry>,
+            blocked: Vec<MarkEntry>,
+            devices: Vec<DeviceEntry>,
+        }
+        let old = OldSidecar {
+            lamport: 5,
+            device: [3u8; 16],
+            contacts: vec![contact("alice", "aaaa", lam(3, 1), false)],
+            verified: vec![],
+            trusted: vec![],
+            seen: vec![],
+            names: vec![],
+            blocked: vec![],
+            devices: vec![],
+        };
+        let bytes = postcard::to_allocvec(&old).unwrap();
+
+        let snap = decode_snapshot(&bytes).expect("an older sidecar still loads");
+        assert_eq!(snap.lamport, 5);
+        assert_eq!(snap.contacts.len(), 1);
+        assert!(snap.relays.is_empty());
+
+        // And a current sidecar is not mistaken for the old shape, which postcard
+        // would otherwise read happily and silently drop the relays from.
+        let mut current = snap.clone();
+        current.relays = vec![relay_row("k", "https://r.example", lam(1, 1), false)];
+        let round = decode_snapshot(&encode_snapshot(&current).unwrap()).unwrap();
+        assert_eq!(round.relays.len(), 1);
+    }
+
     fn device_state(rows: Vec<DeviceEntry>) -> SyncState {
         SyncState::from_snapshot(&SyncSnapshot {
             lamport: 0,
@@ -963,6 +1320,7 @@ mod tests {
             seen: vec![],
             names: vec![],
             devices: rows,
+            relays: vec![],
         })
     }
 
