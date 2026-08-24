@@ -357,6 +357,17 @@ pub(crate) async fn daemon(
         });
     }
 
+    // Advertised-name rows for identities nobody points at any more. Nothing
+    // produces them now — `contact_remove` clears its own row, and a sync merge
+    // sweeps what a sibling device's deletion stranded — but books written by
+    // older builds still carry them, and they would keep riding every snapshot.
+    // One sweep per start, best-effort: it reads two small TOMLs.
+    match book::prune_orphan_names() {
+        Ok(n) if n > 0 => tracing::debug!("pruned {n} orphan advertised-name record(s)"),
+        Err(e) => tracing::debug!("orphan-name sweep skipped: {e:#}"),
+        _ => {}
+    }
+
     eprintln!("arvolo daemon up.");
     eprintln!("  identity: {my_id}");
     eprintln!("  relay:    {relay}");

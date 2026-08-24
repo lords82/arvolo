@@ -84,7 +84,6 @@ export interface Recorder {
   listHistory: number;
   depositTo: [string, string[], number | null, number | null, string | null][];
   setConfig: ConfigPatch[];
-  pruneNames: number;
   syncNow: number;
   startPairing: [PairKind, string | null, string | null][];
   cancelPairing: string[];
@@ -169,7 +168,6 @@ function freshRecorder(): Recorder {
     listHistory: 0,
     depositTo: [],
     setConfig: [],
-    pruneNames: 0,
     syncNow: 0,
     startPairing: [],
     cancelPairing: [],
@@ -331,10 +329,6 @@ export function makeIpcMock() {
           "presence",
           ids.map((id) => ({ id, online: harness.snapshot.presence[id] ?? null }))
         ),
-      pruneNames: () => {
-        harness.recorder.pruneNames++;
-        return guard("pruneNames", 0);
-      },
       syncStatus: () => guard("syncStatus", harness.snapshot.sync),
       listDevices: () => guard("listDevices", harness.snapshot.devices),
       renameThisDevice: (name: string) => {

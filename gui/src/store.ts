@@ -454,8 +454,6 @@ interface State {
    *  that writes it, so the others are renamed on themselves. */
   renameThisDevice: (name: string) => Promise<void>;
   forgetDevice: (who: string) => Promise<void>;
-  /** Drop advertised-name records for contacts that no longer exist. */
-  pruneNames: () => Promise<number>;
 
   /** Begin a pairing exchange and park its state for the sheet to render. */
   startPairing: (kind: PairKind, code?: string, name?: string) => Promise<void>;
@@ -1275,12 +1273,6 @@ export const useStore = create<State>((set, get) => {
         toast.bad(t("store.syncFailed"), String(e));
       }
     },
-    pruneNames: async () => {
-      const n = await act(t("store.errPruneNames"), () => api.pruneNames());
-      await get().refreshContacts();
-      return n;
-    },
-
     startPairing: async (kind, code, name) => {
       // Starting a second exchange must retire the first. The hosting side has
       // no deadline of its own — it waits until cancelled — so an orphaned

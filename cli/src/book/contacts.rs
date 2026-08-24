@@ -173,8 +173,10 @@ pub fn contact_rename(old: &str, new: &str) -> Result<()> {
 /// Advertised-name rows for identities no contact points at any more.
 ///
 /// These accumulate from contacts removed before [`contact_remove`] learned to
-/// clean up after itself, and they keep syncing between devices. Returns how many
-/// were dropped.
+/// clean up after itself, and they keep syncing between devices. Nobody asks for
+/// this: the daemon sweeps once at start (for books written by those older
+/// builds) and again after a sync merge, which is the one path that can still
+/// strand a row. Returns how many were dropped.
 pub fn prune_orphan_names() -> Result<usize> {
     let known: std::collections::BTreeSet<String> =
         load_contacts().contacts.into_values().collect();

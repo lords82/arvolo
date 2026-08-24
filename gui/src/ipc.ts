@@ -99,7 +99,6 @@ export const api = {
   revokeDeposit: (id: string) => invoke<void>("revoke_deposit", { id }),
   getConfig: () => invoke<ConfigDto>("get_config"),
   setConfig: (patch: ConfigPatch) => invoke<ConfigDto>("set_config", { patch }),
-  pruneNames: () => invoke<number>("prune_names"),
   /** Who is reachable right now. Separate from `listContacts` because the book
    *  is read from disk and is instant, while this is a relay round trip. */
   presence: (ids: string[]) => invoke<PresenceDto[]>("presence", { ids }),

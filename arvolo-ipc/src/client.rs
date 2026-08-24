@@ -535,14 +535,6 @@ impl DaemonClient {
         }
     }
 
-    /// Drop advertised-name records for contacts that no longer exist.
-    pub async fn prune_names(&mut self) -> Result<usize> {
-        match self.request(Request::PruneNames).await? {
-            Response::Cleared(n) => Ok(n),
-            other => unexpected(other),
-        }
-    }
-
     /// Ask the relay who is reachable right now. `None` in a row means the relay
     /// could not be asked — never "offline".
     pub async fn presence(&mut self, ids: Vec<String>) -> Result<Vec<PresenceDto>> {

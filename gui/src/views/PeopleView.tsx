@@ -519,7 +519,6 @@ export function PeopleView() {
   const contacts = useStore((s) => s.contacts);
   const startPairing = useStore((s) => s.startPairing);
   const addContact = useStore((s) => s.addContact);
-  const pruneNames = useStore((s) => s.pruneNames);
   const loadPresence = useStore((s) => s.loadPresence);
   const presenceLoading = useStore((s) => s.presenceLoading);
 
@@ -676,29 +675,6 @@ export function PeopleView() {
         >
           <Icon.Relay size={13} /> {t("people.whoIsOnline")}
         </Button>
-        <MenuButton
-          label={t("people.moreActions")}
-          items={[
-            {
-              key: "prune",
-              label: t("people.prune"),
-              icon: <Icon.Trash size={13} />,
-              onSelect: async () => {
-                const n = await pruneNames();
-                toast.ok(
-                  n === 0
-                    ? t("people.pruneNone")
-                    : n === 1
-                      ? t("people.pruneOne")
-                      : t("people.pruneMany", n),
-                  n ? t("people.pruneDetail") : undefined
-                );
-              },
-            },
-          ]}
-        >
-          <Icon.More size={15} />
-        </MenuButton>
       </div>
 
       <div className="hstack wrap">

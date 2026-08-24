@@ -274,12 +274,6 @@ pub async fn presence(ids: Vec<String>) -> Result<Vec<PresenceDto>, String> {
 }
 
 #[tauri::command]
-pub async fn prune_names() -> Result<usize, String> {
-    let mut c = client().await?;
-    c.prune_names().await.or_else(err)
-}
-
-#[tauri::command]
 pub async fn sync_status() -> Result<SyncDto, String> {
     let mut c = client().await?;
     c.sync_status().await.or_else(err)

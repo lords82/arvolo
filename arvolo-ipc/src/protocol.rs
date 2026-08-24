@@ -242,9 +242,6 @@ pub enum Request {
     /// comments it out → [`Response::Config`] with the state that resulted, so a
     /// UI never has to guess what the daemon made of its patch.
     SetConfig(ConfigPatch),
-    /// Drop advertised-name records left behind by contacts that no longer exist
-    /// → [`Response::Cleared`] with the count (`arvolo contacts prune`).
-    PruneNames,
     /// Ask the relay who, among these ids, has a live presence beacon
     /// → [`Response::Presence`]. Deliberately separate from
     /// [`Request::ListContacts`]: the book is read from disk and is instant,

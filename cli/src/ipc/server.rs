@@ -445,10 +445,6 @@ async fn dispatch(d: &Daemon, cmd: Request) -> Response {
             Err(e) => Response::Error(format!("{e:#}")),
         },
         Request::Presence { ids } => Response::Presence(presence(d, ids).await),
-        Request::PruneNames => match crate::book::prune_orphan_names() {
-            Ok(n) => Response::Cleared(n),
-            Err(e) => Response::Error(format!("{e:#}")),
-        },
         Request::RelayInfo => Response::RelayInfo(relay_info(d).await),
         Request::SyncStatus => match sync_dto(d) {
             Ok(s) => Response::Sync(s),
