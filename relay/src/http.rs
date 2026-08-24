@@ -211,13 +211,23 @@ async fn dl_manifest_handler() -> impl IntoResponse {
 }
 
 /// Advertise this relay's optional features so a client can fail fast: `links`
-/// (public browser download links) and `rz2` (long-lived, multi-session pairing
-/// slots — [`RZ_OWN_KEY`] and friends).
+/// (public browser download links), `rz2` (long-lived, multi-session pairing
+/// slots — [`RZ_OWN_KEY`] and friends), and `cors` (this relay serves ciphertext
+/// to a page on another origin, so a link can point at a decryptor that is not
+/// the relay).
 ///
-/// The two are read with opposite defaults on purpose. A client that can't reach
+/// They are read with different defaults on purpose. A client that can't reach
 /// this endpoint assumes links are allowed (worst case: a deposit is refused
 /// later), but assumes `rz2` is absent — announcing a v2 code no relay can host
-/// would strand a receiver, so the missing field must mean "no".
+/// would strand a receiver, so the missing field must mean "no". `cors` fails
+/// closed for the same reason and a sharper one: minting a split-origin link
+/// against a relay that will not serve it cross-origin produces a link that
+/// looks fine and downloads nothing.
+///
+/// `cors` is unconditionally true — the relay either has the code or it does
+/// not, and there is nothing here for an operator to configure. Deriving it from
+/// `version` instead would mean comparing versions inside a client that
+/// deliberately carries no JSON parser.
 ///
 /// `version` is what this relay is, and it answers a different question from the
 /// two flags: not "can you do X" but "how far along are you". The desktop app
@@ -227,15 +237,16 @@ async fn dl_manifest_handler() -> impl IntoResponse {
 /// release that added it, which is all the caller needs to know.
 ///
 /// Kept as hand-written JSON like the rest of this document, because that is how
-/// it is *read*: the two client-side probes match on substrings rather than
-/// parsing (`core::code::relay_rz_version`, `core::link::relay_allows_links`), so
-/// the shape here is load-bearing. Adding a field is safe for both; reordering or
-/// reformatting the existing two is not.
+/// it is *read*: the client-side probes match on substrings rather than parsing
+/// (`core::code::relay_rz_version`, `core::link::relay_link_support`), so the
+/// shape here is load-bearing. Adding a field is safe for all of them;
+/// reordering or reformatting the existing ones is not — which is why `cors` is
+/// appended after `version` rather than slotted in beside the other two flags.
 async fn features_handler(State(state): State<AppState>) -> impl IntoResponse {
     (
         [(axum::http::header::CONTENT_TYPE, "application/json")],
         format!(
-            "{{\"links\":{},\"rz2\":true,\"version\":\"{}\"}}",
+            "{{\"links\":{},\"rz2\":true,\"version\":\"{}\",\"cors\":true}}",
             state.links_enabled,
             arvolo_core::VERSION
         ),
@@ -337,7 +348,10 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/v1/deposit", post(deposit_handler))
         .route("/v1/features", get(features_handler))
-        .route("/v1/fetch/{claim}", get(fetch_handler))
+        .route(
+            "/v1/fetch/{claim}",
+            get(fetch_handler).options(fetch_options_handler),
+        )
         .route("/v1/entry/{claim}", axum::routing::delete(revoke_handler))
         .route("/v1/entry/{claim}/status", get(entry_status_handler))
         .route("/v1/addr", get(addr_handler))
@@ -1505,6 +1519,76 @@ async fn revoke_handler(
     Ok("revoked".into())
 }
 
+/// Headers that let a page on *another* origin read this ciphertext.
+///
+/// This is what makes a relay safe for a stranger to run. With them, the
+/// decryptor page can live on an origin that stores no ciphertext, so the
+/// operator never runs code in a context holding the key — see
+/// `docs/PROTOCOL.md` §7.6. Without them the page must come from the relay
+/// itself, and then the operator can serve one that steals the key.
+///
+/// `*`, and not an allow-list, because the header transfers no authority the
+/// URL did not already carry: the blob is authenticated ciphertext under a key
+/// this relay does not have, and the claim *is* the capability — anyone holding
+/// it can already `curl` the bytes. CORS does not grant the right to *trigger* a
+/// fetch (a cross-origin `<img src>` already burns a burn-after-read claim
+/// today, no CORS involved); it grants only the right to *read the response*.
+///
+/// No `Access-Control-Allow-Credentials`: with `*` a browser would reject it,
+/// and there are no cookies on this path. No `Vary: Origin`: the answer is a
+/// literal `*` and does not depend on the request.
+///
+/// One deployment note that belongs next to the code, because getting it wrong
+/// looks like a browser bug: a reverse proxy must **not** add these itself. Two
+/// identical `Access-Control-Allow-Origin` headers are not a stricter policy,
+/// they are an invalid one, and the browser refuses the response. Leave it to
+/// the relay — `docs/DEPLOY.md` says so for the nginx examples.
+fn cross_origin_headers(resp: &mut Response) {
+    use axum::http::header::HeaderValue;
+    for (name, value) in [
+        ("access-control-allow-origin", "*"),
+        (
+            "access-control-expose-headers",
+            "content-length, x-arvolo-encapped-key",
+        ),
+        // So a future COEP-isolated decryptor page is not blocked from reading it.
+        ("cross-origin-resource-policy", "cross-origin"),
+    ] {
+        resp.headers_mut().insert(
+            axum::http::HeaderName::from_static(name),
+            HeaderValue::from_static(value),
+        );
+    }
+}
+
+/// Answer a preflight for `/v1/fetch/{claim}` **without touching the mailbox**.
+///
+/// Nothing in the current design triggers one: the page issues a plain `GET`
+/// with no custom headers and `credentials: "omit"`, which is a CORS-simple
+/// request. This exists so that some corporate middlebox preflighting anyway
+/// degrades to an extra round trip instead of a download that mysteriously does
+/// not work behind one company's proxy — and so that adding a request header
+/// later is a preflight, not an outage.
+///
+/// It must never consume the claim. A burn-after-read entry plus a preflight
+/// that counted as a download is the sharpest foot-gun on this path, which is
+/// why this is its own handler and not a branch inside `fetch_handler`.
+async fn fetch_options_handler() -> Response {
+    let mut resp = Response::new(axum::body::Body::empty());
+    *resp.status_mut() = StatusCode::NO_CONTENT;
+    cross_origin_headers(&mut resp);
+    for (name, value) in [
+        ("access-control-allow-methods", "GET, HEAD, OPTIONS"),
+        ("access-control-max-age", "86400"),
+    ] {
+        resp.headers_mut().insert(
+            axum::http::HeaderName::from_static(name),
+            axum::http::header::HeaderValue::from_static(value),
+        );
+    }
+    resp
+}
+
 async fn fetch_handler(
     State(state): State<AppState>,
     AxumPath(claim): AxumPath<String>,
@@ -1543,6 +1627,17 @@ async fn fetch_handler(
                 .insert(axum::http::header::CONTENT_LENGTH, val);
         }
     }
+    // Opaque bytes, said out loud: the relay cannot know what this decrypts to,
+    // and nothing downstream should guess.
+    resp.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::header::HeaderValue::from_static("application/octet-stream"),
+    );
+    resp.headers_mut().insert(
+        axum::http::header::X_CONTENT_TYPE_OPTIONS,
+        axum::http::header::HeaderValue::from_static("nosniff"),
+    );
+    cross_origin_headers(&mut resp);
     Ok(resp)
 }
 

@@ -173,6 +173,119 @@ fn sha256_hex(body: &str) -> String {
     data_encoding::HEXLOWER.encode(&sha2::Sha256::digest(body.as_bytes()))
 }
 
+/// The whole community-relay design rests on this one property: a page on an
+/// origin that holds no ciphertext can read the ciphertext from a relay. Without
+/// these headers the browser makes the request and then refuses to hand the
+/// bytes to the page, so the decryptor has to be served by the relay — and then
+/// the operator can serve one that steals the key.
+///
+/// Worth having as a test because every other test here talks to the relay from
+/// Rust, where CORS does not exist: this feature could be entirely broken in a
+/// browser with the suite still green.
+#[tokio::test]
+async fn ciphertext_is_readable_from_another_origin() {
+    let relay = spawn_relay().await;
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("note.txt");
+    std::fs::write(&src, b"the bytes a stranger's relay must hand over").unwrap();
+
+    let out = deposit_link(&src, &relay, 3600, 1).await.expect("deposit");
+    let key = decode_key(out.link.rsplit_once('#').unwrap().1).unwrap();
+
+    let resp = reqwest::Client::new()
+        .get(format!("{relay}/v1/fetch/{}", out.claim))
+        .header("origin", "https://dl.example")
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+
+    let header = |n: &str| {
+        resp.headers()
+            .get(n)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string()
+    };
+    assert_eq!(
+        header("access-control-allow-origin"),
+        "*",
+        "a page on another origin must be allowed to read the ciphertext"
+    );
+    assert!(
+        header("access-control-expose-headers").contains("content-length"),
+        "the page reads content-length to show progress"
+    );
+    assert_eq!(header("cross-origin-resource-policy"), "cross-origin");
+    // Exactly one of each: a duplicated allow-origin is an invalid policy, not a
+    // stricter one, and a browser refuses the response outright.
+    for name in [
+        "access-control-allow-origin",
+        "cross-origin-resource-policy",
+    ] {
+        assert_eq!(
+            resp.headers().get_all(name).iter().count(),
+            1,
+            "{name} must appear exactly once"
+        );
+    }
+
+    // …and the bytes still decrypt, so nothing about the headers changed what is
+    // served.
+    let blob = resp.bytes().await.unwrap();
+    let (name, plain) = decrypt_link(&blob, &key).expect("decrypt");
+    assert_eq!(name, "note.txt");
+    assert_eq!(plain, b"the bytes a stranger's relay must hand over");
+}
+
+/// A preflight must be answerable without spending the claim. Burn-after-read
+/// plus a preflight that counted as a download would mean the file vanishes
+/// before the page ever asks for it — and only behind the proxies that preflight,
+/// which is the worst way to find a bug.
+#[tokio::test]
+async fn a_preflight_does_not_burn_the_claim() {
+    let relay = spawn_relay().await;
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("once.txt");
+    std::fs::write(&src, b"single download").unwrap();
+
+    // max=1: the next real fetch is the only one this claim allows.
+    let out = deposit_link(&src, &relay, 3600, 1).await.expect("deposit");
+    let c = reqwest::Client::new();
+
+    let pre = c
+        .request(
+            reqwest::Method::OPTIONS,
+            format!("{relay}/v1/fetch/{}", out.claim),
+        )
+        .header("origin", "https://dl.example")
+        .header("access-control-request-method", "GET")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(pre.status(), reqwest::StatusCode::NO_CONTENT);
+    assert!(pre
+        .headers()
+        .get("access-control-allow-methods")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .contains("GET"));
+
+    let key = decode_key(out.link.rsplit_once('#').unwrap().1).unwrap();
+    let blob = c
+        .get(format!("{relay}/v1/fetch/{}", out.claim))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .expect("the claim survived the preflight")
+        .bytes()
+        .await
+        .unwrap();
+    assert_eq!(decrypt_link(&blob, &key).unwrap().1, b"single download");
+}
+
 #[tokio::test]
 async fn link_deposit_fetch_decrypt_roundtrip() {
     let relay = spawn_relay().await;
