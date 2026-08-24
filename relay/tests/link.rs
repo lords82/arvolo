@@ -46,20 +46,58 @@ async fn dl_page_and_script_are_served_from_the_relay() {
         .unwrap()
         .to_string();
     assert!(ct.contains("text/html"), "page content-type: {ct}");
+    // The script is inlined, so `'self'` would not authorize it: the policy has
+    // to name its hash, and naming only the hash is what stops any *other*
+    // script on this origin from running.
+    let csp = page
+        .headers()
+        .get("content-security-policy")
+        .expect("download page must carry a CSP")
+        .to_str()
+        .unwrap()
+        .to_string();
     assert!(
-        page.headers().get("content-security-policy").is_some(),
-        "download page must carry a CSP"
+        csp.contains("script-src 'sha256-"),
+        "CSP must pin the inline script by hash: {csp}"
     );
+    assert!(
+        !csp.contains("script-src 'self'"),
+        "CSP is not self-based: {csp}"
+    );
+
     let body = page.text().await.unwrap();
     assert!(body.contains("arvolo"), "branded page");
-    assert!(body.contains("/dl.js"), "page references its script");
+    // One artifact: nothing left to fetch before the page can run, which is what
+    // makes the published bundle checkable with a single hash.
+    assert!(
+        !body.contains("<script src="),
+        "the page must have no subresources — the script is inlined"
+    );
+    assert!(
+        body.contains(&csp),
+        "the page's <meta> policy must be the byte-identical header policy"
+    );
     // The page ships English inline as the fallback and tags each string so the
-    // script can swap it for the reader's language before first paint.
+    // script can swap it for the reader's language before first paint…
     assert!(
         body.contains("data-t=\"heading\"") && body.contains("data-html=\"footer\""),
         "page strings are tagged for translation"
     );
+    // …and now carries all four dictionaries itself, picked off the browser's
+    // own language list. Nothing is fetched at runtime.
+    assert!(
+        body.contains("navigator.languages"),
+        "browser-language pick"
+    );
+    for probe in [
+        "Qualcuno ti ha mandato un file",
+        "Quelqu'un vous a envoyé un fichier",
+        "Jemand hat Ihnen eine Datei geschickt",
+    ] {
+        assert!(body.contains(probe), "missing translation: {probe}");
+    }
 
+    // Still served separately for one release, for a page cached before 0.14.
     let js = c.get(format!("{relay}/dl.js")).send().await.unwrap();
     assert!(js.status().is_success());
     let js_ct = js
@@ -70,32 +108,69 @@ async fn dl_page_and_script_are_served_from_the_relay() {
         .unwrap()
         .to_string();
     assert!(js_ct.contains("javascript"), "script content-type: {js_ct}");
-    // …and the script carries all four dictionaries, picked off the browser's
-    // own language list. Nothing is fetched at runtime, so they ship together.
-    let js_body = js.text().await.unwrap();
-    assert!(
-        js_body.contains("navigator.languages"),
-        "browser-language pick"
-    );
-    for probe in [
-        "Qualcuno ti ha mandato un file",
-        "Quelqu'un vous a envoyé un fichier",
-        "Jemand hat Ihnen eine Datei geschickt",
-    ] {
-        assert!(js_body.contains(probe), "missing translation: {probe}");
-    }
+    assert!(js.text().await.unwrap().contains("navigator.languages"));
 
-    // The streaming service worker is served from the root with a root scope.
-    let sw = c.get(format!("{relay}/arvolo-sw.js")).send().await.unwrap();
-    assert!(sw.status().is_success());
-    assert_eq!(
-        sw.headers()
-            .get("service-worker-allowed")
-            .and_then(|v| v.to_str().ok()),
-        Some("/"),
-        "service worker must be allowed a root scope"
+    // The streaming service worker, at both paths it has to answer on: the root
+    // (a page cached before 0.14) and under /dl/, where a page at /dl/{claim}
+    // resolves it now that the bundle uses relative URLs. Both need a root scope.
+    for path in ["arvolo-sw.js", "dl/arvolo-sw.js"] {
+        let sw = c.get(format!("{relay}/{path}")).send().await.unwrap();
+        assert!(sw.status().is_success(), "{path} must be served");
+        assert_eq!(
+            sw.headers()
+                .get("service-worker-allowed")
+                .and_then(|v| v.to_str().ok()),
+            Some("/"),
+            "{path}: service worker must be allowed a root scope"
+        );
+        assert!(sw.text().await.unwrap().contains("ReadableStream"));
+    }
+}
+
+/// The bundle this relay serves is the bundle it would publish: one build step
+/// produces the embedded page, the `--print-decryptor` output and these hashes,
+/// so a self-hosted relay and the canonical origin cannot serve different code
+/// while both claiming the same version.
+#[tokio::test]
+async fn the_relay_serves_the_decryptor_bundle_its_manifest_describes() {
+    let relay = spawn_relay().await;
+    let c = reqwest::Client::new();
+
+    let manifest = c.get(format!("{relay}/manifest.txt")).send().await.unwrap();
+    assert!(manifest.status().is_success());
+    let manifest = manifest.text().await.unwrap();
+    assert!(
+        manifest.starts_with("arvolo-decryptor "),
+        "manifest names what it describes: {manifest}"
     );
-    assert!(sw.text().await.unwrap().contains("ReadableStream"));
+
+    for (path, name) in [
+        ("dl/anyclaim", "index.html"),
+        ("arvolo-sw.js", "arvolo-sw.js"),
+    ] {
+        let body = c
+            .get(format!("{relay}/{path}"))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        let want = manifest
+            .lines()
+            .find_map(|l| l.strip_suffix(&format!("  {name}")))
+            .unwrap_or_else(|| panic!("manifest has no line for {name}: {manifest}"));
+        assert_eq!(
+            sha256_hex(&body),
+            want,
+            "{name} does not match its manifest hash"
+        );
+    }
+}
+
+fn sha256_hex(body: &str) -> String {
+    use sha2::Digest;
+    data_encoding::HEXLOWER.encode(&sha2::Sha256::digest(body.as_bytes()))
 }
 
 #[tokio::test]

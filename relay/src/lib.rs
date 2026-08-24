@@ -11,6 +11,7 @@
 //! max-downloads (burn-after-read). Federation, multi-recipient refcount GC, and
 //! partial backfill are post-MVP (see docs/ROADMAP-FUTURE.md).
 
+pub mod decryptor;
 mod http;
 mod limits;
 mod mailbox;

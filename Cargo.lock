@@ -327,6 +327,7 @@ dependencies = [
  "reqwest 0.12.28",
  "rusqlite",
  "serde",
+ "sha2 0.10.9",
  "tempfile",
  "tokio",
  "tokio-util",

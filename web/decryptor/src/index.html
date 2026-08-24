@@ -3,6 +3,12 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- Substituted at build time by relay/build.rs, which is also what sends the
+     identical policy as a response header. The header is the real control where
+     one can be set; this <meta> is what protects the page on a static host that
+     cannot set headers at all (GitHub Pages), which is where the canonical copy
+     lives. Both come from one string so they can never disagree. -->
+<meta http-equiv="Content-Security-Policy" content="{{CSP}}">
 <title>arvolo — secure download</title>
 <style>
   /* Arvolo — browser download page.

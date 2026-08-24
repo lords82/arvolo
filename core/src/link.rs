@@ -10,7 +10,7 @@
 //! chunk-by-chunk and stream the plaintext straight to disk (no whole-file RAM).
 //!
 //! Container layout (all integers little-endian), matching the decoder in the
-//! relay's `web/dl.js`:
+//! browser decryptor's `web/decryptor/src/dl.js`:
 //!
 //! ```text
 //!   [8]        magic  = b"ARVLNK01"

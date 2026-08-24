@@ -378,7 +378,11 @@ async function fsAccessSink(name) {
 // to a real download with back-pressure (one chunk per pull), so memory stays
 // bounded. Falls back if the handshake doesn't complete quickly.
 async function swSink(name) {
-  await navigator.serviceWorker.register("/arvolo-sw.js");
+  // Resolved against wherever this page is, not against the root: one bundle is
+  // served from a relay's `/dl/{claim}`, from the canonical origin's `/`, and
+  // from any subdirectory a self-hoster puts it in. An absolute `/arvolo-sw.js`
+  // would only work in the last-but-one of those.
+  await navigator.serviceWorker.register(new URL("arvolo-sw.js", location.href));
   await navigator.serviceWorker.ready;
   if (!navigator.serviceWorker.controller) {
     await new Promise((resolve, reject) => {
@@ -424,7 +428,7 @@ async function swSink(name) {
   // Kick off the actual browser download; the SW answers it with our stream.
   const iframe = document.createElement("iframe");
   iframe.hidden = true;
-  iframe.src = "/dl/stream/" + id;
+  iframe.src = new URL("arvolo-stream/" + id, location.href);
   document.body.appendChild(iframe);
 
   return {

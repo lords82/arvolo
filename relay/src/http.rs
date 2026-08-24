@@ -66,19 +66,11 @@ fn default_max() -> u32 {
 }
 
 /// The browser secure-download page, its script, and the streaming service
-/// worker. Decryption happens entirely client-side; the relay only serves
+/// worker — assembled by `build.rs` from `web/decryptor/src` and shared with
+/// `--print-decryptor`, so this relay and the canonical published page are the
+/// same bytes. Decryption happens entirely client-side; the relay only serves
 /// ciphertext.
-const DL_HTML: &str = include_str!("web/dl.html");
-const DL_JS: &str = include_str!("web/dl.js");
-const DL_SW: &str = include_str!("web/arvolo-sw.js");
-
-/// A strict Content-Security-Policy for the download page: no external
-/// resources at all, only same-origin script/worker/frame and same-origin fetch
-/// (to `/v1/fetch/{claim}`). `worker-src`/`frame-src` are for the streaming
-/// service worker and the hidden download iframe it drives. No inline script.
-const DL_CSP: &str = "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; \
-     connect-src 'self'; img-src 'self' data:; worker-src 'self'; frame-src 'self'; \
-     frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
+use crate::decryptor::{CSP as DL_CSP, PAGE as DL_HTML, SCRIPT as DL_JS, SERVICE_WORKER as DL_SW};
 
 /// Shown (with 403) when the administrator has disabled download links. Its own
 /// file rather than a string literal here, so it can carry the same styling as
@@ -169,8 +161,15 @@ async fn dl_js_handler(State(state): State<AppState>) -> Response {
         .into_response()
 }
 
-/// The streaming download service worker. Served from the root path so its
-/// default scope (`/`) covers the `/dl/stream/{id}` requests it must intercept.
+/// The streaming download service worker.
+///
+/// Served at two paths on purpose. The page resolves `arvolo-sw.js` against its
+/// own directory so that one bundle works wherever it is deployed (a static
+/// origin's `/`, a subdirectory, or this relay's `/dl/{claim}`) — and from
+/// `/dl/{claim}` that resolves to `/dl/arvolo-sw.js`. The root path stays for a
+/// page cached before 0.14. `Service-Worker-Allowed: /` widens the scope of the
+/// `/dl/` copy, whose default scope would otherwise not cover a stream URL the
+/// page asks for from elsewhere.
 async fn dl_sw_handler(State(state): State<AppState>) -> Response {
     if !state.links_enabled {
         return (StatusCode::FORBIDDEN, LINKS_DISABLED_MSG).into_response();
@@ -190,6 +189,25 @@ async fn dl_sw_handler(State(state): State<AppState>) -> Response {
         DL_SW,
     )
         .into_response()
+}
+
+/// SHA-256 of the decryptor bundle this binary serves, in `sha256sum` format.
+///
+/// Not gated on `links_enabled`: it describes the build, not the service, and a
+/// relay with links switched off should still be able to answer "which page
+/// would you serve". Plain text so `sha256sum -c` and a human reading it in a
+/// browser see the same thing.
+async fn dl_manifest_handler() -> impl IntoResponse {
+    (
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                "text/plain; charset=utf-8",
+            ),
+            (axum::http::header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        ],
+        crate::decryptor::MANIFEST,
+    )
 }
 
 /// Advertise this relay's optional features so a client can fail fast: `links`
@@ -355,6 +373,10 @@ pub fn router(state: AppState) -> Router {
         .route("/dl/{claim}", get(dl_page_handler))
         .route("/dl.js", get(dl_js_handler))
         .route("/arvolo-sw.js", get(dl_sw_handler))
+        .route("/dl/arvolo-sw.js", get(dl_sw_handler))
+        // The published bundle's checksums, so `arvolo verify-page` can be
+        // pointed at a self-hosted relay and not only at the canonical origin.
+        .route("/manifest.txt", get(dl_manifest_handler))
         .route("/healthz", get(|| async { "ok" }))
         // Applied after the routes so it wraps them all: bounds the small
         // control-plane bodies. `/v1/deposit` reads a raw `Body` (not a

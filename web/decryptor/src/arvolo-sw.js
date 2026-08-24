@@ -69,8 +69,15 @@ self.addEventListener("message", (e) => {
   port.postMessage({ type: "ready" });
 });
 
+// `arvolo-stream/<id>` is resolved by the page against its own directory, so one
+// bundle works at a relay's `/dl/{claim}`, at the canonical origin's `/`, and in
+// any subdirectory — the id is what identifies the stream, never the prefix.
+// `/dl/stream/<id>` is the pre-0.14 spelling, still matched so a page cached
+// before the rename keeps working against a freshly installed worker.
+const STREAM_PATH = /\/(?:arvolo-stream|dl\/stream)\/([^/]+)$/;
+
 self.addEventListener("fetch", (e) => {
-  const m = new URL(e.request.url).pathname.match(/\/dl\/stream\/([^/]+)$/);
+  const m = new URL(e.request.url).pathname.match(STREAM_PATH);
   if (!m) return;
   const entry = streams.get(m[1]);
   if (!entry) return; // unknown id → normal 404
