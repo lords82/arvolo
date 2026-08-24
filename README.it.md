@@ -34,17 +34,18 @@ comando:
 curl -fsSL https://raw.githubusercontent.com/lords82/arvolo/main/install.sh | sh
 ```
 
-**2. Puntalo a un relay.** Arvolo non ha un server centrale — è proprio il
-punto — quindi serve un relay: quello che la tua azienda o un amico già
-gestisce, oppure il tuo, su in un comando:
+**2. Niente da configurare.** Arvolo esce già puntato a un relay pubblico, quindi
+il passo successivo funziona subito. È una macchina piccola gestita dal progetto
+— file fino a 100 MB, link che vivono 6 ore — e non vede mai le tue chiavi. **Per
+le cose che contano punta Arvolo a un relay tuo**, che è un comando solo:
 
 ```sh
 docker run -d --name arvolo-relay -p 6282:6282 -v arvolo-data:/data \
   ghcr.io/lords82/arvolo-relay:latest
 ```
 
-Nell'app lo imposti in **Impostazioni → Rete**; da riga di comando il primo
-avvio te lo chiede e se lo ricorda.
+Nell'app lo imposti in **Impostazioni → Rete**; da riga di comando c'è `--relay`,
+e il primo avvio te lo chiede e se lo ricorda.
 
 **3. Manda qualcosa.** Nell'app: trascina un file nella finestra e condividi il
 codice breve che ti dà — l'altra persona lo incolla nel suo Arvolo e il file

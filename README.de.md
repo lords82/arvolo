@@ -34,9 +34,11 @@ Kommandozeilen-Client:
 curl -fsSL https://raw.githubusercontent.com/lords82/arvolo/main/install.sh | sh
 ```
 
-**2. Zeig ihm ein Relay.** Arvolo hat keinen zentralen Server — das ist gerade
-der Punkt — also braucht es ein Relay: das, das deine Firma oder ein Freund
-schon betreibt, oder dein eigenes, aufgesetzt mit einem Befehl:
+**2. Nichts einzurichten.** Arvolo kommt auf ein öffentliches Relay eingestellt,
+der nächste Schritt funktioniert also sofort. Es ist eine kleine Maschine, die das
+Projekt betreibt — Dateien bis 100 MB, Links leben 6 Stunden — und sie sieht deine
+Schlüssel nie. **Für alles, worauf es ankommt, zeig Arvolo dein eigenes Relay**,
+aufgesetzt mit einem Befehl:
 
 ```sh
 docker run -d --name arvolo-relay -p 6282:6282 -v arvolo-data:/data \
@@ -44,7 +46,8 @@ docker run -d --name arvolo-relay -p 6282:6282 -v arvolo-data:/data \
 ```
 
 In der App stellst du es unter **Einstellungen → Netzwerk** ein; auf der
-Kommandozeile fragt der erste Start danach und merkt es sich.
+Kommandozeile gibt es `--relay`, und der erste Start fragt danach und merkt es
+sich.
 
 **3. Schick etwas.** In der App: zieh eine Datei ins Fenster und teile den
 kurzen Code, den sie dir gibt — die andere Person fügt ihn in ihr Arvolo ein,
