@@ -1,8 +1,10 @@
 # Changelog
 
-## v0.13.0-rc2 — a contact brings their own relay, and the app updates itself
+## v0.13.0 — a contact brings their own relay, and the app updates itself
 
-Two features and one fix that ought to have shipped years ago.
+Two features that ought to have shipped years ago, a fix for something that
+should never have shipped at all, and a handful of smaller things that stop
+asking you to think about them.
 
 ### Fixed
 
@@ -20,6 +22,15 @@ Two features and one fix that ought to have shipped years ago.
   form, and on failing it *deletes* the note — so a mixed-version pair does not
   sync until both sides are current. The desktop app now says so on the update
   banner rather than leaving it to these notes.
+
+- **A device name typed into the list was thrown away by the two gestures people
+  make after typing one.** The field committed on Enter and closed on blur, so
+  pressing the Save button beside it blurred the field and ended the edit, and
+  clicking anywhere else did the same — in both cases the name was gone before
+  anything read it, with nothing on screen to say so and nothing ever reaching the
+  daemon. The edit now commits in one place, reached from Enter and from Save
+  alike, and the field stays open until one of the two buttons beside it is
+  pressed.
 
 ### New
 
@@ -55,6 +66,27 @@ Two features and one fix that ought to have shipped years ago.
   order `docs/DEPLOY.md` asks them to avoid — clients ahead of the relay they
   depend on. Nothing today needs a newer relay and `compat.json` says so; the
   check is there for the release that does.
+
+### Changed
+
+- **The "clean up orphans" button is gone from the address book, and so is the
+  chore.** It dropped advertised-name rows for identities no contact points at any
+  more; its command-line twin went away in v0.12.0, where pruning became something
+  that happens after a sync merge. Nothing produces those rows now — removing a
+  contact clears its own row — so what was left was books written by older builds,
+  which no merge would ever visit on a machine that does not sync. The daemon
+  sweeps once at start instead, and nobody is asked to think about it.
+
+- **Rename and forget moved into the ⋯ menu on each device row**, as everywhere
+  else in the app, and the one that cannot apply to a row is shown disabled with
+  its reason rather than left out. A device row belongs to the device that writes
+  it, so renaming happens on the machine you are at; a machine that forgot itself
+  would announce itself again on the next round, which is why the daemon refuses
+  that one. An absent menu item cannot say either.
+
+- **The desktop program is called Arvolo**, in Activity Monitor, in `ps`, in a
+  firewall prompt and in Program Files. It used to introduce itself as
+  `arvolo-gui`, which is the name of a crate, not of a program.
 
 ## v0.13.0-rc1 — fewer words, and they stay in the box
 
