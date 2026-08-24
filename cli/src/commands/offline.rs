@@ -191,6 +191,11 @@ pub(crate) async fn send_sealed(
                      Send it directly instead (`arvolo send …` P2P while both devices are \
                      online), or use a private relay with a higher limit."
                 ),
+                flow::DepositError::Busy => anyhow::bail!(
+                    "the relay is being used by a lot of people right now. Try again \
+                     shortly, or use a relay of your own (`--relay`, or set it once in \
+                     the config). A direct P2P send works while both devices are online."
+                ),
                 flow::DepositError::Unavailable(m) => anyhow::bail!(
                     "the relay is unavailable ({m}). Try again later, or check ARVOLO_RELAY \
                      / --relay. A direct P2P send works while both devices are online."

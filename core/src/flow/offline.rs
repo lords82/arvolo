@@ -98,6 +98,12 @@ fn random_token() -> String {
 pub enum DepositError {
     /// The relay refused the file as larger than its per-file cap.
     TooLarge,
+    /// The relay has no room at this moment: it is holding as many bytes as its
+    /// operator allows. Distinct from [`Unavailable`](Self::Unavailable) because
+    /// nothing is broken and nothing is unreachable — the mailbox is simply full
+    /// right now, which on a shared relay means other people are using it. It
+    /// clears on its own as deposits expire, so it is worth retrying.
+    Busy,
     /// The relay was unreachable or returned a transient error. Human reason.
     Unavailable(String),
     /// A local, unrecoverable error (couldn't read or seal the file).
@@ -108,6 +114,11 @@ impl std::fmt::Display for DepositError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             DepositError::TooLarge => write!(f, "the relay refused the file as too large"),
+            DepositError::Busy => write!(
+                f,
+                "the relay is being used by a lot of people right now — try again \
+                 shortly, or use a relay of your own"
+            ),
             DepositError::Unavailable(m) => write!(f, "relay unavailable: {m}"),
             DepositError::Fatal(e) => write!(f, "{e:#}"),
         }
@@ -261,6 +272,13 @@ pub async fn deposit_offline(
     let status = resp.status();
     if status == reqwest::StatusCode::PAYLOAD_TOO_LARGE {
         return Err(DepositError::TooLarge);
+    }
+    // 507 is the relay saying it is holding all the bytes it is allowed to hold.
+    // Reported as its own case rather than folded into `Unavailable`: "the relay
+    // returned 507 Insufficient Storage" tells the person nothing they can act on,
+    // and on the shared relay this is the one failure they are most likely to meet.
+    if status == reqwest::StatusCode::INSUFFICIENT_STORAGE {
+        return Err(DepositError::Busy);
     }
     if !status.is_success() {
         return Err(DepositError::Unavailable(format!(

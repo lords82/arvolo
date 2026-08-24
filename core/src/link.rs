@@ -248,7 +248,18 @@ pub async fn deposit_link(
         .body(blob)
         .send()
         .await
-        .context("deposit request")?
+        .context("deposit request")?;
+    // The one refusal a person meets on a shared relay, and the one where the raw
+    // status says nothing they can act on: 507 means the relay is holding all the
+    // bytes its operator allows. It clears as deposits expire, so say "later or
+    // yours" rather than "rejected".
+    if resp.status() == reqwest::StatusCode::INSUFFICIENT_STORAGE {
+        anyhow::bail!(
+            "the relay is being used by a lot of people right now — try again shortly, \
+             or use a relay of your own"
+        );
+    }
+    let resp = resp
         .error_for_status()
         .context("relay rejected deposit")?;
     let ttl_secs = crate::flow::granted_ttl(&resp, ttl);

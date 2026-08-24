@@ -581,6 +581,16 @@ async fn deliver_to_inner(
                     finish(inner, id, false, Err(e));
                     return;
                 }
+                Err(e @ flow::DepositError::Busy) => {
+                    set_waiting(
+                        inner,
+                        id,
+                        &format!(
+                            "{e} — retrying later, and delivering P2P as soon as the recipient is online"
+                        ),
+                    );
+                    next_relay_try = Instant::now() + Duration::from_secs(RELAY_RETRY_SECS);
+                }
                 Err(e @ flow::DepositError::Unavailable(_)) => {
                     set_waiting(
                         inner,
