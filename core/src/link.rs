@@ -259,9 +259,7 @@ pub async fn deposit_link(
              or use a relay of your own"
         );
     }
-    let resp = resp
-        .error_for_status()
-        .context("relay rejected deposit")?;
+    let resp = resp.error_for_status().context("relay rejected deposit")?;
     let ttl_secs = crate::flow::granted_ttl(&resp, ttl);
     let claim = resp.text().await.context("read claim")?;
     let claim = claim.trim().to_string();

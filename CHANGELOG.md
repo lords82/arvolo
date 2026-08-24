@@ -1,5 +1,31 @@
 # Changelog
 
+## v0.13.1 — the Mac and Windows apps, which v0.13.0 forgot
+
+### Fixed
+
+- **v0.13.0 shipped with no `.dmg` and no `.msi`.** The GUI binary had been
+  renamed to `Arvolo`, and the CLI travels inside the bundle as a sidecar named
+  `arvolo`, installed in the same directory. macOS and Windows compare filenames
+  without case, so the two files are one name there and landed on top of each
+  other: notarization refused the app ("the signature of the binary is invalid"),
+  and WiX refused to link an installer holding the same file twice. The Linux
+  AppImage, built on a case-sensitive filesystem, came out fine and hid it.
+
+  Worse than the missing downloads: `latest.json` is assembled from the
+  signatures that exist, so it went out naming `linux-x86_64` alone — every
+  installed Mac and Windows copy was told there was nothing newer. **If you are
+  on macOS or Windows, this is the release to install by hand**; the in-app
+  updater will take it from here.
+
+- **A relay with no room left now says so in words.** It answers `507` when it is
+  holding as many bytes as its operator allows, and the client used to pass that
+  through as "relay returned 507 Insufficient Storage" — the machine's condition,
+  not yours. It now says that the relay is busy, that it passes, and that a relay
+  of your own has no queue. Nothing about the retrying changed: deposits expire,
+  the room comes back, and a direct transfer still happens the moment the
+  recipient appears.
+
 ## v0.13.0 — a contact brings their own relay, and the app updates itself
 
 Two features that ought to have shipped years ago, a fix for something that
