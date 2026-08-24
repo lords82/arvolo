@@ -8,6 +8,22 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 
+# The running program is called Arvolo, not arvolo-gui.
+#
+# The crate keeps its name — `cargo build -p arvolo-gui`, the workspace member,
+# every script and CI job that names it — but the *binary* it produces is what a
+# person actually meets: it is the file inside `Arvolo.app/Contents/MacOS/`, the
+# name in Activity Monitor and in `ps`, the process a firewall prompt asks about,
+# and the `.exe` in Program Files. `arvolo-gui` is an internal label, and there
+# is no reason for it to be the answer to "what is this program".
+#
+# Renamed here rather than through Tauri's `mainBinaryName`, which only renames
+# at bundle time — the config's own documentation points at this field first, and
+# it is also the only one of the two that `tauri dev` sees.
+[[bin]]
+name = "Arvolo"
+path = "src/main.rs"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
