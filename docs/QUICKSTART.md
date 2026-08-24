@@ -19,7 +19,8 @@ curl -fsSL https://raw.githubusercontent.com/lords82/arvolo/main/install.sh | sh
 
 Installs `arvolo` (client) and `arvolo-relay` (server) into `/usr/local/bin`. Or
 grab prebuilt binaries from the [latest release](https://github.com/lords82/arvolo/releases),
-or `cargo install arvolo-cli arvolo-relay` (Rust ≥ 1.88).
+or build them with
+`cargo install --git https://github.com/lords82/arvolo arvolo-cli` (Rust ≥ 1.88).
 
 ---
 

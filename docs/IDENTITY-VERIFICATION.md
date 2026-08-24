@@ -6,7 +6,7 @@
 > Scope: what is (or will be) **in the public AGPL-3.0 repo**. Developments that
 > require managed identity infrastructure (directory + SSO, key transparency,
 > federation with domain-proof) are **out of the open core**: they are part of the
-> commercial edition — see [`COMMERCIAL.md`](COMMERCIAL.md).
+> commercial edition — see [`../LICENSING.md`](../LICENSING.md).
 
 ---
 
@@ -123,7 +123,7 @@ without an IdP.
 ## Explicit boundary (what does NOT enter the open core)
 
 Anything that requires a **managed trust anchor** for identity belongs to the
-commercial edition (see [`COMMERCIAL.md`](COMMERCIAL.md)), **not** this repo:
+commercial edition (see [`../LICENSING.md`](../LICENSING.md)), **not** this repo:
 authenticated directory, SSO/SAML/OIDC + SCIM, key transparency, federation with
 domain verification, centralized revocation and audit of the identity binding.
 

@@ -7,7 +7,7 @@
 > Scope: **open-core only** (public AGPL-3.0 repo). Commercial features — relay
 > federation, governance/console, SSO/audit, managed hosting — belong to the
 > commercial edition (separate private repo); see
-> [`COMMERCIAL.md`](COMMERCIAL.md) and [`../LICENSING.md`](../LICENSING.md).
+> [`../LICENSING.md`](../LICENSING.md).
 
 ---
 
@@ -45,7 +45,7 @@
 - **Key-change detection** (after-the-fact anti-MITM): warn if a known contact's key changes.
 - In-person pairing that **pins long-term identities** (a contact verified "for free").
 - Verification via **QR** (once GUI/mobile land).
-- Automatic key↔person binding (directory, SSO, key transparency) is **out of the open core**: commercial edition (see [`COMMERCIAL.md`](COMMERCIAL.md)).
+- Automatic key↔person binding (directory, SSO, key transparency) is **out of the open core**: commercial edition (see [`../LICENSING.md`](../LICENSING.md)).
 
 ## 6. Hardening & self-host (open-core)
 - Link policies: **download-once, revoke, password, max downloads**.
@@ -56,7 +56,7 @@
 ## 7. Experience & adoption (open-core)
 
 > Product factors that widen the addressable market. The *sales strategy* and the
-> paid features are in the commercial edition (see [`COMMERCIAL.md`](COMMERCIAL.md)).
+> paid features are in the commercial edition (see [`../LICENSING.md`](../LICENSING.md)).
 
 ### 7.1 No-install experience (adoption blocker #1)
 Today it is CLI-only; installer for Linux/macOS only. Nobody adopts a tool where

@@ -15,8 +15,10 @@ agree that your contribution may be distributed under **both** the AGPL-3.0 and
 the Arvolo commercial license. Sign your commits with `git commit -s` (adds a
 `Signed-off-by` line).
 
-> Note: until the project formalizes a Contributor License Agreement, non-trivial
-> external contributions may be deferred so the dual-licensing rights stay clean.
+> The sign-off is all that is asked for. For anything larger than a fix, open an
+> issue first and let's agree on the shape before you write it — that is worth
+> doing on any project, and here it also gives us a chance to talk through the
+> dual-licensing side before, rather than after, you have spent your evening on it.
 
 ## Development
 

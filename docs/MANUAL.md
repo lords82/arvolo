@@ -49,18 +49,12 @@ Installs `arvolo` (and `arvolo-relay`) into `/usr/local/bin` (override with
 [latest release](https://github.com/lords82/arvolo/releases), unpack, and put it
 on your `PATH`.
 
-**From crates.io** (needs Rust ≥ 1.88):
+**With cargo** (needs Rust ≥ 1.88) — from the repository, which is where the
+crates are published from today:
 
 ```sh
-cargo install arvolo-cli    # the `arvolo` client
-cargo install arvolo-relay  # the relay (self-host)
-```
-
-**From git** (latest, unreleased):
-
-```sh
-cargo install --git https://github.com/lords82/arvolo arvolo-cli
-cargo install --git https://github.com/lords82/arvolo arvolo-relay
+cargo install --git https://github.com/lords82/arvolo arvolo-cli    # the `arvolo` client
+cargo install --git https://github.com/lords82/arvolo arvolo-relay  # the relay (self-host)
 ```
 
 **Relay via Docker** — self-host the zero-knowledge relay in one command:

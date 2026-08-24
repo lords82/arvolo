@@ -6,7 +6,7 @@ the client (`arvolo`) and the single self-hostable relay (`arvolo-relay`).
 
 > Managed-identity and multi-relay features (directory, SSO, federation, key
 > transparency) are **not** covered here — they are part of the separate
-> commercial edition. See [`COMMERCIAL.md`](COMMERCIAL.md).
+> commercial edition. See [`../LICENSING.md`](../LICENSING.md).
 
 ---
 
@@ -188,5 +188,5 @@ federation, Windows and mobile are on the open-core
 [`ROADMAP-FUTURE.md`](ROADMAP-FUTURE.md).
 
 Everything in this document is open-core and self-hostable. For the commercial
-edition boundary, see [`COMMERCIAL.md`](COMMERCIAL.md) and
+edition boundary, see [`../LICENSING.md`](../LICENSING.md) and
 [`../LICENSING.md`](../LICENSING.md).
