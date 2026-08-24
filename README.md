@@ -41,6 +41,8 @@ to 100 MB, links live for 6 hours**, and it can be busy. **For anything that
 matters, point Arvolo at a relay you run** — [one `docker run`](#run-your-own-relay),
 thirty seconds. A browser link is also the one path where the relay serves the
 JavaScript that does the decrypting, which is a good reason for it to be yours.
+Using the public one means accepting its [terms](TERMS.md) — short, and worth the
+two minutes if what you send is not yours to send.
 
 ## Send to a person
 
@@ -130,6 +132,7 @@ covers doing it properly, with TLS.
 | [Deploying](docs/DEPLOY.md) | Production self-hosting: systemd, Docker, abuse hardening. |
 | [The desktop app](gui/README.md) | The GUI in detail, with its CLI parity table. |
 | [The protocol](docs/PROTOCOL.md) | The wire format and every flow, for the curious and the auditing. |
+| [Terms of use](TERMS.md) | The conditions of the public relay: what may not be sent, who answers for it, what is logged and for how long. |
 
 ## Security
 

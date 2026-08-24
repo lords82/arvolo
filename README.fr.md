@@ -39,7 +39,9 @@ curl -fsSL https://raw.githubusercontent.com/lords82/arvolo/main/install.sh | sh
 suivante fonctionne tout de suite. C'est une petite machine tenue par le projet —
 fichiers jusqu'à 100 Mo, liens valables 6 heures — et elle ne voit jamais vos
 clés. **Pour ce qui compte, pointez Arvolo vers un relais à vous**, monté en une
-commande :
+commande. Utiliser le relais public, c'est en accepter les
+[conditions](TERMS.md) *(anglais)* : elles sont courtes, et valent les deux
+minutes si ce que vous envoyez n'est pas à vous.
 
 ```sh
 docker run -d --name arvolo-relay -p 6282:6282 -v arvolo-data:/data \
@@ -83,6 +85,7 @@ jamais au serveur](docs/assets/arvolo-link-browser.png)
 | [Déploiement](docs/DEPLOY.md) | Auto-hébergement en production : systemd, Docker, durcissement. *(anglais)* |
 | [L'application de bureau](gui/README.md) | La GUI en détail, avec sa table de parité CLI. *(anglais)* |
 | [Le protocole](docs/PROTOCOL.md) | Le format réseau et chaque flux, pour les curieux et les auditeurs. *(anglais)* |
+| [Conditions d'utilisation](TERMS.md) | Les conditions du relais public : ce qui ne peut pas être envoyé, qui en répond, ce qui est journalisé et pour combien de temps. *(anglais)* |
 
 ## Licence
 
