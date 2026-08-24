@@ -26,6 +26,12 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::time::timeout;
 
+/// How long to wait on a spawned `arvolo` before giving up on it. Generous on
+/// purpose — nextest owns the hang deadline, this only turns a hang into a named
+/// assertion. See the same constant in `contacts_pair.rs` for what a tight one
+/// cost on Windows.
+const SPAWN_WAIT: Duration = Duration::from_secs(60);
+
 async fn spawn_relay() -> String {
     let dir = tempfile::tempdir().unwrap();
     let node = BlobNode::spawn(dir.path(), RelayChoice::Disabled)
@@ -131,7 +137,7 @@ async fn advertised_name_shown_and_approved_end_to_end() {
 
     // The receiver's listen shows the advertised name as a NEW, unverified claim.
     let mut saw_name = false;
-    while let Ok(Ok(Some(line))) = timeout(Duration::from_secs(25), lines.next_line()).await {
+    while let Ok(Ok(Some(line))) = timeout(SPAWN_WAIT, lines.next_line()).await {
         if line.contains("Lorenzo") {
             saw_name = true;
             break;

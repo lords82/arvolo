@@ -24,6 +24,17 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::time::timeout;
 
+/// How long to wait on a spawned `arvolo` before giving up on it.
+///
+/// Deliberately generous. nextest owns the hang deadline (`.config/nextest.toml`
+/// kills a wedged test and names it); these bounds exist only so a hang surfaces
+/// as an assertion here instead of a silent block, not to say how fast the CLI
+/// ought to be. Held tight they measure the runner instead of the code: at 20s
+/// this expired on a slow Windows runner before the host had printed its code,
+/// and the failure then read as a product bug — "the host should print a pairing
+/// code, got: \"\"" — when the pairing was fine and the machine was busy.
+const SPAWN_WAIT: Duration = Duration::from_secs(60);
+
 async fn spawn_relay() -> String {
     let dir = tempfile::tempdir().unwrap();
     let node = BlobNode::spawn(dir.path(), RelayChoice::Disabled)
@@ -90,7 +101,7 @@ async fn pairing_saves_and_verifies_both_sides() {
 
     let mut lines = BufReader::new(host.stdout.take().unwrap()).lines();
     let mut code = String::new();
-    while let Ok(Ok(Some(line))) = timeout(Duration::from_secs(20), lines.next_line()).await {
+    while let Ok(Ok(Some(line))) = timeout(SPAWN_WAIT, lines.next_line()).await {
         let t = line.trim();
         if !t.is_empty() {
             code = t.to_string();
@@ -107,7 +118,7 @@ async fn pairing_saves_and_verifies_both_sides() {
     assert!(ok, "the joining side failed: {err}");
     assert!(out.contains("verified"), "joiner should verify: {out}");
 
-    let status = timeout(Duration::from_secs(30), host.wait())
+    let status = timeout(SPAWN_WAIT, host.wait())
         .await
         .expect("the host side should finish once paired")
         .expect("host exit");
@@ -162,7 +173,7 @@ async fn a_wrong_code_saves_nobody() {
 
     let mut lines = BufReader::new(host.stdout.take().unwrap()).lines();
     let mut code = String::new();
-    while let Ok(Ok(Some(line))) = timeout(Duration::from_secs(20), lines.next_line()).await {
+    while let Ok(Ok(Some(line))) = timeout(SPAWN_WAIT, lines.next_line()).await {
         let t = line.trim();
         if !t.is_empty() {
             code = t.to_string();
@@ -221,7 +232,7 @@ async fn pairing_across_two_relays_teaches_each_side_where_the_other_is() {
 
     let mut lines = BufReader::new(host.stdout.take().unwrap()).lines();
     let mut code = String::new();
-    while let Ok(Ok(Some(line))) = timeout(Duration::from_secs(20), lines.next_line()).await {
+    while let Ok(Ok(Some(line))) = timeout(SPAWN_WAIT, lines.next_line()).await {
         let t = line.trim();
         if !t.is_empty() {
             code = t.to_string();
@@ -238,7 +249,7 @@ async fn pairing_across_two_relays_teaches_each_side_where_the_other_is() {
     let (ok, _, err) = run(cfg_b.path(), &relay_b, &["contacts", "add", "alice", &code]).await;
     assert!(ok, "the joining side failed: {err}");
 
-    let status = timeout(Duration::from_secs(30), host.wait())
+    let status = timeout(SPAWN_WAIT, host.wait())
         .await
         .expect("the host side should finish once paired")
         .expect("host exit");

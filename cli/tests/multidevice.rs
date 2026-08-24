@@ -21,6 +21,12 @@ use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
+/// How long to wait on a spawned `arvolo` before giving up on it. Generous on
+/// purpose — nextest owns the hang deadline, this only turns a hang into a named
+/// assertion. See the same constant in `contacts_pair.rs` for what a tight one
+/// cost on Windows.
+const SPAWN_WAIT: Duration = Duration::from_secs(60);
+
 async fn spawn_relay() -> String {
     let dir = tempfile::tempdir().unwrap();
     let node = BlobNode::spawn(dir.path(), RelayChoice::Disabled)
@@ -92,9 +98,7 @@ async fn device_pair_join_and_sync_end_to_end() {
         .expect("spawn device pair");
     let mut lines = BufReader::new(pair.stdout.take().unwrap()).lines();
     let mut code = None;
-    while let Ok(Ok(Some(line))) =
-        tokio::time::timeout(Duration::from_secs(25), lines.next_line()).await
-    {
+    while let Ok(Ok(Some(line))) = tokio::time::timeout(SPAWN_WAIT, lines.next_line()).await {
         if let Some(rest) = line.split_once("device join ") {
             code = Some(rest.1.trim().to_string());
             break;
@@ -105,7 +109,7 @@ async fn device_pair_join_and_sync_end_to_end() {
     // Device B joins with the code (--yes overwrites B's fresh identity).
     let (ok, log) = run(cfg_b.path(), &relay, &["device", "join", &code, "--yes"]).await;
     assert!(ok, "device join failed: {log}");
-    let _ = tokio::time::timeout(Duration::from_secs(25), pair.wait()).await;
+    let _ = tokio::time::timeout(SPAWN_WAIT, pair.wait()).await;
 
     // After pairing the two devices share ONE identity...
     let (_, id_a) = run(cfg_a.path(), &relay, &["me", "--plain"]).await;

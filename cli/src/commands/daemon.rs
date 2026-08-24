@@ -639,22 +639,6 @@ fn should_self_notify(front_ends: &AtomicUsize) -> bool {
     front_ends.load(Ordering::SeqCst) == 0
 }
 
-#[cfg(test)]
-mod notify_tests {
-    use super::should_self_notify;
-    use std::sync::atomic::AtomicUsize;
-
-    // Regression: this used to read `!front_ends.load(..) > 0` — a bitwise NOT
-    // on usize, true for every count — so the daemon notified on top of the
-    // GUI and every offer rang twice.
-    #[test]
-    fn daemon_stays_quiet_while_a_front_end_is_attached() {
-        assert!(should_self_notify(&AtomicUsize::new(0)));
-        assert!(!should_self_notify(&AtomicUsize::new(1)));
-        assert!(!should_self_notify(&AtomicUsize::new(3)));
-    }
-}
-
 #[cfg(all(test, unix))]
 mod lock_tests {
     use super::{acquire_instance_lock, version_lt};
@@ -1177,5 +1161,24 @@ mod share_line_tests {
         assert_eq!(transfer_state(&dto(false, 0, "active")), "active");
         let failed = "failed: relay unreachable";
         assert_eq!(transfer_state(&dto(true, 0, failed)), failed);
+    }
+}
+
+// Last module in the file on purpose: the two above are unix-only, so on Windows
+// this is the only test module, and anything below it would trip
+// `clippy::items_after_test_module`.
+#[cfg(test)]
+mod notify_tests {
+    use super::should_self_notify;
+    use std::sync::atomic::AtomicUsize;
+
+    // Regression: this used to read `!front_ends.load(..) > 0` — a bitwise NOT
+    // on usize, true for every count — so the daemon notified on top of the
+    // GUI and every offer rang twice.
+    #[test]
+    fn daemon_stays_quiet_while_a_front_end_is_attached() {
+        assert!(should_self_notify(&AtomicUsize::new(0)));
+        assert!(!should_self_notify(&AtomicUsize::new(1)));
+        assert!(!should_self_notify(&AtomicUsize::new(3)));
     }
 }
