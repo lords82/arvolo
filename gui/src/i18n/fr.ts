@@ -387,11 +387,15 @@ export const fr: Dict = {
   "devices.thisDevice": "cet appareil",
   "devices.neverSeen": "jamais synchronisé",
   "devices.seenAgo": (when) => `vu ${when}`,
+  "devices.rowActions": (name) => `Actions pour ${name}`,
   "devices.rename": "Renommer",
   "devices.renameTitle": "Nommer cet appareil",
   "devices.renameHint":
     "Celui-ci seulement : chaque machine se décrit elle-même, les autres se renomment sur elles-mêmes.",
+  "devices.renameThereDesc": "Sur cette machine : c'est elle qui écrit sa ligne.",
   "devices.forget": "Oublier",
+  "devices.forgetHereDesc":
+    "Vous y êtes — elle s'annoncerait de nouveau au tour suivant.",
   "devices.confirmForgetTitle": (name) => `Oublier ${name} ?`,
   "devices.confirmForgetBody":
     "Elle quitte la liste sur toutes vos machines. Elle garde l'identité — cela ne se reprend pas — mais si elle tourne, elle cesse de s'annoncer.",

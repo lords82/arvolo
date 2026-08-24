@@ -693,6 +693,56 @@ describe("the send panel", () => {
     await waitFor(() => expect(harness.recorder.sendTo[0]?.[3]).toBeNull());
   });
 
+  // The bug these two are here for: the name field committed on Enter and closed
+  // on blur, so both gestures a person makes after typing — press the button
+  // beside it, click anywhere — threw the name away without a word. The daemon
+  // was fine; nothing ever reached it.
+  it("125g. a machine is named by pressing Save, not only by pressing Enter", async () => {
+    render(<App />);
+    useStore.getState().go("devices");
+    fireEvent.click(await screen.findByLabelText("Actions for this mac"));
+    fireEvent.click(await screen.findByText("Rename"));
+    fireEvent.change(await screen.findByLabelText("Name this device"), {
+      target: { value: "portatile" },
+    });
+    // Clicking Save blurs the field first. That used to be the end of the edit.
+    fireEvent.blur(screen.getByLabelText("Name this device"));
+    fireEvent.click(screen.getByText("Save"));
+    await waitFor(() =>
+      expect(harness.recorder.renameThisDevice).toEqual(["portatile"])
+    );
+    expect(await screen.findByText("Renamed")).toBeTruthy();
+  });
+
+  it("125h. the row menu carries both actions, with the impossible one refused in place", async () => {
+    harness.snapshot.devices = [
+      ...harness.snapshot.devices,
+      {
+        id: "bb00000000000000000000000000bb00",
+        name: "the desktop",
+        platform: "linux",
+        last_seen: 1_700_000_000,
+        is_this_device: false,
+      },
+    ];
+    render(<App />);
+    useStore.getState().go("devices");
+    // This machine: named here, and not forgettable here — it would only
+    // announce itself again on the next round.
+    fireEvent.click(await screen.findByLabelText("Actions for this mac"));
+    expect(
+      (await screen.findByText("Rename")).closest("button")?.disabled
+    ).toBe(false);
+    expect(screen.getByText("Forget").closest("button")?.disabled).toBe(true);
+    fireEvent.keyDown(document, { key: "Escape" });
+    // The other one: the mirror image, for the same reason read the other way.
+    fireEvent.click(await screen.findByLabelText("Actions for the desktop"));
+    expect(
+      (await screen.findByText("Rename")).closest("button")?.disabled
+    ).toBe(true);
+    expect(screen.getByText("Forget").closest("button")?.disabled).toBe(false);
+  });
+
   it("125d. the Devices screen opens the sheet already on that mode", async () => {
     render(<App />);
     fireEvent.click(await screen.findByText("Your devices")); // the rail item

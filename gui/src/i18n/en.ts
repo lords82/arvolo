@@ -433,11 +433,15 @@ export const en = {
   "devices.thisDevice": "this device",
   "devices.neverSeen": "never synced",
   "devices.seenAgo": (when: string) => `seen ${when}`,
+  "devices.rowActions": (name: string) => `Actions for ${name}`,
   "devices.rename": "Rename",
   "devices.renameTitle": "Name this device",
   "devices.renameHint":
     "Only this one: a device is described by itself, so the others are renamed on themselves.",
+  "devices.renameThereDesc": "On that machine: it writes its own row.",
   "devices.forget": "Forget",
+  "devices.forgetHereDesc":
+    "You are on it — it would announce itself again on the next round.",
   "devices.confirmForgetTitle": (name: string) => `Forget ${name}?`,
   "devices.confirmForgetBody":
     "It leaves the list on every machine. It keeps the identity — nothing takes that back — but if it is running it stops announcing itself.",

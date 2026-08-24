@@ -28,6 +28,7 @@ import { fire, useStore } from "../store";
 import { useT } from "../i18n";
 import { Icon } from "../ui/Icons";
 import { Badge, Button, Empty, SwitchRow, TextInput } from "../ui/Primitives";
+import { MenuButton } from "../ui/Menu";
 import { CopyField, Fingerprint } from "../ui/Bits";
 import { Confirm } from "../ui/Sheet";
 import { toast } from "../ui/Toasts";
@@ -40,7 +41,12 @@ import type { DeviceDto } from "../types";
  *  the machine it describes. So *rename* appears on this machine's row alone;
  *  offering it on the others would be a field whose value the next sync round
  *  would throw away. *Forget* is the opposite: it is for the machine you are not
- *  at, usually one you no longer have. */
+ *  at, usually one you no longer have.
+ *
+ *  Both live in the row's ⋯ menu, as everywhere else in the app, and the one that
+ *  does not apply to a row is shown disabled with the reason rather than left
+ *  out: "why can I rename here and not there" is exactly the question the rule
+ *  above raises, and an absent item cannot answer it. */
 function DeviceList() {
   const t = useT();
   const devices = useStore((s) => s.devices);
@@ -51,6 +57,19 @@ function DeviceList() {
   const [confirmForget, setConfirmForget] = useState<DeviceDto | null>(null);
 
   const now = Math.floor(Date.now() / 1000);
+
+  // The edit is committed here and nowhere else, so every way of committing it —
+  // Enter, the Save button — goes through the same check and the same toast.
+  const commit = () => {
+    const name = draft.trim();
+    if (!name) return;
+    setEditing(null);
+    fire(
+      rename(name).then(() =>
+        toast.ok(t("devices.renamed"), t("devices.renamedDetail"))
+      )
+    );
+  };
 
   return (
     <div className="card card-pad stack">
@@ -74,19 +93,21 @@ function DeviceList() {
               </span>
               <span className="row-main">
                 {editing === d.id ? (
+                  // No commit-or-cancel on blur. It used to close on blur, which
+                  // meant the two gestures a person actually makes after typing a
+                  // name — click Save, click anywhere — both threw the name away
+                  // before anything could read it, with nothing on screen to say
+                  // so. The field now stays open until one of the two buttons
+                  // beside it is pressed.
                   <TextInput
                     autoFocus
                     value={draft}
                     aria-label={t("devices.renameTitle")}
                     onChange={(e) => setDraft(e.currentTarget.value)}
                     onKeyDown={(e) => {
-                      if (e.key === "Enter" && draft.trim()) {
-                        setEditing(null);
-                        fire(rename(draft.trim()));
-                      }
+                      if (e.key === "Enter") commit();
                       if (e.key === "Escape") setEditing(null);
                     }}
-                    onBlur={() => setEditing(null)}
                   />
                 ) : (
                   <span className="row-name hstack-sm">
@@ -107,20 +128,56 @@ function DeviceList() {
                 </span>
               </span>
               <span className="hstack-sm">
-                {d.is_this_device ? (
-                  <Button
-                    size="sm"
-                    onClick={() => {
-                      setDraft(d.name);
-                      setEditing(d.id);
-                    }}
-                  >
-                    {t("devices.rename")}
-                  </Button>
+                {editing === d.id ? (
+                  <>
+                    <Button
+                      size="sm"
+                      variant="primary"
+                      disabled={!draft.trim()}
+                      onClick={commit}
+                    >
+                      {t("common.save")}
+                    </Button>
+                    <Button size="sm" onClick={() => setEditing(null)}>
+                      {t("common.cancel")}
+                    </Button>
+                  </>
                 ) : (
-                  <Button size="sm" onClick={() => setConfirmForget(d)}>
-                    {t("devices.forget")}
-                  </Button>
+                  <MenuButton
+                    label={t("devices.rowActions", d.name)}
+                    items={[
+                      {
+                        key: "rename",
+                        label: t("devices.rename"),
+                        icon: <Icon.Devices size={13} />,
+                        disabled: !d.is_this_device,
+                        desc: d.is_this_device
+                          ? undefined
+                          : t("devices.renameThereDesc"),
+                        onSelect: () => {
+                          setDraft(d.name);
+                          setEditing(d.id);
+                        },
+                      },
+                      {
+                        key: "forget",
+                        label: t("devices.forget"),
+                        icon: <Icon.Trash size={13} />,
+                        danger: !d.is_this_device,
+                        separated: true,
+                        // The daemon refuses it anyway — a machine that forgot
+                        // itself would announce itself again five minutes later —
+                        // so the menu says why instead of sending it to be told.
+                        disabled: d.is_this_device,
+                        desc: d.is_this_device
+                          ? t("devices.forgetHereDesc")
+                          : undefined,
+                        onSelect: () => setConfirmForget(d),
+                      },
+                    ]}
+                  >
+                    <Icon.More size={15} />
+                  </MenuButton>
                 )}
               </span>
             </div>
@@ -140,7 +197,12 @@ function DeviceList() {
         onConfirm={() => {
           const who = confirmForget;
           setConfirmForget(null);
-          if (who) fire(forget(who.name));
+          if (who)
+            fire(
+              forget(who.name).then(() =>
+                toast.ok(t("devices.forgotten"), who.name)
+              )
+            );
         }}
       />
     </div>
