@@ -8,22 +8,20 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 
-# The running program is called Arvolo, not arvolo-gui.
+# The binary stays `arvolo-gui`, and it cannot be called `Arvolo`.
 #
-# The crate keeps its name — `cargo build -p arvolo-gui`, the workspace member,
-# every script and CI job that names it — but the *binary* it produces is what a
-# person actually meets: it is the file inside `Arvolo.app/Contents/MacOS/`, the
-# name in Activity Monitor and in `ps`, the process a firewall prompt asks about,
-# and the `.exe` in Program Files. `arvolo-gui` is an internal label, and there
-# is no reason for it to be the answer to "what is this program".
+# v0.13.0 renamed it — the program a person meets should say its own name in
+# Activity Monitor and in `ps` — and that release shipped with no `.dmg` and no
+# `.msi`, because the CLI travels inside the bundle as a sidecar named `arvolo`
+# and lands in the same directory as the main binary. macOS and Windows compare
+# filenames without case: `Arvolo` and `arvolo` are one name there, so the two
+# files collide. Notarization refused the app ("the signature of the binary is
+# invalid" on `Contents/MacOS/arvolo`) and WiX refused to link the installer.
 #
-# Renamed here rather than through Tauri's `mainBinaryName`, which only renames
-# at bundle time — the config's own documentation points at this field first, and
-# it is also the only one of the two that `tauri dev` sees.
-[[bin]]
-name = "Arvolo"
-path = "src/main.rs"
-
+# Renaming the program therefore means renaming the sidecar first — and the
+# sidecar is what a Windows user types in a terminal after the installer puts it
+# on PATH, so that is a decision with its own consequences, not a one-line
+# rename. Until it is taken, this file leaves the binary name alone.
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

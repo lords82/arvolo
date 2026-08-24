@@ -84,10 +84,6 @@ asking you to think about them.
   would announce itself again on the next round, which is why the daemon refuses
   that one. An absent menu item cannot say either.
 
-- **The desktop program is called Arvolo**, in Activity Monitor, in `ps`, in a
-  firewall prompt and in Program Files. It used to introduce itself as
-  `arvolo-gui`, which is the name of a crate, not of a program.
-
 ## v0.13.0-rc1 — fewer words, and they stay in the box
 
 The words in the CLI and the GUI explained too much. Almost every string said
