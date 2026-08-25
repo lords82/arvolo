@@ -124,12 +124,18 @@ pub(super) enum LiveOutcome {
     Fatal(anyhow::Error),
 }
 
-pub(super) fn set_waiting(inner: &Arc<Inner>, id: u64, reason: &str) {
+pub(super) fn set_waiting(inner: &Arc<Inner>, id: u64, reason: WaitingReason) {
+    let text = reason.text();
     // Live status: keep the cancel token so pause/cancel still reach the loop.
-    inner.set_status_live(id, TransferStatus::Waiting(reason.to_string()));
+    inner.set_status_live(id, TransferStatus::Waiting(text.clone()));
+    // After the status, not before: setting a status clears the code, so a code
+    // written first would be wiped by the very call that makes it true.
+    inner.set_waiting_code(id, reason.code(), reason.detail().unwrap_or_default());
     inner.emit(ManagerEvent::Waiting {
         id,
-        reason: reason.to_string(),
+        reason: text,
+        code: reason.code().to_string(),
+        detail: reason.detail().unwrap_or_default().to_string(),
     });
 }
 
@@ -571,34 +577,18 @@ async fn deliver_to_inner(
                 }
                 Err(flow::DepositError::TooLarge) => {
                     too_big = true;
-                    set_waiting(
-                        inner,
-                        id,
-                        "file too large for this relay — waiting for the recipient to come online for a direct transfer",
-                    );
+                    set_waiting(inner, id, WaitingReason::TooLarge);
                 }
                 Err(flow::DepositError::Fatal(e)) => {
                     finish(inner, id, false, Err(e));
                     return;
                 }
                 Err(e @ flow::DepositError::Busy) => {
-                    set_waiting(
-                        inner,
-                        id,
-                        &format!(
-                            "{e} — retrying later, and delivering P2P as soon as the recipient is online"
-                        ),
-                    );
+                    set_waiting(inner, id, WaitingReason::RelayRetry(e.to_string()));
                     next_relay_try = Instant::now() + Duration::from_secs(RELAY_RETRY_SECS);
                 }
                 Err(e @ flow::DepositError::Unavailable(_)) => {
-                    set_waiting(
-                        inner,
-                        id,
-                        &format!(
-                            "{e} — retrying later, and delivering P2P as soon as the recipient is online"
-                        ),
-                    );
+                    set_waiting(inner, id, WaitingReason::RelayRetry(e.to_string()));
                     next_relay_try = Instant::now() + Duration::from_secs(RELAY_RETRY_SECS);
                 }
             }
@@ -805,7 +795,7 @@ pub(super) async fn serve_live_once(
     //
     // `set_waiting` says the true thing and announces it. `Active` follows below,
     // when a receiver actually connects.
-    set_waiting(inner, id, "offered — waiting for them to accept");
+    set_waiting(inner, id, WaitingReason::Offered);
 
     // Per-attempt child token: the watchdog cancels *this* to stop serving on
     // fallback, leaving the caller's token (user cancel) untouched.

@@ -37,7 +37,7 @@ export type WireEvent =
   | { completed: { id: number; path: string | null } }
   | { deposited: { id: number } }
   | { preparing: { id: number } }
-  | { waiting: { id: number; reason: string } }
+  | { waiting: { id: number; reason: string; code?: string; detail?: string } }
   | { paused: { id: number; reason: string } }
   | { failed: { id: number; error: string } }
   | { cancelled: { id: number } }

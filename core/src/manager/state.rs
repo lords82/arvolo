@@ -12,6 +12,20 @@ use crate::presence::{InboxSubscription, ReceivedOffer};
 
 use super::*;
 
+/// Drop a waiting code the moment the row stops waiting.
+///
+/// Both status setters call it, so the code cannot outlive the status it belongs
+/// to: a transfer that waited, then went active, would otherwise still be
+/// carrying "offered" for any client that read the field without checking the
+/// status first. Cheap insurance against a stale label — the sort that shows up
+/// as a row explaining itself with last week's reason.
+fn clear_waiting_code(t: &mut Transfer) {
+    if !matches!(t.status, TransferStatus::Waiting(_)) {
+        t.waiting_code.clear();
+        t.waiting_detail.clear();
+    }
+}
+
 /// Live state for an in-progress `send --to` delivery, so it can be paused,
 /// resumed, or re-driven. Mirrored to disk (a `SendToRecord`) for durability.
 #[derive(Clone)]
@@ -204,6 +218,7 @@ impl Inner {
         );
         if let Some(t) = self.transfers.lock().unwrap().get_mut(&id) {
             t.status = status;
+            clear_waiting_code(t);
         }
         self.cancels.lock().unwrap().remove(&id);
     }
@@ -213,6 +228,16 @@ impl Inner {
     pub(super) fn set_status_live(&self, id: u64, status: TransferStatus) {
         if let Some(t) = self.transfers.lock().unwrap().get_mut(&id) {
             t.status = status;
+            clear_waiting_code(t);
+        }
+    }
+
+    /// Record why a send is waiting, as the code a client translates. Set right
+    /// after the status, which is why it does not clear itself.
+    pub(super) fn set_waiting_code(&self, id: u64, code: &str, detail: &str) {
+        if let Some(t) = self.transfers.lock().unwrap().get_mut(&id) {
+            t.waiting_code = code.to_string();
+            t.waiting_detail = detail.to_string();
         }
     }
 

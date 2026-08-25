@@ -45,6 +45,13 @@ export interface TransferDto {
   /** How far the inbox offer for a deposited send has got. Same vocabulary as a
    *  deposit's `offer_status`; null when there is nothing to say. */
   offer_status?: string | null;
+  /** Why a waiting send is waiting, as a stable code: "offered" | "tooLarge" |
+   *  "relayRetry". `status` says the same thing in the daemon's English and keeps
+   *  saying it — this is what we translate. Null for a row that is not waiting,
+   *  absent from a daemon that predates the field. */
+  waiting_code?: string | null;
+  /** The relay's own message quoted inside a "relayRetry" reason. */
+  waiting_detail?: string | null;
   /** What the sender of an incoming transfer calls themselves, carried over from
    *  the offer. Absent from a send, a pasted ticket, and an older daemon — and a
    *  claim either way, never evidence. */
@@ -281,7 +288,18 @@ export type EngineEvent =
   /** Reading and encrypting the payload: nothing on the wire yet, and the
    *  recipient has not been offered anything. */
   | { type: "preparing"; id: number }
-  | { type: "waiting"; id: number; reason: string }
+  | {
+      type: "waiting";
+      id: number;
+      reason: string;
+      /** Stable code for `reason` ("offered" | "tooLarge" | "relayRetry"), so the
+       *  window can say it in the user's language. Absent from an older daemon,
+       *  which sends only the English sentence. */
+      code?: string;
+      /** The relay's own words quoted inside a "relayRetry" reason. Not ours to
+       *  translate. */
+      detail?: string;
+    }
   | { type: "paused"; id: number; reason: string }
   | { type: "failed"; id: number; error: string }
   | { type: "cancelled"; id: number }
@@ -348,8 +366,15 @@ export interface UITransfer {
   verified: boolean;
   swarmPeers: number;
   downloadPeers: number;
-  /** Short reason for waiting/paused/failed states. */
+  /** Short reason for waiting/paused/failed states, in the daemon's English. */
   reason?: string;
+  /** For a waiting send: the daemon's stable code for `reason`, which is what
+   *  gets translated. `reason` stays as the fallback for a daemon too old to
+   *  send one. */
+  waitingCode?: string;
+  /** The relay's own message quoted inside a "relayRetry" reason. Shown as it
+   *  arrived: it is another machine's diagnostic, not our prose. */
+  waitingDetail?: string;
   /** Completed-receive path (for "open folder"). */
   path?: string;
   /** When the transfer began (ms). Comes from the engine's `created`; only a row

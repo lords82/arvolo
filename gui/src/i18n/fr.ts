@@ -110,6 +110,10 @@ export const fr: Dict = {
   "meta.sharingPeers": (n) =>
     n === 1 ? "1 personne le télécharge" : `${n} personnes le téléchargent`,
   "meta.stalled": "reprend dès que possible",
+  "waiting.offered": "proposé — en attente de leur acceptation",
+  "waiting.tooLarge": "trop gros pour le relais — envoi direct prévu",
+  "waiting.relayRetry": (why: string) => `${why} — nouvel essai, direct dès qu'ils sont là`,
+  "waiting.relayUnnamed": "le relais n'a pas pu le prendre en charge",
   "meta.incoming": "ouvrir pour les détails",
   "meta.deposited": "en attente du retrait par le destinataire",
   "meta.failed": "transfert échoué",

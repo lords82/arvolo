@@ -569,6 +569,8 @@ export const useStore = create<State>((set, get) => {
       transferred: d.transferred,
       status,
       reason,
+      waitingCode: d.waiting_code ?? undefined,
+      waitingDetail: d.waiting_detail ?? undefined,
       peer: get().peerLabel(d.peer, prev?.peer),
       peerId: d.peer ?? prev?.peerId,
       // The sender's own claim about their name, kept so "save the sender" can
@@ -974,7 +976,15 @@ export const useStore = create<State>((set, get) => {
           patch(ev.id, (tx) => ({ ...tx, status: "preparing" }));
           break;
         case "waiting":
-          patch(ev.id, (tx) => ({ ...tx, status: "stalled", reason: ev.reason }));
+          patch(ev.id, (tx) => ({
+            ...tx,
+            status: "stalled",
+            reason: ev.reason,
+            // Empty from a daemon that predates the code: store nothing rather
+            // than "", so the renderer's fallback to `reason` still triggers.
+            waitingCode: ev.code || undefined,
+            waitingDetail: ev.detail || undefined,
+          }));
           break;
         case "paused":
           patch(ev.id, (tx) => ({ ...tx, status: "paused", reason: ev.reason }));

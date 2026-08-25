@@ -304,7 +304,11 @@ pub(crate) async fn push(
                         );
                         break;
                     }
-                    Ok(ManagerEvent::Waiting { id: eid, reason }) if eid == id => {
+                    // The code rides along for clients that translate; this one
+                    // prints the sentence, which is what a terminal wants.
+                    Ok(ManagerEvent::Waiting {
+                        id: eid, reason, ..
+                    }) if eid == id => {
                         if let Some(p) = progress.take() { p.finish(); }
                         eprintln!("⏳ held: {reason}");
                         eprintln!(

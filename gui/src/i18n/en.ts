@@ -131,6 +131,17 @@ export const en = {
   "meta.sharingPeers": (n: number) =>
     n === 1 ? "1 person downloading it" : `${n} people downloading it`,
   "meta.stalled": "resumes as soon as it can",
+  // Why a send is waiting. One per `WaitingReason` in core/src/manager/mod.rs:
+  // the daemon sends a code, not this sentence, precisely so this sentence can be
+  // written in each language rather than arriving in English down a socket.
+  // Shorter than the daemon's own sentences on purpose. Those are written for a
+  // terminal, where a line has room to explain itself; this is the meta line
+  // under a row, and the copy rules cap it at a glance's worth of words.
+  "waiting.offered": "offered — waiting for them to accept",
+  "waiting.tooLarge": "too big for the relay — will send direct",
+  "waiting.relayRetry": (why: string) => `${why} — retrying, direct when they're online`,
+  // What goes where the relay's own words would, when it gave none.
+  "waiting.relayUnnamed": "the relay could not take it",
   "meta.incoming": "open for the details",
   "meta.deposited": "waiting for the recipient to collect it",
   "meta.failed": "transfer failed",
