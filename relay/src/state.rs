@@ -183,6 +183,14 @@ pub(crate) const CONTROL_PLANE_BODY_LIMIT: usize = 16 * 1024 * 1024; // 16 MiB
 pub const DEFAULT_MAX_ENTRIES: i64 = 100_000;
 /// Cap on chunks a single seed request may ask the relay to fetch+store.
 pub const MAX_SEED_CHUNKS_PER_REQ: usize = 4096;
+/// Cap on hashes a single `/v1/have` question may ask about.
+///
+/// The question itself leaks nothing new — the chunk protocol already answers it
+/// for anyone holding the hashes — but it is a *read* on a relay whose read paths
+/// have no limiter of their own, and a batched one. Bounding the list (and
+/// spending the write budget on it, as the swarm tracker does for the same
+/// reason) is what keeps it from being the cheapest way to make the box work.
+pub const MAX_HAVE_CHUNKS_PER_REQ: usize = 4096;
 /// Default cap on the total number of pending seeded chunk rows (each backs one
 /// ≤16 MiB chunk file on disk), bounding the unauthenticated seed path's disk
 /// footprint. Override with `ARVOLO_MAX_SEEDED_ROWS`.

@@ -46,20 +46,58 @@ async fn dl_page_and_script_are_served_from_the_relay() {
         .unwrap()
         .to_string();
     assert!(ct.contains("text/html"), "page content-type: {ct}");
+    // The script is inlined, so `'self'` would not authorize it: the policy has
+    // to name its hash, and naming only the hash is what stops any *other*
+    // script on this origin from running.
+    let csp = page
+        .headers()
+        .get("content-security-policy")
+        .expect("download page must carry a CSP")
+        .to_str()
+        .unwrap()
+        .to_string();
     assert!(
-        page.headers().get("content-security-policy").is_some(),
-        "download page must carry a CSP"
+        csp.contains("script-src 'sha256-"),
+        "CSP must pin the inline script by hash: {csp}"
     );
+    assert!(
+        !csp.contains("script-src 'self'"),
+        "CSP is not self-based: {csp}"
+    );
+
     let body = page.text().await.unwrap();
     assert!(body.contains("arvolo"), "branded page");
-    assert!(body.contains("/dl.js"), "page references its script");
+    // One artifact: nothing left to fetch before the page can run, which is what
+    // makes the published bundle checkable with a single hash.
+    assert!(
+        !body.contains("<script src="),
+        "the page must have no subresources — the script is inlined"
+    );
+    assert!(
+        body.contains(&csp),
+        "the page's <meta> policy must be the byte-identical header policy"
+    );
     // The page ships English inline as the fallback and tags each string so the
-    // script can swap it for the reader's language before first paint.
+    // script can swap it for the reader's language before first paint…
     assert!(
         body.contains("data-t=\"heading\"") && body.contains("data-html=\"footer\""),
         "page strings are tagged for translation"
     );
+    // …and now carries all four dictionaries itself, picked off the browser's
+    // own language list. Nothing is fetched at runtime.
+    assert!(
+        body.contains("navigator.languages"),
+        "browser-language pick"
+    );
+    for probe in [
+        "Qualcuno ti ha mandato un file",
+        "Quelqu'un vous a envoyé un fichier",
+        "Jemand hat Ihnen eine Datei geschickt",
+    ] {
+        assert!(body.contains(probe), "missing translation: {probe}");
+    }
 
+    // Still served separately for one release, for a page cached before 0.14.
     let js = c.get(format!("{relay}/dl.js")).send().await.unwrap();
     assert!(js.status().is_success());
     let js_ct = js
@@ -70,32 +108,182 @@ async fn dl_page_and_script_are_served_from_the_relay() {
         .unwrap()
         .to_string();
     assert!(js_ct.contains("javascript"), "script content-type: {js_ct}");
-    // …and the script carries all four dictionaries, picked off the browser's
-    // own language list. Nothing is fetched at runtime, so they ship together.
-    let js_body = js.text().await.unwrap();
+    assert!(js.text().await.unwrap().contains("navigator.languages"));
+
+    // The streaming service worker, at both paths it has to answer on: the root
+    // (a page cached before 0.14) and under /dl/, where a page at /dl/{claim}
+    // resolves it now that the bundle uses relative URLs. Both need a root scope.
+    for path in ["arvolo-sw.js", "dl/arvolo-sw.js"] {
+        let sw = c.get(format!("{relay}/{path}")).send().await.unwrap();
+        assert!(sw.status().is_success(), "{path} must be served");
+        assert_eq!(
+            sw.headers()
+                .get("service-worker-allowed")
+                .and_then(|v| v.to_str().ok()),
+            Some("/"),
+            "{path}: service worker must be allowed a root scope"
+        );
+        assert!(sw.text().await.unwrap().contains("ReadableStream"));
+    }
+}
+
+/// The bundle this relay serves is the bundle it would publish: one build step
+/// produces the embedded page, the `--print-decryptor` output and these hashes,
+/// so a self-hosted relay and the canonical origin cannot serve different code
+/// while both claiming the same version.
+#[tokio::test]
+async fn the_relay_serves_the_decryptor_bundle_its_manifest_describes() {
+    let relay = spawn_relay().await;
+    let c = reqwest::Client::new();
+
+    let manifest = c.get(format!("{relay}/manifest.txt")).send().await.unwrap();
+    assert!(manifest.status().is_success());
+    let manifest = manifest.text().await.unwrap();
     assert!(
-        js_body.contains("navigator.languages"),
-        "browser-language pick"
+        manifest.starts_with("arvolo-decryptor "),
+        "manifest names what it describes: {manifest}"
     );
-    for probe in [
-        "Qualcuno ti ha mandato un file",
-        "Quelqu'un vous a envoyé un fichier",
-        "Jemand hat Ihnen eine Datei geschickt",
+
+    for (path, name) in [
+        ("dl/anyclaim", "index.html"),
+        ("arvolo-sw.js", "arvolo-sw.js"),
     ] {
-        assert!(js_body.contains(probe), "missing translation: {probe}");
+        let body = c
+            .get(format!("{relay}/{path}"))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        let want = manifest
+            .lines()
+            .find_map(|l| l.strip_suffix(&format!("  {name}")))
+            .unwrap_or_else(|| panic!("manifest has no line for {name}: {manifest}"));
+        assert_eq!(
+            sha256_hex(&body),
+            want,
+            "{name} does not match its manifest hash"
+        );
+    }
+}
+
+fn sha256_hex(body: &str) -> String {
+    use sha2::Digest;
+    data_encoding::HEXLOWER.encode(&sha2::Sha256::digest(body.as_bytes()))
+}
+
+/// The whole community-relay design rests on this one property: a page on an
+/// origin that holds no ciphertext can read the ciphertext from a relay. Without
+/// these headers the browser makes the request and then refuses to hand the
+/// bytes to the page, so the decryptor has to be served by the relay — and then
+/// the operator can serve one that steals the key.
+///
+/// Worth having as a test because every other test here talks to the relay from
+/// Rust, where CORS does not exist: this feature could be entirely broken in a
+/// browser with the suite still green.
+#[tokio::test]
+async fn ciphertext_is_readable_from_another_origin() {
+    let relay = spawn_relay().await;
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("note.txt");
+    std::fs::write(&src, b"the bytes a stranger's relay must hand over").unwrap();
+
+    let out = deposit_link(&src, &relay, 3600, 1).await.expect("deposit");
+    let key = decode_key(out.link.rsplit_once('#').unwrap().1).unwrap();
+
+    let resp = reqwest::Client::new()
+        .get(format!("{relay}/v1/fetch/{}", out.claim))
+        .header("origin", "https://dl.example")
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+
+    let header = |n: &str| {
+        resp.headers()
+            .get(n)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string()
+    };
+    assert_eq!(
+        header("access-control-allow-origin"),
+        "*",
+        "a page on another origin must be allowed to read the ciphertext"
+    );
+    assert!(
+        header("access-control-expose-headers").contains("content-length"),
+        "the page reads content-length to show progress"
+    );
+    assert_eq!(header("cross-origin-resource-policy"), "cross-origin");
+    // Exactly one of each: a duplicated allow-origin is an invalid policy, not a
+    // stricter one, and a browser refuses the response outright.
+    for name in [
+        "access-control-allow-origin",
+        "cross-origin-resource-policy",
+    ] {
+        assert_eq!(
+            resp.headers().get_all(name).iter().count(),
+            1,
+            "{name} must appear exactly once"
+        );
     }
 
-    // The streaming service worker is served from the root with a root scope.
-    let sw = c.get(format!("{relay}/arvolo-sw.js")).send().await.unwrap();
-    assert!(sw.status().is_success());
-    assert_eq!(
-        sw.headers()
-            .get("service-worker-allowed")
-            .and_then(|v| v.to_str().ok()),
-        Some("/"),
-        "service worker must be allowed a root scope"
-    );
-    assert!(sw.text().await.unwrap().contains("ReadableStream"));
+    // …and the bytes still decrypt, so nothing about the headers changed what is
+    // served.
+    let blob = resp.bytes().await.unwrap();
+    let (name, plain) = decrypt_link(&blob, &key).expect("decrypt");
+    assert_eq!(name, "note.txt");
+    assert_eq!(plain, b"the bytes a stranger's relay must hand over");
+}
+
+/// A preflight must be answerable without spending the claim. Burn-after-read
+/// plus a preflight that counted as a download would mean the file vanishes
+/// before the page ever asks for it — and only behind the proxies that preflight,
+/// which is the worst way to find a bug.
+#[tokio::test]
+async fn a_preflight_does_not_burn_the_claim() {
+    let relay = spawn_relay().await;
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("once.txt");
+    std::fs::write(&src, b"single download").unwrap();
+
+    // max=1: the next real fetch is the only one this claim allows.
+    let out = deposit_link(&src, &relay, 3600, 1).await.expect("deposit");
+    let c = reqwest::Client::new();
+
+    let pre = c
+        .request(
+            reqwest::Method::OPTIONS,
+            format!("{relay}/v1/fetch/{}", out.claim),
+        )
+        .header("origin", "https://dl.example")
+        .header("access-control-request-method", "GET")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(pre.status(), reqwest::StatusCode::NO_CONTENT);
+    assert!(pre
+        .headers()
+        .get("access-control-allow-methods")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .contains("GET"));
+
+    let key = decode_key(out.link.rsplit_once('#').unwrap().1).unwrap();
+    let blob = c
+        .get(format!("{relay}/v1/fetch/{}", out.claim))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .expect("the claim survived the preflight")
+        .bytes()
+        .await
+        .unwrap();
+    assert_eq!(decrypt_link(&blob, &key).unwrap().1, b"single download");
 }
 
 #[tokio::test]

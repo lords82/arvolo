@@ -80,3 +80,24 @@ async fn the_older_probes_still_read_the_same_document() {
     assert_eq!(relay_rz_version(&relay).await, RzVersion::V2);
     assert!(relay_allows_links(&relay).await.unwrap());
 }
+
+/// A relay that has the cross-origin headers says so, so a client can mint a
+/// link whose decryptor is not the relay. The matching "an older relay does not,
+/// and the client must read that as no" case is a unit test in core against a
+/// frozen literal document — it has to be, because the risk is precisely that
+/// relay and client change together and nobody notices the old shape stopped
+/// being handled.
+#[tokio::test]
+async fn a_relay_that_serves_ciphertext_cross_origin_advertises_it() {
+    let relay = spawn_relay().await;
+    let doc = reqwest::get(format!("{relay}/v1/features"))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        doc.replace(' ', "").contains("\"cors\":true"),
+        "features document must advertise cors: {doc}"
+    );
+}

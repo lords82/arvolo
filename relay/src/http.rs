@@ -1,6 +1,6 @@
 //! The axum HTTP layer: route handlers and the [`router`] assembly.
 
-use arvolo_core::chunked::{SeedRequest, CHUNK_SIZE};
+use arvolo_core::chunked::{encode_have_bitfield, HaveRequest, SeedRequest, CHUNK_SIZE};
 use arvolo_core::swarm::{AnnounceReq, AnnounceResp, PeerInfo};
 use axum::{
     body::Bytes,
@@ -19,10 +19,10 @@ use crate::limits::{
 use crate::mailbox::{InboxStatus, MailboxError};
 use crate::state::{
     max_blob_bytes, max_inbox_rows, max_presence_rows, max_rz_rows, max_seeded_rows,
-    max_session_relay_bytes, max_total_blob_bytes, AppState, SwarmPeer, CONTROL_PLANE_BODY_LIMIT,
-    INBOX_MAX_TTL_SECS, INBOX_TTL_SECS, MAX_INBOX_PER_SLOT, MAX_INBOX_VALUE_BYTES,
-    MAX_RZ_VALUE_BYTES, MAX_SEED_CHUNKS_PER_REQ, MAX_SWARMS, MAX_SWARM_CHUNKS, MAX_SWARM_PEERS,
-    PRESENCE_TTL_SECS, SWARM_PEER_TTL_SECS,
+    max_session_relay_bytes, max_total_blob_bytes, max_ttl_secs, AppState, SwarmPeer,
+    CONTROL_PLANE_BODY_LIMIT, INBOX_MAX_TTL_SECS, INBOX_TTL_SECS, MAX_HAVE_CHUNKS_PER_REQ,
+    MAX_INBOX_PER_SLOT, MAX_INBOX_VALUE_BYTES, MAX_RZ_VALUE_BYTES, MAX_SEED_CHUNKS_PER_REQ,
+    MAX_SWARMS, MAX_SWARM_CHUNKS, MAX_SWARM_PEERS, PRESENCE_TTL_SECS, SWARM_PEER_TTL_SECS,
 };
 use crate::util::{constant_time_eq, now_unix, random_claim};
 
@@ -66,19 +66,11 @@ fn default_max() -> u32 {
 }
 
 /// The browser secure-download page, its script, and the streaming service
-/// worker. Decryption happens entirely client-side; the relay only serves
+/// worker — assembled by `build.rs` from `web/decryptor/src` and shared with
+/// `--print-decryptor`, so this relay and the canonical published page are the
+/// same bytes. Decryption happens entirely client-side; the relay only serves
 /// ciphertext.
-const DL_HTML: &str = include_str!("web/dl.html");
-const DL_JS: &str = include_str!("web/dl.js");
-const DL_SW: &str = include_str!("web/arvolo-sw.js");
-
-/// A strict Content-Security-Policy for the download page: no external
-/// resources at all, only same-origin script/worker/frame and same-origin fetch
-/// (to `/v1/fetch/{claim}`). `worker-src`/`frame-src` are for the streaming
-/// service worker and the hidden download iframe it drives. No inline script.
-const DL_CSP: &str = "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; \
-     connect-src 'self'; img-src 'self' data:; worker-src 'self'; frame-src 'self'; \
-     frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
+use crate::decryptor::{CSP as DL_CSP, PAGE as DL_HTML, SCRIPT as DL_JS, SERVICE_WORKER as DL_SW};
 
 /// Shown (with 403) when the administrator has disabled download links. Its own
 /// file rather than a string literal here, so it can carry the same styling as
@@ -169,8 +161,15 @@ async fn dl_js_handler(State(state): State<AppState>) -> Response {
         .into_response()
 }
 
-/// The streaming download service worker. Served from the root path so its
-/// default scope (`/`) covers the `/dl/stream/{id}` requests it must intercept.
+/// The streaming download service worker.
+///
+/// Served at two paths on purpose. The page resolves `arvolo-sw.js` against its
+/// own directory so that one bundle works wherever it is deployed (a static
+/// origin's `/`, a subdirectory, or this relay's `/dl/{claim}`) — and from
+/// `/dl/{claim}` that resolves to `/dl/arvolo-sw.js`. The root path stays for a
+/// page cached before 0.14. `Service-Worker-Allowed: /` widens the scope of the
+/// `/dl/` copy, whose default scope would otherwise not cover a stream URL the
+/// page asks for from elsewhere.
 async fn dl_sw_handler(State(state): State<AppState>) -> Response {
     if !state.links_enabled {
         return (StatusCode::FORBIDDEN, LINKS_DISABLED_MSG).into_response();
@@ -192,14 +191,43 @@ async fn dl_sw_handler(State(state): State<AppState>) -> Response {
         .into_response()
 }
 
-/// Advertise this relay's optional features so a client can fail fast: `links`
-/// (public browser download links) and `rz2` (long-lived, multi-session pairing
-/// slots — [`RZ_OWN_KEY`] and friends).
+/// SHA-256 of the decryptor bundle this binary serves, in `sha256sum` format.
 ///
-/// The two are read with opposite defaults on purpose. A client that can't reach
+/// Not gated on `links_enabled`: it describes the build, not the service, and a
+/// relay with links switched off should still be able to answer "which page
+/// would you serve". Plain text so `sha256sum -c` and a human reading it in a
+/// browser see the same thing.
+async fn dl_manifest_handler() -> impl IntoResponse {
+    (
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                "text/plain; charset=utf-8",
+            ),
+            (axum::http::header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        ],
+        crate::decryptor::MANIFEST,
+    )
+}
+
+/// Advertise this relay's optional features so a client can fail fast: `links`
+/// (public browser download links), `rz2` (long-lived, multi-session pairing
+/// slots — [`RZ_OWN_KEY`] and friends), and `cors` (this relay serves ciphertext
+/// to a page on another origin, so a link can point at a decryptor that is not
+/// the relay).
+///
+/// They are read with different defaults on purpose. A client that can't reach
 /// this endpoint assumes links are allowed (worst case: a deposit is refused
 /// later), but assumes `rz2` is absent — announcing a v2 code no relay can host
-/// would strand a receiver, so the missing field must mean "no".
+/// would strand a receiver, so the missing field must mean "no". `cors` fails
+/// closed for the same reason and a sharper one: minting a split-origin link
+/// against a relay that will not serve it cross-origin produces a link that
+/// looks fine and downloads nothing.
+///
+/// `cors` is unconditionally true — the relay either has the code or it does
+/// not, and there is nothing here for an operator to configure. Deriving it from
+/// `version` instead would mean comparing versions inside a client that
+/// deliberately carries no JSON parser.
 ///
 /// `version` is what this relay is, and it answers a different question from the
 /// two flags: not "can you do X" but "how far along are you". The desktop app
@@ -209,15 +237,16 @@ async fn dl_sw_handler(State(state): State<AppState>) -> Response {
 /// release that added it, which is all the caller needs to know.
 ///
 /// Kept as hand-written JSON like the rest of this document, because that is how
-/// it is *read*: the two client-side probes match on substrings rather than
-/// parsing (`core::code::relay_rz_version`, `core::link::relay_allows_links`), so
-/// the shape here is load-bearing. Adding a field is safe for both; reordering or
-/// reformatting the existing two is not.
+/// it is *read*: the client-side probes match on substrings rather than parsing
+/// (`core::code::relay_rz_version`, `core::link::relay_link_support`), so the
+/// shape here is load-bearing. Adding a field is safe for all of them;
+/// reordering or reformatting the existing ones is not — which is why `cors` is
+/// appended after `version` rather than slotted in beside the other two flags.
 async fn features_handler(State(state): State<AppState>) -> impl IntoResponse {
     (
         [(axum::http::header::CONTENT_TYPE, "application/json")],
         format!(
-            "{{\"links\":{},\"rz2\":true,\"version\":\"{}\"}}",
+            "{{\"links\":{},\"rz2\":true,\"have\":true,\"version\":\"{}\",\"cors\":true}}",
             state.links_enabled,
             arvolo_core::VERSION
         ),
@@ -319,11 +348,19 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/v1/deposit", post(deposit_handler))
         .route("/v1/features", get(features_handler))
-        .route("/v1/fetch/{claim}", get(fetch_handler))
+        .route(
+            "/v1/fetch/{claim}",
+            get(fetch_handler).options(fetch_options_handler),
+        )
         .route("/v1/entry/{claim}", axum::routing::delete(revoke_handler))
         .route("/v1/entry/{claim}/status", get(entry_status_handler))
         .route("/v1/addr", get(addr_handler))
         .route("/v1/seed", post(seed_handler))
+        .route("/v1/have", post(have_handler))
+        .route(
+            "/v1/seeded/{token}",
+            axum::routing::delete(seeded_delete_handler),
+        )
         .route("/v1/release/{token}/{hash}", post(release_handler))
         .route(
             "/v1/rz/{slot}/{key}",
@@ -355,6 +392,10 @@ pub fn router(state: AppState) -> Router {
         .route("/dl/{claim}", get(dl_page_handler))
         .route("/dl.js", get(dl_js_handler))
         .route("/arvolo-sw.js", get(dl_sw_handler))
+        .route("/dl/arvolo-sw.js", get(dl_sw_handler))
+        // The published bundle's checksums, so `arvolo verify-page` can be
+        // pointed at a self-hosted relay and not only at the canonical origin.
+        .route("/manifest.txt", get(dl_manifest_handler))
         .route("/healthz", get(|| async { "ok" }))
         // Applied after the routes so it wraps them all: bounds the small
         // control-plane bodies. `/v1/deposit` reads a raw `Body` (not a
@@ -1365,10 +1406,11 @@ async fn deposit_handler(
 
     // Aggregate disk-budget guard: refuse when the store is already over budget,
     // and bound this deposit to the remaining budget while it streams (so one
-    // in-flight deposit can't blow past the total either).
+    // in-flight deposit can't blow past the total either). Measured over the whole
+    // disk — seeded chunks included — because that is what fills up.
     let total_cap = max_total_blob_bytes();
     let remaining_total = if total_cap != 0 {
-        let stored = mb.stored_bytes();
+        let stored = mb.disk_bytes();
         if stored >= total_cap {
             return Err((
                 StatusCode::INSUFFICIENT_STORAGE,
@@ -1483,6 +1525,76 @@ async fn revoke_handler(
     Ok("revoked".into())
 }
 
+/// Headers that let a page on *another* origin read this ciphertext.
+///
+/// This is what makes a relay safe for a stranger to run. With them, the
+/// decryptor page can live on an origin that stores no ciphertext, so the
+/// operator never runs code in a context holding the key — see
+/// `docs/PROTOCOL.md` §7.6. Without them the page must come from the relay
+/// itself, and then the operator can serve one that steals the key.
+///
+/// `*`, and not an allow-list, because the header transfers no authority the
+/// URL did not already carry: the blob is authenticated ciphertext under a key
+/// this relay does not have, and the claim *is* the capability — anyone holding
+/// it can already `curl` the bytes. CORS does not grant the right to *trigger* a
+/// fetch (a cross-origin `<img src>` already burns a burn-after-read claim
+/// today, no CORS involved); it grants only the right to *read the response*.
+///
+/// No `Access-Control-Allow-Credentials`: with `*` a browser would reject it,
+/// and there are no cookies on this path. No `Vary: Origin`: the answer is a
+/// literal `*` and does not depend on the request.
+///
+/// One deployment note that belongs next to the code, because getting it wrong
+/// looks like a browser bug: a reverse proxy must **not** add these itself. Two
+/// identical `Access-Control-Allow-Origin` headers are not a stricter policy,
+/// they are an invalid one, and the browser refuses the response. Leave it to
+/// the relay — `docs/DEPLOY.md` says so for the nginx examples.
+fn cross_origin_headers(resp: &mut Response) {
+    use axum::http::header::HeaderValue;
+    for (name, value) in [
+        ("access-control-allow-origin", "*"),
+        (
+            "access-control-expose-headers",
+            "content-length, x-arvolo-encapped-key",
+        ),
+        // So a future COEP-isolated decryptor page is not blocked from reading it.
+        ("cross-origin-resource-policy", "cross-origin"),
+    ] {
+        resp.headers_mut().insert(
+            axum::http::HeaderName::from_static(name),
+            HeaderValue::from_static(value),
+        );
+    }
+}
+
+/// Answer a preflight for `/v1/fetch/{claim}` **without touching the mailbox**.
+///
+/// Nothing in the current design triggers one: the page issues a plain `GET`
+/// with no custom headers and `credentials: "omit"`, which is a CORS-simple
+/// request. This exists so that some corporate middlebox preflighting anyway
+/// degrades to an extra round trip instead of a download that mysteriously does
+/// not work behind one company's proxy — and so that adding a request header
+/// later is a preflight, not an outage.
+///
+/// It must never consume the claim. A burn-after-read entry plus a preflight
+/// that counted as a download is the sharpest foot-gun on this path, which is
+/// why this is its own handler and not a branch inside `fetch_handler`.
+async fn fetch_options_handler() -> Response {
+    let mut resp = Response::new(axum::body::Body::empty());
+    *resp.status_mut() = StatusCode::NO_CONTENT;
+    cross_origin_headers(&mut resp);
+    for (name, value) in [
+        ("access-control-allow-methods", "GET, HEAD, OPTIONS"),
+        ("access-control-max-age", "86400"),
+    ] {
+        resp.headers_mut().insert(
+            axum::http::HeaderName::from_static(name),
+            axum::http::header::HeaderValue::from_static(value),
+        );
+    }
+    resp
+}
+
 async fn fetch_handler(
     State(state): State<AppState>,
     AxumPath(claim): AxumPath<String>,
@@ -1521,17 +1633,37 @@ async fn fetch_handler(
                 .insert(axum::http::header::CONTENT_LENGTH, val);
         }
     }
+    // Opaque bytes, said out loud: the relay cannot know what this decrypts to,
+    // and nothing downstream should guess.
+    resp.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::header::HeaderValue::from_static("application/octet-stream"),
+    );
+    resp.headers_mut().insert(
+        axum::http::header::X_CONTENT_TYPE_OPTIONS,
+        axum::http::header::HeaderValue::from_static("nosniff"),
+    );
+    cross_origin_headers(&mut resp);
     Ok(resp)
 }
 
 /// Seed (backfill) a P2P blob into the relay's store. Body = the sender's blob
 /// ticket; returns the relay's provider address (base32) so the sender can
 /// advertise the relay as a fallback provider.
+#[derive(serde::Deserialize)]
+struct SeedQuery {
+    /// How long the relay should keep these chunks if nobody takes them. A wish,
+    /// clamped below — the same shape a deposit's TTL has, and for the same reason.
+    #[serde(default)]
+    ttl: u64,
+}
+
 async fn seed_handler(
     State(state): State<AppState>,
+    Query(q): Query<SeedQuery>,
     ip: ClientIp,
     body: String,
-) -> Result<String, (StatusCode, String)> {
+) -> Result<Response, (StatusCode, String)> {
     write_rate_limit(&state.write_limiter, ip.0, now_unix(), writes_per_min())?;
     let req = SeedRequest::decode(body.trim())
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("bad seed request: {e}")))?;
@@ -1554,6 +1686,19 @@ async fn seed_handler(
             "relay at seed capacity".into(),
         ));
     }
+    let add_bytes = (req.chunks.len() as u64).saturating_mul(CHUNK_SIZE as u64);
+    // The same aggregate disk budget the mailbox answers to. Until this, seeding
+    // was bounded only by a *row* count — 50k rows, which at the nominal chunk size
+    // stands for roughly 800 GB — so on any ordinary relay the real limit was the
+    // filesystem, reached as ENOSPC rather than as a refusal. Two paths, one disk,
+    // one budget.
+    let total_cap = max_total_blob_bytes();
+    if total_cap != 0 && state.mailbox.disk_bytes().saturating_add(add_bytes) > total_cap {
+        return Err((
+            StatusCode::INSUFFICIENT_STORAGE,
+            "relay at storage capacity".into(),
+        ));
+    }
     // Free-tier per-session offload cap: bound how many bytes any one transfer may
     // lean on this relay (keyed on the content-derived swarm id, so it is durable
     // across the sender suspending/resuming/restarting). `0` = unlimited. Meter by
@@ -1561,7 +1706,6 @@ async fn seed_handler(
     // over-counts, which only makes the cap marginally stricter. On PAYMENT_REQUIRED
     // the sender falls back to direct P2P (or a private, uncapped relay).
     let cap = max_session_relay_bytes();
-    let add_bytes = (req.chunks.len() as u64).saturating_mul(CHUNK_SIZE as u64);
     if cap > 0
         && state
             .mailbox
@@ -1576,7 +1720,17 @@ async fn seed_handler(
         .seed_chunks(req.sender, &req.chunks)
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, format!("seed failed: {e}")))?;
-    let exp = now_unix().saturating_add(seed_ttl());
+    // The caller's wish, clamped to what this relay is prepared to hold — never
+    // longer than a mailbox blob may live, and never shorter than the default when
+    // nothing was asked. A parked send needs its pieces to outlive the offer that
+    // names them, or the recipient finds an arrival pointing at nothing; a bare
+    // backfill asks for nothing and keeps the old day.
+    let granted = if q.ttl == 0 {
+        seed_ttl()
+    } else {
+        q.ttl.min(max_ttl_secs())
+    };
+    let exp = now_unix().saturating_add(granted);
     for hash in &req.chunks {
         state
             .mailbox
@@ -1588,7 +1742,76 @@ async fn seed_handler(
             .mailbox
             .add_session_bytes(&req.swarm_id, add_bytes, exp);
     }
-    Ok("ok".into())
+    // The granted TTL rides back in a header, as a deposit's does: a sender that
+    // asked for a week and got a day has to know, or it will promise the recipient
+    // a deadline the relay never agreed to.
+    Ok(([(GRANTED_TTL_HEADER, granted.to_string())], "ok").into_response())
+}
+
+/// Withdraw a parked send: forget every chunk seeded under `token` and delete the
+/// files. `DELETE /v1/seeded/{token}`. Idempotent — a token with nothing left is a
+/// success, because the caller's goal (nothing of theirs on this relay) holds.
+///
+/// Authorized by the token alone. That is not a new capability: the same token
+/// already authorizes releasing these chunks one at a time through
+/// `/v1/release/{token}/{hash}`, so this is the existing power spelled once. It
+/// travels in the ticket, so a recipient holds it too — they can drop pieces meant
+/// for them, which costs them their own download and nobody else's.
+async fn seeded_delete_handler(
+    State(state): State<AppState>,
+    AxumPath(token): AxumPath<String>,
+    ip: ClientIp,
+) -> Result<String, (StatusCode, String)> {
+    write_rate_limit(&state.write_limiter, ip.0, now_unix(), writes_per_min())?;
+    let hashes = state.mailbox.take_seeds_by_token(&token);
+    for hash in &hashes {
+        let _ = state.blobs.release_hex(hash).await;
+    }
+    Ok(hashes.len().to_string())
+}
+
+/// Which of the asked-about chunks this relay currently holds. `POST /v1/have`,
+/// body an `arvh…` [`HaveRequest`], answer a bitfield in the order asked.
+///
+/// Both ends need this and neither could ask before: the backfilled set used to
+/// travel only from sender to receiver over the control channel, so it was
+/// unknowable exactly when the sender was away — the case the relay's copy is
+/// *for*. A receiver resuming alone learns where to pull from; a sender learns
+/// what it need not upload again.
+///
+/// Three deliberate properties:
+///
+/// - **A read that spends the write budget.** Reads here have no limiter of their
+///   own, and this one is batched, so it would otherwise be the cheapest way to
+///   load the box. The swarm tracker rate-limits itself for the same reason.
+/// - **Capped list.** Bounded work per request, and the client splits longer
+///   questions rather than needing to know the limit.
+/// - **No new disclosure.** The chunk protocol already serves any held chunk to
+///   whoever names its hash, with no token, so this answers a question that was
+///   already answerable — only cheaply. The hashes are of ciphertext under a
+///   per-transfer random key, so they cannot be derived from the file itself.
+async fn have_handler(
+    State(state): State<AppState>,
+    ip: ClientIp,
+    body: String,
+) -> Result<String, (StatusCode, String)> {
+    write_rate_limit(&state.write_limiter, ip.0, now_unix(), writes_per_min())?;
+    let req = HaveRequest::decode(body.trim())
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("bad have request: {e}")))?;
+    if req.chunks.len() > MAX_HAVE_CHUNKS_PER_REQ {
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!("too many chunks (max {MAX_HAVE_CHUNKS_PER_REQ})"),
+        ));
+    }
+    let held = state.blobs.has_chunks(&req.chunks);
+    let mut bitfield = arvolo_core::swarm::bitfield_new(req.chunks.len());
+    for (i, has) in held.iter().enumerate() {
+        if *has {
+            arvolo_core::swarm::bitfield_set(&mut bitfield, i);
+        }
+    }
+    Ok(encode_have_bitfield(&bitfield))
 }
 
 /// The relay's iroh blob-node address plus a fresh transfer token, so the sender

@@ -236,6 +236,29 @@ impl Mailbox {
             .max(0) as u64
     }
 
+    /// Aggregate bytes held by **seeded chunks**, counted at the nominal chunk
+    /// size — the same approximation the per-transfer offload meter uses, and for
+    /// the same reason: the `seeded` table records hashes, not sizes, and the last
+    /// chunk of a payload is short, so this over-counts slightly and the cap it
+    /// backs is marginally stricter than asked. Erring that way is the right way
+    /// to be wrong about a disk.
+    pub fn seeded_bytes(&self) -> u64 {
+        (self.seeded_count().max(0) as u64).saturating_mul(arvolo_core::chunked::CHUNK_SIZE as u64)
+    }
+
+    /// Everything this relay is holding on disk, mailbox blobs and seeded chunks
+    /// together.
+    ///
+    /// One number because there is one disk. The two paths used to be metered
+    /// separately and in different units — blobs in bytes, chunks in *rows* — so
+    /// neither could see the other filling the volume they share, and the row cap
+    /// (50k) stood for roughly 800 GB at the nominal chunk size, which is not a
+    /// disk guard on any ordinary machine. Whichever path asks for room now asks
+    /// against the whole of it.
+    pub fn disk_bytes(&self) -> u64 {
+        self.stored_bytes().saturating_add(self.seeded_bytes())
+    }
+
     /// A fresh, random claim token to write a blob under.
     pub fn new_claim(&self) -> String {
         random_claim()
@@ -298,11 +321,11 @@ impl Mailbox {
         if self.at_capacity() {
             return Err(MailboxError::Capacity);
         }
-        // Aggregate disk-budget guard (`0` = unlimited).
+        // Aggregate disk-budget guard (`0` = unlimited), over everything held.
         let total_cap = max_total_blob_bytes();
         if total_cap != 0
             && self
-                .stored_bytes()
+                .disk_bytes()
                 .saturating_add(deposit.ciphertext.len() as u64)
                 > total_cap
         {
@@ -663,6 +686,47 @@ impl Mailbox {
             )
             .map_err(backend)?;
         Ok(())
+    }
+
+    /// When each chunk seeded under `token` is due to be dropped. For tests and
+    /// operators: the deadline a parked send was actually granted, as opposed to
+    /// the one it asked for.
+    pub fn seed_expiries(&self, token: &str) -> Vec<u64> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = match conn.prepare("SELECT expires_at FROM seeded WHERE token = ?1") {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        stmt.query_map(params![token], |r| r.get::<_, i64>(0))
+            .map(|rows| {
+                rows.filter_map(|r| r.ok())
+                    .map(|v| v.max(0) as u64)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Every chunk hash still seeded under `token`, and forget them all.
+    ///
+    /// The withdrawal half of a parked send: a sender that changes its mind has to
+    /// be able to take the pieces back off the relay, not merely stop pointing at
+    /// them. Returns the hashes so the caller can delete the files the rows named
+    /// — doing it the other way round would leave a file no row can ever free.
+    ///
+    /// Authorized by the token alone, which is the same capability that already
+    /// authorizes releasing a chunk one at a time. So this grants nothing new: it
+    /// is the existing power, spelled once instead of n times.
+    pub fn take_seeds_by_token(&self, token: &str) -> Vec<String> {
+        let conn = self.conn.lock().unwrap();
+        let hashes: Vec<String> = match conn.prepare("SELECT hash FROM seeded WHERE token = ?1") {
+            Ok(mut stmt) => stmt
+                .query_map(params![token], |r| r.get::<_, String>(0))
+                .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                .unwrap_or_default(),
+            Err(_) => return Vec::new(),
+        };
+        let _ = conn.execute("DELETE FROM seeded WHERE token = ?1", params![token]);
+        hashes
     }
 
     /// (token, hash) pairs of seeded chunks whose TTL has passed.

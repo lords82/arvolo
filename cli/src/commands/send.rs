@@ -806,6 +806,9 @@ pub(crate) async fn serve_session(
             SendEvent::Backfilled => {
                 eprintln!("Backfilled — you can close this.")
             }
+            SendEvent::Offloaded => {
+                eprintln!("Everything they still need is on the relay — closing here is safe.")
+            }
             SendEvent::BackfillFailed { reason } => eprintln!("Relay backfill failed: {reason}"),
             SendEvent::RelayCapped { limit_bytes } => {
                 eprintln!("{}", relay_capped_line(limit_bytes))
@@ -956,6 +959,9 @@ pub(crate) async fn send_with_code(
             }
             SendEvent::Backfilled => {
                 eprintln!("Backfilled — you can close this.")
+            }
+            SendEvent::Offloaded => {
+                eprintln!("Everything they still need is on the relay — closing here is safe.")
             }
             SendEvent::BackfillFailed { reason } => eprintln!("Relay backfill failed: {reason}"),
             SendEvent::RelayCapped { limit_bytes } => {

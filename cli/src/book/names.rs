@@ -5,14 +5,25 @@ use serde::{Deserialize, Serialize};
 
 use super::*;
 
-/// One advertised-name record, keyed by base32 id: the approved name and the last
-/// advertised name still awaiting approval (if any).
+/// One advertised-name record, keyed by base32 id: the approved name, the last
+/// advertised name still awaiting approval (if any), and the very first name this
+/// key was ever seen to claim.
 #[derive(Default, Clone, Serialize, Deserialize)]
 pub(crate) struct NameRow {
     #[serde(default)]
     pub(crate) pinned: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) pending: Option<String>,
+    /// Written once, on the first claim ever observed from this key, and never
+    /// touched again.
+    ///
+    /// Without it a stranger's name history is unreadable: `pending` is
+    /// overwritten by every new claim, so a key that introduced itself as one
+    /// person and comes back as another looks exactly like a key that has only
+    /// ever used the second name. That difference is the whole signal, and until
+    /// somebody approves a name (`pinned`) there is nowhere else it survives.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub(crate) first: String,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -59,24 +70,42 @@ pub fn observe_advertised_name(id_b32: &str, advertised: &str) -> NameStatus {
     let mut names = load_names();
     let row = names.names.entry(id_b32.to_string()).or_default();
 
+    // The first claim, kept for good. Deliberately not a pin — nobody approved
+    // anything — just the record of how this key introduced itself.
+    let first_claim = if row.first.is_empty() {
+        row.first = advertised.to_string();
+        true
+    } else {
+        false
+    };
+
     if row.pinned.is_empty() {
         // Never approved a name for this id yet → brand-new.
-        if row.pending.as_deref() != Some(advertised) {
+        let moved = row.pending.as_deref() != Some(advertised);
+        if moved {
             row.pending = Some(advertised.to_string());
+        }
+        if moved || first_claim {
             let _ = save_names(&names);
         }
         NameStatus::New(advertised.to_string())
     } else if row.pinned == advertised {
         // Back to the approved name → drop any stale pending.
-        if row.pending.is_some() {
+        let moved = row.pending.is_some();
+        if moved {
             row.pending = None;
+        }
+        if moved || first_claim {
             let _ = save_names(&names);
         }
         NameStatus::Unchanged(advertised.to_string())
     } else {
         let old = row.pinned.clone();
-        if row.pending.as_deref() != Some(advertised) {
+        let moved = row.pending.as_deref() != Some(advertised);
+        if moved {
             row.pending = Some(advertised.to_string());
+        }
+        if moved || first_claim {
             let _ = save_names(&names);
         }
         NameStatus::Changed {
@@ -84,6 +113,27 @@ pub fn observe_advertised_name(id_b32: &str, advertised: &str) -> NameStatus {
             new: advertised.to_string(),
         }
     }
+}
+
+/// What this key was already on record as calling itself: the approved name if
+/// there is one, otherwise the first claim ever seen from it.
+///
+/// This is the half of the name history that means something *before* anyone is
+/// saved. Compared against the claim on the offer in hand, it answers the only
+/// question a display name can be made to answer: is this the same story as last
+/// time? Empty when the key has never advertised anything.
+pub fn known_name_of(id_b32: &str) -> Option<String> {
+    load_names()
+        .names
+        .get(id_b32)
+        .map(|r| {
+            if r.pinned.is_empty() {
+                r.first.clone()
+            } else {
+                r.pinned.clone()
+            }
+        })
+        .filter(|s| !s.is_empty())
 }
 
 /// Approve the pending advertised name for a contact alias or raw id: pin it and

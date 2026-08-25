@@ -49,8 +49,24 @@ async fn main() -> Result<()> {
     // --version/--help; anything else is rejected so an accidental flag prints and
     // exits instead of silently starting the server and grabbing the listen port.
     let mut verbosity: u8 = 0;
-    for arg in std::env::args().skip(1) {
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
         match arg.as_str() {
+            // Write the browser decryptor bundle out instead of starting a
+            // server: the same bytes this binary serves at /dl/{claim}, ready to
+            // publish on a static origin. CI uses it to deploy the canonical
+            // page; a self-hoster uses it to put the page on a host of their own.
+            "--print-decryptor" => {
+                let Some(dir) = args.next() else {
+                    eprintln!("arvolo-relay: --print-decryptor needs a directory");
+                    std::process::exit(2);
+                };
+                let dir = std::path::PathBuf::from(dir);
+                arvolo_relay::decryptor::print_bundle(&dir)
+                    .map_err(|e| anyhow::anyhow!("write bundle to {}: {e}", dir.display()))?;
+                print!("{}", arvolo_relay::decryptor::MANIFEST);
+                return Ok(());
+            }
             "-V" | "--version" => {
                 println!("arvolo-relay {}", env!("CARGO_PKG_VERSION"));
                 return Ok(());
@@ -64,6 +80,9 @@ async fn main() -> Result<()> {
                 println!("Options:");
                 println!(
                     "  -v, -vv, -vvv   log verbosity: arvolo debug/trace; -vvv also shows iroh"
+                );
+                println!(
+                    "      --print-decryptor <DIR>  write the browser decryptor bundle and exit"
                 );
                 println!("  -V, --version   print version and exit");
                 println!("  -h, --help      print this help and exit");
@@ -219,8 +238,8 @@ async fn main() -> Result<()> {
     if arvolo_relay::max_total_blob_bytes() == 0 {
         tracing::warn!(
             "ARVOLO_MAX_TOTAL_BLOB_BYTES is unset (unlimited): the per-blob cap alone does not \
-             stop many deposits from filling the disk. Set it to the disk budget you are willing \
-             to lend on a public relay."
+             stop many deposits, or many seeded chunks, from filling the disk. It bounds both — \
+             set it to the disk budget you are willing to lend on a public relay."
         );
     }
     if arvolo_relay::max_session_relay_bytes() == 0 {

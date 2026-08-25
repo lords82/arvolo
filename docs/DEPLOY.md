@@ -162,6 +162,15 @@ server {
 }
 ```
 
+**Do not add CORS headers at the proxy.** The relay sends its own on
+`/v1/fetch/{claim}` — that is what lets a download page hosted somewhere else
+read the ciphertext, and it is the reason a relay you run is safe for other
+people's links. An `add_header Access-Control-Allow-Origin *` in nginx *on top*
+of the relay's produces two identical headers, and two are not a stricter policy
+than one: they are an invalid one, and the browser refuses the response outright.
+The failure looks like a browser bug and only shows up in a browser, never in
+`curl`. Leave the header to the relay and proxy the route untouched.
+
 **Cap blob and seed sizes.** A single blob is capped at `ARVOLO_MAX_BLOB_BYTES`,
 which now **defaults to 2 GiB** (`0` lifts the limit for a private relay). The
 per-transfer seed offload meter (`ARVOLO_MAX_SESSION_RELAY_BYTES`) still defaults to

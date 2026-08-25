@@ -121,6 +121,7 @@ export const en = {
   "status.deposited": "Deposited",
   "status.paused": "Paused",
   "status.incoming": "To confirm",
+  "status.offered": "Offered",
   "status.stalled": "Stalled",
   "status.failed": "Failed",
   "status.cancelling": "Cancelling…",
@@ -130,6 +131,7 @@ export const en = {
   "meta.sharing": "available — nobody downloading it",
   "meta.sharingPeers": (n: number) =>
     n === 1 ? "1 person downloading it" : `${n} people downloading it`,
+  "meta.offered": "waiting for them to see it",
   "meta.stalled": "resumes as soon as it can",
   // Why a send is waiting. One per `WaitingReason` in core/src/manager/mod.rs:
   // the daemon sends a code, not this sentence, precisely so this sentence can be
@@ -140,6 +142,9 @@ export const en = {
   "waiting.offered": "offered — waiting for them to accept",
   "waiting.tooLarge": "too big for the relay — will send direct",
   "waiting.relayRetry": (why: string) => `${why} — retrying, direct when they're online`,
+  "waiting.parked": "parked on the relay — finishes without you",
+  "waiting.relayCapped": (cap: string) => `relay caps this at ${cap} — direct from here`,
+  "waiting.offloadFailed": (why: string) => `couldn't park it: ${why}`,
   // What goes where the relay's own words would, when it gave none.
   "waiting.relayUnnamed": "the relay could not take it",
   "meta.incoming": "open for the details",
@@ -171,6 +176,9 @@ export const en = {
   // ---- transfers ---------------------------------------------------------
   "transfers.pause": "Pause",
   "transfers.resume": "Resume",
+  "transfers.depositNow": "Leave it in their mailbox",
+  "transfers.depositNowDesc":
+    "Stop waiting for them to accept. The file goes to the relay and they collect it whenever.",
   "transfers.openFile": "Open file",
   "transfers.openFileFailed": "Couldn't open the file",
   "transfers.openFolder": "Open folder",
@@ -273,6 +281,17 @@ export const en = {
   "people.addSaved": (name: string) => `Saved ${name}`,
   "people.addSavedDetail":
     "They stay unverified until you compare the fingerprint.",
+  "people.addNameTaken": (name: string) =>
+    `“${name}” already belongs to someone. Saving will ask whether to move the name.`,
+  "people.confirmRekeyTitle": (name: string) => `Give “${name}” a new key?`,
+  // Floored in copy-rules.ts: the marks being dropped is the whole consequence,
+  // and a shorter wording turns an irreversible change into a confirmation.
+  "people.confirmRekeyBody": (name: string) =>
+    `“${name}” already points at another key. Moving the name drops their verified and trusted marks — the new key is unchecked until you compare it.`,
+  "people.confirmRekeyCurrent": "The key it points at now",
+  "people.confirmRekeyDo": "Move the name",
+  "people.rekeyed": (name: string) => `“${name}” now points at the new key`,
+  "people.rekeyedDetail": "Verified and trusted were dropped.",
 
   "person.fingerprint": "Fingerprint",
   // The canonical wording. Everywhere else that needs this either points here
@@ -713,19 +732,37 @@ export const en = {
   "incoming.hintVerified": "Already compared: the same key you verified.",
   "incoming.hintKnown":
     "Compare it out loud with the sender. A name does not prove who they are.",
-  // Floored in copy-rules.ts: it must say this is a raw id and not a
-  // fingerprint, or the reader takes it for something that has been checked.
-  "incoming.hintUnknown":
-    "Not a fingerprint — the raw id of somebody you have not saved. Save them below to get words you can compare.",
+  // Floored in copy-rules.ts: it must say that nobody has checked these words
+  // yet, or the reader takes their presence for a check already made.
+  "incoming.hintStranger":
+    "Nobody has checked these words yet. Read them out to the sender over something other than this app.",
+  // Floored too, for the reason the words are missing: an id is not evidence.
+  "incoming.hintRawId":
+    "Not a fingerprint — the raw id, because this daemon is too old to send the words. Update it to be able to compare.",
+  // Floored: a first arrival is the one case where there is nothing at all to
+  // check against, and saying less than that would hide it.
+  "incoming.firstTime":
+    "First time this key has sent you anything — there is nothing yet to compare it with.",
+  "incoming.seenBefore": (n: string) =>
+    `You have taken ${n} transfer(s) from this key before.`,
+  "incoming.wasCalled": (name: string) => `Used to call itself “${name}”`,
   "incoming.attachedNote": "Message attached",
   "incoming.passwordLabel": "Password",
   "incoming.passwordHint": "The sender will have told you separately.",
   "incoming.ifYouKnowThem": "If you know them",
   "incoming.saveAsPlaceholder": "Save to the address book as…",
   "incoming.saveAsLabel": "Name to give the contact",
+  "incoming.saveAsSuggested":
+    "Proposed from the name they gave themselves. Change it: the name is yours.",
   "incoming.savedAs": (name: string) => `Saved as ${name}`,
   "incoming.savedAsDetail": "Still unverified until you compare the fingerprint.",
+  "incoming.savedInline": (name: string) => `Saved as “${name}”, not verified`,
   "incoming.saveNote": "Saving is not verifying.",
+  "incoming.acceptAndSave": "Accept and save",
+  // Floored: it has to name whose marks would go, or "already taken" reads as a
+  // tidiness rule rather than the reason it exists.
+  "incoming.nameTaken": (name: string) =>
+    `“${name}” is already someone else here. Re-pointing it would drop their verified and trusted marks.`,
   "incoming.blockAndReject": "Block and reject",
   "incoming.blocked": "Blocked",
   "incoming.blockedDetail": "Their offers are dropped on arrival.",
@@ -842,6 +879,7 @@ export const en = {
   "bits.qrTooDense": "Too much data for a QR — use Copy.",
   "store.errPause": "Couldn't pause it",
   "store.errResume": "Couldn't resume it",
+  "store.errDepositNow": "Couldn't leave it in the mailbox",
   "store.errCancel": "Couldn't cancel it",
   "store.errRemove": "Couldn't delete it",
   "store.errVerify": (name: string) => `Couldn't verify ${name}`,

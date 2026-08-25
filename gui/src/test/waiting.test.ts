@@ -20,7 +20,14 @@ import { setLangChoice } from "../i18n";
 import type { UITransfer } from "../types";
 
 /** The codes this build knows how to translate. */
-const KNOWN = ["offered", "tooLarge", "relayRetry"] as const;
+const KNOWN = [
+  "offered",
+  "tooLarge",
+  "relayRetry",
+  "parked",
+  "relayCapped",
+  "offloadFailed",
+] as const;
 
 function row(over: Partial<UITransfer> = {}): UITransfer {
   return {

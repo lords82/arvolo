@@ -19,14 +19,16 @@ import {
   fmtBytes,
   metaLine,
   sectionsFor,
+  slugName,
   statusMeta,
   type Section,
 } from "../format";
 import { useT } from "../i18n";
 import type { UITransfer } from "../types";
 import { Icon } from "../ui/Icons";
-import { Button, Empty, Field, IconButton, TextInput } from "../ui/Primitives";
+import { Button, Empty, Field, IconButton } from "../ui/Primitives";
 import { ExtChip, Fingerprint, Progress } from "../ui/Bits";
+import { nameCollision, SaveSenderFields } from "../ui/SaveSenderFields";
 import { MenuButton, type MenuItem } from "../ui/Menu";
 import { Confirm, Sheet } from "../ui/Sheet";
 import { toast } from "../ui/Toasts";
@@ -50,6 +52,7 @@ function Row({
   const t = useT();
   const pause = useStore((s) => s.pause);
   const resume = useStore((s) => s.resume);
+  const depositNow = useStore((s) => s.depositNow);
   const cancel = useStore((s) => s.cancel);
   const removeRow = useStore((s) => s.removeRow);
   const openIncoming = useStore((s) => s.openIncoming);
@@ -73,6 +76,7 @@ function Row({
     tx.status === "sharing" ||
     tx.status === "paused" ||
     tx.status === "stalled" ||
+    tx.status === "offered" ||
     tx.status === "deposited" ||
     tx.status === "cancelling";
   const done =
@@ -105,6 +109,19 @@ function Row({
       onSelect: () => fire(resume(tx.id)),
     });
   }
+  // The way out of the wait. A send holds a direct offer open for a while before
+  // parking the file on the relay, because their app having the offer is not the
+  // same as a person having answered it — this is for when you already know the
+  // answer is not coming, and would rather spend the relay than the afternoon.
+  if (tx.status === "offered") {
+    items.push({
+      key: "depositnow",
+      label: t("transfers.depositNow"),
+      desc: t("transfers.depositNowDesc"),
+      icon: <Icon.Mailbox size={13} />,
+      onSelect: () => fire(depositNow(tx.id)),
+    });
+  }
   if (tx.path) {
     // Opening the file comes first: after a download, the thing you want is the
     // thing, and the folder is how you go looking for it when you want something
@@ -133,12 +150,12 @@ function Row({
   // moment you know who they are — the offer dialog asks the same question, but
   // only if you went through it: an auto-accepted arrival, or one you waved past,
   // otherwise leaves the sender nameless with their id only in the tooltip.
-  // Offers are left out: their own dialog owns that question.
+  //
+  // Parked offers are in too. The dialog no longer has a save of its own — it
+  // saves as part of accepting — so this is the way to keep somebody *without*
+  // deciding about their file yet.
   const unknownSender =
-    tx.dir === "in" &&
-    tx.status !== "incoming" &&
-    !!tx.peerId &&
-    !contactsById[tx.peerId];
+    tx.dir === "in" && !!tx.peerId && !contactsById[tx.peerId];
   if (unknownSender) {
     items.push({
       key: "savesender",
@@ -377,18 +394,6 @@ function Row({
 
 // ---------------------------------------------------------------------------
 
-/** A contact name worth proposing, from the name the sender types about
- *  themselves: lowercased, spaces to `-`, punctuation dropped. Empty when
- *  nothing typeable is left — better no suggestion than one nobody can use. */
-function slugName(claimed: string | undefined): string {
-  return (claimed ?? "")
-    .trim()
-    .toLowerCase()
-    .replace(/\s+/g, "-")
-    .replace(/[^\p{L}\p{N}_-]/gu, "")
-    .replace(/^-+|-+$/g, "");
-}
-
 /** Save the person on the other end of an incoming transfer, without leaving the
  *  board. Deliberately the same three facts as the offer dialog — the name you
  *  choose, the fingerprint to compare, and that saving is not verifying. */
@@ -402,13 +407,16 @@ function SaveSenderSheet({
   onClose: () => void;
 }) {
   const t = useT();
+  const contacts = useStore((s) => s.contacts);
   const addContact = useStore((s) => s.addContact);
   const [name, setName] = useState(() => slugName(tx.senderName));
+  const [edited, setEdited] = useState(false);
   const [busy, setBusy] = useState(false);
+  const clash = nameCollision(contacts, name, tx.peerId);
 
   const submit = async () => {
     const chosen = name.trim();
-    if (!chosen || !tx.peerId) return;
+    if (!chosen || clash || !tx.peerId) return;
     setBusy(true);
     try {
       await addContact(chosen, tx.peerId);
@@ -437,7 +445,7 @@ function SaveSenderSheet({
           <Button
             variant="primary"
             onClick={submit}
-            disabled={!name.trim() || busy}
+            disabled={!name.trim() || !!clash || busy}
             busy={busy}
           >
             {t("common.save")}
@@ -445,28 +453,27 @@ function SaveSenderSheet({
         </>
       }
     >
-      <Field label={t("incoming.saveAsLabel")} hint={t("incoming.saveNote")}>
-        {({ id, describedBy }) => (
-          <TextInput
-            id={id}
-            aria-describedby={describedBy}
-            data-autofocus
-            value={name}
-            onChange={(e) => setName(e.currentTarget.value)}
-            placeholder={t("incoming.saveAsPlaceholder")}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") {
-                e.preventDefault();
-                void submit();
-              }
-            }}
-          />
-        )}
-      </Field>
+      <SaveSenderFields
+        value={name}
+        onChange={(v) => {
+          setName(v);
+          setEdited(true);
+        }}
+        contacts={contacts}
+        peerId={tx.peerId}
+        suggested={!edited}
+        onSubmit={submit}
+        autoFocus
+      />
       {/* The only handle on them that means anything, so it is shown in full
           rather than behind a disclosure — same rule as the offer dialog. */}
-      <Field label={t("incoming.senderId")} hint={t("incoming.hintUnknown")}>
-        {() => <Fingerprint value={tx.peerId ?? ""} />}
+      <Field
+        label={t("incoming.senderId")}
+        hint={
+          tx.fingerprint ? t("incoming.hintStranger") : t("incoming.hintRawId")
+        }
+      >
+        {() => <Fingerprint value={tx.fingerprint || (tx.peerId ?? "")} />}
       </Field>
     </Sheet>
   );

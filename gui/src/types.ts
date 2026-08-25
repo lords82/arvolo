@@ -10,6 +10,12 @@ export type UIStatus =
   | "preparing" // reading + encrypting the payload; nothing on the wire yet
   | "sharing" // made available and waiting to be fetched — not progress
   | "paused" // manually paused
+  /** An outgoing send holding a direct offer open, waiting for the recipient to
+   *  accept. Split out from `stalled` because it is not the same situation: the
+   *  file is one click away from moving, and the app is holding the door open for
+   *  a while before parking it on the relay instead — so there is something the
+   *  user can usefully decide, which `stalled` (muted, "nothing to do") denies. */
+  | "offered"
   | "stalled" // auto-held, retrying when possible (daemon "waiting")
   | "deposited" // handed to the relay mailbox
   | "completed"
@@ -74,6 +80,19 @@ export interface OfferDto {
   size: number;
   note: string;
   sender_name: string;
+  /** `from`'s word fingerprint, stamped by the daemon. A pure function of the
+   *  key, so it is there for a stranger too — which is the point: it is the one
+   *  handle on them that means anything, and it must not cost a save to see.
+   *
+   *  Optional because an older daemon does not stamp it (`serde(default)` on the
+   *  Rust side means absent, not empty) — as are the two below. */
+  fingerprint?: string;
+  /** Transfers already taken from this key. `0` is a first arrival. */
+  seen_count?: number;
+  /** The name this key was already on record as claiming ("" when none). Shown
+   *  against `sender_name`: a key that used to introduce itself differently is
+   *  what impersonation looks like from this side. */
+  known_name?: string;
 }
 
 export interface ContactDto {
@@ -274,6 +293,13 @@ export type EngineEvent =
       size: number;
       note: string;
       sender_name: string;
+      /** The daemon is already downloading this one: the sender is trusted, so
+       *  there is no question to ask. Absent against an older daemon. */
+      auto?: boolean;
+      /** See `OfferDto` — the same three stamps, on the pushed event. */
+      fingerprint?: string;
+      seen_count?: number;
+      known_name?: string;
     }
   | {
       type: "started";
@@ -292,13 +318,18 @@ export type EngineEvent =
       type: "waiting";
       id: number;
       reason: string;
-      /** Stable code for `reason` ("offered" | "tooLarge" | "relayRetry"), so the
-       *  window can say it in the user's language. Absent from an older daemon,
-       *  which sends only the English sentence. */
+      /** Stable code for `reason` ("offered" | "tooLarge" | "relayRetry" |
+       *  "parked" | "relayCapped" | "offloadFailed"), so the window can say it in
+       *  the user's language. Absent from an older daemon, which sends only the
+       *  English sentence. */
       code?: string;
-      /** The relay's own words quoted inside a "relayRetry" reason. Not ours to
-       *  translate. */
+      /** Words that came from elsewhere and are quoted inside the reason — the
+       *  relay's own message, or the cap it named. Not ours to translate. */
       detail?: string;
+      /** How far the offer this send holds open has got. Orthogonal to `code`:
+       *  that says why it waits, this says how far the thing it waits on has come.
+       *  Absent from an older daemon. */
+      offer_status?: string;
     }
   | { type: "paused"; id: number; reason: string }
   | { type: "failed"; id: number; error: string }
@@ -363,6 +394,15 @@ export interface UITransfer {
   senderName?: string;
   /** Base32 id of the peer, when known (for verify/name lookups). */
   peerId?: string;
+  /** The peer's word fingerprint, when the daemon stamped one on the offer. On
+   *  an offer row it is the only identity worth reading, and it arrives whether
+   *  or not the sender is saved. */
+  fingerprint?: string;
+  /** Transfers already taken from this key, on an offer row. `0` is a first
+   *  arrival; `undefined` against a daemon too old to say. */
+  seenCount?: number;
+  /** What this key was already on record as calling itself, on an offer row. */
+  knownName?: string;
   verified: boolean;
   swarmPeers: number;
   downloadPeers: number;

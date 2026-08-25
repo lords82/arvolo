@@ -88,6 +88,13 @@ interface SheetProps {
   footer?: ReactNode;
   /** Extra control in the header, left of the close button. */
   headerAction?: ReactNode;
+  /** Whether clicking the backdrop closes (default: yes).
+   *
+   *  Turn it off for a panel that changes shape while it is being used: a click
+   *  aimed at a control that has just been replaced would land on the scrim and
+   *  read as the dialog closing itself. Escape, the × and the footer's own way
+   *  out are unaffected, so nothing becomes inescapable. */
+  dismissOnScrim?: boolean;
 }
 
 export function Sheet({
@@ -99,6 +106,7 @@ export function Sheet({
   children,
   footer,
   headerAction,
+  dismissOnScrim = true,
 }: SheetProps) {
   const t = useT();
   const ref = useRef<HTMLDivElement>(null);
@@ -106,7 +114,7 @@ export function Sheet({
   if (!open) return null;
   return (
     <>
-      <div className="scrim" onClick={onClose} />
+      <div className="scrim" onClick={dismissOnScrim ? onClose : undefined} />
       <div
         ref={ref}
         className={`sheet ${placement}`}

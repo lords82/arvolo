@@ -177,12 +177,19 @@ pub fn contact_rename(old: &str, new: &str) -> Result<()> {
 /// this: the daemon sweeps once at start (for books written by those older
 /// builds) and again after a sync merge, which is the one path that can still
 /// strand a row. Returns how many were dropped.
+///
+/// A row carrying a `first` claim is **not** stranded, contact or no contact:
+/// that is how a key introduced itself to this device, and it is the only thing
+/// that makes a stranger's second arrival readable as a second arrival. Sweeping
+/// those was the sweep quietly undoing the observation on every daemon start.
 pub fn prune_orphan_names() -> Result<usize> {
     let known: std::collections::BTreeSet<String> =
         load_contacts().contacts.into_values().collect();
     let mut names = load_names();
     let before = names.names.len();
-    names.names.retain(|id, _| known.contains(id));
+    names
+        .names
+        .retain(|id, row| known.contains(id) || !row.first.is_empty());
     let removed = before - names.names.len();
     if removed > 0 {
         save_names(&names)?;
@@ -190,11 +197,26 @@ pub fn prune_orphan_names() -> Result<usize> {
     Ok(removed)
 }
 
+/// Drop what a removed contact's name row said, keeping how the key introduced
+/// itself.
+///
+/// Same reasoning as the `seen` counter in [`contact_remove`]: `pinned` and
+/// `pending` are the user's approvals and belong to the contact that is going
+/// away, but `first` is an observation about a key. Forgetting it would make an
+/// identity you have already met look brand new the next time it turns up, which
+/// weakens a defence rather than tidying up.
 fn forget_name_row(id_b32: &str) -> Result<()> {
     let mut names = load_names();
-    if names.names.remove(id_b32).is_some() {
-        save_names(&names)?;
+    let Some(row) = names.names.get_mut(id_b32) else {
+        return Ok(());
+    };
+    if row.first.is_empty() {
+        names.names.remove(id_b32);
+    } else {
+        row.pinned.clear();
+        row.pending = None;
     }
+    save_names(&names)?;
     Ok(())
 }
 

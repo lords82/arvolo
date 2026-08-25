@@ -14,6 +14,12 @@ categories = ["network-programming", "command-line-utilities"]
 name = "arvolo-relay"
 path = "src/main.rs"
 
+# Assembles the browser decryptor bundle from web/decryptor/src (see build.rs):
+# inlines the script into the page and derives the CSP hash that pins it.
+[build-dependencies]
+sha2 = "0.10"
+data-encoding = "2"
+
 [dependencies]
 arvolo-core.workspace = true
 anyhow.workspace = true
@@ -42,6 +48,8 @@ http-body-util = "0.1"
 data-encoding = "2"
 blake3 = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+# Checks the served decryptor bundle against the hashes its manifest publishes.
+sha2 = "0.10"
 
 # ---- distro packages -------------------------------------------------------
 #

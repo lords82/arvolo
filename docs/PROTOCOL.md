@@ -241,6 +241,7 @@ swarm announce) additionally share a per-IP write-rate limit
 | GET | `/v1/entry/{claim}/status` | none | `pending` (present) / 404 `gone`. The claim is already a secret capability, so existence leaks nothing. |
 | GET | `/v1/addr` | none | The relay blob node's iroh address + a seed token (for backfill). |
 | POST | `/v1/seed` | seed token | Seed (backfill) a sender's chunks into the relay's blob store so a transfer finishes even if the sender goes offline. Capped per request and in total. |
+| POST | `/v1/have` | none (see below) | Body an `arvh…` list of chunk hashes; answers a base32 bitfield, one bit per hash in the order asked, saying which the relay holds. Asked by **both** ends: a receiver whose sender is away has no other way to learn the relay can serve it, and a sender uses it to seed only what is missing. Capped per request and charged against the write budget. It discloses nothing new — the chunk protocol already serves any held chunk to whoever names its hash, and the hashes are of ciphertext under a per-transfer random key, so holding the file does not yield them. |
 | POST | `/v1/release/{token}/{hash}` | release token | Release a seeded chunk. |
 | POST / GET / DELETE | `/v1/rz/{slot}/{key}` | per-key (below) | **Rendezvous** for short-code pairing (§7.2). Keys match `^[a-z0-9][a-z0-9._-]{0,63}$`; values are size-capped; a slot holds at most 32 rows and TTLs out. Every key is first-writer-wins. Per-IP rate limits (POSTs/min, *distinct slots* touched by GET/min — polling one slot is never throttled, and new v2 claims/hour) blunt nameplate sweeps and pairing griefing. |
 
@@ -503,6 +504,21 @@ When a relay is configured, the sender also seeds its chunks to its blob node
 provider**. The receiver fetches from whichever provider answers (chunk protocol
 over iroh); if the sender drops, the relay finishes the transfer. Seeded chunks
 are released/reaped afterwards.
+
+Which pieces the relay holds is discoverable by asking it (`/v1/have`), not only
+by being told over the control channel. That matters in the case the backfill
+exists for: with the sender gone there is nobody to send `RelayHas`, so a receiver
+that could only be told would sit with no provider for any piece while the relay
+held the whole tail. The sender asks the same question before seeding, so a
+transfer whose receiver connects and drops repeatedly cannot burn its own offload
+budget re-offering pieces the relay already has.
+
+Seeding is done in batches and only for what is missing, so it can stop cleanly on
+the relay's per-session cap (`402`, surfaced to the user) or on a cancel. Once
+everything the recipient still lacks is on the relay, a sealed 1:1 send stops
+serving and **does not fall back to the mailbox**: the payload is already parked,
+in a form that keeps the recipient's partial and can resume — a deposit would
+upload it a second time and start their download from zero.
 
 ### 7.4 Offline mailbox (recipient away)
 ```

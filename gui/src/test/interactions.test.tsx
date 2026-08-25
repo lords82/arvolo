@@ -92,9 +92,9 @@ function fresh() {
 /** Seed the daemon's snapshot with one pending offer and mount the whole app,
  *  waiting for `init()`'s reload to land. Setting the store directly is not enough
  *  here: mounting `App` refetches, and would wipe a hand-placed row. */
-async function renderAppWithOffer() {
+async function renderAppWithOffer(over: Record<string, unknown> = {}) {
   harness.snapshot.pending = [
-    dto.offer({ id: "o1", from: PEER_ID, name: "arrivo.zip" }),
+    dto.offer({ id: "o1", from: PEER_ID, name: "arrivo.zip", ...(over as object) }),
   ];
   render(<App />);
   await screen.findByText("arrivo.zip");
@@ -238,6 +238,152 @@ describe("an incoming offer", () => {
     );
   });
 
+  // The dialog used to show a stranger the raw base32 id and offer to hand over
+  // words *after* they were saved — asking the reader to commit before it would
+  // inform them. The fingerprint is a pure function of the key; the daemon stamps
+  // it onto every offer, saved sender or not.
+  it("140. a stranger's fingerprint is on screen before anything is saved", async () => {
+    await renderAppWithOffer();
+    fireEvent.click(screen.getByText("arrivo.zip"));
+    await screen.findByText("Somebody is sending you a file");
+    expect(
+      screen.getByText("able-otter-nine-plum-river-cedar-lantern-fox")
+    ).toBeTruthy();
+    expect(harness.recorder.addContact).toEqual([]);
+  });
+
+  it("141. a key that has never sent before says so; one that has, says how often", async () => {
+    await renderAppWithOffer();
+    fireEvent.click(screen.getByText("arrivo.zip"));
+    expect(await screen.findByText(en["incoming.firstTime"])).toBeTruthy();
+
+    cleanup();
+    resetHarness();
+    fresh();
+    await renderAppWithOffer({ seen_count: 3 });
+    fireEvent.click(screen.getByText("arrivo.zip"));
+    expect(await screen.findByText(en["incoming.seenBefore"]("3"))).toBeTruthy();
+    expect(screen.queryByText(en["incoming.firstTime"])).toBeNull();
+  });
+
+  // A key that introduced itself as one person and came back as another is
+  // indistinguishable from a key that only ever used the second name — unless
+  // somebody kept the first claim. That difference is the whole signal.
+  it("142. a stranger whose claimed name has changed is called out", async () => {
+    await renderAppWithOffer({ sender_name: "Marco", known_name: "Giulia" });
+    fireEvent.click(screen.getByText("arrivo.zip"));
+    expect(
+      await screen.findByText(en["incoming.wasCalled"]("Giulia"))
+    ).toBeTruthy();
+  });
+
+  it("143. a stranger claiming the same name as always is not called out", async () => {
+    await renderAppWithOffer({ sender_name: "Giulia", known_name: "Giulia" });
+    fireEvent.click(screen.getByText("arrivo.zip"));
+    await screen.findByText("Somebody is sending you a file");
+    expect(screen.queryByText(en["incoming.wasCalled"]("Giulia"))).toBeNull();
+  });
+
+  it("144. the name field is filled in from what the sender calls themselves", async () => {
+    await renderAppWithOffer({ sender_name: "Anna Maria" });
+    fireEvent.click(screen.getByText("arrivo.zip"));
+    const field = (await screen.findByLabelText(
+      en["incoming.saveAsLabel"]
+    )) as HTMLInputElement;
+    expect(field.value).toBe("anna-maria");
+  });
+
+  // One gesture, one commit. There is no Save of its own any more: the address
+  // book used to move mid-decision, which re-rendered the sender as known and
+  // took the panel — and with it the place the user was reading — off screen.
+  it("145. Accept saves the typed name first, then takes the file", async () => {
+    await renderAppWithOffer({ sender_name: "Anna" });
+    fireEvent.click(screen.getByText("arrivo.zip"));
+    const field = await screen.findByLabelText(en["incoming.saveAsLabel"]);
+    fireEvent.change(field, { target: { value: "annamaria" } });
+    fireEvent.click(screen.getByText(en["incoming.acceptAndSave"]));
+    await waitFor(() =>
+      expect(harness.recorder.addContact).toEqual([["annamaria", PEER_ID]])
+    );
+    expect(harness.recorder.accept).toEqual([["o1", null, null]]);
+  });
+
+  it("146. with the field left empty it is a plain Accept, and saves nobody", async () => {
+    await renderAppWithOffer();
+    fireEvent.click(screen.getByText("arrivo.zip"));
+    fireEvent.click(await screen.findByText(en["incoming.accept"]));
+    await waitFor(() => expect(harness.recorder.accept).toHaveLength(1));
+    expect(harness.recorder.addContact).toEqual([]);
+  });
+
+  it("147. a refused save does not go on to take the file", async () => {
+    await renderAppWithOffer({ sender_name: "Anna" });
+    harness.fail = new Set(["addContact"]);
+    fireEvent.click(screen.getByText("arrivo.zip"));
+    fireEvent.click(await screen.findByText(en["incoming.acceptAndSave"]));
+    await waitFor(() => expect(toastText()).toBeTruthy());
+    expect(harness.recorder.accept).toEqual([]);
+    expect(useStore.getState().transfers["oo1"]).toBeTruthy();
+  });
+
+  // `contact_add` re-points a name that already exists and drops that name's
+  // verified and trusted marks. Typing a name you already use, over a stranger's
+  // offer, would quietly demote the person you had actually checked.
+  it("148. a name that belongs to somebody else is refused before it is sent", async () => {
+    harness.snapshot.contacts = [
+      dto.contact({ name: "giulia", id: "someone-else", verified: true }),
+    ];
+    await renderAppWithOffer();
+    fireEvent.click(screen.getByText("arrivo.zip"));
+    const field = await screen.findByLabelText(en["incoming.saveAsLabel"]);
+    fireEvent.change(field, { target: { value: "giulia" } });
+    expect(screen.getByText(en["incoming.nameTaken"]("giulia"))).toBeTruthy();
+    fireEvent.click(screen.getByText(en["incoming.accept"]));
+    await act(async () => {});
+    expect(harness.recorder.addContact).toEqual([]);
+    expect(harness.recorder.accept).toEqual([]);
+  });
+
+  // The panel changes shape as it is used; a click aimed at a control that has
+  // just been replaced must not land on the backdrop and read as the dialog
+  // closing itself.
+  it("149. the backdrop does not dismiss the decision, but Escape does", async () => {
+    await renderAppWithOffer();
+    fireEvent.click(screen.getByText("arrivo.zip"));
+    await screen.findByText("Somebody is sending you a file");
+    fireEvent.click(document.querySelector(".scrim")!);
+    expect(useStore.getState().incomingOfferId).toBe("o1");
+    fireEvent.keyDown(document, { key: "Escape" });
+    await waitFor(() =>
+      expect(useStore.getState().incomingOfferId).toBeNull()
+    );
+  });
+
+  // The dialog is mounted for the life of the window, so without a fresh mount
+  // per offer the second arrival inherits the first one's proposed name.
+  it("150. a second offer proposes its own sender's name, not the first one's", async () => {
+    await renderAppWithOffer({ sender_name: "Anna" });
+    fireEvent.click(screen.getByText("arrivo.zip"));
+    await screen.findByLabelText(en["incoming.saveAsLabel"]);
+
+    act(() => {
+      useStore.getState().applyEvent({
+        type: "offer_received",
+        id: "o2",
+        from: "peer-two",
+        name: "secondo.zip",
+        size: 10,
+        note: "",
+        sender_name: "Bruno",
+      });
+      useStore.getState().openIncoming("o2");
+    });
+    const field = (await screen.findByLabelText(
+      en["incoming.saveAsLabel"]
+    )) as HTMLInputElement;
+    expect(field.value).toBe("bruno");
+  });
+
   it("135. it shows the sender's note", async () => {
     harness.snapshot.pending = [
       dto.offer({ id: "o1", from: PEER_ID, name: "arrivo.zip", note: "guarda qui" }),
@@ -295,6 +441,36 @@ describe("the row menu", () => {
     const menu = await openRowMenu("invio.txt");
     fireEvent.click(within(menu).getByText("Pause"));
     await waitFor(() => expect(harness.recorder.pause).toEqual([1]));
+  });
+
+  // The escape hatch from the wait. A send holds a direct offer open for a while
+  // before parking the file on the relay, so there has to be a way to say "I know
+  // they are not going to answer" without cancelling and starting again.
+  it("119a. a send waiting on an accept offers to park it on the relay", async () => {
+    await renderAppWithSend({
+      status: "waiting: offered — waiting for them to accept",
+      offer_status: "arrived",
+    });
+    const menu = await openRowMenu("invio.txt");
+    fireEvent.click(within(menu).getByText(en["transfers.depositNow"]));
+    await waitFor(() => expect(harness.recorder.depositNow).toEqual([1]));
+  });
+
+  it("119b. nothing else offers it — there is no wait to cut short", async () => {
+    await renderAppWithSend({ status: "active" });
+    const menu = await openRowMenu("invio.txt");
+    expect(within(menu).queryByText(en["transfers.depositNow"])).toBeNull();
+  });
+
+  it("119c. a daemon that refuses says so instead of looking done", async () => {
+    await renderAppWithSend({
+      status: "waiting: offered — waiting for them to accept",
+      offer_status: "arrived",
+    });
+    harness.fail = new Set(["depositNow"]);
+    const menu = await openRowMenu("invio.txt");
+    fireEvent.click(within(menu).getByText(en["transfers.depositNow"]));
+    await waitFor(() => expect(toastText()).toBeTruthy());
   });
 
   it("111. a refused menu action reports itself", async () => {

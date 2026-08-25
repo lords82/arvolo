@@ -133,6 +133,19 @@ pub enum WaitingReason {
     /// a diagnostic from another machine, and inventing a translation for them
     /// would be inventing their content.
     RelayRetry(String),
+    /// Everything the recipient still lacks is on the relay: the send is parked
+    /// there, they can finish without this daemon running, and it stays open only
+    /// in case they turn up for a direct transfer, which is faster and free.
+    Parked,
+    /// The relay will hold no more *of this transfer* — its per-session offload
+    /// cap, not its disk. Carries the cap already written for people ("128 MiB"),
+    /// because a client that translates the sentence still has to interpolate the
+    /// figure rather than invent it.
+    RelayCapped(String),
+    /// Parking on the relay did not work. Carries the relay's own words for the
+    /// same reason [`Self::RelayRetry`] does: they are a diagnostic from another
+    /// machine, and translating them would be inventing their content.
+    OffloadFailed(String),
 }
 
 impl WaitingReason {
@@ -143,6 +156,9 @@ impl WaitingReason {
             WaitingReason::Offered => "offered",
             WaitingReason::TooLarge => "tooLarge",
             WaitingReason::RelayRetry(_) => "relayRetry",
+            WaitingReason::Parked => "parked",
+            WaitingReason::RelayCapped(_) => "relayCapped",
+            WaitingReason::OffloadFailed(_) => "offloadFailed",
         }
     }
 
@@ -156,6 +172,16 @@ impl WaitingReason {
             WaitingReason::RelayRetry(why) => format!(
                 "{why} — retrying later, and delivering P2P as soon as the recipient is online"
             ),
+            WaitingReason::Parked => {
+                "parked on the relay — they can finish it without you online".into()
+            }
+            WaitingReason::RelayCapped(cap) => format!(
+                "the relay won't hold more of this transfer (cap {cap}) — \
+                 delivering direct as soon as they're online"
+            ),
+            WaitingReason::OffloadFailed(why) => {
+                format!("couldn't park it on the relay: {why}")
+            }
         }
     }
 
@@ -164,7 +190,9 @@ impl WaitingReason {
     /// is ours.
     pub fn detail(&self) -> Option<&str> {
         match self {
-            WaitingReason::RelayRetry(why) => Some(why),
+            WaitingReason::RelayRetry(why)
+            | WaitingReason::RelayCapped(why)
+            | WaitingReason::OffloadFailed(why) => Some(why),
             _ => None,
         }
     }
@@ -367,12 +395,22 @@ pub enum ManagerEvent {
     /// (refused / unreachable / errored). The daemon keeps trying: live P2P when
     /// the recipient appears, and the relay again on a slow interval. `reason` is
     /// a short human explanation; `code` is the same thing as
-    /// [`WaitingReason::code`], for a subscriber that says it in its own words.
+    /// [`WaitingReason::code`], for a subscriber that says it in its own words,
+    /// and `detail` the part of it that came from another machine.
+    ///
+    /// `offer_status` is how far the offer this send is holding open has got —
+    /// the same `pending`/`arrived`/`taken` ladder a deposited send reports, empty
+    /// when no offer stands. It rides on the event because nothing else announces
+    /// it: a front end fed only by events would otherwise have to guess whether a
+    /// waiting send is waiting on the network or on a person, and those two do not
+    /// deserve the same word on screen. Orthogonal to `code`, which says *why* it
+    /// waits — this says *how far* the one thing it is waiting on has come.
     Waiting {
         id: u64,
         reason: String,
         code: String,
         detail: String,
+        offer_status: String,
     },
     /// A send was paused (by the user, or automatically after a long failure to
     /// deliver). It stays put until `resume`d or `cancel`led. `reason` explains why.
@@ -671,8 +709,20 @@ impl TransferManager {
             // An awaiting-pickup deposit has no running loop either, and the file
             // is sitting on the relay: withdraw it there before ending the row,
             // or "cancel" would only hide it while the recipient could still fetch.
+            // Both routes park a file on a relay and both must really withdraw
+            // it; which one this was is a fact about the record on disk, not about
+            // the status, so ask there rather than making the caller know.
             TransferStatus::Deposited => {
-                cancel_deposited(self.inner.clone(), id);
+                let parked = self
+                    .inner
+                    .state_dir
+                    .as_ref()
+                    .is_some_and(|dir| load_parkeds(dir).iter().any(|r| r.id == id));
+                if parked {
+                    cancel_parked(self.inner.clone(), id);
+                } else {
+                    cancel_deposited(self.inner.clone(), id);
+                }
                 return true;
             }
             TransferStatus::Active | TransferStatus::Preparing | TransferStatus::Waiting(_) => {}
@@ -755,6 +805,8 @@ impl TransferManager {
                 target,
                 relay: theirs,
                 pause_flag: pause_flag.clone(),
+                deposit_now: Default::default(),
+                attempt: Default::default(),
                 prep: Default::default(),
             },
         );
@@ -850,6 +902,48 @@ impl TransferManager {
                 Err(anyhow::anyhow!("{msg}"))
             }
         }
+    }
+
+    /// Stop waiting for the recipient to accept and park the file on the relay now.
+    ///
+    /// The escape hatch for the grace period a `send --to` spends holding a live
+    /// offer open (see `deposit_after_secs`): waiting half an hour for somebody to
+    /// click is right by default and wrong when you already know they will not, and
+    /// this is how you say so without cancelling and sending again.
+    ///
+    /// Only a send that is actually waiting can take it — one under way is already
+    /// being delivered by the route the user wanted, and one that has already been
+    /// deposited has nowhere further to go. Returns `false` in those cases rather
+    /// than pretending, so a caller can say what happened.
+    pub fn deposit_now(&self, id: u64) -> bool {
+        let waiting = self
+            .inner
+            .transfers
+            .lock()
+            .unwrap()
+            .get(&id)
+            .is_some_and(|t| {
+                t.direction == Direction::Send
+                    && matches!(
+                        t.status,
+                        TransferStatus::Waiting(_) | TransferStatus::Preparing
+                    )
+            });
+        if !waiting {
+            return false;
+        }
+        let Some(h) = self.inner.held.lock().unwrap().get(&id).cloned() else {
+            return false;
+        };
+        h.deposit_now.store(true, Ordering::Relaxed);
+        // End the attempt in flight, if one is serving, so the loop comes back round
+        // now rather than when the watchdog next gives up. Deliberately the
+        // *attempt* token and not the send's own: cancelling that one would pause
+        // the send, which is the opposite of what was asked for.
+        if let Some(c) = h.attempt.lock().unwrap().as_ref() {
+            c.cancel();
+        }
+        true
     }
 
     /// Pause an in-progress transfer (Active or Waiting): stop working on it and hold
@@ -1112,6 +1206,8 @@ impl TransferManager {
                 target: rec.target,
                 relay: rec.relay.clone(),
                 pause_flag: pause_flag.clone(),
+                deposit_now: Default::default(),
+                attempt: Default::default(),
                 prep: slot.clone(),
             },
         );
@@ -2264,6 +2360,8 @@ mod held_prep_tests {
                 target: None,
                 relay: None,
                 pause_flag: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                deposit_now: Default::default(),
+                attempt: Default::default(),
                 prep: slot.clone(),
             },
         );

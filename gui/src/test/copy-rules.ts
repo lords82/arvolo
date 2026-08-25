@@ -77,6 +77,17 @@ const CATEGORY: Record<string, Cat> = {
   // `app.versionMismatch` above: a caveat under a headline, not a headline.
   "app.updateHeldBack": "secondary",
   "app.updateDevices": "secondary",
+  // What the offer dialog knows about a sender it has never been told about:
+  // each one is a sentence explaining a state, sitting under the fingerprint.
+  "incoming.firstTime": "secondary",
+  "incoming.seenBefore": "secondary",
+  "incoming.saveAsSuggested": "secondary",
+  // These two land in an error slot but are not one-line errors: a refusal that
+  // only said "already taken" would read as a tidiness rule, when the reason it
+  // exists is the marks it protects. Both carry a floor for that reason, and a
+  // floor of 70 cannot live under the `error` cap of 60.
+  "incoming.nameTaken": "secondary",
+  "people.addNameTaken": "secondary",
 };
 
 /** The other end of the cap, for the handful of strings where being brief is the
@@ -94,7 +105,16 @@ export const FLOOR: Record<string, number> = {
   "pair.joinWarnRest": 90,
   // Must say the fingerprint was never compared, and what that lets through.
   "people.confirmForceBody": 90,
-  "incoming.hintUnknown": 70,
+  // Must say nobody has checked these words yet, and where to check them —
+  // otherwise a fingerprint being *present* reads as a check already made.
+  "incoming.hintStranger": 70,
+  // Must say why there are no words, not just that this is an id.
+  "incoming.hintRawId": 70,
+  // Must say there is nothing to compare against, not merely "new".
+  "incoming.firstTime": 70,
+  // Must name the marks that would be dropped, and whose they are.
+  "incoming.nameTaken": 70,
+  "people.confirmRekeyBody": 90,
   // Must say the key *is* the identity, not merely that it is private.
   "settings.identityKeyHint": 70,
 };

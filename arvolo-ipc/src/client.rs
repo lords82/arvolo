@@ -400,6 +400,11 @@ impl DaemonClient {
         expect_ok(self.request(Request::Resume { id }).await?)
     }
 
+    /// Park a waiting send on the relay instead of waiting longer for an accept.
+    pub async fn deposit_now(&mut self, id: u64) -> Result<()> {
+        expect_ok(self.request(Request::DepositNow { id }).await?)
+    }
+
     pub async fn accept(&mut self, offer_id: String, out: Option<PathBuf>) -> Result<u64> {
         self.accept_with_password(offer_id, out, None).await
     }
@@ -457,8 +462,42 @@ impl DaemonClient {
 
     /// Save (or re-key) a contact. Re-keying clears verified/trusted marks —
     /// warn the user first.
+    /// Save a contact. Refused if the name already belongs to another key —
+    /// see [`Self::rebind_contact`] for the deliberate version of that.
     pub async fn add_contact(&mut self, name: String, id: String) -> Result<()> {
-        expect_ok(self.request(Request::AddContact { name, id }).await?)
+        expect_ok(
+            self.request(Request::AddContact {
+                name,
+                id,
+                rebind: false,
+            })
+            .await?,
+        )
+    }
+
+    /// Point an existing contact name at a different key, dropping its verified
+    /// and trusted marks. Returns the two fingerprints, so the caller can show
+    /// what changed. Also succeeds (with `None`) when the name was free.
+    pub async fn rebind_contact(
+        &mut self,
+        name: String,
+        id: String,
+    ) -> Result<Option<(String, String)>> {
+        match self
+            .request(Request::AddContact {
+                name,
+                id,
+                rebind: true,
+            })
+            .await?
+        {
+            Response::KeyChanged {
+                old_fingerprint,
+                new_fingerprint,
+            } => Ok(Some((old_fingerprint, new_fingerprint))),
+            Response::Ok => Ok(None),
+            other => unexpected(other),
+        }
     }
 
     pub async fn remove_contact(&mut self, name: String) -> Result<()> {

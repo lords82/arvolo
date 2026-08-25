@@ -24,6 +24,21 @@ export function extOf(name: string): string {
   return ext || "FILE";
 }
 
+/** A contact name worth proposing, from the name a sender types about
+ *  themselves: lowercased, spaces to `-`, punctuation dropped. Empty when
+ *  nothing typeable is left — better no suggestion than one nobody can use.
+ *
+ *  Same rule as the CLI's `slug_contact_name`, so the two surfaces propose the
+ *  same name for the same sender. */
+export function slugName(claimed: string | undefined): string {
+  return (claimed ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "-")
+    .replace(/[^\p{L}\p{N}_-]/gu, "")
+    .replace(/^-+|-+$/g, "");
+}
+
 /** Shorten a base32 id to `if2xmne…c7daha`, matching the CLI/mock. */
 export function shortId(id: string): string {
   if (id.length <= 16) return id;
@@ -64,6 +79,12 @@ export function statusMeta(s: UIStatus): StatusMeta {
       return { tone: "warn", text: t("status.paused") };
     case "incoming":
       return { tone: "warn", text: t("status.incoming") };
+    // Not muted, and not "stalled": the file is one accept away from moving, and
+    // there is something the reader can do about it — leave it, or park it on the
+    // relay. A tone that said "nothing to see" would hide the only window in which
+    // a direct transfer is still possible.
+    case "offered":
+      return { tone: "out", text: t("status.offered") };
     case "stalled":
       return { tone: "mut", text: t("status.stalled") };
     case "failed":
@@ -121,7 +142,11 @@ export function barClass(tx: UITransfer): string {
   const dir = tx.dir === "out" ? "out" : "in";
   if (tx.status === "completed") return `prog ${dir} done`;
   if (tx.status === "failed") return `prog ${dir} bad`;
-  if (tx.status === "stalled" || tx.status === "paused")
+  if (
+    tx.status === "stalled" ||
+    tx.status === "offered" ||
+    tx.status === "paused"
+  )
     return `prog ${dir} stall`;
   // A share is complete by definition — the file is all there, waiting. Drawing it
   // as a bar invites reading a full one as "done" and an empty one as "stuck",
@@ -178,10 +203,26 @@ export function fmtEta(tx: UITransfer): string {
  *  silently back into English the first time somebody improved the wording. The
  *  codes come from `WaitingReason::code` in core/src/manager/mod.rs — the two
  *  lists are kept in step by `waiting.test.ts`. */
-const WAITING_KEY: Record<string, "waiting.offered" | "waiting.tooLarge" | "waiting.relayRetry"> = {
+const WAITING_PLAIN: Record<
+  string,
+  "waiting.offered" | "waiting.tooLarge" | "waiting.parked"
+> = {
   offered: "waiting.offered",
   tooLarge: "waiting.tooLarge",
+  parked: "waiting.parked",
+};
+
+/** The reasons that quote something from elsewhere inside them — the relay's own
+ *  message, or a cap it named. Those words are interpolated, never translated: we
+ *  did not write them and have no idea what they say. Kept apart from the plain
+ *  ones so the type system knows which entries take an argument. */
+const WAITING_QUOTED: Record<
+  string,
+  "waiting.relayRetry" | "waiting.relayCapped" | "waiting.offloadFailed"
+> = {
   relayRetry: "waiting.relayRetry",
+  relayCapped: "waiting.relayCapped",
+  offloadFailed: "waiting.offloadFailed",
 };
 
 /** What a waiting row says, in the reader's language where we can.
@@ -192,13 +233,12 @@ const WAITING_KEY: Record<string, "waiting.offered" | "waiting.tooLarge" | "wait
  *  window. Saying the wrong reason confidently would be worse than saying the
  *  right one in English. */
 export function waitingText(tx: UITransfer): string {
-  const key = tx.waitingCode ? WAITING_KEY[tx.waitingCode] : undefined;
-  if (!key) return tx.reason || t("meta.stalled");
-  // The relay's own words are quoted, not translated — they came from another
-  // machine and we have no idea what they say.
-  return key === "waiting.relayRetry"
-    ? t(key, tx.waitingDetail || t("waiting.relayUnnamed"))
-    : t(key);
+  const code = tx.waitingCode;
+  if (!code) return tx.reason || t("meta.stalled");
+  const quoted = WAITING_QUOTED[code];
+  if (quoted) return t(quoted, tx.waitingDetail || t("waiting.relayUnnamed"));
+  const plain = WAITING_PLAIN[code];
+  return plain ? t(plain) : tx.reason || t("meta.stalled");
 }
 
 /** The right-hand meta line under the status. */
@@ -221,6 +261,17 @@ export function metaLine(tx: UITransfer): string {
       return t("meta.paused");
     case "preparing":
       return t("meta.preparing");
+    // The offer is out and the answer has not come. Say which of the two things
+    // is true — it hasn't reached them, or it is sitting in front of them — in
+    // the same words the deposits panel uses for the same fact. The daemon's own
+    // reason string is deliberately not shown here: it is raw English, and this
+    // is the one waiting state a reader can act on.
+    case "offered":
+      return t(
+        tx.offerStatus === "arrived" || tx.offerStatus === "taken"
+          ? "deposit.offerArrived"
+          : "meta.offered"
+      );
     case "stalled":
       return waitingText(tx);
     case "incoming":
@@ -407,6 +458,7 @@ export function sectionsFor(
     s === "sharing" ||
     s === "paused" ||
     s === "stalled" ||
+    s === "offered" ||
     s === "cancelling";
   const isTerminal = (s: UIStatus) =>
     s === "completed" ||

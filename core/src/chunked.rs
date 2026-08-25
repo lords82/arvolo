@@ -1856,6 +1856,67 @@ impl SeedRequest {
     }
 }
 
+/// "Of these chunk hashes, which do you already hold?" — asked of the relay by
+/// both ends. Base32 `arvh…`; the answer is a bitfield over the same order (see
+/// [`encode_have_bitfield`]).
+///
+/// **Keyed on the hashes and nothing else**, deliberately not on the per-transfer
+/// seed token: `/v1/addr` mints a fresh token on every preparation and
+/// `PrepRecord` does not carry it, so a token-keyed query would fail in exactly
+/// the case it exists for — a sender that restarted and no longer knows what it
+/// left behind.
+///
+/// It tells a caller nothing they could not already find out. The relay serves
+/// any chunk it holds to whoever names its hash over [`CHUNK_ALPN`], without a
+/// token, so "do you have it" is answerable by just asking for it; this only
+/// makes the same question cheap and batched, which is why the relay caps the
+/// list length and spends the write budget on it. And the hashes are BLAKE3 of
+/// *ciphertext* sealed under a per-transfer random key — holding the same file
+/// does not let you compute them, so the ticket remains the capability.
+#[derive(Serialize, Deserialize)]
+pub struct HaveRequest {
+    pub chunks: Vec<Hash>,
+}
+
+impl HaveRequest {
+    pub fn encode(&self) -> Result<String> {
+        let bytes = postcard::to_allocvec(self).context("serialize have request")?;
+        Ok(format!(
+            "arvh{}",
+            data_encoding::BASE32_NOPAD.encode(&bytes)
+        ))
+    }
+    pub fn decode(s: &str) -> Result<Self> {
+        let body = s
+            .trim()
+            .strip_prefix("arvh")
+            .ok_or_else(|| anyhow!("not a have request"))?;
+        let bytes = data_encoding::BASE32_NOPAD
+            .decode(body.to_uppercase().as_bytes())
+            .context("decode have request")?;
+        postcard::from_bytes(&bytes).context("deserialize have request")
+    }
+}
+
+/// The answer to a [`HaveRequest`]: one bit per requested hash, in the order
+/// asked. Encoded here rather than at either end so the two cannot drift.
+pub fn encode_have_bitfield(bitfield: &[u8]) -> String {
+    data_encoding::BASE32_NOPAD.encode(bitfield).to_lowercase()
+}
+
+/// Decode a [`encode_have_bitfield`] answer. `n_chunks` is what we asked about:
+/// a reply claiming more bits than that is a reply to a different question.
+pub fn decode_have_bitfield(s: &str, n_chunks: usize) -> Result<Vec<u8>> {
+    let bytes = data_encoding::BASE32_NOPAD
+        .decode(s.trim().to_uppercase().as_bytes())
+        .context("decode have bitfield")?;
+    anyhow::ensure!(
+        bytes.len() <= crate::swarm::bitfield_bytes(n_chunks),
+        "have bitfield longer than the question asked"
+    );
+    Ok(bytes)
+}
+
 /// Encode/decode a relay provider address (its iroh address).
 pub fn encode_addr(addr: &EndpointAddr) -> Result<String> {
     encode_ticket(addr)

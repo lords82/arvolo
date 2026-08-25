@@ -18,7 +18,7 @@ const COMMAND_GROUPS: &[(&str, &[&str])] = &[
     ("Receive", &["recv", "decline", "listen"]),
     (
         "Follow it, and take it back",
-        &["status", "history", "pause", "resume", "cancel"],
+        &["status", "history", "pause", "resume", "deposit", "cancel"],
     ),
     ("People and devices", &["contacts", "device", "me"]),
     ("Arvolo itself", &["daemon", "completions", "help"]),
@@ -392,6 +392,17 @@ pub(crate) enum Command {
     },
     /// Pause an in-progress transfer (hold it; resume or cancel later).
     Pause {
+        /// The transfer id shown by `arvolo status`.
+        #[arg(add = ArgValueCandidates::new(completions::transfer_candidates))]
+        id: String,
+    },
+    /// Stop waiting for the recipient and leave the file in their mailbox.
+    ///
+    /// A send to someone who is reachable holds a direct offer open for a while
+    /// first, because their app having the offer is not the same as a person
+    /// having answered it. Use this when you already know they will not answer
+    /// soon: the file goes to the relay now and they collect it whenever.
+    Deposit {
         /// The transfer id shown by `arvolo status`.
         #[arg(add = ArgValueCandidates::new(completions::transfer_candidates))]
         id: String,
