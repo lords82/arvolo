@@ -142,10 +142,25 @@ pub fn log_path() -> PathBuf {
 /// grow without bound, not that a month of it is archived. Best-effort — a log
 /// that can't be rotated is not a reason to fail to start a daemon.
 pub fn rotate_log(max_bytes: u64) {
-    let path = log_path();
-    let too_big = std::fs::metadata(&path).map(|m| m.len() > max_bytes);
+    rotate_log_at(&log_path(), max_bytes);
+}
+
+/// Path to the desktop app's own log (honors `ARVOLO_CONFIG_DIR`).
+///
+/// Beside the daemon's rather than inside it: they are two processes with two
+/// lifetimes, and a bundled app writes to no terminal anybody can watch, so
+/// without a file of its own the app's errors have nowhere to be. Same directory,
+/// so "where do I look" has one answer.
+pub fn gui_log_path() -> PathBuf {
+    config_dir().join("gui.log")
+}
+
+/// [`rotate_log`] for any of the logs here — the policy written once, since a
+/// second copy of "one generation, best-effort" is a second place for it to drift.
+pub fn rotate_log_at(path: &std::path::Path, max_bytes: u64) {
+    let too_big = std::fs::metadata(path).map(|m| m.len() > max_bytes);
     if matches!(too_big, Ok(true)) {
-        let _ = std::fs::rename(&path, path.with_extension("log.1"));
+        let _ = std::fs::rename(path, path.with_extension("log.1"));
     }
 }
 

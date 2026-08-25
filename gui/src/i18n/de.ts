@@ -493,6 +493,7 @@ export const de: Dict = {
   "settings.updateNone": "Sie haben die neueste Version.",
   "settings.updateFound": (version) => `Arvolo ${version} ist da.`,
   "settings.updateInstalling": "Wird installiert — die App startet neu.",
+  "settings.updateReopen": "Installiert — zum Abschluss neu öffnen.",
   "settings.updateFailed": (why) => `Prüfung nicht möglich: ${why}`,
   "settings.confirmUpdateTitle": "Aktualisieren, während Übertragungen laufen?",
   "settings.confirmUpdateBody":

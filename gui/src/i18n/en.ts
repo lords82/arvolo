@@ -564,6 +564,7 @@ export const en = {
   "settings.updateNone": "You're on the latest version.",
   "settings.updateFound": (version: string) => `Arvolo ${version} is out.`,
   "settings.updateInstalling": "Installing — the app restarts itself.",
+  "settings.updateReopen": "Installed — open Arvolo again to finish.",
   "settings.updateFailed": (why: string) => `Couldn't check: ${why}`,
   "settings.confirmUpdateTitle": "Update while transfers are running?",
   "settings.confirmUpdateBody":

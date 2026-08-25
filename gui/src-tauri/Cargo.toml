@@ -45,6 +45,7 @@ data-encoding = "2"
 anyhow.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+tracing-subscriber.workspace = true
 # The daemon client + wire contract, shared with the CLI.
 arvolo-ipc.workspace = true
 # Only for `http::client()`, to fetch the update compatibility table. Already in

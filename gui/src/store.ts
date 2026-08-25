@@ -296,7 +296,11 @@ function toUIStatus(raw: string): { status: UIStatus; reason?: string } {
 /** Where the update flow is. `error` is only ever shown for a check the user
  *  asked for — an automatic one that failed says nothing (see `checkForUpdate`). */
 export interface UpdateState {
-  phase: "idle" | "checking" | "available" | "downloading" | "error";
+  /** `installed` is not a kind of `error`: the new version is on disk and will be
+   *  running the moment the app is opened again. Only the last step — coming back
+   *  up by itself — did not happen, and telling someone their update failed when
+   *  it did not is the wrong end of that. */
+  phase: "idle" | "checking" | "available" | "downloading" | "installed" | "error";
   info: UpdateInfo | null;
   progress: UpdateProgress | null;
   error: string | null;
@@ -791,8 +795,16 @@ export const useStore = create<State>((set, get) => {
       // process is replaced by the one it just installed.
       fire(
         api.installUpdate().catch((e) => {
+          // The backend says which of the two happened with a marker rather than
+          // a sentence, so the wording on either side can be rewritten without
+          // quietly turning one state into the other.
+          const installed = String(e).includes("relaunch-failed");
           set((s) => ({
-            update: { ...s.update, phase: "error", error: String(e) },
+            update: {
+              ...s.update,
+              phase: installed ? "installed" : "error",
+              error: installed ? null : String(e),
+            },
           }));
         })
       );

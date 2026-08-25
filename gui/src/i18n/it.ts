@@ -492,6 +492,7 @@ export const it: Dict = {
   "settings.updateNone": "Hai l'ultima versione.",
   "settings.updateFound": (version) => `È uscito Arvolo ${version}.`,
   "settings.updateInstalling": "Sto installando — l'app si riavvia da sola.",
+  "settings.updateReopen": "Installato — riapri Arvolo per completare.",
   "settings.updateFailed": (why) => `Non ho potuto controllare: ${why}`,
   "settings.confirmUpdateTitle": "Aggiorno con i trasferimenti in corso?",
   "settings.confirmUpdateBody":

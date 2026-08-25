@@ -175,9 +175,9 @@ async fn hold_back_for_relay(app: &AppHandle, info: UpdateInfo) -> UpdateInfo {
 ///    restart — and on the way back up the pump spawns the *new* daemon from the
 ///    *new* sidecar, which is the whole point of stopping the old one.
 ///
-/// If the install fails, the hold is released: the app stays on the old version,
-/// and leaving it permanently without a daemon would turn a failed update into a
-/// broken installation.
+/// If the install fails — or the relaunch does — the hold is released: the app
+/// stays usable, and leaving it permanently without a daemon would turn a failed
+/// update into a broken installation.
 #[tauri::command]
 pub async fn install_update(app: AppHandle, version: Option<String>) -> Result<(), String> {
     let updater = updater(&app, version.as_deref())?;
@@ -211,5 +211,87 @@ pub async fn install_update(app: AppHandle, version: Option<String>) -> Result<(
         return Err(format!("install: {e}"));
     }
 
-    app.restart()
+    // Installed. Everything from here is about coming back up, and it is the one
+    // step that used to have no way of failing out loud.
+    relaunch(&app)
+}
+
+/// The message the frontend keys "installed, but you have to reopen it" off.
+/// Matched by prefix rather than by wording, so the sentence can be rewritten
+/// without silently turning that state back into a plain error.
+pub const RELAUNCH_FAILED: &str = "relaunch-failed";
+
+/// Start the newly installed app and leave.
+///
+/// On macOS this asks **LaunchServices** to open the bundle rather than executing
+/// the binary inside it, which is what `App::restart` does. The difference is not
+/// cosmetic on a bundle that was replaced a moment ago: `open` hands the job to
+/// launchd, so the new process is not a child of the one about to exit, it is
+/// registered with the window server, and it gets a Dock icon and the focus.
+/// Spawning the inner Mach-O from a dying parent is the fragile way, and when it
+/// does not take there is nothing at all to see — which is exactly how this
+/// reached someone as "the update works, the app just never comes back".
+///
+/// Everywhere else `restart` is right and is used unchanged.
+///
+/// Never returns on success. On failure the daemon is handed back and the caller
+/// gets an error, because the alternative — exiting anyway — is the behaviour
+/// this exists to remove: an app that vanishes and leaves the person guessing
+/// whether it installed, crashed, or is about to come back.
+fn relaunch(
+    #[cfg_attr(target_os = "macos", allow(unused_variables))] app: &AppHandle,
+) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        match bundle_root() {
+            Some(bundle) => {
+                match std::process::Command::new("/usr/bin/open")
+                    .arg("-n")
+                    .arg(&bundle)
+                    .status()
+                {
+                    // `open` returns as soon as launchd has taken the request, so a
+                    // success here means the new instance is on its way, not that
+                    // it has finished starting.
+                    Ok(status) if status.success() => std::process::exit(0),
+                    Ok(status) => {
+                        tracing::error!(%status, ?bundle, "open refused to relaunch the app");
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, ?bundle, "could not run open to relaunch");
+                    }
+                }
+            }
+            None => {
+                tracing::error!("not running from an .app bundle — cannot relaunch through open");
+            }
+        }
+        daemon::release_hold();
+        Err(RELAUNCH_FAILED.into())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        // Windows takes the app down from inside the installer and never reaches
+        // here; on Linux the bundle was replaced under us and `restart` re-execs
+        // the same path, which is the whole story on that platform.
+        app.restart()
+    }
+}
+
+/// The `.app` this process is running from: `…/Arvolo.app/Contents/MacOS/bin`
+/// with the last three components dropped. `None` when the layout is not a
+/// bundle, which is every `tauri dev` run.
+#[cfg(target_os = "macos")]
+fn bundle_root() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let macos = exe.parent()?;
+    if macos.file_name()? != "MacOS" {
+        return None;
+    }
+    let contents = macos.parent()?;
+    if contents.file_name()? != "Contents" {
+        return None;
+    }
+    let bundle = contents.parent()?;
+    (bundle.extension()? == "app").then(|| bundle.to_path_buf())
 }

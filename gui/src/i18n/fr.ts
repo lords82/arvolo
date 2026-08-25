@@ -495,6 +495,7 @@ export const fr: Dict = {
   "settings.updateNone": "Vous avez la dernière version.",
   "settings.updateFound": (version) => `Arvolo ${version} est sorti.`,
   "settings.updateInstalling": "Installation — l'application redémarre seule.",
+  "settings.updateReopen": "Installé — rouvrez Arvolo pour terminer.",
   "settings.updateFailed": (why) => `Vérification impossible : ${why}`,
   "settings.confirmUpdateTitle": "Mettre à jour pendant des transferts ?",
   "settings.confirmUpdateBody":

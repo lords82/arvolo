@@ -130,7 +130,44 @@ fn ui_lang(app: &AppHandle) -> String {
 /// to quit instead of leaving an unreachable process behind.
 struct HasTray(bool);
 
+/// Keep the app's log to one readable file. Same bound and same one-generation
+/// policy the daemon's log uses.
+const GUI_LOG_MAX_BYTES: u64 = 2 * 1024 * 1024;
+
+/// Send this process's diagnostics somewhere a person can read them.
+///
+/// A bundled app writes to no terminal: without this, every `tracing::error!` and
+/// every `log::error!` from Tauri itself went nowhere at all. That is not a
+/// missing nicety — it is why "the update installed and the app never came back"
+/// could only be investigated by reasoning about the source, with the one line
+/// that would have said which step failed being written to a subscriber that did
+/// not exist.
+///
+/// `fmt::init` also installs the `log` bridge, which is the half that matters
+/// here: the updater's own failure paths inside Tauri use `log`, not `tracing`.
+fn init_logging() {
+    arvolo_ipc::rotate_log_at(&arvolo_ipc::gui_log_path(), GUI_LOG_MAX_BYTES);
+    let Ok(file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(arvolo_ipc::gui_log_path())
+    else {
+        // Nowhere to write is not a reason to refuse to start; it only puts us
+        // back where we were before this existed.
+        return;
+    };
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_env("ARVOLO_LOG")
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .with_writer(std::sync::Mutex::new(file))
+        .with_ansi(false)
+        .try_init();
+}
+
 fn main() {
+    init_logging();
     // `--autostart` is what the login entry passes (see the autostart plugin
     // registration below): the app was started by the OS, not by a person, so
     // it should come up hidden in the tray rather than with a window in the

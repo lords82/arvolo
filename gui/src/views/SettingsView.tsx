@@ -79,15 +79,17 @@ export function SettingsView() {
   const updateLine =
     update.phase === "checking"
       ? t("settings.updateChecking")
-      : update.phase === "error"
-        ? t("settings.updateFailed", update.error ?? "")
-        : update.phase === "downloading"
-          ? t("settings.updateInstalling")
-          : update.info
-            ? t("settings.updateFound", update.info.version)
-            : update.manual
-              ? t("settings.updateNone")
-              : t("settings.updateIdle");
+      : update.phase === "installed"
+        ? t("settings.updateReopen")
+        : update.phase === "error"
+          ? t("settings.updateFailed", update.error ?? "")
+          : update.phase === "downloading"
+            ? t("settings.updateInstalling")
+            : update.info
+              ? t("settings.updateFound", update.info.version)
+              : update.manual
+                ? t("settings.updateNone")
+                : t("settings.updateIdle");
 
   const [name, setName] = useState("");
   const [relay, setRelay] = useState("");
