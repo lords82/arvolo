@@ -709,8 +709,20 @@ impl TransferManager {
             // An awaiting-pickup deposit has no running loop either, and the file
             // is sitting on the relay: withdraw it there before ending the row,
             // or "cancel" would only hide it while the recipient could still fetch.
+            // Both routes park a file on a relay and both must really withdraw
+            // it; which one this was is a fact about the record on disk, not about
+            // the status, so ask there rather than making the caller know.
             TransferStatus::Deposited => {
-                cancel_deposited(self.inner.clone(), id);
+                let parked = self
+                    .inner
+                    .state_dir
+                    .as_ref()
+                    .is_some_and(|dir| load_parkeds(dir).iter().any(|r| r.id == id));
+                if parked {
+                    cancel_parked(self.inner.clone(), id);
+                } else {
+                    cancel_deposited(self.inner.clone(), id);
+                }
                 return true;
             }
             TransferStatus::Active | TransferStatus::Preparing | TransferStatus::Waiting(_) => {}

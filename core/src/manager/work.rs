@@ -732,22 +732,27 @@ async fn deliver_to_inner(
         // `offloaded` keeps this whole branch shut afterwards. So there is no
         // delivered set to subtract here — only what the relay already holds, which
         // `park_on_relay` asks it for.
-        if park_now
-            && !too_big
-            && !offloaded
-            && standing.is_some()
-            && park_on_relay(
+        if park_now && !too_big && !offloaded && standing.is_some() {
+            if let Some(out) = park_on_relay(
                 inner, id, cancel, relay, recipient, payload, name, archive, &prep,
             )
             .await
-        {
-            offloaded = true;
-            clear_deposit_now(inner, id);
-            set_waiting(inner, id, WaitingReason::Parked);
-            continue;
+            {
+                clear_deposit_now(inner, id);
+                // Recorded before anything is said about it, for the same reason a
+                // deposit is: a parked send that nothing wrote down cannot be
+                // withdrawn or asked after, and the promise parking makes is that
+                // it can be.
+                let offer = standing
+                    .as_ref()
+                    .map(|s| (s.posted.id.clone(), s.posted.poster_token.clone()))
+                    .unwrap_or_default();
+                spawn_parked_confirm(inner, id, out, offer, relay.to_string(), recipient);
+                return;
+            }
+            // Couldn't park it all (capped, refused, unreachable): fall through to
+            // the mailbox, which is what the user asked for a route to.
         }
-        // Couldn't park it all (capped, refused, unreachable, or no offer stands):
-        // fall through to the mailbox, which is what the user asked for a route to.
         if !too_big && !offloaded && (park_now || Instant::now() >= next_relay_try) {
             // Interruptible: the upload is the longest thing this loop does, and a
             // cancel that is only noticed once it *finishes* is a cancel that does
@@ -1270,7 +1275,7 @@ pub(super) async fn park_on_relay(
     name: &str,
     archive: bool,
     prep: &flow::PrepSlot,
-) -> bool {
+) -> Option<ParkOutcome> {
     // Reuses the preparation, so this is the cheap path even on a large payload —
     // and it binds the same node id, which is what lets the relay pull from us.
     let session = match flow::prepare_send_in_slot(
@@ -1287,18 +1292,18 @@ pub(super) async fn park_on_relay(
         Ok(s) => s,
         Err(e) => {
             tracing::warn!("parking transfer {id} on the relay: prepare failed: {e:#}");
-            return false;
+            return None;
         }
     };
     if !session.has_relay {
         // No relay in the ticket: nothing to park onto, and the recipient's copy of
         // the ticket says the same, so they would never look there either.
         session.shutdown().await;
-        return false;
+        return None;
     }
     let inner_cb = inner.clone();
     let parked = session
-        .park_on_relay(cancel, move |ev| match ev {
+        .park_on_relay(flow::PARK_TTL_SECS, cancel, move |ev| match ev {
             flow::SendEvent::RelayCapped { limit_bytes } => {
                 set_waiting(&inner_cb, id, WaitingReason::RelayCapped(mib(limit_bytes)))
             }
@@ -1308,8 +1313,31 @@ pub(super) async fn park_on_relay(
             _ => {}
         })
         .await;
+    let release = session.relay_release();
+    let chunks = session.chunk_hashes();
+    let size = session.total_size;
     session.shutdown().await;
-    parked
+    let ttl = parked?;
+    Some(ParkOutcome {
+        release: release?,
+        chunks,
+        size,
+        ttl_secs: ttl,
+    })
+}
+
+/// What a successful park yields: where the pieces are, which pieces they are, and
+/// how long the relay agreed to hold them.
+///
+/// Kept for the same reasons a deposit's outcome is: a parked send has to be
+/// withdrawable (the token), askable-about (the hashes), and deadlined (the TTL) —
+/// otherwise parking is a worse promise than depositing, which is exactly what it
+/// is standing in for.
+pub(super) struct ParkOutcome {
+    pub(super) release: crate::backfill::RelayRelease,
+    pub(super) chunks: Vec<crate::hash::Hash>,
+    pub(super) size: u64,
+    pub(super) ttl_secs: u64,
 }
 
 /// `deposit_relay` holds the blob, `offer_relay` holds the notice pointing at it.
@@ -1431,6 +1459,48 @@ pub(super) fn cancel_deposited(inner: Arc<Inner>, id: u64) {
         }
         if let Some(dir) = &inner.state_dir {
             remove_deposited(dir, id);
+        }
+        inner.set_status(id, TransferStatus::Cancelled);
+        inner.emit(ManagerEvent::Cancelled { id });
+    });
+}
+
+/// Cancel a **parked** send: take the pieces back off the relay and retract the
+/// notice pointing at them, then end the row.
+///
+/// The parked twin of [`cancel_deposited`], and it has to exist for the same
+/// reason: without it "cancel" would hide the row while the recipient could still
+/// collect the file — a cancel that cancels nothing. Both are tried within one
+/// bounded window, because the user is waiting and a relay that has gone away must
+/// not hold up their answer; what cannot be withdrawn lapses at its TTL.
+pub(super) fn cancel_parked(inner: Arc<Inner>, id: u64) {
+    let rec = inner
+        .state_dir
+        .as_ref()
+        .and_then(|dir| load_parkeds(dir).into_iter().find(|r| r.id == id));
+    tokio::spawn(async move {
+        if let Some(rec) = &rec {
+            let withdraw = async {
+                let _ = crate::backfill::revoke_seeded(&inner.client, &rec.relay, &rec.token).await;
+                if !rec.offer_id.is_empty() {
+                    if let Ok(recipient) = PublicId::from_bytes(&rec.recipient) {
+                        let _ = presence::retract_offer(
+                            &inner.client,
+                            &rec.offer_relay,
+                            &recipient,
+                            &rec.offer_id,
+                            &rec.poster_token,
+                        )
+                        .await;
+                    }
+                }
+            };
+            let _ =
+                tokio::time::timeout(std::time::Duration::from_secs(CANCEL_RELAY_SECS), withdraw)
+                    .await;
+        }
+        if let Some(dir) = &inner.state_dir {
+            remove_parked(dir, id);
         }
         inner.set_status(id, TransferStatus::Cancelled);
         inner.emit(ManagerEvent::Cancelled { id });
@@ -1563,6 +1633,35 @@ pub(super) fn read_deposit(
     }
 }
 
+/// Decide a **parked** send's fate from one look. Pure, like [`read_deposit`], and
+/// the same shape for the same reasons — with one honest difference at the end.
+///
+/// `held` is how many of its pieces the relay still has. Zero means the recipient
+/// released them as they took them, which is what a completed download does. The
+/// recipient's ack on the offer outranks it: that is a person acting, not an
+/// inference from an absence.
+///
+/// The difference: a recipient who is *swarming* does not release, so pieces can
+/// sit there through a completed download. Their absence therefore proves a
+/// pickup, but their presence proves nothing — so this reports [`Verdict::Unknown`]
+/// at the deadline rather than claiming nobody came. Saying "expired" of a file
+/// that was collected would be worse than admitting we cannot tell.
+pub(super) fn read_parked(
+    held: Option<usize>,
+    offer: Option<presence::OfferStatus>,
+    now: u64,
+    verdict_at: u64,
+) -> Verdict {
+    if matches!(offer, Some(presence::OfferStatus::Taken)) {
+        return Verdict::PickedUp;
+    }
+    match held {
+        Some(0) => Verdict::PickedUp,
+        _ if now < verdict_at => Verdict::KeepWatching,
+        _ => Verdict::Unknown,
+    }
+}
+
 /// Retire a watched deposit's durable record: the blob is past saving either way,
 /// so dropping it also stops a restart from re-watching a dead deposit.
 fn retire_record(inner: &Arc<Inner>, id: u64) {
@@ -1679,6 +1778,138 @@ pub(super) fn spawn_offline_confirm(
         expires,
         offer_probe,
     ));
+}
+
+/// Retire a parked send's durable record: nothing more can be done for it either
+/// way, and leaving it would have a restart re-watch a copy that is gone.
+fn retire_parked(inner: &Arc<Inner>, id: u64) {
+    if let Some(dir) = &inner.state_dir {
+        remove_parked(dir, id);
+    }
+}
+
+/// Mark a transfer as parked on the relay and start confirming its pickup.
+///
+/// The parked twin of [`spawn_offline_confirm`], and deliberately the same shape:
+/// the same terminal status, the same durable record, the same watcher. A parked
+/// send and a deposited one are the same promise to the person who made it —
+/// "it is on the relay, they can collect it, you can take it back" — and a
+/// front end that had to tell them apart to say that would be a front end with
+/// two vocabularies for one fact.
+pub(super) fn spawn_parked_confirm(
+    inner: &Arc<Inner>,
+    id: u64,
+    out: ParkOutcome,
+    // The offer naming these pieces, and the token that retracts it. Empty when
+    // none stands, in which case there is no ack to wait for.
+    offer: (String, String),
+    offer_relay: String,
+    recipient: &PublicId,
+) {
+    let ParkOutcome {
+        release,
+        chunks,
+        size,
+        ttl_secs,
+    } = out;
+    let expires = unix_now().saturating_add(ttl_secs);
+    inner.set_progress(id, size);
+    inner.set_status(id, TransferStatus::Deposited);
+
+    let name = inner
+        .transfers
+        .lock()
+        .unwrap()
+        .get(&id)
+        .map(|t| t.name.clone())
+        .unwrap_or_default();
+    let (offer_id, poster_token) = offer;
+
+    if let Some(dir) = &inner.state_dir {
+        persist_parked(
+            dir,
+            &ParkedRecord {
+                id,
+                recipient: recipient.to_bytes().to_vec(),
+                name,
+                size,
+                relay: release.http.clone(),
+                token: release.token.clone(),
+                chunks: chunks.clone(),
+                expires,
+                offer_id: offer_id.clone(),
+                poster_token: poster_token.clone(),
+                offer_relay: offer_relay.clone(),
+            },
+        );
+    }
+    let probe = (!offer_id.is_empty() && !poster_token.is_empty())
+        .then(|| (recipient.clone(), offer_id, poster_token));
+    tokio::spawn(confirm_parked_delivery(
+        inner.clone(),
+        id,
+        release.http,
+        offer_relay,
+        chunks,
+        expires,
+        probe,
+    ));
+}
+
+/// Watch a parked send until its fate is known, on the same ladder a deposit is
+/// watched on: their ack if there is an offer, otherwise whether the relay still
+/// holds the pieces.
+pub(super) async fn confirm_parked_delivery(
+    inner: Arc<Inner>,
+    id: u64,
+    relay: String,
+    offer_relay: String,
+    chunks: Vec<crate::hash::Hash>,
+    expires: u64,
+    offer: Option<(PublicId, String, String)>,
+) {
+    let verdict_at = expires.saturating_sub(OFFLINE_CONFIRM_MARGIN_SECS);
+    let mut delay = OFFLINE_CONFIRM_POLL_SECS;
+    loop {
+        let held = crate::backfill::relay_have(&inner.client, &relay, &chunks)
+            .await
+            .ok()
+            .map(|h| h.len());
+        let offer_state = match (&offer, read_parked(held, None, unix_now(), verdict_at)) {
+            (Some((recipient, offer_id, token)), Verdict::KeepWatching) => {
+                presence::offer_status(&inner.client, &offer_relay, recipient, offer_id, token)
+                    .await
+                    .ok()
+            }
+            _ => None,
+        };
+        if let Some(st) = offer_state {
+            inner.set_offer_status(id, st.as_str());
+        }
+        match read_parked(held, offer_state, unix_now(), verdict_at) {
+            Verdict::PickedUp => {
+                inner.set_status(id, TransferStatus::Completed);
+                inner.emit(ManagerEvent::Completed { id, path: None });
+                retire_parked(&inner, id);
+                return;
+            }
+            // A parked copy cannot report an honest "nobody came" — see
+            // [`read_parked`] — so both endings retire quietly rather than
+            // accusing the recipient of not collecting.
+            Verdict::Expired | Verdict::Unknown => {
+                retire_parked(&inner, id);
+                return;
+            }
+            Verdict::KeepWatching => {}
+        }
+        let now = unix_now();
+        if now >= verdict_at {
+            continue;
+        }
+        let sleep = delay.min(verdict_at.saturating_sub(now).max(1));
+        tokio::time::sleep(std::time::Duration::from_secs(sleep)).await;
+        delay = (delay * 2).min(OFFLINE_CONFIRM_POLL_MAX_SECS);
+    }
 }
 
 /// Unix seconds now (0 on a pre-epoch clock — never panics).
@@ -2137,7 +2368,7 @@ mod prep_record_tests {
 
 #[cfg(test)]
 mod deposit_verdict_tests {
-    use super::{presence, read_deposit, Verdict};
+    use super::{presence, read_deposit, read_parked, Verdict};
     use crate::flow::ClaimInfo;
 
     const DEADLINE: u64 = 1_000;
@@ -2255,6 +2486,38 @@ mod deposit_verdict_tests {
         assert_eq!(
             read_deposit(None, None, DEADLINE, DEADLINE),
             Verdict::Unknown
+        );
+    }
+
+    /// Pickup, read the way a parked send can honestly read it: the relay no
+    /// longer holding the pieces means the recipient took them and released them
+    /// as they went.
+    ///
+    /// And the ending that matters more — pieces still sitting there at the
+    /// deadline may NOT be reported as "nobody came". A recipient who swarms never
+    /// releases, so their presence proves nothing, and saying nobody collected a
+    /// file that was collected is the one wrong answer available here.
+    #[test]
+    fn a_parked_pickup_is_read_from_what_the_relay_still_holds() {
+        assert_eq!(read_parked(Some(0), None, 10, DEADLINE), Verdict::PickedUp);
+        assert_eq!(
+            read_parked(Some(3), None, 10, DEADLINE),
+            Verdict::KeepWatching
+        );
+        // Their own ack outranks any inference drawn from an absence.
+        assert_eq!(
+            read_parked(Some(3), Some(presence::OfferStatus::Taken), 10, DEADLINE),
+            Verdict::PickedUp
+        );
+        assert_eq!(
+            read_parked(Some(3), None, DEADLINE, DEADLINE),
+            Verdict::Unknown,
+            "pieces still held at the deadline cannot prove nobody came"
+        );
+        assert_eq!(
+            read_parked(None, None, DEADLINE, DEADLINE),
+            Verdict::Unknown,
+            "a relay we could not ask is unknown, not a verdict"
         );
     }
 

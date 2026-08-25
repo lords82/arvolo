@@ -83,10 +83,10 @@ async fn a_full_mailbox_leaves_no_room_to_seed() {
     assert_eq!(session.chunks, 1);
 
     let parked = session
-        .park_on_relay(&CancellationToken::new(), |_| {})
+        .park_on_relay(flow::PARK_TTL_SECS, &CancellationToken::new(), |_| {})
         .await;
     assert!(
-        !parked,
+        parked.is_none(),
         "the disk is spoken for by the mailbox — seeding onto it must be refused"
     );
     assert_eq!(
@@ -119,8 +119,9 @@ async fn seeded_chunks_leave_no_room_to_deposit() {
     .expect("prepare_send");
     assert!(
         session
-            .park_on_relay(&CancellationToken::new(), |_| {})
-            .await,
+            .park_on_relay(flow::PARK_TTL_SECS, &CancellationToken::new(), |_| {})
+            .await
+            .is_some(),
         "one chunk fits in the budget"
     );
     assert_eq!(

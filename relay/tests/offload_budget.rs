@@ -70,7 +70,10 @@ async fn parking_again_does_not_spend_the_offload_budget_again() {
 
     let cancel = CancellationToken::new();
     assert!(
-        session.park_on_relay(&cancel, |_| {}).await,
+        session
+            .park_on_relay(flow::PARK_TTL_SECS, &cancel, |_| {})
+            .await
+            .is_some(),
         "first park should fit exactly inside the budget"
     );
 
@@ -99,7 +102,10 @@ async fn parking_again_does_not_spend_the_offload_budget_again() {
     // spends nothing. Before the subtraction this returned false: the seed request
     // took the same 402 as the raw one above, from a relay holding the whole file.
     assert!(
-        session.park_on_relay(&cancel, |_| {}).await,
+        session
+            .park_on_relay(flow::PARK_TTL_SECS, &cancel, |_| {})
+            .await
+            .is_some(),
         "a second park must be free — the relay already has every piece"
     );
 

@@ -406,12 +406,27 @@ fn progress_figure(sent: u64, acked_chunks: usize, chunk_size: u64, total: u64, 
 /// the upload took.
 const SEED_BATCH: usize = 64;
 
+/// How long the relay is asked to keep a parked payload.
+///
+/// The same week an inbox offer lives, and not by coincidence: the offer is what
+/// names these pieces, so pieces that lapse first leave the recipient an arrival
+/// pointing at nothing — the exact failure the mailbox once had when a relay
+/// capped a deposit's TTL and the offer outlived the blob. The relay clamps this
+/// to its own maximum and says what it granted.
+pub const PARK_TTL_SECS: u64 = 7 * 24 * 3600;
+
 /// How an offload ended. Only [`Self::Complete`] means the relay can finish the
 /// job without us.
 #[derive(Debug, PartialEq, Eq)]
 enum Offload {
     /// Every requested piece is on the relay (some may already have been).
-    Complete,
+    ///
+    /// `granted` is the lifetime the relay agreed to, when a batch was actually
+    /// sent. `None` means every piece was already there, so nothing was asked and
+    /// the deadline is whatever an earlier pass established — the caller falls
+    /// back to what it requested, which can only be an over-estimate of what is
+    /// left, never an under-estimate of what was granted.
+    Complete { granted: Option<u64> },
     /// The relay refused further seeding: this transfer hit its offload cap.
     Capped,
     /// The relay has no room at all — not this transfer's budget, the whole store.
@@ -446,6 +461,7 @@ impl SendSession {
     async fn offload(
         &self,
         wanted: &[usize],
+        ttl_secs: u64,
         cancel: &CancellationToken,
         on: &(impl Fn(SendEvent) + Send + Sync),
     ) -> Offload {
@@ -471,11 +487,14 @@ impl SendSession {
             .collect();
         if todo.is_empty() {
             on(SendEvent::Backfilled);
-            return Offload::Complete;
+            return Offload::Complete { granted: None };
         }
         // Metered on the whole file, not this batch: the relay keys the offload
         // budget on content, so it stays one durable session across resumes.
         let swarm_id = crate::swarm::swarm_id(self.sender.chunks(), self.total_size);
+        // The shortest lifetime any batch was granted: a deadline has to be the
+        // earliest moment a piece can vanish, not the latest.
+        let mut granted: Option<u64> = None;
         for batch in todo.chunks(SEED_BATCH) {
             if cancel.is_cancelled() {
                 return Offload::Cancelled;
@@ -495,12 +514,21 @@ impl SendSession {
                     return Offload::Failed;
                 }
             };
+            let url = format!("{}/v1/seed?ttl={ttl_secs}", r.http);
             let sent = tokio::select! {
                 _ = cancel.cancelled() => return Offload::Cancelled,
-                r = self.client.post(format!("{}/v1/seed", r.http)).body(body).send() => r,
+                r = self.client.post(url).body(body).send() => r,
             };
             match sent {
                 Ok(resp) if resp.status().is_success() => {
+                    if let Some(ttl) = resp
+                        .headers()
+                        .get("x-arvolo-ttl")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|v| v.trim().parse::<u64>().ok())
+                    {
+                        granted = Some(granted.map_or(ttl, |g: u64| g.min(ttl)));
+                    }
                     self.sender.mark_on_relay(batch);
                 }
                 Ok(resp) if resp.status() == reqwest::StatusCode::PAYMENT_REQUIRED => {
@@ -543,7 +571,18 @@ impl SendSession {
             }
         }
         on(SendEvent::Backfilled);
-        Offload::Complete
+        Offload::Complete { granted }
+    }
+
+    /// Where this send's pieces can be parked, when a relay was configured.
+    pub fn relay_release(&self) -> Option<RelayRelease> {
+        self.relay.clone()
+    }
+
+    /// The chunk digests this send serves, in order — what a parked copy is
+    /// addressed by, and so what a later "is it still there?" has to ask about.
+    pub fn chunk_hashes(&self) -> Vec<crate::hash::Hash> {
+        self.sender.chunks().to_vec()
     }
 
     /// Stop serving and release the endpoint. Only needed by a caller that never
@@ -579,15 +618,20 @@ impl SendSession {
     /// recipient who turns up while this runs still gets it direct.
     pub async fn park_on_relay(
         &self,
+        ttl_secs: u64,
         cancel: &CancellationToken,
         on: impl Fn(SendEvent) + Send + Sync,
-    ) -> bool {
+    ) -> Option<u64> {
         let all: Vec<usize> = (0..self.chunks).collect();
-        let complete = self.offload(&all, cancel, &on).await == Offload::Complete;
-        if complete {
-            on(SendEvent::Offloaded);
+        match self.offload(&all, ttl_secs, cancel, &on).await {
+            Offload::Complete { granted } => {
+                on(SendEvent::Offloaded);
+                // What the relay agreed to, or what we asked for when it had
+                // everything already and nothing needed asking.
+                Some(granted.unwrap_or(ttl_secs))
+            }
+            _ => None,
         }
-        complete
     }
 
     /// Serve until `cancel` fires. On each receiver drop, backfill the
@@ -695,7 +739,7 @@ impl SendSession {
                         continue;
                     }
                     on(SendEvent::ReceiverDropped { missing: undelivered.len() });
-                    let outcome = self.offload(&undelivered, &cancel, &on).await;
+                    let outcome = self.offload(&undelivered, PARK_TTL_SECS, &cancel, &on).await;
                     // Nothing left for us to do that the relay cannot: the tail is
                     // there in full, and this ticket is sealed to one recipient who
                     // is not here. Serving an empty room until somebody cancels is
@@ -709,7 +753,7 @@ impl SendSession {
                     // in the room. Same shape as the abort arm above, for the same
                     // reason: one receiver leaving must not end anyone else's
                     // download.
-                    if matches!(outcome, Offload::Complete)
+                    if matches!(outcome, Offload::Complete { .. })
                         && self.sealed_to_recipient
                         && self.sender.active_peers() <= 1
                     {

@@ -504,6 +504,57 @@ pub(super) fn load_depositeds(dir: &Path) -> Vec<DepositedRecord> {
     out
 }
 
+/// A send parked on the relay as **chunks** rather than as a mailbox blob.
+///
+/// The same three promises a deposit makes, which is the whole reason this is
+/// written down: it can be withdrawn (`token`), asked after (`chunks`, against the
+/// relay's `have`), and it has a deadline (`expires`). A parked send that nothing
+/// recorded would be a file on somebody's relay that its sender could neither take
+/// back nor learn the fate of.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(super) struct ParkedRecord {
+    pub(super) id: u64,
+    pub(super) recipient: Vec<u8>,
+    pub(super) name: String,
+    pub(super) size: u64,
+    /// The relay holding the pieces — where a withdrawal and a "have you still
+    /// got these?" both go.
+    pub(super) relay: String,
+    /// Per-transfer token: the capability that authorizes withdrawing them.
+    pub(super) token: String,
+    /// The digests the parked copy is addressed by. Also what the pickup poll asks
+    /// about: a chunk the relay no longer holds is one the recipient released as
+    /// they took it.
+    pub(super) chunks: Vec<crate::hash::Hash>,
+    /// Unix seconds when the relay drops them of its own accord.
+    pub(super) expires: u64,
+    /// The offer in the recipient's inbox that names these pieces, and the token
+    /// that retracts it — so a cancel removes the notice as well as the file.
+    pub(super) offer_id: String,
+    pub(super) poster_token: String,
+    /// Where the notice is, which is not always where the pieces are.
+    pub(super) offer_relay: String,
+}
+
+pub(super) fn parked_path(dir: &Path, id: u64) -> PathBuf {
+    dir.join(format!("park-{id}.pc"))
+}
+
+pub(super) fn load_parkeds(dir: &Path) -> Vec<ParkedRecord> {
+    load_records(dir, "park-")
+}
+
+pub(super) fn persist_parked(dir: &Path, rec: &ParkedRecord) {
+    if let Ok(bytes) = postcard::to_allocvec(rec) {
+        let _ = std::fs::create_dir_all(dir);
+        let _ = write_record_private(&parked_path(dir, rec.id), &bytes);
+    }
+}
+
+pub(super) fn remove_parked(dir: &Path, id: u64) {
+    let _ = std::fs::remove_file(parked_path(dir, id));
+}
+
 pub(super) fn persist_deposited(dir: &Path, rec: &DepositedRecord) {
     if let Ok(bytes) = postcard::to_allocvec(rec) {
         let _ = std::fs::create_dir_all(dir);

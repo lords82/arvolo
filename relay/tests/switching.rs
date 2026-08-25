@@ -339,11 +339,10 @@ async fn a_folder_arrives_whole_from_the_relay() {
     .await
     .unwrap();
     let ticket_str = session.ticket.clone();
-    assert!(
-        session
-            .park_on_relay(&CancellationToken::new(), |_| {})
-            .await
-    );
+    assert!(session
+        .park_on_relay(flow::PARK_TTL_SECS, &CancellationToken::new(), |_| {})
+        .await
+        .is_some());
     session.shutdown().await;
 
     let got = receive(&ticket_str, dir.path().join("out"), None, None).await;
@@ -504,11 +503,10 @@ async fn a_stale_claim_about_the_relay_does_not_stall_us() {
     .unwrap();
     let ticket = ChunkTicket::decode(&session.ticket).unwrap();
     // The sender parks everything, so it will advertise the relay as holding it…
-    assert!(
-        session
-            .park_on_relay(&CancellationToken::new(), |_| {})
-            .await
-    );
+    assert!(session
+        .park_on_relay(flow::PARK_TTL_SECS, &CancellationToken::new(), |_| {})
+        .await
+        .is_some());
     // …and then the relay loses one of them.
     std::fs::remove_file(relay.store.join(ticket.chunks[1].to_string())).unwrap();
 
@@ -547,11 +545,10 @@ async fn a_sealed_transfer_still_opens_when_only_the_relay_is_left() {
     .await
     .unwrap();
     let ticket_str = session.ticket.clone();
-    assert!(
-        session
-            .park_on_relay(&CancellationToken::new(), |_| {})
-            .await
-    );
+    assert!(session
+        .park_on_relay(flow::PARK_TTL_SECS, &CancellationToken::new(), |_| {})
+        .await
+        .is_some());
     session.shutdown().await;
 
     let got = receive(
@@ -589,11 +586,10 @@ async fn the_short_last_piece_survives_the_relay() {
     .unwrap();
     let ticket_str = session.ticket.clone();
     assert_eq!(ChunkTicket::decode(&ticket_str).unwrap().chunks.len(), 3);
-    assert!(
-        session
-            .park_on_relay(&CancellationToken::new(), |_| {})
-            .await
-    );
+    assert!(session
+        .park_on_relay(flow::PARK_TTL_SECS, &CancellationToken::new(), |_| {})
+        .await
+        .is_some());
     session.shutdown().await;
 
     let got = receive(&ticket_str, dir.path().join("got.bin"), None, None).await;
@@ -647,7 +643,10 @@ async fn a_relay_stocked_mid_download_rescues_it() {
         // the assumption it began at 0 left whichever piece it really began with
         // sourceless one run in three.
         assert!(
-            other.park_on_relay(&CancellationToken::new(), |_| {}).await,
+            other
+                .park_on_relay(flow::PARK_TTL_SECS, &CancellationToken::new(), |_| {})
+                .await
+                .is_some(),
             "the stand-in should have been able to park the payload"
         );
         flag.store(true, Ordering::Relaxed);

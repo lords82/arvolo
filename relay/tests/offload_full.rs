@@ -64,22 +64,26 @@ async fn a_full_relay_refuses_the_park_without_stranding_the_send() {
     let claimed_done = Arc::new(AtomicBool::new(false));
     let (s, d) = (said_so.clone(), claimed_done.clone());
     let parked = session
-        .park_on_relay(&CancellationToken::new(), move |ev| match ev {
-            SendEvent::BackfillFailed { reason } => {
-                assert!(
+        .park_on_relay(
+            flow::PARK_TTL_SECS,
+            &CancellationToken::new(),
+            move |ev| match ev {
+                SendEvent::BackfillFailed { reason } => {
+                    assert!(
                     reason.contains("no room"),
                     "a full relay should be reported as full, not as a bare rejection: {reason}"
                 );
-                s.store(true, Ordering::Relaxed);
-            }
-            // The event the caller turns into "mailbox off, already parked". A relay
-            // that could not take the file must never produce it.
-            SendEvent::Offloaded => d.store(true, Ordering::Relaxed),
-            _ => {}
-        })
+                    s.store(true, Ordering::Relaxed);
+                }
+                // The event the caller turns into "mailbox off, already parked". A relay
+                // that could not take the file must never produce it.
+                SendEvent::Offloaded => d.store(true, Ordering::Relaxed),
+                _ => {}
+            },
+        )
         .await;
 
-    assert!(!parked, "nothing was stored, so nothing is parked");
+    assert!(parked.is_none(), "nothing was stored, so nothing is parked");
     assert!(
         said_so.load(Ordering::Relaxed),
         "the refusal has to reach the user — this was the silent case"

@@ -19,10 +19,10 @@ use crate::limits::{
 use crate::mailbox::{InboxStatus, MailboxError};
 use crate::state::{
     max_blob_bytes, max_inbox_rows, max_presence_rows, max_rz_rows, max_seeded_rows,
-    max_session_relay_bytes, max_total_blob_bytes, AppState, SwarmPeer, CONTROL_PLANE_BODY_LIMIT,
-    INBOX_MAX_TTL_SECS, INBOX_TTL_SECS, MAX_HAVE_CHUNKS_PER_REQ, MAX_INBOX_PER_SLOT,
-    MAX_INBOX_VALUE_BYTES, MAX_RZ_VALUE_BYTES, MAX_SEED_CHUNKS_PER_REQ, MAX_SWARMS,
-    MAX_SWARM_CHUNKS, MAX_SWARM_PEERS, PRESENCE_TTL_SECS, SWARM_PEER_TTL_SECS,
+    max_session_relay_bytes, max_total_blob_bytes, max_ttl_secs, AppState, SwarmPeer,
+    CONTROL_PLANE_BODY_LIMIT, INBOX_MAX_TTL_SECS, INBOX_TTL_SECS, MAX_HAVE_CHUNKS_PER_REQ,
+    MAX_INBOX_PER_SLOT, MAX_INBOX_VALUE_BYTES, MAX_RZ_VALUE_BYTES, MAX_SEED_CHUNKS_PER_REQ,
+    MAX_SWARMS, MAX_SWARM_CHUNKS, MAX_SWARM_PEERS, PRESENCE_TTL_SECS, SWARM_PEER_TTL_SECS,
 };
 use crate::util::{constant_time_eq, now_unix, random_claim};
 
@@ -357,6 +357,10 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/addr", get(addr_handler))
         .route("/v1/seed", post(seed_handler))
         .route("/v1/have", post(have_handler))
+        .route(
+            "/v1/seeded/{token}",
+            axum::routing::delete(seeded_delete_handler),
+        )
         .route("/v1/release/{token}/{hash}", post(release_handler))
         .route(
             "/v1/rz/{slot}/{key}",
@@ -1646,11 +1650,20 @@ async fn fetch_handler(
 /// Seed (backfill) a P2P blob into the relay's store. Body = the sender's blob
 /// ticket; returns the relay's provider address (base32) so the sender can
 /// advertise the relay as a fallback provider.
+#[derive(serde::Deserialize)]
+struct SeedQuery {
+    /// How long the relay should keep these chunks if nobody takes them. A wish,
+    /// clamped below — the same shape a deposit's TTL has, and for the same reason.
+    #[serde(default)]
+    ttl: u64,
+}
+
 async fn seed_handler(
     State(state): State<AppState>,
+    Query(q): Query<SeedQuery>,
     ip: ClientIp,
     body: String,
-) -> Result<String, (StatusCode, String)> {
+) -> Result<Response, (StatusCode, String)> {
     write_rate_limit(&state.write_limiter, ip.0, now_unix(), writes_per_min())?;
     let req = SeedRequest::decode(body.trim())
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("bad seed request: {e}")))?;
@@ -1707,7 +1720,17 @@ async fn seed_handler(
         .seed_chunks(req.sender, &req.chunks)
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, format!("seed failed: {e}")))?;
-    let exp = now_unix().saturating_add(seed_ttl());
+    // The caller's wish, clamped to what this relay is prepared to hold — never
+    // longer than a mailbox blob may live, and never shorter than the default when
+    // nothing was asked. A parked send needs its pieces to outlive the offer that
+    // names them, or the recipient finds an arrival pointing at nothing; a bare
+    // backfill asks for nothing and keeps the old day.
+    let granted = if q.ttl == 0 {
+        seed_ttl()
+    } else {
+        q.ttl.min(max_ttl_secs())
+    };
+    let exp = now_unix().saturating_add(granted);
     for hash in &req.chunks {
         state
             .mailbox
@@ -1719,7 +1742,32 @@ async fn seed_handler(
             .mailbox
             .add_session_bytes(&req.swarm_id, add_bytes, exp);
     }
-    Ok("ok".into())
+    // The granted TTL rides back in a header, as a deposit's does: a sender that
+    // asked for a week and got a day has to know, or it will promise the recipient
+    // a deadline the relay never agreed to.
+    Ok(([(GRANTED_TTL_HEADER, granted.to_string())], "ok").into_response())
+}
+
+/// Withdraw a parked send: forget every chunk seeded under `token` and delete the
+/// files. `DELETE /v1/seeded/{token}`. Idempotent — a token with nothing left is a
+/// success, because the caller's goal (nothing of theirs on this relay) holds.
+///
+/// Authorized by the token alone. That is not a new capability: the same token
+/// already authorizes releasing these chunks one at a time through
+/// `/v1/release/{token}/{hash}`, so this is the existing power spelled once. It
+/// travels in the ticket, so a recipient holds it too — they can drop pieces meant
+/// for them, which costs them their own download and nobody else's.
+async fn seeded_delete_handler(
+    State(state): State<AppState>,
+    AxumPath(token): AxumPath<String>,
+    ip: ClientIp,
+) -> Result<String, (StatusCode, String)> {
+    write_rate_limit(&state.write_limiter, ip.0, now_unix(), writes_per_min())?;
+    let hashes = state.mailbox.take_seeds_by_token(&token);
+    for hash in &hashes {
+        let _ = state.blobs.release_hex(hash).await;
+    }
+    Ok(hashes.len().to_string())
 }
 
 /// Which of the asked-about chunks this relay currently holds. `POST /v1/have`,

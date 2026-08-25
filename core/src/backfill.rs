@@ -148,6 +148,36 @@ impl BlobNode {
 /// never has to know the limit.
 pub const HAVE_BATCH: usize = 4096;
 
+/// Take a parked send back off the relay: forget every chunk seeded under
+/// `token` and delete the files. Returns how many were dropped.
+///
+/// The withdrawal half of parking. Without it a sender that changed its mind
+/// could stop pointing at the pieces but not remove them, which is a worse
+/// promise than the mailbox makes — there, a cancel really does take the file
+/// back. Idempotent: a token with nothing left is a success, because what the
+/// caller wanted (nothing of theirs on this relay) already holds.
+pub async fn revoke_seeded(client: &reqwest::Client, http: &str, token: &str) -> Result<usize> {
+    let url = format!("{}/v1/seeded/{}", http.trim_end_matches('/'), token);
+    let resp = client
+        .delete(&url)
+        .send()
+        .await
+        .context("relay /v1/seeded")?;
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        // A relay too old to know the route. Nothing was withdrawn, and saying so
+        // is better than reporting a withdrawal that did not happen: the pieces
+        // lapse at their TTL instead.
+        anyhow::bail!("this relay cannot withdraw parked chunks (too old)");
+    }
+    let body = resp
+        .error_for_status()
+        .context("relay refused the withdrawal")?
+        .text()
+        .await
+        .unwrap_or_default();
+    Ok(body.trim().parse().unwrap_or(0))
+}
+
 /// Ask the relay which of `chunks` it currently holds, as indices into `chunks`.
 ///
 /// This is the discovery both ends need and neither could do before: the set of

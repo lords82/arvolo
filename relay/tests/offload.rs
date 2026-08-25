@@ -86,8 +86,9 @@ async fn a_receiver_finishes_from_the_relay_with_the_sender_gone() {
     let ticket = session.ticket.clone();
 
     let parked = session
-        .park_on_relay(&CancellationToken::new(), |_| {})
-        .await;
+        .park_on_relay(flow::PARK_TTL_SECS, &CancellationToken::new(), |_| {})
+        .await
+        .is_some();
     assert!(parked, "the relay should have taken the whole payload");
 
     // The sender goes away for good. From here the relay is the only source.

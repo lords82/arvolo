@@ -688,6 +688,47 @@ impl Mailbox {
         Ok(())
     }
 
+    /// When each chunk seeded under `token` is due to be dropped. For tests and
+    /// operators: the deadline a parked send was actually granted, as opposed to
+    /// the one it asked for.
+    pub fn seed_expiries(&self, token: &str) -> Vec<u64> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = match conn.prepare("SELECT expires_at FROM seeded WHERE token = ?1") {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        stmt.query_map(params![token], |r| r.get::<_, i64>(0))
+            .map(|rows| {
+                rows.filter_map(|r| r.ok())
+                    .map(|v| v.max(0) as u64)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Every chunk hash still seeded under `token`, and forget them all.
+    ///
+    /// The withdrawal half of a parked send: a sender that changes its mind has to
+    /// be able to take the pieces back off the relay, not merely stop pointing at
+    /// them. Returns the hashes so the caller can delete the files the rows named
+    /// — doing it the other way round would leave a file no row can ever free.
+    ///
+    /// Authorized by the token alone, which is the same capability that already
+    /// authorizes releasing a chunk one at a time. So this grants nothing new: it
+    /// is the existing power, spelled once instead of n times.
+    pub fn take_seeds_by_token(&self, token: &str) -> Vec<String> {
+        let conn = self.conn.lock().unwrap();
+        let hashes: Vec<String> = match conn.prepare("SELECT hash FROM seeded WHERE token = ?1") {
+            Ok(mut stmt) => stmt
+                .query_map(params![token], |r| r.get::<_, String>(0))
+                .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                .unwrap_or_default(),
+            Err(_) => return Vec::new(),
+        };
+        let _ = conn.execute("DELETE FROM seeded WHERE token = ?1", params![token]);
+        hashes
+    }
+
     /// (token, hash) pairs of seeded chunks whose TTL has passed.
     pub fn expired_seeds(&self, now: u64) -> Vec<(String, String)> {
         let conn = self.conn.lock().unwrap();
