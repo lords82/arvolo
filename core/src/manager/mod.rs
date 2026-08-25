@@ -105,6 +105,99 @@ pub enum TransferStatus {
     Failed(String),
 }
 
+/// Why a send is waiting: a stable code, and the English sentence that goes with
+/// it.
+///
+/// Both, because the two readers want different things. The CLI wants the
+/// sentence and is English by design. A GUI wants to say it in the user's own
+/// language, and cannot: prose arriving over a socket is not translatable, so
+/// "offered — waiting for them to accept" sat in English on an otherwise
+/// localized window. The code is what a client looks up; the sentence is what it
+/// falls back to, and what an older client — which knows nothing of the code —
+/// still shows.
+///
+/// Closed on purpose. Every reason a transfer can wait for is a variant here, so
+/// the set a client must translate is greppable in one place rather than spread
+/// across the call sites that happen to construct one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WaitingReason {
+    /// The offer is in the recipient's inbox and nothing else will happen until
+    /// they accept it.
+    Offered,
+    /// The relay refused the file as larger than its per-file cap, so this one
+    /// will never go through the mailbox: it waits for the recipient to come
+    /// online for a direct transfer.
+    TooLarge,
+    /// The relay could not take it *right now* — full, unreachable, or erroring.
+    /// Carries the relay's own words, which are not ours to translate: they are
+    /// a diagnostic from another machine, and inventing a translation for them
+    /// would be inventing their content.
+    RelayRetry(String),
+    /// Everything the recipient still lacks is on the relay: the send is parked
+    /// there, they can finish without this daemon running, and it stays open only
+    /// in case they turn up for a direct transfer, which is faster and free.
+    Parked,
+    /// The relay will hold no more *of this transfer* — its per-session offload
+    /// cap, not its disk. Carries the cap already written for people ("128 MiB"),
+    /// because a client that translates the sentence still has to interpolate the
+    /// figure rather than invent it.
+    RelayCapped(String),
+    /// Parking on the relay did not work. Carries the relay's own words for the
+    /// same reason [`Self::RelayRetry`] does: they are a diagnostic from another
+    /// machine, and translating them would be inventing their content.
+    OffloadFailed(String),
+}
+
+impl WaitingReason {
+    /// The stable identifier a client keys its own wording off. Never
+    /// user-visible, so it never changes when the English sentence is reworded.
+    pub fn code(&self) -> &'static str {
+        match self {
+            WaitingReason::Offered => "offered",
+            WaitingReason::TooLarge => "tooLarge",
+            WaitingReason::RelayRetry(_) => "relayRetry",
+            WaitingReason::Parked => "parked",
+            WaitingReason::RelayCapped(_) => "relayCapped",
+            WaitingReason::OffloadFailed(_) => "offloadFailed",
+        }
+    }
+
+    /// What a client with no translation shows, and what the CLI prints.
+    pub fn text(&self) -> String {
+        match self {
+            WaitingReason::Offered => "offered — waiting for them to accept".into(),
+            WaitingReason::TooLarge => "file too large for this relay — waiting for the \
+                 recipient to come online for a direct transfer"
+                .into(),
+            WaitingReason::RelayRetry(why) => format!(
+                "{why} — retrying later, and delivering P2P as soon as the recipient is online"
+            ),
+            WaitingReason::Parked => {
+                "parked on the relay — they can finish it without you online".into()
+            }
+            WaitingReason::RelayCapped(cap) => format!(
+                "the relay won't hold more of this transfer (cap {cap}) — \
+                 delivering direct as soon as they're online"
+            ),
+            WaitingReason::OffloadFailed(why) => {
+                format!("couldn't park it on the relay: {why}")
+            }
+        }
+    }
+
+    /// The part of [`text`](Self::text) that came from somewhere else, for a
+    /// client that translates the frame around it. `None` when the whole sentence
+    /// is ours.
+    pub fn detail(&self) -> Option<&str> {
+        match self {
+            WaitingReason::RelayRetry(why)
+            | WaitingReason::RelayCapped(why)
+            | WaitingReason::OffloadFailed(why) => Some(why),
+            _ => None,
+        }
+    }
+}
+
 /// A snapshot of one transfer, for a UI list.
 #[derive(Clone, Debug)]
 pub struct Transfer {
@@ -174,6 +267,18 @@ pub struct Transfer {
     /// it. "Downloaded, and now find it yourself" is a strange thing for the
     /// window that downloaded it to say.
     pub path: Option<PathBuf>,
+    /// [`WaitingReason::code`] while the status is
+    /// [`Waiting`](TransferStatus::Waiting); empty otherwise.
+    ///
+    /// Beside the status rather than inside it because the status string is the
+    /// wire's and the CLI's, and both want the sentence. A client that wants to
+    /// say it in another language reads this instead. Cleared whenever the
+    /// transfer stops waiting, so nothing reads a code that no longer describes
+    /// the row.
+    pub waiting_code: String,
+    /// The relay's own words inside a [`WaitingReason::RelayRetry`], for a client
+    /// translating the sentence around them. Empty when there are none.
+    pub waiting_detail: String,
 }
 
 /// What an offline send actually left on the relay, carried by
@@ -289,16 +394,22 @@ pub enum ManagerEvent {
     /// A send is being held for later delivery because the relay couldn't take it
     /// (refused / unreachable / errored). The daemon keeps trying: live P2P when
     /// the recipient appears, and the relay again on a slow interval. `reason` is
-    /// a short human explanation.
+    /// a short human explanation; `code` is the same thing as
+    /// [`WaitingReason::code`], for a subscriber that says it in its own words,
+    /// and `detail` the part of it that came from another machine.
+    ///
     /// `offer_status` is how far the offer this send is holding open has got —
     /// the same `pending`/`arrived`/`taken` ladder a deposited send reports, empty
     /// when no offer stands. It rides on the event because nothing else announces
     /// it: a front end fed only by events would otherwise have to guess whether a
     /// waiting send is waiting on the network or on a person, and those two do not
-    /// deserve the same word on screen.
+    /// deserve the same word on screen. Orthogonal to `code`, which says *why* it
+    /// waits — this says *how far* the one thing it is waiting on has come.
     Waiting {
         id: u64,
         reason: String,
+        code: String,
+        detail: String,
         offer_status: String,
     },
     /// A send was paused (by the user, or automatically after a long failure to
@@ -541,6 +652,8 @@ impl TransferManager {
                     offer_status: String::new(),
                     sender_name: String::new(),
                     path: None,
+                    waiting_code: String::new(),
+                    waiting_detail: String::new(),
                 },
             );
             // Keep the map from growing without bound over a long session: once
@@ -1160,11 +1273,13 @@ impl TransferManager {
             );
             mark_paused(dir, id);
         }
+        // English, like every other reason the engine produces: this one is
+        // printed by the CLI (`⏸ paused: …`) and it had been left in Italian.
         self.inner
-            .set_status(id, TransferStatus::Paused("in pausa".to_string()));
+            .set_status(id, TransferStatus::Paused("paused by hand".to_string()));
         self.inner.emit(ManagerEvent::Paused {
             id,
-            reason: "in pausa".to_string(),
+            reason: "paused by hand".to_string(),
         });
     }
 
@@ -2625,5 +2740,71 @@ mod deposit_event_tests {
         // The relay's original deadline, not a fresh hour from now: a restart loop
         // must not keep a blob alive past the TTL its recipient was promised.
         assert_eq!(info.expires, expires);
+    }
+}
+
+#[cfg(test)]
+mod waiting_reason_tests {
+    use super::*;
+
+    /// The code is a promise to every client that translates: it names the reason
+    /// and it does not change when the English is reworded. Pinning the pairs here
+    /// makes a rename of a variant a visible decision rather than a silent break
+    /// in somebody's language.
+    ///
+    /// `gui/src/test/waiting.test.ts` reads the same list out of this file and
+    /// checks the window knows all of it — the other half of a contract no
+    /// compiler can see, because it runs across two languages.
+    #[test]
+    fn every_reason_has_a_stable_code_and_a_sentence() {
+        let cases = [
+            (WaitingReason::Offered, "offered"),
+            (WaitingReason::TooLarge, "tooLarge"),
+            (
+                WaitingReason::RelayRetry("mailbox full".into()),
+                "relayRetry",
+            ),
+        ];
+        for (reason, code) in cases {
+            assert_eq!(reason.code(), code);
+            assert!(
+                !reason.text().is_empty(),
+                "{code} must still say something to a client that cannot translate it"
+            );
+        }
+    }
+
+    /// The relay's own words are passed through, not paraphrased: they are a
+    /// diagnostic from another machine, and the sentence has to carry them or the
+    /// reason stops being actionable ("could not deposit" tells nobody anything).
+    #[test]
+    fn a_relay_retry_quotes_the_relay() {
+        let r = WaitingReason::RelayRetry("mailbox full".into());
+        assert_eq!(r.detail(), Some("mailbox full"));
+        assert!(r.text().starts_with("mailbox full"), "{}", r.text());
+        // The other two have nothing quoted, so a client has nothing to splice in.
+        assert_eq!(WaitingReason::Offered.detail(), None);
+        assert_eq!(WaitingReason::TooLarge.detail(), None);
+    }
+
+    /// A code must not outlive the wait it explains. The row goes active, the
+    /// status says so, and a client reading the code without re-checking the
+    /// status would otherwise still be told the file is "offered".
+    #[tokio::test]
+    async fn the_code_is_dropped_when_the_row_stops_waiting() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = TransferManager::new(Identity::generate(), None, dir.path().to_path_buf());
+        let (id, _cancel) = m.register(Direction::Send, None, "f.bin".into(), 10);
+
+        crate::manager::work::set_waiting(&m.inner, id, WaitingReason::Offered);
+        let waiting = m.list().into_iter().find(|t| t.id == id).unwrap();
+        assert_eq!(waiting.waiting_code, "offered");
+
+        m.inner.set_status_live(id, TransferStatus::Active);
+        let active = m.list().into_iter().find(|t| t.id == id).unwrap();
+        assert_eq!(
+            active.waiting_code, "",
+            "an active row must not still explain why it was waiting"
+        );
     }
 }

@@ -171,7 +171,7 @@ export function categorise(key: string): Cat {
     return "secondary";
   if (/^(blurb|sub)/i.test(key.split(".")[1] ?? "")) return "secondary";
   if (/^store\.err/.test(key)) return "error";
-  if (/^(meta|status|state|eta|until|ago|section|deposit)\./.test(key))
+  if (/^(meta|status|state|eta|until|ago|section|deposit|waiting)\./.test(key))
     return "status";
   if (/(Title|title)$/.test(key) || /\.title/.test(key)) return "title";
   if (/^(common|trust|title)\./.test(key) || /Label$/.test(key)) return "label";

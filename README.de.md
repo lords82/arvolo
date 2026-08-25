@@ -38,7 +38,9 @@ curl -fsSL https://raw.githubusercontent.com/lords82/arvolo/main/install.sh | sh
 der nächste Schritt funktioniert also sofort. Es ist eine kleine Maschine, die das
 Projekt betreibt — Dateien bis 100 MB, Links leben 6 Stunden — und sie sieht deine
 Schlüssel nie. **Für alles, worauf es ankommt, zeig Arvolo dein eigenes Relay**,
-aufgesetzt mit einem Befehl:
+aufgesetzt mit einem Befehl. Wer das öffentliche nutzt, akzeptiert dessen
+[Nutzungsbedingungen](TERMS.md) *(Englisch)* — kurz, und die zwei Minuten wert,
+wenn das Verschickte nicht dir gehört.
 
 ```sh
 docker run -d --name arvolo-relay -p 6282:6282 -v arvolo-data:/data \
@@ -83,6 +85,7 @@ schicken](docs/assets/arvolo-link-browser.png)
 | [Deployment](docs/DEPLOY.md) | Self-Hosting in Produktion: systemd, Docker, Härtung. *(Englisch)* |
 | [Die Desktop-App](gui/README.md) | Die GUI im Detail, mit ihrer CLI-Paritätstabelle. *(Englisch)* |
 | [Das Protokoll](docs/PROTOCOL.md) | Das Wire-Format und jeder Ablauf, für Neugierige und Auditoren. *(Englisch)* |
+| [Nutzungsbedingungen](TERMS.md) | Die Bedingungen des öffentlichen Relays: was nicht verschickt werden darf, wer dafür einsteht, was protokolliert wird und wie lange. *(Englisch)* |
 
 ## Lizenz
 

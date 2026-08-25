@@ -177,9 +177,23 @@ pub(super) enum LiveOutcome {
     Fatal(anyhow::Error),
 }
 
-pub(super) fn set_waiting(inner: &Arc<Inner>, id: u64, reason: &str) {
+/// A byte cap written for people. Carried inside the waiting reason rather than
+/// formatted at each end, so a translated client interpolates the same figure the
+/// CLI prints instead of rounding it its own way.
+fn mib(bytes: u64) -> String {
+    format!("{} MiB", bytes / (1024 * 1024))
+}
+
+pub(super) fn set_waiting(inner: &Arc<Inner>, id: u64, reason: WaitingReason) {
+    let text = reason.text();
     // Live status: keep the cancel token so pause/cancel still reach the loop.
-    inner.set_status_live(id, TransferStatus::Waiting(reason.to_string()));
+    inner.set_status_live(id, TransferStatus::Waiting(text.clone()));
+    // After the status, not before: setting a status clears the code, so a code
+    // written first would be wiped by the very call that makes it true.
+    inner.set_waiting_code(id, reason.code(), reason.detail().unwrap_or_default());
+    // Read back rather than passed in: the ladder belongs to the offer, not to
+    // this reason, and every caller of this would otherwise have to carry a value
+    // it has no opinion about.
     let offer_status = inner
         .transfers
         .lock()
@@ -189,7 +203,9 @@ pub(super) fn set_waiting(inner: &Arc<Inner>, id: u64, reason: &str) {
         .unwrap_or_default();
     inner.emit(ManagerEvent::Waiting {
         id,
-        reason: reason.to_string(),
+        reason: text,
+        code: reason.code().to_string(),
+        detail: reason.detail().unwrap_or_default().to_string(),
         offer_status,
     });
 }
@@ -202,15 +218,24 @@ pub(super) fn set_waiting(inner: &Arc<Inner>, id: u64, reason: &str) {
 /// why the send is waiting.
 pub(super) fn set_offer_status_live(inner: &Arc<Inner>, id: u64, offer_status: &str) {
     inner.set_offer_status(id, offer_status);
-    let reason = match inner.transfers.lock().unwrap().get(&id).map(|t| &t.status) {
-        Some(TransferStatus::Waiting(r)) => r.clone(),
-        // Not waiting any more — whatever it is doing now has its own status and
-        // its own event, and re-announcing it as waiting would walk it backwards.
-        _ => return,
+    let (reason, code, detail) = {
+        let rows = inner.transfers.lock().unwrap();
+        let Some(t) = rows.get(&id) else { return };
+        match &t.status {
+            TransferStatus::Waiting(r) => {
+                (r.clone(), t.waiting_code.clone(), t.waiting_detail.clone())
+            }
+            // Not waiting any more — whatever it is doing now has its own status
+            // and its own event, and re-announcing it as waiting would walk it
+            // backwards.
+            _ => return,
+        }
     };
     inner.emit(ManagerEvent::Waiting {
         id,
         reason,
+        code,
+        detail,
         offer_status: offer_status.to_string(),
     });
 }
@@ -654,11 +679,7 @@ async fn deliver_to_inner(
                     // costs the relay nothing, and the wait is also what keeps
                     // `give_up_at` reachable. Ending here would strand the row.
                     offloaded = true;
-                    set_waiting(
-                        inner,
-                        id,
-                        "parked on the relay — they can finish it without you online",
-                    );
+                    set_waiting(inner, id, WaitingReason::Parked);
                     live_backoff = match live_backoff {
                         Duration::ZERO => Duration::from_secs(LIVE_RETRY_MIN_SECS),
                         d => (d * 2).min(Duration::from_secs(LIVE_RETRY_MAX_SECS)),
@@ -722,11 +743,7 @@ async fn deliver_to_inner(
         {
             offloaded = true;
             clear_deposit_now(inner, id);
-            set_waiting(
-                inner,
-                id,
-                "parked on the relay — they can finish it without you online",
-            );
+            set_waiting(inner, id, WaitingReason::Parked);
             continue;
         }
         // Couldn't park it all (capped, refused, unreachable, or no offer stands):
@@ -783,34 +800,18 @@ async fn deliver_to_inner(
                 }
                 Err(flow::DepositError::TooLarge) => {
                     too_big = true;
-                    set_waiting(
-                        inner,
-                        id,
-                        "file too large for this relay — waiting for the recipient to come online for a direct transfer",
-                    );
+                    set_waiting(inner, id, WaitingReason::TooLarge);
                 }
                 Err(flow::DepositError::Fatal(e)) => {
                     finish(inner, id, false, Err(e));
                     return;
                 }
                 Err(e @ flow::DepositError::Busy) => {
-                    set_waiting(
-                        inner,
-                        id,
-                        &format!(
-                            "{e} — retrying later, and delivering P2P as soon as the recipient is online"
-                        ),
-                    );
+                    set_waiting(inner, id, WaitingReason::RelayRetry(e.to_string()));
                     next_relay_try = Instant::now() + Duration::from_secs(RELAY_RETRY_SECS);
                 }
                 Err(e @ flow::DepositError::Unavailable(_)) => {
-                    set_waiting(
-                        inner,
-                        id,
-                        &format!(
-                            "{e} — retrying later, and delivering P2P as soon as the recipient is online"
-                        ),
-                    );
+                    set_waiting(inner, id, WaitingReason::RelayRetry(e.to_string()));
                     next_relay_try = Instant::now() + Duration::from_secs(RELAY_RETRY_SECS);
                 }
             }
@@ -1027,7 +1028,7 @@ pub(super) async fn serve_live_once(
     //
     // `set_waiting` says the true thing and announces it. `Active` follows below,
     // when a receiver actually connects.
-    set_waiting(inner, id, "offered — waiting for them to accept");
+    set_waiting(inner, id, WaitingReason::Offered);
 
     // Per-attempt child token: the watchdog cancels *this* to stop serving on
     // fallback, leaving the caller's token (user cancel) untouched.
@@ -1143,28 +1144,16 @@ pub(super) async fn serve_live_once(
             // the loop needs to stop trying.
             SendEvent::RelayCapped { limit_bytes } => {
                 capped_cb.store(true, Ordering::Relaxed);
-                set_waiting(
-                    &inner_cb,
-                    id,
-                    &format!(
-                        "the relay won't hold more of this transfer (cap {} MiB) — delivering direct as soon as they're online",
-                        limit_bytes / (1024 * 1024)
-                    ),
-                );
+                set_waiting(&inner_cb, id, WaitingReason::RelayCapped(mib(limit_bytes)));
             }
             // Also said out loud, for the same reason as the cap above: a relay with
             // no room left is the case where the file most needs the user to know
             // the offload did not happen — and it was the quietest.
             SendEvent::BackfillFailed { reason } => {
-                set_waiting(
-                    &inner_cb,
-                    id,
-                    &format!("couldn't park it on the relay: {reason}"),
-                );
+                set_waiting(&inner_cb, id, WaitingReason::OffloadFailed(reason));
             }
-            SendEvent::Ready { .. }
-            | SendEvent::ReceiverDropped { .. }
-            | SendEvent::Backfilled => {}
+            SendEvent::Ready { .. } | SendEvent::ReceiverDropped { .. } | SendEvent::Backfilled => {
+            }
         })
         .await;
     watchdog.abort();
@@ -1310,16 +1299,11 @@ pub(super) async fn park_on_relay(
     let inner_cb = inner.clone();
     let parked = session
         .park_on_relay(cancel, move |ev| match ev {
-            flow::SendEvent::RelayCapped { limit_bytes } => set_waiting(
-                &inner_cb,
-                id,
-                &format!(
-                    "the relay won't hold more of this transfer (cap {} MiB) — the rest has to go direct",
-                    limit_bytes / (1024 * 1024)
-                ),
-            ),
+            flow::SendEvent::RelayCapped { limit_bytes } => {
+                set_waiting(&inner_cb, id, WaitingReason::RelayCapped(mib(limit_bytes)))
+            }
             flow::SendEvent::BackfillFailed { reason } => {
-                set_waiting(&inner_cb, id, &format!("couldn't park it on the relay: {reason}"))
+                set_waiting(&inner_cb, id, WaitingReason::OffloadFailed(reason))
             }
             _ => {}
         })

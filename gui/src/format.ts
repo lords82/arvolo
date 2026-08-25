@@ -195,6 +195,52 @@ export function fmtEta(tx: UITransfer): string {
   return t("eta.hours", Math.round(secs / 3600));
 }
 
+/** Every reason the engine can give for a send waiting, and the key that says it
+ *  in the reader's language.
+ *
+ *  Keyed by the daemon's stable code rather than by its English sentence: the
+ *  sentence is prose that gets reworded, and matching on prose would put the row
+ *  silently back into English the first time somebody improved the wording. The
+ *  codes come from `WaitingReason::code` in core/src/manager/mod.rs — the two
+ *  lists are kept in step by `waiting.test.ts`. */
+const WAITING_PLAIN: Record<
+  string,
+  "waiting.offered" | "waiting.tooLarge" | "waiting.parked"
+> = {
+  offered: "waiting.offered",
+  tooLarge: "waiting.tooLarge",
+  parked: "waiting.parked",
+};
+
+/** The reasons that quote something from elsewhere inside them — the relay's own
+ *  message, or a cap it named. Those words are interpolated, never translated: we
+ *  did not write them and have no idea what they say. Kept apart from the plain
+ *  ones so the type system knows which entries take an argument. */
+const WAITING_QUOTED: Record<
+  string,
+  "waiting.relayRetry" | "waiting.relayCapped" | "waiting.offloadFailed"
+> = {
+  relayRetry: "waiting.relayRetry",
+  relayCapped: "waiting.relayCapped",
+  offloadFailed: "waiting.offloadFailed",
+};
+
+/** What a waiting row says, in the reader's language where we can.
+ *
+ *  Falls back to the daemon's English sentence, which is the honest thing to show
+ *  when there is nothing to look up: a daemon older than the code field, or a
+ *  reason this build has never heard of because the daemon is newer than the
+ *  window. Saying the wrong reason confidently would be worse than saying the
+ *  right one in English. */
+export function waitingText(tx: UITransfer): string {
+  const code = tx.waitingCode;
+  if (!code) return tx.reason || t("meta.stalled");
+  const quoted = WAITING_QUOTED[code];
+  if (quoted) return t(quoted, tx.waitingDetail || t("waiting.relayUnnamed"));
+  const plain = WAITING_PLAIN[code];
+  return plain ? t(plain) : tx.reason || t("meta.stalled");
+}
+
 /** The right-hand meta line under the status. */
 export function metaLine(tx: UITransfer): string {
   switch (tx.status) {
@@ -227,7 +273,7 @@ export function metaLine(tx: UITransfer): string {
           : "meta.offered"
       );
     case "stalled":
-      return tx.reason ? tx.reason : t("meta.stalled");
+      return waitingText(tx);
     case "incoming":
       return t("meta.incoming");
     case "deposited": {

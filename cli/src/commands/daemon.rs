@@ -1158,6 +1158,8 @@ mod share_line_tests {
             path: None,
             sender_name: String::new(),
             offer_status: None,
+            waiting_code: None,
+            waiting_detail: None,
         }
     }
 

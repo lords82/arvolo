@@ -576,6 +576,21 @@ pub struct TransferDto {
     /// things to keep in step.
     #[serde(default)]
     pub offer_status: Option<String>,
+    /// Why a waiting send is waiting, as a stable code — `"offered"`,
+    /// `"tooLarge"`, `"relayRetry"` — with `waiting_detail` carrying the relay's
+    /// own words when there are any. `None` for a row that is not waiting, or a
+    /// daemon that predates the field.
+    ///
+    /// `status` already says it in English, and keeps saying it: this rides
+    /// *alongside*, so the CLI and any older client are untouched while a
+    /// localized one can look the reason up instead of printing a sentence it
+    /// cannot translate.
+    #[serde(default)]
+    pub waiting_code: Option<String>,
+    /// The relay's message quoted inside a `"relayRetry"` reason, when there is
+    /// one. Not ours, and not translatable — a diagnostic from another machine.
+    #[serde(default)]
+    pub waiting_detail: Option<String>,
 }
 
 /// A parked incoming offer awaiting the user's accept/reject.
@@ -942,9 +957,17 @@ pub enum EventDto {
     Waiting {
         id: u64,
         reason: String,
+        /// Stable code for `reason`, so a localized client can say it in its own
+        /// words. `#[serde(default)]` on all three: an older daemon sends none of
+        /// them, and its event must still decode.
+        #[serde(default)]
+        code: String,
+        /// The relay's own message quoted inside the reason, when there is one.
+        #[serde(default)]
+        detail: String,
         /// How far the offer this send holds open has got (`pending` / `arrived` /
-        /// `taken`), empty when none stands. `serde(default)` so an older daemon,
-        /// which sends none, reads as "nothing known" rather than failing to parse.
+        /// `taken`), empty when none stands. Orthogonal to `code`: that says why
+        /// the send waits, this says how far the thing it waits on has come.
         #[serde(default)]
         offer_status: String,
     },
@@ -1082,6 +1105,8 @@ impl From<&Transfer> for TransferDto {
             path: t.path.as_ref().map(|p| p.to_string_lossy().into_owned()),
             sender_name: t.sender_name.clone(),
             offer_status: (!t.offer_status.is_empty()).then(|| t.offer_status.clone()),
+            waiting_code: (!t.waiting_code.is_empty()).then(|| t.waiting_code.clone()),
+            waiting_detail: (!t.waiting_detail.is_empty()).then(|| t.waiting_detail.clone()),
         }
     }
 }
@@ -1149,10 +1174,14 @@ impl From<&ManagerEvent> for EventDto {
             ManagerEvent::Waiting {
                 id,
                 reason,
+                code,
+                detail,
                 offer_status,
             } => EventDto::Waiting {
                 id: *id,
                 reason: reason.clone(),
+                code: code.clone(),
+                detail: detail.clone(),
                 offer_status: offer_status.clone(),
             },
             ManagerEvent::Paused { id, reason } => EventDto::Paused {
@@ -1393,9 +1422,11 @@ mod tests {
                 EventDto::Waiting {
                     id: 3,
                     reason: "relay unavailable".into(),
+                    code: "relayRetry".into(),
+                    detail: "relay unavailable".into(),
                     offer_status: String::new(),
                 },
-                r#"{"waiting":{"id":3,"reason":"relay unavailable","offer_status":""}}"#,
+                r#"{"waiting":{"id":3,"reason":"relay unavailable","code":"relayRetry","detail":"relay unavailable","offer_status":""}}"#,
             ),
             (
                 EventDto::Failed {
@@ -1473,6 +1504,38 @@ mod tests {
             ),
             other => panic!("wrong variant: {other:?}"),
         }
+    }
+
+    /// The whole point of adding the code *beside* the sentence rather than in
+    /// place of it: a daemon that predates the field still speaks a language this
+    /// client understands. If these ever stopped decoding, upgrading the GUI ahead
+    /// of the daemon would break the transfer list rather than merely leave one
+    /// reason in English.
+    #[test]
+    fn a_waiting_reason_from_an_older_daemon_still_decodes() {
+        let ev: EventDto =
+            serde_json::from_str(r#"{"waiting":{"id":3,"reason":"relay unavailable"}}"#).unwrap();
+        assert_eq!(
+            ev,
+            EventDto::Waiting {
+                id: 3,
+                reason: "relay unavailable".into(),
+                code: String::new(),
+                detail: String::new(),
+                offer_status: String::new(),
+            },
+            "a missing code must read as absent, not fail the whole event"
+        );
+
+        let dto: TransferDto = serde_json::from_str(
+            r#"{"id":1,"direction":"send","peer":null,"name":"f","total_size":1,
+                "transferred":0,"status":"waiting: offered — waiting for them to accept"}"#,
+        )
+        .unwrap();
+        assert_eq!(dto.waiting_code, None);
+        assert_eq!(dto.waiting_detail, None);
+        // And the sentence is still there, which is what such a client shows.
+        assert!(dto.status.contains("waiting for them to accept"));
     }
 
     /// The live fields are `Option`s on purpose: "the relay could not be asked" is a

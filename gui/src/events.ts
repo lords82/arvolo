@@ -48,6 +48,8 @@ export type WireEvent =
       waiting: {
         id: number;
         reason: string;
+        code?: string;
+        detail?: string;
         // How far the offer this send holds open has got. Absent from an older
         // daemon, which is why it is optional rather than "".
         offer_status?: string;
