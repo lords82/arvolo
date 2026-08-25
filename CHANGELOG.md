@@ -1,5 +1,63 @@
 # Changelog
 
+## v0.14.0 — the relay stops being something only the sender can see
+
+A transfer that leans on the relay used to depend on the sender being there
+to say so. Now both ends can ask it directly, which turns the relay's copy
+from a hint the sender passes on into a source the recipient can find
+alone — and makes parking a file there as good a promise as depositing it.
+
+### Fixed
+
+- **A download could sit stalled while the relay held the whole file.** Which
+  pieces the relay was holding travelled one way only: from the sender, over
+  the control channel. So it was unknowable in exactly the situation the
+  relay's copy exists for — with the sender gone there is nobody to say it,
+  and a receiver resuming alone found no source for any piece while the relay
+  had everything it needed. Both ends can now ask (`POST /v1/have`). The
+  question discloses nothing new: the chunk protocol already answers it for
+  anyone holding the hashes, and those are hashes of ciphertext under a
+  per-transfer random key, so having the same file does not produce them.
+
+- **A send whose recipient dropped kept serving an empty room for ever.** It
+  now ends once everything they still lack is on the relay — and says so,
+  which is what stops the same file going up a second time as a sealed
+  mailbox blob. That second copy would have spent the relay twice and thrown
+  away whatever the recipient had already pulled, because a mailbox fetch
+  cannot resume. It also unstuck two things that could not run while the send
+  was pinned: the wake-up when the recipient finally accepts, and the
+  seven-day give-up.
+
+- **Repeated drops could exhaust a transfer's relay budget without the relay
+  storing a byte.** Every drop re-offered the whole undelivered tail; the
+  relay skipped files it already had, but the meter was charged before it got
+  that far. Seeding now asks first and sends only what is missing.
+
+- **The relay's two stores were metered separately over one disk** — blobs in
+  bytes, seeded chunks in rows, where fifty thousand rows stood for some
+  800 GB. What arrived first was the filesystem running out. One budget now
+  covers both. **If you run a relay, set `ARVOLO_MAX_TOTAL_BLOB_BYTES`**: it
+  is the knob that now governs the whole disk.
+
+- **A relay with no room said nothing.** Its refusal was dropped on the floor:
+  the offload silently did not happen and the send went back to waiting with
+  nothing on screen to distinguish that from a relay that was fine.
+
+### Changed
+
+- **"Park it on the relay now" parks the pieces instead of uploading a second
+  copy** when the recipient is already holding a ticket for them — keeping
+  whatever they had downloaded rather than starting them from zero. It makes
+  the same three promises the mailbox does, which is new: the pieces last as
+  long as the offer naming them (rather than a fixed day), a cancel really
+  withdraws them, and the pickup is watched. Where a parked send cannot tell
+  a pickup from an expiry — a recipient who swarms never releases the pieces
+  — it says it does not know rather than reporting that nobody came.
+
+- **A waiting send says why in the reader's language** for three more
+  reasons: parked, the relay declining to hold more of this transfer, and a
+  park that failed.
+
 ## v0.13.1 — the Mac and Windows apps, which v0.13.0 forgot
 
 ### Fixed
