@@ -509,6 +509,13 @@ pub(crate) fn project_to_ledgers(state: &SyncState) -> Result<()> {
     }
     save_seen(&s)?;
 
+    // `first` is not in the sync register and is not rebuilt from it: it records
+    // how a key introduced itself *to this device*, which is a local observation
+    // in the same family as `seen`. Carrying the local value across is not an
+    // optimisation — rebuilding the row without it would erase the name history
+    // of every stranger on every merge, and a defence that a sync round quietly
+    // clears is worse than one that was never there.
+    let old = load_names().names;
     let mut n = Names::default();
     for (id, r) in &state.names {
         if !r.deleted {
@@ -517,6 +524,21 @@ pub(crate) fn project_to_ledgers(state: &SyncState) -> Result<()> {
                 NameRow {
                     pinned: r.pinned.clone(),
                     pending: r.pending.clone(),
+                    first: old.get(id).map(|o| o.first.clone()).unwrap_or_default(),
+                },
+            );
+        }
+    }
+    // A key whose only record is its first claim has no register row to merge —
+    // it has never been approved or removed — so it would vanish here.
+    for (id, row) in old {
+        let tombstoned = state.names.get(&id).is_some_and(|r| r.deleted);
+        if !row.first.is_empty() && !n.names.contains_key(&id) && !tombstoned {
+            n.names.insert(
+                id,
+                NameRow {
+                    first: row.first,
+                    ..Default::default()
                 },
             );
         }

@@ -370,6 +370,16 @@ pub async fn resume(id: u64) -> Result<(), String> {
     c.resume(id).await.or_else(err)
 }
 
+/// Park a waiting send on the relay instead of waiting longer for an accept.
+/// Errors when the send is not waiting: the daemon refuses, and the refusal is
+/// the point — a bare `Ok` would tell the user their file is on its way by a
+/// route it never took.
+#[tauri::command]
+pub async fn deposit_now(id: u64) -> Result<(), String> {
+    let mut c = client().await?;
+    c.deposit_now(id).await.or_else(err)
+}
+
 #[tauri::command]
 pub async fn cancel(id: u64) -> Result<(), String> {
     let mut c = client().await?;
@@ -421,6 +431,17 @@ pub async fn recv(
 pub async fn add_contact(name: String, id: String) -> Result<(), String> {
     let mut c = client().await?;
     c.add_contact(name, id).await.or_else(err)
+}
+
+/// Point an existing contact name at a different key. Separate from
+/// [`add_contact`] on purpose: that one is refused on a name collision, and this
+/// is the only way past it — so nothing can re-key a contact, and drop the marks
+/// that go with it, without having asked first. Returns the old and new
+/// fingerprints when a key really did change.
+#[tauri::command]
+pub async fn rebind_contact(name: String, id: String) -> Result<Option<(String, String)>, String> {
+    let mut c = client().await?;
+    c.rebind_contact(name, id).await.or_else(err)
 }
 
 #[tauri::command]

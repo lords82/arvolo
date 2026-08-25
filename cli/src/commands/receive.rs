@@ -136,6 +136,12 @@ pub(crate) async fn listen(
                             match manager.accept_offer(&id, None).await {
                                 Ok(_) => {
                                     eprintln!("   ✓ accepted — downloading…");
+                                    // This path drives the engine itself, so the
+                                    // daemon's accept handler is not there to keep
+                                    // the TOFU ledger. Record the receipt here, or
+                                    // an inline `listen` would leave every sender
+                                    // looking new for ever.
+                                    book::record_seen(&from_b32);
                                     // While it downloads: their id is right here,
                                     // and so is whoever knows who they are.
                                     offer_to_save_contact(&from_b32).await;
@@ -292,7 +298,10 @@ pub(crate) async fn listen_attached(
                     Ok(Some(EventDto::OfferReceived { id, from, name, size, note, sender_name, .. })) => {
                         handle_attached_offer(
                             &mut client,
-                            OfferDto { id, from, name, size, note, sender_name },
+                            // The stamped fields are for a front-end that has no
+                            // address book of its own; this one reads the book
+                            // directly, a few lines down.
+                            OfferDto { id, from, name, size, note, sender_name, ..Default::default() },
                             policy,
                         ).await;
                     }

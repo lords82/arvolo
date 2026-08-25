@@ -236,6 +236,29 @@ impl Mailbox {
             .max(0) as u64
     }
 
+    /// Aggregate bytes held by **seeded chunks**, counted at the nominal chunk
+    /// size — the same approximation the per-transfer offload meter uses, and for
+    /// the same reason: the `seeded` table records hashes, not sizes, and the last
+    /// chunk of a payload is short, so this over-counts slightly and the cap it
+    /// backs is marginally stricter than asked. Erring that way is the right way
+    /// to be wrong about a disk.
+    pub fn seeded_bytes(&self) -> u64 {
+        (self.seeded_count().max(0) as u64).saturating_mul(arvolo_core::chunked::CHUNK_SIZE as u64)
+    }
+
+    /// Everything this relay is holding on disk, mailbox blobs and seeded chunks
+    /// together.
+    ///
+    /// One number because there is one disk. The two paths used to be metered
+    /// separately and in different units — blobs in bytes, chunks in *rows* — so
+    /// neither could see the other filling the volume they share, and the row cap
+    /// (50k) stood for roughly 800 GB at the nominal chunk size, which is not a
+    /// disk guard on any ordinary machine. Whichever path asks for room now asks
+    /// against the whole of it.
+    pub fn disk_bytes(&self) -> u64 {
+        self.stored_bytes().saturating_add(self.seeded_bytes())
+    }
+
     /// A fresh, random claim token to write a blob under.
     pub fn new_claim(&self) -> String {
         random_claim()
@@ -298,11 +321,11 @@ impl Mailbox {
         if self.at_capacity() {
             return Err(MailboxError::Capacity);
         }
-        // Aggregate disk-budget guard (`0` = unlimited).
+        // Aggregate disk-budget guard (`0` = unlimited), over everything held.
         let total_cap = max_total_blob_bytes();
         if total_cap != 0
             && self
-                .stored_bytes()
+                .disk_bytes()
                 .saturating_add(deposit.ciphertext.len() as u64)
                 > total_cap
         {

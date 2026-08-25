@@ -271,8 +271,12 @@ pub(crate) async fn daemon(
                                     notify::auto_downloading(&name, &who, &size_h);
                                 }
                             }
-                            if let Err(e) = manager.accept_offer(&id, None).await {
-                                eprintln!("   ✗ could not auto-accept: {e:#}");
+                            match manager.accept_offer(&id, None).await {
+                                // Same ledger, same rule as the IPC accept: a
+                                // receipt is recorded when the transfer is taken,
+                                // never when the offer merely turns up.
+                                Ok(_) => book::record_seen(&from_b32),
+                                Err(e) => eprintln!("   ✗ could not auto-accept: {e:#}"),
                             }
                         } else {
                             let size_h = human_size(size);
@@ -311,6 +315,10 @@ pub(crate) async fn daemon(
                                     size,
                                     note,
                                     sender_name,
+                                    // Stamped from the address book on the way out
+                                    // (`stamp_offer`), not here: the book moves while
+                                    // an offer waits.
+                                    ..Default::default()
                                 },
                             );
                         }
@@ -919,6 +927,22 @@ pub(crate) async fn pause_cmd(id: String) -> Result<()> {
     client.pause(tid).await?;
     eprintln!(
         "paused transfer {shown} — `arvolo resume {shown}` to continue, or `arvolo cancel {shown}`."
+    );
+    Ok(())
+}
+
+/// `arvolo deposit <id>` — park a waiting send on the relay instead of waiting
+/// any longer for the recipient to accept.
+pub(crate) async fn deposit_cmd(id: String) -> Result<()> {
+    let mut client = daemon_client()
+        .await
+        .context("no daemon running (start `arvolo daemon start`)")?;
+    let tid = resolve_transfer_id(&mut client, &id).await?;
+    let shown = handle_for(&mut client, tid).await;
+    client.deposit_now(tid).await?;
+    eprintln!(
+        "transfer {shown} is going to the mailbox — they collect it whenever they come back. \
+         Take it back with `arvolo cancel {shown}`."
     );
     Ok(())
 }

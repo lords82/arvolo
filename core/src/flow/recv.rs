@@ -658,6 +658,62 @@ pub async fn recv_chunked(
         connected: sender_addr.is_some(),
     });
 
+    // Ask the relay directly what it holds, rather than only being told.
+    //
+    // `RelayHas` arrives on the control channel and nowhere else, so before this
+    // the backfilled pieces were undiscoverable exactly when the sender was gone —
+    // the one situation they exist for. A resume with the origin down would sit
+    // with an empty provider set for every piece, backing off against a relay that
+    // was holding the whole tail.
+    //
+    // Additive only. A piece the relay has since dropped is one *we* released after
+    // committing it, so forgetting it here would be forgetting our own progress;
+    // and an answer that is too optimistic costs a failed fetch and a cooldown,
+    // never a wrong byte — every chunk is verified against the ticket's hash
+    // whatever served it.
+    let have_probe = t.relay.as_ref().map(|r| {
+        let (http, chunks) = (r.http.clone(), t.chunks.clone());
+        let (on_relay, client) = (on_relay.clone(), client.clone());
+        let live = sender_live.clone();
+        let cancel = ctrl_cancel.clone();
+        tokio::spawn(async move {
+            // How often to ask, by whether the origin is there to answer instead:
+            // rarely while it is serving (it announces its own seeding over the
+            // control channel anyway), promptly once it is not — that is when the
+            // question becomes the only way to find a source at all.
+            const WHILE_SERVED: u64 = 120;
+            const WHILE_ALONE: u64 = 15;
+            // Ticked in small slices rather than slept through in one go. Deciding
+            // the whole wait up front reads the origin's state at the *start* of a
+            // two-minute nap: an origin that leaves a second later would not be
+            // noticed for the rest of it, which is exactly the moment the relay
+            // needs looking at. The cost of the slices is a wakeup that does
+            // nothing; the cost of getting it wrong is a stalled download.
+            const SLICE: u64 = 5;
+            let mut waited = u64::MAX; // ask immediately on the first pass
+            loop {
+                let served = live
+                    .as_ref()
+                    .map(|b| b.load(std::sync::atomic::Ordering::Relaxed))
+                    .unwrap_or(false);
+                let due = if served { WHILE_SERVED } else { WHILE_ALONE };
+                if waited >= due {
+                    if let Ok(held) = crate::backfill::relay_have(&client, &http, &chunks).await {
+                        let mut set = on_relay.lock().unwrap();
+                        set.extend(held);
+                    }
+                    waited = 0;
+                }
+                tokio::select! {
+                    _ = cancel.cancelled() => break,
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(SLICE)) => {
+                        waited = waited.saturating_add(SLICE);
+                    }
+                }
+            }
+        })
+    });
+
     // Swarm (multi-peer) coordination. A piece is addressed by BLAKE3 of its
     // ciphertext and re-sealed deterministically from the content key, so any two
     // downloaders holding the **same content key** produce byte-identical,
@@ -1138,6 +1194,11 @@ pub async fn recv_chunked(
     // not hold up our completion, and a lost ack then costs a redundant offer, not
     // the file. The bound clears the graceful-close wait inside `Control::finish`.
     drop(ack_tx);
+    // The relay probe has nothing to flush: stop it outright rather than letting it
+    // outlive the download it was answering for.
+    if let Some(p) = have_probe {
+        p.abort();
+    }
     match ctrl {
         Some(h) => {
             // Both senders must go for the channel to close: this one and the clone

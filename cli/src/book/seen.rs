@@ -19,6 +19,12 @@ pub struct SenderStatus {
     pub trusted: bool,
 }
 
+/// The TOFU ledger: how many transfers have been taken from each key.
+///
+/// A counter, and deliberately nothing more — not a history. Dating the receipts
+/// only ever feeds a "last transfer" column, which is not a question an address
+/// book is asked, and `SeenEntry` has no field to sync a date in, so it would
+/// read differently on each of your machines.
 #[derive(Default, Serialize, Deserialize)]
 pub(crate) struct Seen {
     #[serde(default)]
@@ -47,6 +53,14 @@ pub fn sender_status(id_b32: &str) -> SenderStatus {
         verified: is_verified(id_b32),
         trusted: is_trusted(id_b32),
     }
+}
+
+/// How many transfers have been taken from `id_b32`. `0` means never — the one
+/// answer worth putting in front of the user, which is why this exists next to
+/// [`sender_status`]'s `seen_before`: a count reads as "you know this key" in a
+/// way a boolean does not.
+pub fn seen_count(id_b32: &str) -> u64 {
+    load_seen().seen.get(id_b32).copied().unwrap_or(0)
 }
 
 /// Record a receipt from `id_b32` (TOFU ledger): increments its counter. Best

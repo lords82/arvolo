@@ -56,6 +56,7 @@ export interface Recorder {
   remove: number[];
   pause: number[];
   resume: number[];
+  depositNow: number[];
   accept: [string, string | null, string | null][];
   reject: string[];
   markVerified: string[];
@@ -143,6 +144,7 @@ function freshRecorder(): Recorder {
     remove: [],
     pause: [],
     resume: [],
+    depositNow: [],
     accept: [],
     reject: [],
     markVerified: [],
@@ -404,6 +406,10 @@ export function makeIpcMock() {
         harness.recorder.resume.push(id);
         return guard("resume", undefined);
       },
+      depositNow: (id: number) => {
+        harness.recorder.depositNow.push(id);
+        return guard("depositNow", undefined);
+      },
       cancel: (id: number) => {
         harness.recorder.cancel.push(id);
         return guard("cancel", undefined);
@@ -543,6 +549,12 @@ export const dto = {
       size: 500,
       note: "",
       sender_name: "",
+      // Stamped by the daemon from the address book. The default is a stranger
+      // whose key you have never taken anything from — the case the dialog has
+      // the most to say about.
+      fingerprint: "able-otter-nine-plum-river-cedar-lantern-fox",
+      seen_count: 0,
+      known_name: "",
       ...over,
     };
   },

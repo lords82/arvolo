@@ -234,7 +234,12 @@ async fn dispatch(d: &Daemon, cmd: Request) -> Response {
             Response::Transfers(v)
         }
         Request::ListPending => {
-            let mut v: Vec<OfferDto> = d.pending.lock().unwrap().values().cloned().collect();
+            let mut v: Vec<OfferDto> = {
+                let map = d.pending.lock().unwrap();
+                map.values().cloned().collect()
+            };
+            // Outside the lock: each stamp reads three small TOMLs.
+            let mut v: Vec<OfferDto> = v.drain(..).map(stamp_offer_dto).collect();
             v.sort_by(|a, b| a.name.cmp(&b.name));
             Response::Pending(v)
         }
@@ -280,6 +285,21 @@ async fn dispatch(d: &Daemon, cmd: Request) -> Response {
             d.manager.resume(id);
             Response::Ok
         }
+        // Unlike its neighbours, this one reports the refusal. `deposit_now` says
+        // no for a send that is not waiting — one already under way, or already
+        // parked — and an `Ok` there would be a front-end telling the user their
+        // file is on the relay when nothing happened at all.
+        Request::DepositNow { id } => {
+            if d.manager.deposit_now(id) {
+                Response::Ok
+            } else {
+                Response::Error(
+                    "that transfer is not waiting for the recipient to accept — \
+                     only a waiting send can be parked on the relay"
+                        .to_string(),
+                )
+            }
+        }
         Request::RejectOffer { offer_id } => {
             d.pending.lock().unwrap().remove(&offer_id);
             d.manager.reject_offer(&offer_id).await;
@@ -310,7 +330,14 @@ async fn dispatch(d: &Daemon, cmd: Request) -> Response {
                     // password-protected deposit with no password — erase the row
                     // from `ListPending` while the engine still held it, leaving
                     // nothing to retry against.
-                    d.pending.lock().unwrap().remove(&offer_id);
+                    let taken = d.pending.lock().unwrap().remove(&offer_id);
+                    // The TOFU ledger, recorded here because *this* is the receipt:
+                    // an offer merely arriving must not count, or a stranger could
+                    // walk their own "you know me" counter up by re-posting, and a
+                    // defence would become a lever.
+                    if let Some(o) = taken {
+                        crate::book::record_seen(&o.from);
+                    }
                     let _ = d.side_events.send(EventDto::OfferGone {
                         id: offer_id.clone(),
                     });
@@ -378,10 +405,7 @@ async fn dispatch(d: &Daemon, cmd: Request) -> Response {
         // Contact edits reply on their own result; the pushed `ContactsChanged`
         // event (from the daemon's book watcher) is what nudges every *other*
         // attached frontend to refetch.
-        Request::AddContact { name, id } => match crate::book::contact_add(&name, &id) {
-            Ok(_key_change) => Response::Ok,
-            Err(e) => Response::Error(format!("{e:#}")),
-        },
+        Request::AddContact { name, id, rebind } => add_contact(&name, &id, rebind),
         Request::RemoveContact { name } => {
             // Clear the trust ledgers FIRST, exactly as the CLI does — they
             // resolve the id via the contact name, which is gone once removed.
@@ -1315,7 +1339,7 @@ async fn stream_events(daemon: &Daemon, write: &mut (impl AsyncWrite + Unpin)) {
     loop {
         let ev = tokio::select! {
             e = engine.recv() => match e {
-                Ok(ev) => stamp_auto(EventDto::from(&ev)),
+                Ok(ev) => stamp_offer(EventDto::from(&ev)),
                 Err(RecvError::Lagged(_)) => continue,
                 Err(RecvError::Closed) => return,
             },
@@ -1337,14 +1361,84 @@ async fn stream_events(daemon: &Daemon, write: &mut (impl AsyncWrite + Unpin)) {
     }
 }
 
-/// Mark an offer that the daemon is about to auto-accept, so a front-end can say
-/// "arriving" instead of asking a question with only one answer. Trust is read
-/// from the same address book the auto-accept decision uses, so the two agree.
-fn stamp_auto(mut ev: EventDto) -> EventDto {
-    if let EventDto::OfferReceived { from, auto, .. } = &mut ev {
+/// Fill in everything about an offer's sender that lives in the address book and
+/// not in the offer.
+///
+/// `auto` marks one the daemon is about to auto-accept, so a front-end can say
+/// "arriving" instead of asking a question with only one answer; trust is read
+/// from the same book the auto-accept decision uses, so the two agree. The other
+/// three are what the user needs in order to *answer* the question — the sender's
+/// fingerprint, how many times they have been received from before, and the name
+/// this key is already on record as claiming.
+///
+/// Stamped here rather than where the offer is parked, because the book moves:
+/// saving the sender, approving their name or taking a transfer all change the
+/// answers while the offer sits waiting.
+fn stamp_offer(mut ev: EventDto) -> EventDto {
+    if let EventDto::OfferReceived {
+        from,
+        auto,
+        fingerprint,
+        seen_count,
+        known_name,
+        ..
+    } = &mut ev
+    {
         *auto = crate::book::sender_status(from).trusted;
+        *fingerprint = crate::book::fingerprint_of(from).unwrap_or_default();
+        *seen_count = crate::book::seen_count(from);
+        *known_name = crate::book::known_name_of(from)
+            .map(|n| crate::ui::sanitize_display(&n))
+            .unwrap_or_default();
     }
     ev
+}
+
+/// Save a contact, refusing a silent re-key.
+///
+/// `contact_add` re-points a name that already exists at the new key and drops
+/// that name's verified and trusted marks. Reached from an offer dialog — where
+/// the name being typed is a stranger's — that turns a save into the quiet
+/// demotion of whoever already held it: exactly the person the marks were there
+/// to protect. The CLI's save prompt refuses the same collision, for the same
+/// reason; this is that refusal, moved somewhere every front-end inherits it.
+///
+/// `rebind` is the deliberate version, and it answers with the two fingerprints
+/// so the caller can say what it changed rather than reporting a bare success.
+fn add_contact(name: &str, id: &str, rebind: bool) -> Response {
+    let taken = crate::book::contact_list()
+        .into_iter()
+        .find(|(n, _)| n == name)
+        .map(|(_, other)| other);
+    // Re-adding somebody under the name they already have is not a re-key: it is
+    // how a relay hint gets refreshed, and it must stay a plain success. Compare
+    // the same normalisation `contact_add` stores, `<id>@<relay>` form included.
+    let (bare, _) = crate::book::split_id_and_relay(id);
+    let collides = taken.is_some_and(|other| other != bare.trim().to_lowercase());
+    if collides && !rebind {
+        return Response::Error(format!(
+            "'{name}' is already someone else in your contacts — pick another name. \
+             Re-pointing it at this key would drop their verified and trusted marks."
+        ));
+    }
+    match crate::book::contact_add(name, id) {
+        Ok(Some(change)) => Response::KeyChanged {
+            old_fingerprint: change.old_fingerprint,
+            new_fingerprint: change.new_fingerprint,
+        },
+        Ok(None) => Response::Ok,
+        Err(e) => Response::Error(format!("{e:#}")),
+    }
+}
+
+/// The same three facts, onto a parked offer on its way out of `ListPending`.
+fn stamp_offer_dto(mut o: OfferDto) -> OfferDto {
+    o.fingerprint = crate::book::fingerprint_of(&o.from).unwrap_or_default();
+    o.seen_count = crate::book::seen_count(&o.from);
+    o.known_name = crate::book::known_name_of(&o.from)
+        .map(|n| crate::ui::sanitize_display(&n))
+        .unwrap_or_default();
+    o
 }
 
 /// Counts one attached front-end for as long as it is alive.
@@ -1397,4 +1491,115 @@ async fn write_reply(
     result: Response,
 ) -> std::io::Result<()> {
     write_msg(w, &ServerMessage::Reply { id, result }).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arvolo_core::crypto::Identity;
+
+    fn fresh_id() -> String {
+        data_encoding::BASE32_NOPAD
+            .encode(&Identity::generate().public().to_bytes())
+            .to_lowercase()
+    }
+
+    /// The collision guard, where every front-end inherits it.
+    ///
+    /// `contact_add` re-points an existing name at the new key and drops that
+    /// name's verified and trusted marks. Reached from an offer dialog, where the
+    /// name being typed is a stranger's, that is the quiet demotion of whoever
+    /// already held it — so the plain save refuses, and only a caller that says
+    /// `rebind` gets through.
+    #[test]
+    fn saving_a_stranger_cannot_demote_the_person_whose_name_it_is() {
+        let _guard = crate::testlock::ENV
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("ARVOLO_CONFIG_DIR", dir.path());
+
+        let giulia = fresh_id();
+        let stranger = fresh_id();
+        crate::book::contact_add("giulia", &giulia).unwrap();
+        crate::book::mark_verified("giulia").unwrap();
+        crate::book::mark_trusted("giulia").unwrap();
+
+        match add_contact("giulia", &stranger, false) {
+            Response::Error(e) => assert!(
+                e.contains("verified") && e.contains("trusted"),
+                "the refusal has to name what it is protecting, got: {e}"
+            ),
+            other => panic!("a silent re-key got through: {other:?}"),
+        }
+        assert!(crate::book::is_verified(&giulia), "her mark is untouched");
+        assert!(crate::book::is_trusted(&giulia));
+        assert_eq!(
+            crate::book::resolve_name(&giulia).as_deref(),
+            Some("giulia")
+        );
+
+        // Re-adding the same person under the name they already have is not a
+        // re-key — it is how a relay hint is refreshed — and must still work.
+        assert!(matches!(
+            add_contact("giulia", &giulia, false),
+            Response::Ok
+        ));
+        assert!(crate::book::is_verified(&giulia));
+
+        // The deliberate version goes through, and says what it changed.
+        match add_contact("giulia", &stranger, true) {
+            Response::KeyChanged {
+                old_fingerprint,
+                new_fingerprint,
+            } => {
+                assert_ne!(old_fingerprint, new_fingerprint);
+                assert!(!old_fingerprint.is_empty());
+            }
+            other => panic!("expected the two fingerprints back, got {other:?}"),
+        }
+        assert!(
+            !crate::book::is_verified(&stranger) && !crate::book::is_trusted(&stranger),
+            "the new key starts unchecked"
+        );
+
+        std::env::remove_var("ARVOLO_CONFIG_DIR");
+    }
+
+    /// What the front-end reads off a parked offer is stamped at read time, not
+    /// when the offer was parked — the address book moves while an offer waits.
+    #[test]
+    fn a_parked_offer_is_stamped_from_the_book_as_it_stands() {
+        let _guard = crate::testlock::ENV
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("ARVOLO_CONFIG_DIR", dir.path());
+
+        let from = fresh_id();
+        crate::book::observe_advertised_name(&from, "Giulia");
+        let parked = OfferDto {
+            id: "o1".into(),
+            from: from.clone(),
+            name: "arrivo.zip".into(),
+            size: 9,
+            note: String::new(),
+            sender_name: "Marco".into(),
+            ..Default::default()
+        };
+
+        let o = stamp_offer_dto(parked.clone());
+        assert!(
+            !o.fingerprint.is_empty(),
+            "a stranger's words exist before they are saved — that is the point"
+        );
+        assert_eq!(o.seen_count, 0, "nothing taken from this key yet");
+        assert_eq!(o.known_name, "Giulia");
+
+        // A receipt, and the same offer now reads differently.
+        crate::book::record_seen(&from);
+        assert_eq!(stamp_offer_dto(parked).seen_count, 1);
+
+        std::env::remove_var("ARVOLO_CONFIG_DIR");
+    }
 }

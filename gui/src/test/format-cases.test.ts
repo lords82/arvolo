@@ -109,6 +109,7 @@ describe("statusMeta", () => {
     "incoming",
     "active",
     "paused",
+    "offered",
     "stalled",
     "cancelling",
     "deposited",
@@ -175,6 +176,7 @@ describe("barClass", () => {
     "a stalled %s bar is marked apart from a running one",
     (dir) => {
       expect(barClass(t({ dir, status: "stalled" }))).toContain("stall");
+      expect(barClass(t({ dir, status: "offered" }))).toContain("stall");
       expect(barClass(t({ dir, status: "active" }))).not.toContain("stall");
     }
   );
@@ -248,6 +250,7 @@ describe("metaLine", () => {
     ["active", /%/],
     ["paused", /paused/i],
     ["stalled", /resume|relay/i],
+    ["offered", /see it/i],
     ["incoming", /details/i],
     ["deposited", /collect/i],
     ["failed", /fallit|boom/i],

@@ -1,6 +1,6 @@
 //! The axum HTTP layer: route handlers and the [`router`] assembly.
 
-use arvolo_core::chunked::{SeedRequest, CHUNK_SIZE};
+use arvolo_core::chunked::{encode_have_bitfield, HaveRequest, SeedRequest, CHUNK_SIZE};
 use arvolo_core::swarm::{AnnounceReq, AnnounceResp, PeerInfo};
 use axum::{
     body::Bytes,
@@ -20,9 +20,9 @@ use crate::mailbox::{InboxStatus, MailboxError};
 use crate::state::{
     max_blob_bytes, max_inbox_rows, max_presence_rows, max_rz_rows, max_seeded_rows,
     max_session_relay_bytes, max_total_blob_bytes, AppState, SwarmPeer, CONTROL_PLANE_BODY_LIMIT,
-    INBOX_MAX_TTL_SECS, INBOX_TTL_SECS, MAX_INBOX_PER_SLOT, MAX_INBOX_VALUE_BYTES,
-    MAX_RZ_VALUE_BYTES, MAX_SEED_CHUNKS_PER_REQ, MAX_SWARMS, MAX_SWARM_CHUNKS, MAX_SWARM_PEERS,
-    PRESENCE_TTL_SECS, SWARM_PEER_TTL_SECS,
+    INBOX_MAX_TTL_SECS, INBOX_TTL_SECS, MAX_HAVE_CHUNKS_PER_REQ, MAX_INBOX_PER_SLOT,
+    MAX_INBOX_VALUE_BYTES, MAX_RZ_VALUE_BYTES, MAX_SEED_CHUNKS_PER_REQ, MAX_SWARMS,
+    MAX_SWARM_CHUNKS, MAX_SWARM_PEERS, PRESENCE_TTL_SECS, SWARM_PEER_TTL_SECS,
 };
 use crate::util::{constant_time_eq, now_unix, random_claim};
 
@@ -246,7 +246,7 @@ async fn features_handler(State(state): State<AppState>) -> impl IntoResponse {
     (
         [(axum::http::header::CONTENT_TYPE, "application/json")],
         format!(
-            "{{\"links\":{},\"rz2\":true,\"version\":\"{}\",\"cors\":true}}",
+            "{{\"links\":{},\"rz2\":true,\"have\":true,\"version\":\"{}\",\"cors\":true}}",
             state.links_enabled,
             arvolo_core::VERSION
         ),
@@ -356,6 +356,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/entry/{claim}/status", get(entry_status_handler))
         .route("/v1/addr", get(addr_handler))
         .route("/v1/seed", post(seed_handler))
+        .route("/v1/have", post(have_handler))
         .route("/v1/release/{token}/{hash}", post(release_handler))
         .route(
             "/v1/rz/{slot}/{key}",
@@ -1401,10 +1402,11 @@ async fn deposit_handler(
 
     // Aggregate disk-budget guard: refuse when the store is already over budget,
     // and bound this deposit to the remaining budget while it streams (so one
-    // in-flight deposit can't blow past the total either).
+    // in-flight deposit can't blow past the total either). Measured over the whole
+    // disk — seeded chunks included — because that is what fills up.
     let total_cap = max_total_blob_bytes();
     let remaining_total = if total_cap != 0 {
-        let stored = mb.stored_bytes();
+        let stored = mb.disk_bytes();
         if stored >= total_cap {
             return Err((
                 StatusCode::INSUFFICIENT_STORAGE,
@@ -1671,6 +1673,19 @@ async fn seed_handler(
             "relay at seed capacity".into(),
         ));
     }
+    let add_bytes = (req.chunks.len() as u64).saturating_mul(CHUNK_SIZE as u64);
+    // The same aggregate disk budget the mailbox answers to. Until this, seeding
+    // was bounded only by a *row* count — 50k rows, which at the nominal chunk size
+    // stands for roughly 800 GB — so on any ordinary relay the real limit was the
+    // filesystem, reached as ENOSPC rather than as a refusal. Two paths, one disk,
+    // one budget.
+    let total_cap = max_total_blob_bytes();
+    if total_cap != 0 && state.mailbox.disk_bytes().saturating_add(add_bytes) > total_cap {
+        return Err((
+            StatusCode::INSUFFICIENT_STORAGE,
+            "relay at storage capacity".into(),
+        ));
+    }
     // Free-tier per-session offload cap: bound how many bytes any one transfer may
     // lean on this relay (keyed on the content-derived swarm id, so it is durable
     // across the sender suspending/resuming/restarting). `0` = unlimited. Meter by
@@ -1678,7 +1693,6 @@ async fn seed_handler(
     // over-counts, which only makes the cap marginally stricter. On PAYMENT_REQUIRED
     // the sender falls back to direct P2P (or a private, uncapped relay).
     let cap = max_session_relay_bytes();
-    let add_bytes = (req.chunks.len() as u64).saturating_mul(CHUNK_SIZE as u64);
     if cap > 0
         && state
             .mailbox
@@ -1706,6 +1720,50 @@ async fn seed_handler(
             .add_session_bytes(&req.swarm_id, add_bytes, exp);
     }
     Ok("ok".into())
+}
+
+/// Which of the asked-about chunks this relay currently holds. `POST /v1/have`,
+/// body an `arvh…` [`HaveRequest`], answer a bitfield in the order asked.
+///
+/// Both ends need this and neither could ask before: the backfilled set used to
+/// travel only from sender to receiver over the control channel, so it was
+/// unknowable exactly when the sender was away — the case the relay's copy is
+/// *for*. A receiver resuming alone learns where to pull from; a sender learns
+/// what it need not upload again.
+///
+/// Three deliberate properties:
+///
+/// - **A read that spends the write budget.** Reads here have no limiter of their
+///   own, and this one is batched, so it would otherwise be the cheapest way to
+///   load the box. The swarm tracker rate-limits itself for the same reason.
+/// - **Capped list.** Bounded work per request, and the client splits longer
+///   questions rather than needing to know the limit.
+/// - **No new disclosure.** The chunk protocol already serves any held chunk to
+///   whoever names its hash, with no token, so this answers a question that was
+///   already answerable — only cheaply. The hashes are of ciphertext under a
+///   per-transfer random key, so they cannot be derived from the file itself.
+async fn have_handler(
+    State(state): State<AppState>,
+    ip: ClientIp,
+    body: String,
+) -> Result<String, (StatusCode, String)> {
+    write_rate_limit(&state.write_limiter, ip.0, now_unix(), writes_per_min())?;
+    let req = HaveRequest::decode(body.trim())
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("bad have request: {e}")))?;
+    if req.chunks.len() > MAX_HAVE_CHUNKS_PER_REQ {
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!("too many chunks (max {MAX_HAVE_CHUNKS_PER_REQ})"),
+        ));
+    }
+    let held = state.blobs.has_chunks(&req.chunks);
+    let mut bitfield = arvolo_core::swarm::bitfield_new(req.chunks.len());
+    for (i, has) in held.iter().enumerate() {
+        if *has {
+            arvolo_core::swarm::bitfield_set(&mut bitfield, i);
+        }
+    }
+    Ok(encode_have_bitfield(&bitfield))
 }
 
 /// The relay's iroh blob-node address plus a fresh transfer token, so the sender

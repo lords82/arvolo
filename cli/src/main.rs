@@ -45,7 +45,9 @@ mod util;
 use args::{build_cli, Cli, Command, DaemonAction, DeviceAction, MeAction};
 use commands::cancel::cancel_cmd;
 use commands::contacts::contacts_cmd;
-use commands::daemon::{daemon, daemon_start, daemon_status_cmd, daemon_stop_cmd, pause_cmd};
+use commands::daemon::{
+    daemon, daemon_start, daemon_status_cmd, daemon_stop_cmd, deposit_cmd, pause_cmd,
+};
 use commands::history::history_cmd;
 use commands::identity::{me, name_cmd};
 use commands::receive::{decline_cmd, listen, recv};
@@ -187,6 +189,7 @@ async fn run() -> Result<()> {
         },
         Command::Cancel { id } => cancel_cmd(id).await,
         Command::Pause { id } => pause_cmd(id).await,
+        Command::Deposit { id } => deposit_cmd(id).await,
         Command::Resume { id, path } => resume_cmd(id, path).await,
     }
 }

@@ -250,6 +250,38 @@ describe("engine events → rows", () => {
     expect(row("t1")).toMatchObject({ status: "stalled", reason: "relay unavailable" });
   });
 
+  // A send holding an offer open is waiting on a person, not on the network, and
+  // the two do not deserve the same word: `stalled` is the board's quietest tone
+  // ("nothing to do"), while this one has an action attached to it.
+  it("8b. a send whose offer has reached them is `offered`, not `stalled`", async () => {
+    await boot();
+    harness.emit({ started: { id: 1, direction: "send", name: "m.bin", total_size: 10 } });
+    harness.emit({
+      waiting: {
+        id: 1,
+        reason: "offered — waiting for them to accept",
+        offer_status: "arrived",
+      },
+    });
+    expect(row("t1")).toMatchObject({ status: "offered", offerStatus: "arrived" });
+  });
+
+  it("8c. an incoming transfer never becomes `offered`", async () => {
+    await boot();
+    harness.emit({ started: { id: 2, direction: "recv", name: "m.bin", total_size: 10 } });
+    harness.emit({ waiting: { id: 2, reason: "held", offer_status: "arrived" } });
+    expect(row("t2").status).toBe("stalled");
+  });
+
+  // An older daemon sends no `offer_status` at all. It must read as "nothing
+  // known" — the old word, the old behaviour — rather than as a state.
+  it("8d. a daemon that says nothing about the offer still reads as stalled", async () => {
+    await boot();
+    harness.emit({ started: { id: 1, direction: "send", name: "m.bin", total_size: 10 } });
+    harness.emit({ waiting: { id: 1, reason: "relay unavailable" } });
+    expect(row("t1").status).toBe("stalled");
+  });
+
   it("9. `paused` and `failed` and `cancelled` land on their statuses", async () => {
     await boot();
     for (const id of [1, 2, 3]) {

@@ -17,6 +17,10 @@ pub(crate) struct Config {
     pub(crate) p2p: Option<bool>,
     pub(crate) seed: Option<bool>,
     pub(crate) seed_after: Option<u64>,
+    /// Seconds a `send --to` waits for the recipient to accept before parking the
+    /// file on the relay instead. `0` deposits as soon as the live attempt gives
+    /// up, which is what every version before this one did.
+    pub(crate) deposit_after: Option<u64>,
     pub(crate) share_days: Option<u64>,
     pub(crate) share_copies: Option<u64>,
     pub(crate) swarm: Option<String>,
@@ -202,7 +206,7 @@ pub fn apply_config_to_env() {
     // One row per config key → its ARVOLO_* env var, each normalized to the string
     // the env expects (or `None` to leave the env untouched). Bridged with
     // env > config > default precedence via `set_if_unset`.
-    let bridges: [(&str, Option<String>); 14] = [
+    let bridges: [(&str, Option<String>); 15] = [
         ("ARVOLO_TEMP_DIR", cfg.temp_dir.and_then(nonempty)),
         ("ARVOLO_IDENTITY", cfg.identity.and_then(nonempty)),
         ("ARVOLO_IROH_RELAY", cfg.iroh_relay.and_then(nonempty)),
@@ -222,6 +226,10 @@ pub fn apply_config_to_env() {
         ),
         ("ARVOLO_SEED", cfg.seed.map(bool_env)),
         ("ARVOLO_SEED_AFTER", cfg.seed_after.map(|n| n.to_string())),
+        (
+            "ARVOLO_DEPOSIT_AFTER",
+            cfg.deposit_after.map(|n| n.to_string()),
+        ),
         ("ARVOLO_SHARE_DAYS", cfg.share_days.map(|n| n.to_string())),
         (
             "ARVOLO_SHARE_COPIES",
@@ -315,6 +323,16 @@ pub fn write_default_config(relay: Option<&str>) -> Result<()> {
 
 # Seconds to keep backfilling the relay after a transfer completes (0 = off).
 #seed_after = 0
+
+# How long a send waits for the recipient to *accept* before parking the file on
+# the relay instead, in seconds. Their client having the offer is not the same as
+# a person having answered it, and the wait costs nothing here — the daemon is
+# running anyway, and the relay wakes it the moment they say yes. What it saves is
+# a full copy of the file sitting on the relay for a week because nobody happened
+# to be at their screen. A recipient who goes offline is not waited for: that
+# deposits at once, whatever this says. 0 = deposit as soon as the direct attempt
+# gives up (how it worked before this setting existed).
+#deposit_after = 1800
 
 # When to stop sharing a file you are making available (a ticket, a code, or the
 # seeding a finished download turns into). Unset = until you stop it by hand,

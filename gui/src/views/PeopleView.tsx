@@ -39,6 +39,7 @@ import {
   ShortId,
 } from "../ui/Bits";
 import { MenuButton, type MenuItem } from "../ui/Menu";
+import { nameCollision } from "../ui/SaveSenderFields";
 import { Confirm, Sheet } from "../ui/Sheet";
 import { toast } from "../ui/Toasts";
 import type { ContactDto } from "../types";
@@ -285,19 +286,48 @@ function AddPersonSheet({
   onClose: () => void;
 }) {
   const t = useT();
+  const contacts = useStore((s) => s.contacts);
   const addContact = useStore((s) => s.addContact);
+  const rebindContact = useStore((s) => s.rebindContact);
   const [name, setName] = useState("");
   const [id, setId] = useState("");
   const [busy, setBusy] = useState(false);
+  // The name is already somebody else's. Re-pointing it is a real thing to want
+  // — a contact reinstalled and has a new key — but it drops their verified and
+  // trusted marks, so it is a question, not a side effect. The daemon refuses the
+  // plain save for exactly this case; this is the only way past it.
+  const [confirmRebind, setConfirmRebind] = useState(false);
+  const clash = nameCollision(contacts, name, undefined);
+
+  const done = (label: string, detail: string) => {
+    toast.ok(label, detail);
+    setName("");
+    setId("");
+    setConfirmRebind(false);
+    onClose();
+  };
 
   const submit = async () => {
+    if (clash) {
+      setConfirmRebind(true);
+      return;
+    }
     setBusy(true);
     try {
       await addContact(name.trim(), id.trim());
-      toast.ok(t("people.addSaved", name.trim()), t("people.addSavedDetail"));
-      setName("");
-      setId("");
-      onClose();
+      done(t("people.addSaved", name.trim()), t("people.addSavedDetail"));
+    } catch {
+      // reported by the store
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const doRebind = async () => {
+    setBusy(true);
+    try {
+      await rebindContact(name.trim(), id.trim());
+      done(t("people.rekeyed", name.trim()), t("people.rekeyedDetail"));
     } catch {
       // reported by the store
     } finally {
@@ -329,11 +359,15 @@ function AddPersonSheet({
         </>
       }
     >
-      <Field label={t("people.addNameLabel")}>
-        {({ id: fid }) => (
+      <Field
+        label={t("people.addNameLabel")}
+        hint={clash ? t("people.addNameTaken", clash.name) : undefined}
+      >
+        {({ id: fid, describedBy }) => (
           <TextInput
             id={fid}
             data-autofocus
+            aria-describedby={describedBy}
             value={name}
             onChange={(e) => setName(e.currentTarget.value)}
             placeholder={t("people.addNamePlaceholder")}
@@ -358,6 +392,24 @@ function AddPersonSheet({
         )}
       </Field>
       <div className="card card-pad t-sm t-sec">{t("people.addTip")}</div>
+      <Confirm
+        open={confirmRebind}
+        danger
+        busy={busy}
+        title={t("people.confirmRekeyTitle", name.trim())}
+        body={
+          <>
+            <div>{t("people.confirmRekeyBody", name.trim())}</div>
+            <div style={{ marginTop: 8 }}>
+              <div className="t-label">{t("people.confirmRekeyCurrent")}</div>
+              <Fingerprint value={clash?.fingerprint ?? ""} />
+            </div>
+          </>
+        }
+        confirmLabel={t("people.confirmRekeyDo")}
+        onConfirm={doRebind}
+        onCancel={() => setConfirmRebind(false)}
+      />
     </Sheet>
   );
 }

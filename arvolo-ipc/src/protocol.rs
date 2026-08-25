@@ -171,6 +171,15 @@ pub enum Request {
     RevokeDeposit { id: String },
     /// Pause an in-progress `send --to` by id → [`Response::Ok`].
     Pause { id: u64 },
+    /// Stop waiting for the recipient to accept and park the file on the relay
+    /// now → [`Response::Ok`], or [`Response::Error`] if the send is not waiting.
+    ///
+    /// A `send --to` holds a live offer open for a while before falling back to
+    /// the mailbox, because the recipient's client having the offer is not the
+    /// same as a person having answered it. This is how somebody who already knows
+    /// the answer is not coming skips that wait, without cancelling and sending
+    /// the file a second time.
+    DepositNow { id: u64 },
     /// Resume a paused `send --to` by id → [`Response::Ok`].
     Resume { id: u64 },
     /// Accept a parked offer, optionally to a specific path → [`Response::TransferId`].
@@ -199,10 +208,24 @@ pub enum Request {
         out: Option<String>,
         password: Option<String>,
     },
-    /// Save (or re-key) a contact → [`Response::Ok`]. Re-keying an existing name
-    /// clears its verified/trusted marks, exactly as `arvolo contacts add` does —
-    /// a UI should warn before sending that.
-    AddContact { name: String, id: String },
+    /// Save a contact → [`Response::Ok`].
+    ///
+    /// A name already bound to a *different* key is refused unless `rebind`.
+    /// Re-keying clears that name's verified and trusted marks — so a front-end
+    /// that sends a name straight from a stranger's offer would silently demote
+    /// whoever already held it. Refusing by default puts the warning where it
+    /// cannot be forgotten, and `serde(default)` means an older client (which
+    /// cannot warn, because it does not know) gets the safe half.
+    ///
+    /// With `rebind`, the reply is [`Response::KeyChanged`] rather than
+    /// [`Response::Ok`], carrying the two fingerprints so the caller can say what
+    /// it just did.
+    AddContact {
+        name: String,
+        id: String,
+        #[serde(default)]
+        rebind: bool,
+    },
     /// Remove a saved contact by name → [`Response::Ok`] (error if unknown).
     RemoveContact { name: String },
     /// Rename a contact, keeping its key and verified/trusted marks → [`Response::Ok`].
@@ -388,6 +411,14 @@ pub enum Response {
     },
     /// How many rows a bulk removal actually dropped.
     Cleared(usize),
+    /// A [`Request::AddContact`] with `rebind` re-pointed an existing name at a
+    /// new key, dropping its verified/trusted marks. Only ever sent in answer to
+    /// a request that asked for it, so a client too old to know this variant can
+    /// never receive it.
+    KeyChanged {
+        old_fingerprint: String,
+        new_fingerprint: String,
+    },
     Ok,
     Error(String),
 }
@@ -548,7 +579,13 @@ pub struct TransferDto {
 }
 
 /// A parked incoming offer awaiting the user's accept/reject.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+///
+/// The last three fields are what the address book already knows about `from`,
+/// carried here so a front-end can put it on screen *before* the decision. They
+/// are not part of the offer: the daemon stamps them on the way out (see
+/// `stamp_offer`), because between parking an offer and looking at it the book
+/// can move.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct OfferDto {
     pub id: String,
     pub from: String,
@@ -557,6 +594,20 @@ pub struct OfferDto {
     pub note: String,
     #[serde(default)]
     pub sender_name: String,
+    /// `from`'s word fingerprint — a pure function of the key, so it exists for a
+    /// stranger exactly as it does for a saved contact. Without it a front-end
+    /// has only the base32 id to show for the one person it knows least about.
+    #[serde(default)]
+    pub fingerprint: String,
+    /// How many transfers have been *taken* from this key before (the TOFU
+    /// ledger). `0` is the first time — the one case worth an alarm.
+    #[serde(default)]
+    pub seen_count: u64,
+    /// The display name this key was already known to claim, if any. Shown
+    /// against `sender_name`: a key that used to call itself something else is
+    /// what impersonation looks like from this side.
+    #[serde(default)]
+    pub known_name: String,
 }
 
 /// An address-book entry for the send panel's "Persone" grid.
@@ -852,6 +903,18 @@ pub enum EventDto {
         /// be wrong: the worst case is a prompt for something already downloading.
         #[serde(default)]
         auto: bool,
+        /// `from`'s word fingerprint. Same reasoning, and same filled-in-by-the-
+        /// daemon route, as [`OfferDto::fingerprint`].
+        #[serde(default)]
+        fingerprint: String,
+        /// Transfers already taken from this key — `0` on a first arrival. See
+        /// [`OfferDto::seen_count`].
+        #[serde(default)]
+        seen_count: u64,
+        /// The name this key was already known to claim. See
+        /// [`OfferDto::known_name`].
+        #[serde(default)]
+        known_name: String,
     },
     Started {
         id: u64,
@@ -879,6 +942,11 @@ pub enum EventDto {
     Waiting {
         id: u64,
         reason: String,
+        /// How far the offer this send holds open has got (`pending` / `arrived` /
+        /// `taken`), empty when none stands. `serde(default)` so an older daemon,
+        /// which sends none, reads as "nothing known" rather than failing to parse.
+        #[serde(default)]
+        offer_status: String,
     },
     Paused {
         id: u64,
@@ -1040,9 +1108,13 @@ impl From<&ManagerEvent> for EventDto {
                 size: *size,
                 note: note.clone(),
                 sender_name: sender_name.clone(),
-                // Left false on purpose: trust is an address-book fact the engine
-                // has no access to. The daemon overwrites it on the way out.
+                // Left empty/false on purpose: all four are address-book facts the
+                // engine has no access to. The daemon overwrites them on the way
+                // out — see `stamp_offer`.
                 auto: false,
+                fingerprint: String::new(),
+                seen_count: 0,
+                known_name: String::new(),
             },
             ManagerEvent::Started {
                 id,
@@ -1074,9 +1146,14 @@ impl From<&ManagerEvent> for EventDto {
             // copy. A UI only ever needs the id — it asks the daemon to withdraw.
             ManagerEvent::Deposited { id, .. } => EventDto::Deposited { id: *id },
             ManagerEvent::Preparing { id } => EventDto::Preparing { id: *id },
-            ManagerEvent::Waiting { id, reason } => EventDto::Waiting {
+            ManagerEvent::Waiting {
+                id,
+                reason,
+                offer_status,
+            } => EventDto::Waiting {
                 id: *id,
                 reason: reason.clone(),
+                offer_status: offer_status.clone(),
             },
             ManagerEvent::Paused { id, reason } => EventDto::Paused {
                 id: *id,
@@ -1316,8 +1393,9 @@ mod tests {
                 EventDto::Waiting {
                     id: 3,
                     reason: "relay unavailable".into(),
+                    offer_status: String::new(),
                 },
-                r#"{"waiting":{"id":3,"reason":"relay unavailable"}}"#,
+                r#"{"waiting":{"id":3,"reason":"relay unavailable","offer_status":""}}"#,
             ),
             (
                 EventDto::Failed {
@@ -1327,6 +1405,23 @@ mod tests {
                 r#"{"failed":{"id":5,"error":"boom"}}"#,
             ),
             (EventDto::Cancelled { id: 6 }, r#"{"cancelled":{"id":6}}"#),
+            // The one event carrying address-book stamps. Field order is part of
+            // the shape a front-end is written against, so it is pinned here.
+            (
+                EventDto::OfferReceived {
+                    id: "off1".into(),
+                    from: "if2xmne".into(),
+                    name: "arrivo.zip".into(),
+                    size: 9,
+                    note: String::new(),
+                    sender_name: "Anna".into(),
+                    auto: false,
+                    fingerprint: "able-otter-nine".into(),
+                    seen_count: 2,
+                    known_name: "Giulia".into(),
+                },
+                r#"{"offer_received":{"id":"off1","from":"if2xmne","name":"arrivo.zip","size":9,"note":"","sender_name":"Anna","auto":false,"fingerprint":"able-otter-nine","seen_count":2,"known_name":"Giulia"}}"#,
+            ),
             // A unit variant is a bare string, NOT an object — the frontend has to
             // handle both forms.
             (EventDto::ContactsChanged, r#""contacts_changed""#),
@@ -1338,6 +1433,45 @@ mod tests {
                 want,
                 "wire shape changed — update gui/src/events.ts to match"
             );
+        }
+    }
+
+    /// A daemon that predates the address-book stamps sends an offer without them,
+    /// and a client built against the new shape must still read it — that is the
+    /// whole reason those fields carry `serde(default)`. The same in reverse for
+    /// `AddContact`: an older client sends no `rebind`, and the safe half of the
+    /// collision guard is the one it must land on.
+    #[test]
+    fn older_peers_stay_readable_and_default_to_the_safe_half() {
+        let old = r#"{"offer_received":{"id":"o1","from":"if2xmne","name":"a.zip","size":1,"note":"","sender_name":""}}"#;
+        match serde_json::from_str::<EventDto>(old).unwrap() {
+            EventDto::OfferReceived {
+                fingerprint,
+                seen_count,
+                known_name,
+                auto,
+                ..
+            } => {
+                assert!(fingerprint.is_empty());
+                assert_eq!(seen_count, 0);
+                assert!(known_name.is_empty());
+                assert!(!auto);
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+
+        let old_offer = r#"{"id":"o1","from":"if2xmne","name":"a.zip","size":1,"note":""}"#;
+        let o: OfferDto = serde_json::from_str(old_offer).unwrap();
+        assert!(o.fingerprint.is_empty());
+        assert_eq!(o.seen_count, 0);
+
+        let old_add = r#"{"add_contact":{"name":"giulia","id":"if2xmne"}}"#;
+        match serde_json::from_str::<Request>(old_add).unwrap() {
+            Request::AddContact { rebind, .. } => assert!(
+                !rebind,
+                "a client that cannot warn about a re-key must not be able to ask for one"
+            ),
+            other => panic!("wrong variant: {other:?}"),
         }
     }
 

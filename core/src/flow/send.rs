@@ -41,6 +41,13 @@ pub enum SendEvent {
     ReceiverDropped { missing: usize },
     /// The undelivered tail is now on the relay; the sender can go offline.
     Backfilled,
+    /// Everything the recipient still lacks is on the relay, this ticket is sealed
+    /// to that one recipient, and nobody else is pulling — so `serve` is ending on
+    /// purpose rather than waiting for a cancel. The relay can finish without us.
+    ///
+    /// Distinct from [`Self::Backfilled`], which fires whenever a tail lands and
+    /// says nothing about whether we are still needed.
+    Offloaded,
     /// A backfill attempt failed (transfer can still be retried).
     BackfillFailed { reason: String },
     /// The relay refused further backfill because this transfer hit the relay's
@@ -392,7 +399,197 @@ fn progress_figure(sent: u64, acked_chunks: usize, chunk_size: u64, total: u64, 
     sent.max(acked).min(total).max(last)
 }
 
+/// How many chunks one seed request carries. The relay pulls every chunk in a
+/// request before it answers, so this is also how long the sender goes without
+/// being able to notice a cap, a cancel, or the receiver coming back. One request
+/// for the whole tail — what this replaced — was uninterruptible for as long as
+/// the upload took.
+const SEED_BATCH: usize = 64;
+
+/// How an offload ended. Only [`Self::Complete`] means the relay can finish the
+/// job without us.
+#[derive(Debug, PartialEq, Eq)]
+enum Offload {
+    /// Every requested piece is on the relay (some may already have been).
+    Complete,
+    /// The relay refused further seeding: this transfer hit its offload cap.
+    Capped,
+    /// The relay has no room at all — not this transfer's budget, the whole store.
+    ///
+    /// Kept apart from [`Self::Failed`] for the same reason the mailbox keeps
+    /// `Busy` apart from `Unavailable`: nothing is broken and nothing is
+    /// unreachable, other people are simply using the relay, and it clears as
+    /// their transfers finish. Worth saying to the user in those words, and worth
+    /// retrying — unlike a rejection, which will keep being one.
+    Full,
+    /// The relay rejected or was unreachable.
+    Failed,
+    /// The caller cancelled mid-way; some batches may have landed.
+    Cancelled,
+}
+
 impl SendSession {
+    /// Put `wanted` (piece indices) on the relay — minus whatever it already
+    /// holds — a batch at a time.
+    ///
+    /// The subtraction is the point. Before it, every drop re-sent the whole
+    /// undelivered tail: the relay skips chunk files it already has, so nothing was
+    /// re-fetched, but the handler still charges the transfer's offload meter for
+    /// every hash in the request *before* it gets that far. A receiver that
+    /// connected and dropped repeatedly could therefore burn a transfer's entire
+    /// relay budget without the relay storing one new byte — and the 402 that
+    /// followed cut it off from a relay that was already holding everything it
+    /// needed. Asking first also repairs the sender's own memory, which does not
+    /// survive a restart: `mark_on_relay` is re-primed from the answer, so the
+    /// `RelayHas` we advertise describes the relay as it *is*, not as this process
+    /// happens to remember it.
+    async fn offload(
+        &self,
+        wanted: &[usize],
+        cancel: &CancellationToken,
+        on: &(impl Fn(SendEvent) + Send + Sync),
+    ) -> Offload {
+        let Some(r) = &self.relay else {
+            return Offload::Failed;
+        };
+        let hashes: Vec<_> = wanted.iter().map(|&i| self.sender.chunks()[i]).collect();
+        // A relay too old for the question answers an empty set: we then seed the
+        // lot, exactly as before this existed.
+        let held = crate::backfill::relay_have(&self.client, &r.http, &hashes)
+            .await
+            .unwrap_or_default();
+        let already: Vec<usize> = held.iter().map(|&i| wanted[i as usize]).collect();
+        if !already.is_empty() {
+            self.sender.mark_on_relay(&already);
+        }
+        let todo: Vec<usize> = wanted
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(i, _)| !held.contains(&(*i as u32)))
+            .map(|(_, piece)| piece)
+            .collect();
+        if todo.is_empty() {
+            on(SendEvent::Backfilled);
+            return Offload::Complete;
+        }
+        // Metered on the whole file, not this batch: the relay keys the offload
+        // budget on content, so it stays one durable session across resumes.
+        let swarm_id = crate::swarm::swarm_id(self.sender.chunks(), self.total_size);
+        for batch in todo.chunks(SEED_BATCH) {
+            if cancel.is_cancelled() {
+                return Offload::Cancelled;
+            }
+            let req = SeedRequest {
+                sender: self.sender.addr(),
+                chunks: batch.iter().map(|&i| self.sender.chunks()[i]).collect(),
+                token: r.token.clone(),
+                swarm_id: swarm_id.clone(),
+            };
+            let body = match req.encode() {
+                Ok(b) => b,
+                Err(e) => {
+                    on(SendEvent::BackfillFailed {
+                        reason: e.to_string(),
+                    });
+                    return Offload::Failed;
+                }
+            };
+            let sent = tokio::select! {
+                _ = cancel.cancelled() => return Offload::Cancelled,
+                r = self.client.post(format!("{}/v1/seed", r.http)).body(body).send() => r,
+            };
+            match sent {
+                Ok(resp) if resp.status().is_success() => {
+                    self.sender.mark_on_relay(batch);
+                }
+                Ok(resp) if resp.status() == reqwest::StatusCode::PAYMENT_REQUIRED => {
+                    // The relay's per-session offload cap (free shared tier). Body
+                    // carries the cap in bytes; what fits is already up there, and
+                    // the rest has to go direct — or via a relay without the cap.
+                    let limit_bytes = resp
+                        .text()
+                        .await
+                        .ok()
+                        .and_then(|b| b.trim().parse().ok())
+                        .unwrap_or(0);
+                    on(SendEvent::RelayCapped { limit_bytes });
+                    return Offload::Capped;
+                }
+                Ok(resp) if resp.status() == reqwest::StatusCode::INSUFFICIENT_STORAGE => {
+                    // The relay is out of room for everybody, not just for us. The
+                    // batches already up there stay and still help; the rest has to
+                    // wait or go direct. Said in the same words the mailbox uses for
+                    // the same condition, because it is the same condition.
+                    on(SendEvent::BackfillFailed {
+                        reason:
+                            "the relay has no room right now — it clears as other transfers finish"
+                                .into(),
+                    });
+                    return Offload::Full;
+                }
+                Ok(resp) => {
+                    on(SendEvent::BackfillFailed {
+                        reason: format!("relay rejected: {}", resp.status()),
+                    });
+                    return Offload::Failed;
+                }
+                Err(e) => {
+                    on(SendEvent::BackfillFailed {
+                        reason: e.to_string(),
+                    });
+                    return Offload::Failed;
+                }
+            }
+        }
+        on(SendEvent::Backfilled);
+        Offload::Complete
+    }
+
+    /// Stop serving and release the endpoint. Only needed by a caller that never
+    /// entered [`Self::serve`] (which ends with the same teardown); dropping the
+    /// session instead leaves the accept loop to be torn down by its own guard.
+    ///
+    /// Bounded, for the reason [`Self::serve`]'s teardown is: `Endpoint::close()`
+    /// waits for connected peers to acknowledge, and the moment you most want to
+    /// stop serving is precisely while somebody is pulling — so an unbounded wait
+    /// here hands a live receiver the power to hold the caller indefinitely. The
+    /// close goes on draining detached; only the waiting ends.
+    pub async fn shutdown(self) {
+        let teardown = tokio::spawn(self.sender.shutdown());
+        if tokio::time::timeout(std::time::Duration::from_secs(10), teardown)
+            .await
+            .is_err()
+        {
+            tracing::warn!("sender teardown still draining after 10s — not waiting for it");
+        }
+    }
+
+    /// Park the whole payload on the relay: seed every piece it does not already
+    /// hold, so the recipient can finish from the relay with this daemon switched
+    /// off. `true` if the relay ended up holding all of it.
+    ///
+    /// This is what "park it on the relay now" should do for a send whose recipient
+    /// is already holding a chunk ticket, instead of a mailbox deposit. The deposit
+    /// would upload the same bytes a second time as a sealed one-shot blob — and
+    /// worse for the recipient, who cannot resume one: whatever they had already
+    /// pulled is discarded and fetched again.
+    ///
+    /// The caller keeps serving meanwhile; nothing here stops the endpoint, so a
+    /// recipient who turns up while this runs still gets it direct.
+    pub async fn park_on_relay(
+        &self,
+        cancel: &CancellationToken,
+        on: impl Fn(SendEvent) + Send + Sync,
+    ) -> bool {
+        let all: Vec<usize> = (0..self.chunks).collect();
+        let complete = self.offload(&all, cancel, &on).await == Offload::Complete;
+        if complete {
+            on(SendEvent::Offloaded);
+        }
+        complete
+    }
+
     /// Serve until `cancel` fires. On each receiver drop, backfill the
     /// undelivered tail to the relay (if configured) and keep serving.
     pub async fn serve(
@@ -494,47 +691,30 @@ impl SendSession {
                         }
                         continue;
                     }
-                    let Some(r) = &self.relay else { continue };
+                    if self.relay.is_none() {
+                        continue;
+                    }
                     on(SendEvent::ReceiverDropped { missing: undelivered.len() });
-                    let chunks: Vec<_> =
-                        undelivered.iter().map(|&i| self.sender.chunks()[i]).collect();
-                    let req = SeedRequest {
-                        sender: self.sender.addr(),
-                        chunks,
-                        token: r.token.clone(),
-                        // Whole-file id (not just this tail) so the relay meters
-                        // the transfer as one durable session across resumes.
-                        swarm_id: crate::swarm::swarm_id(
-                            self.sender.chunks(),
-                            self.total_size,
-                        ),
-                    };
-                    match self
-                        .client
-                        .post(format!("{}/v1/seed", r.http))
-                        .body(req.encode()?)
-                        .send()
-                        .await
+                    let outcome = self.offload(&undelivered, &cancel, &on).await;
+                    // Nothing left for us to do that the relay cannot: the tail is
+                    // there in full, and this ticket is sealed to one recipient who
+                    // is not here. Serving an empty room until somebody cancels is
+                    // what used to pin this task for ever — `give_up_at` and the
+                    // wake-on-accept both live in the caller's loop, which cannot
+                    // run while we are inside this one.
+                    //
+                    // Only on a *complete* offload, and only for a 1:1 send with
+                    // nobody else pulling. A partial one (capped, refused) leaves us
+                    // the only source there is, and a shared ticket has other people
+                    // in the room. Same shape as the abort arm above, for the same
+                    // reason: one receiver leaving must not end anyone else's
+                    // download.
+                    if matches!(outcome, Offload::Complete)
+                        && self.sealed_to_recipient
+                        && self.sender.active_peers() <= 1
                     {
-                        Ok(resp) if resp.status().is_success() => {
-                            self.sender.mark_on_relay(&undelivered);
-                            on(SendEvent::Backfilled);
-                        }
-                        Ok(resp) if resp.status() == reqwest::StatusCode::PAYMENT_REQUIRED => {
-                            // The relay's per-session offload cap (free shared tier).
-                            // Body carries the cap in bytes; fall back to P2P.
-                            let limit_bytes = resp
-                                .text()
-                                .await
-                                .ok()
-                                .and_then(|b| b.trim().parse().ok())
-                                .unwrap_or(0);
-                            on(SendEvent::RelayCapped { limit_bytes });
-                        }
-                        Ok(resp) => on(SendEvent::BackfillFailed {
-                            reason: format!("relay rejected: {}", resp.status()),
-                        }),
-                        Err(e) => on(SendEvent::BackfillFailed { reason: e.to_string() }),
+                        on(SendEvent::Offloaded);
+                        break;
                     }
                 }
             }

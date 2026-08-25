@@ -86,8 +86,18 @@ export const api = {
   blockContact: (who: string) => invoke<void>("block_contact", { who }),
   unblockContact: (who: string) => invoke<void>("unblock_contact", { who }),
   acceptName: (who: string) => invoke<void>("accept_name", { who }),
+  /** Stop waiting for the recipient to accept and park the file on the relay.
+   *  Rejects when the send is not waiting — the daemon says so rather than
+   *  reporting a success that did nothing. */
+  depositNow: (id: number) => invoke<void>("deposit_now", { id }),
   addContact: (name: string, id: string) =>
     invoke<void>("add_contact", { name, id }),
+  /** Point an existing contact name at a different key. `addContact` refuses that
+   *  collision — re-pointing a name drops its verified and trusted marks — so
+   *  this is the only way past it, and the caller must have asked first. Resolves
+   *  to the old and new fingerprints when a key really did change. */
+  rebindContact: (name: string, id: string) =>
+    invoke<[string, string] | null>("rebind_contact", { name, id }),
   removeContact: (name: string) => invoke<void>("remove_contact", { name }),
   renameContact: (old: string, newName: string) =>
     invoke<void>("rename_contact", { old, new: newName }),

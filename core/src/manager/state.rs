@@ -34,6 +34,20 @@ pub(super) struct Held {
     /// Flipped by [`TransferManager::pause`] so the running loop, once its token is
     /// cancelled, knows to pause (keep the transfer) rather than cancel (drop it).
     pub(super) pause_flag: Arc<std::sync::atomic::AtomicBool>,
+    /// Flipped by [`TransferManager::deposit_now`]: stop waiting for the recipient
+    /// to accept and park the file on the relay at the next turn of the loop.
+    ///
+    /// Separate from `pause_flag` because it means the opposite thing about the
+    /// send — this one is "finish it by the other route", not "stop". It also
+    /// deliberately does **not** cancel the send's own token, which would pause it.
+    pub(super) deposit_now: Arc<std::sync::atomic::AtomicBool>,
+    /// The cancellation token of the live attempt currently serving, when one is.
+    ///
+    /// Published here so a `deposit_now` can end that attempt without waiting out
+    /// the watchdog — the same token the watchdog itself cancels to force the
+    /// fallback, so the loop around it already does the right thing. `None`
+    /// between attempts.
+    pub(super) attempt: Arc<Mutex<Option<CancellationToken>>>,
     /// The content key, transport seed and chunk digests this send has already paid
     /// for — here rather than in the delivery task, because the task is what a pause
     /// destroys.

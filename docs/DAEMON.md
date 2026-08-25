@@ -117,6 +117,41 @@ arvolo contacts trust bob --undo   # back to asking
 keyed to the contact's id, so re-adding a contact under a **different** key clears
 both marks — you re-verify before trusting the new key.
 
+Trust is also what decides whether a send to them goes **direct or through the
+relay**, which is the next section.
+
+## Direct, or left in their mailbox
+
+`arvolo send --to <who>` tries a direct peer-to-peer transfer first and falls back
+to leaving the file on the relay for them to collect. The fallback is what makes a
+send work when the other machine is off — but the connection is opened by *them*,
+when they accept, so a recipient who has not marked you trusted has to be at their
+screen for the direct route to happen at all.
+
+So the sender waits. An offer that has reached their device and a client that is
+still online mean the route works and only the answer is missing:
+
+```sh
+arvolo status                # "waiting for them to accept"
+arvolo deposit <id>          # stop waiting; leave it in their mailbox now
+```
+
+Two things end the wait on their own: they go offline (the file is parked at once
+— there is nothing to wait for), or `deposit_after` elapses. That is a
+`config.toml` key, in seconds, default **1800**:
+
+```toml
+deposit_after = 1800   # 0 = park it as soon as the direct attempt gives up
+```
+
+Waiting costs the sender nothing — the daemon is running anyway, and the relay
+wakes it the moment they accept. What it saves is a full copy of every file
+sitting on the relay for a week because nobody happened to be at their screen. On
+the receiving side, `contacts trust` removes the wait entirely: their daemon
+accepts without asking, and the direct transfer starts in seconds.
+
+`arvolo send --to <who> --mailbox` skips all of this and deposits immediately.
+
 ## Run at boot/login
 
 Templates live in [`packaging/`](../packaging/):

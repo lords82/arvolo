@@ -290,7 +290,17 @@ pub enum ManagerEvent {
     /// (refused / unreachable / errored). The daemon keeps trying: live P2P when
     /// the recipient appears, and the relay again on a slow interval. `reason` is
     /// a short human explanation.
-    Waiting { id: u64, reason: String },
+    /// `offer_status` is how far the offer this send is holding open has got —
+    /// the same `pending`/`arrived`/`taken` ladder a deposited send reports, empty
+    /// when no offer stands. It rides on the event because nothing else announces
+    /// it: a front end fed only by events would otherwise have to guess whether a
+    /// waiting send is waiting on the network or on a person, and those two do not
+    /// deserve the same word on screen.
+    Waiting {
+        id: u64,
+        reason: String,
+        offer_status: String,
+    },
     /// A send was paused (by the user, or automatically after a long failure to
     /// deliver). It stays put until `resume`d or `cancel`led. `reason` explains why.
     Paused { id: u64, reason: String },
@@ -670,6 +680,8 @@ impl TransferManager {
                 target,
                 relay: theirs,
                 pause_flag: pause_flag.clone(),
+                deposit_now: Default::default(),
+                attempt: Default::default(),
                 prep: Default::default(),
             },
         );
@@ -765,6 +777,48 @@ impl TransferManager {
                 Err(anyhow::anyhow!("{msg}"))
             }
         }
+    }
+
+    /// Stop waiting for the recipient to accept and park the file on the relay now.
+    ///
+    /// The escape hatch for the grace period a `send --to` spends holding a live
+    /// offer open (see `deposit_after_secs`): waiting half an hour for somebody to
+    /// click is right by default and wrong when you already know they will not, and
+    /// this is how you say so without cancelling and sending again.
+    ///
+    /// Only a send that is actually waiting can take it — one under way is already
+    /// being delivered by the route the user wanted, and one that has already been
+    /// deposited has nowhere further to go. Returns `false` in those cases rather
+    /// than pretending, so a caller can say what happened.
+    pub fn deposit_now(&self, id: u64) -> bool {
+        let waiting = self
+            .inner
+            .transfers
+            .lock()
+            .unwrap()
+            .get(&id)
+            .is_some_and(|t| {
+                t.direction == Direction::Send
+                    && matches!(
+                        t.status,
+                        TransferStatus::Waiting(_) | TransferStatus::Preparing
+                    )
+            });
+        if !waiting {
+            return false;
+        }
+        let Some(h) = self.inner.held.lock().unwrap().get(&id).cloned() else {
+            return false;
+        };
+        h.deposit_now.store(true, Ordering::Relaxed);
+        // End the attempt in flight, if one is serving, so the loop comes back round
+        // now rather than when the watchdog next gives up. Deliberately the
+        // *attempt* token and not the send's own: cancelling that one would pause
+        // the send, which is the opposite of what was asked for.
+        if let Some(c) = h.attempt.lock().unwrap().as_ref() {
+            c.cancel();
+        }
+        true
     }
 
     /// Pause an in-progress transfer (Active or Waiting): stop working on it and hold
@@ -1027,6 +1081,8 @@ impl TransferManager {
                 target: rec.target,
                 relay: rec.relay.clone(),
                 pause_flag: pause_flag.clone(),
+                deposit_now: Default::default(),
+                attempt: Default::default(),
                 prep: slot.clone(),
             },
         );
@@ -2177,6 +2233,8 @@ mod held_prep_tests {
                 target: None,
                 relay: None,
                 pause_flag: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                deposit_now: Default::default(),
+                attempt: Default::default(),
                 prep: slot.clone(),
             },
         );

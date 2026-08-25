@@ -238,8 +238,8 @@ async fn main() -> Result<()> {
     if arvolo_relay::max_total_blob_bytes() == 0 {
         tracing::warn!(
             "ARVOLO_MAX_TOTAL_BLOB_BYTES is unset (unlimited): the per-blob cap alone does not \
-             stop many deposits from filling the disk. Set it to the disk budget you are willing \
-             to lend on a public relay."
+             stop many deposits, or many seeded chunks, from filling the disk. It bounds both — \
+             set it to the disk budget you are willing to lend on a public relay."
         );
     }
     if arvolo_relay::max_session_relay_bytes() == 0 {

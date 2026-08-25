@@ -772,4 +772,88 @@ mod tests {
 
         std::env::remove_var("ARVOLO_CONFIG_DIR");
     }
+
+    /// How a key introduced itself, kept for as long as the key is remembered.
+    ///
+    /// `pending` is overwritten by every fresh claim and `pinned` needs somebody
+    /// to approve one, so without a first-claim record a stranger who arrives as
+    /// "Giulia" and comes back as "Marco" is indistinguishable from a stranger who
+    /// has only ever been Marco. Three things used to erase it and each is checked
+    /// here: nothing at all (a second observation), the orphan sweep the daemon
+    /// runs at every start, and removing the contact.
+    #[test]
+    fn a_strangers_first_claim_survives_what_would_erase_it() {
+        let _guard = crate::testlock::ENV
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("ARVOLO_CONFIG_DIR", dir.path());
+
+        let id = Identity::generate().public();
+        let id_b32 = data_encoding::BASE32_NOPAD
+            .encode(&id.to_bytes())
+            .to_lowercase();
+
+        observe_advertised_name(&id_b32, "Giulia");
+        assert_eq!(known_name_of(&id_b32).as_deref(), Some("Giulia"));
+
+        // A second, different claim moves `pending` and leaves the first alone.
+        observe_advertised_name(&id_b32, "Marco");
+        assert_eq!(pending_name_of(&id_b32).as_deref(), Some("Marco"));
+        assert_eq!(
+            known_name_of(&id_b32).as_deref(),
+            Some("Giulia"),
+            "the claim to compare against is the first one, not the newest"
+        );
+
+        // The daemon's start-up sweep drops rows nobody points at. This one is
+        // pointed at by the observation itself.
+        prune_orphan_names().unwrap();
+        assert_eq!(known_name_of(&id_b32).as_deref(), Some("Giulia"));
+
+        // Once approved, the approved name is what a new claim is read against.
+        accept_name(&id_b32).unwrap();
+        assert_eq!(known_name_of(&id_b32).as_deref(), Some("Marco"));
+
+        // Saving then removing them clears the approval but not the observation:
+        // same reasoning as the `seen` counter, which `contact_remove` also keeps.
+        contact_add("marco", &id_b32).unwrap();
+        contact_remove("marco").unwrap();
+        assert_eq!(
+            display_name_of(&id_b32),
+            None,
+            "the approval went with them"
+        );
+        assert_eq!(
+            known_name_of(&id_b32).as_deref(),
+            Some("Giulia"),
+            "a key you have already met must not look brand new again"
+        );
+
+        std::env::remove_var("ARVOLO_CONFIG_DIR");
+    }
+
+    /// The TOFU ledger counts receipts, and the count is what the offer dialog
+    /// shows. `seen_before` only ever answered yes/no.
+    #[test]
+    fn seen_count_counts_receipts() {
+        let _guard = crate::testlock::ENV
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("ARVOLO_CONFIG_DIR", dir.path());
+
+        let id = Identity::generate().public();
+        let id_b32 = data_encoding::BASE32_NOPAD
+            .encode(&id.to_bytes())
+            .to_lowercase();
+
+        assert_eq!(seen_count(&id_b32), 0);
+        record_seen(&id_b32);
+        record_seen(&id_b32);
+        assert_eq!(seen_count(&id_b32), 2);
+        assert!(sender_status(&id_b32).seen_before);
+
+        std::env::remove_var("ARVOLO_CONFIG_DIR");
+    }
 }

@@ -30,6 +30,13 @@ struct Row {
     online: Option<bool>,
     /// Seconds since the verified mark was made; `None` when unverified, or
     /// verified before the stamp was recorded.
+    ///
+    /// JSON only, on purpose. It reads as a freshness the mark does not have: a
+    /// verification binds a fingerprint, and the fingerprint *is* the id — a key
+    /// that changes becomes a different contact, showing as unverified, so an old
+    /// mark cannot go stale in place. Nothing expires it and nothing reads the
+    /// number, which made it a column that answered a question nobody asked, in
+    /// the one spot beside a presence dot where every reader expects "last seen".
     verified_ago: Option<u64>,
     /// Where they listen, when it isn't wherever you listen. `None` means your
     /// own relay, which is the ordinary case and worth no ink.
@@ -147,14 +154,13 @@ fn print_table(rows: &[Row], asked_presence: bool) {
         .map(|r| r.advertised.as_deref().map_or(0, display_width))
         .max()
         .unwrap_or(0);
-    // "verified 3mo ago" only earns a column if some row can fill it.
-    let ages: Vec<String> = rows
-        .iter()
-        .map(|r| r.verified_ago.map(human_duration).unwrap_or_default())
-        .collect();
-    let age_w = ages.iter().map(|a| display_width(a)).max().unwrap_or(0);
+    // No time column at all. The row answers who they are, whether you checked
+    // their fingerprint, and whether they are reachable now — the dates that used
+    // to sit here (when the mark was made, when a transfer last landed) are not
+    // questions anyone asks of an address book, and beside a presence dot any
+    // date is read as the one thing it is not: "last seen".
 
-    for (i, r) in rows.iter().enumerate() {
+    for r in rows {
         let mut line = String::new();
         if asked_presence {
             line.push_str(match r.online {
@@ -181,9 +187,6 @@ fn print_table(rows: &[Row], asked_presence: bool) {
                     " ".repeat(label_w - display_width(label))
                 ));
             }
-        }
-        if age_w > 0 {
-            line.push_str(&format!("  {:<age_w$}", ages[i]));
         }
         line.push_str(&format!("  {}", r.id));
         if let Some(fp) = &r.fingerprint {
@@ -497,9 +500,23 @@ pub(crate) async fn contacts_cmd(action: ContactAction) -> Result<()> {
             // which is id-keyed, and `id` was already resolved above for the
             // fingerprint.
             let already = book::is_verified(&id);
+            // The one place the age of a mark answers something: you are being
+            // told you already did this, so how long ago says whether that was a
+            // decision you remember making.
+            // Under a minute it says nothing anyone needs — "previously verified
+            // 0s ago" is just the command you have already run, twice.
+            let previously = book::verified_since(&id)
+                .and_then(book::marked_ago)
+                .filter(|secs| *secs >= 60);
             book::mark_verified(&name)?;
             if already {
-                println!("Re-verified '{name}'");
+                match previously {
+                    Some(secs) => println!(
+                        "Re-verified '{name}' — previously verified {} ago.",
+                        human_duration(secs)
+                    ),
+                    None => println!("Re-verified '{name}'"),
+                }
             } else {
                 println!("Marked '{name}' verified.");
             }

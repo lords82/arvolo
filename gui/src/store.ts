@@ -269,6 +269,12 @@ function statusOf(dto: TransferDto): { status: UIStatus; reason?: string } {
   const base = toUIStatus(dto.status);
   if (base.status === "active" && dto.sharing && dto.download_peers === 0)
     return { status: "sharing" };
+  // A held send whose offer has actually reached them is not stalled — it is
+  // waiting on a person, and that is a different thing to say and a different
+  // thing to be able to act on. `offer_status` is the daemon's own evidence for
+  // it, so the distinction is read rather than guessed.
+  if (base.status === "stalled" && dto.direction === "send" && dto.offer_status)
+    return { status: "offered", reason: base.reason };
   return base;
 }
 
@@ -497,6 +503,8 @@ interface State {
   reject: (offerId: string) => Promise<void>;
   pause: (id: number) => Promise<void>;
   resume: (id: number) => Promise<void>;
+  /** Stop waiting for the recipient to accept; park the file on the relay now. */
+  depositNow: (id: number) => Promise<void>;
   cancel: (id: number) => Promise<void>;
   /** Per-row "Elimina": drop a finished transfer from daemon + local list. */
   removeRow: (key: string) => Promise<void>;
@@ -510,6 +518,10 @@ interface State {
   unblockContact: (who: string) => Promise<void>;
   acceptName: (who: string) => Promise<void>;
   addContact: (name: string, id: string) => Promise<void>;
+  /** Re-point an existing contact name at a different key, after the user has
+   *  been told what it costs. Resolves to the two fingerprints when a key
+   *  changed, `null` when the name turned out to be free after all. */
+  rebindContact: (name: string, id: string) => Promise<[string, string] | null>;
   removeContact: (name: string) => Promise<void>;
   renameContact: (old: string, newName: string) => Promise<void>;
   /** Set (or clear) the display name advertised inside offers. */
@@ -611,6 +623,9 @@ export const useStore = create<State>((set, get) => {
     peerId: o.from,
     note: o.note || undefined,
     senderName: o.sender_name || undefined,
+    fingerprint: o.fingerprint || undefined,
+    seenCount: o.seen_count,
+    knownName: o.known_name || undefined,
     verified: get().isVerified(o.from),
     swarmPeers: 0,
     downloadPeers: 0,
@@ -923,6 +938,11 @@ export const useStore = create<State>((set, get) => {
                     size: ev.size,
                     note: ev.note,
                     sender_name: ev.sender_name,
+                    // An older daemon sends none of these; the dialog falls back
+                    // to the raw id and says nothing it cannot support.
+                    fingerprint: ev.fingerprint ?? "",
+                    seen_count: ev.seen_count ?? 0,
+                    known_name: ev.known_name ?? "",
                   },
                   s.transfers[`o${ev.id}`]
                 ),
@@ -974,7 +994,19 @@ export const useStore = create<State>((set, get) => {
           patch(ev.id, (tx) => ({ ...tx, status: "preparing" }));
           break;
         case "waiting":
-          patch(ev.id, (tx) => ({ ...tx, status: "stalled", reason: ev.reason }));
+          patch(ev.id, (tx) => {
+            // Same reading as the snapshot path (`statusOf`): a send whose offer
+            // has reached them is waiting on a person, not on the network, and
+            // gets its own word and its own action.
+            const offerStatus = ev.offer_status || tx.offerStatus;
+            return {
+              ...tx,
+              status:
+                tx.dir === "out" && offerStatus ? "offered" : "stalled",
+              offerStatus,
+              reason: ev.reason,
+            };
+          });
           break;
         case "paused":
           patch(ev.id, (tx) => ({ ...tx, status: "paused", reason: ev.reason }));
@@ -1402,6 +1434,9 @@ export const useStore = create<State>((set, get) => {
     resume: async (id) => {
       await act(t("store.errResume"), () => api.resume(id));
     },
+    depositNow: async (id) => {
+      await act(t("store.errDepositNow"), () => api.depositNow(id));
+    },
     cancel: async (id) => {
       // Show the click landed. The daemon only flips the row once it has actually
       // torn the transfer down — for a deposit that means withdrawing the blob from
@@ -1488,6 +1523,13 @@ export const useStore = create<State>((set, get) => {
     addContact: async (name, id) => {
       await act(t("store.errAddContact", name), () => api.addContact(name, id));
       await get().refreshContacts();
+    },
+    rebindContact: async (name, id) => {
+      const r = await act(t("store.errAddContact", name), () =>
+        api.rebindContact(name, id)
+      );
+      await get().refreshContacts();
+      return r;
     },
     removeContact: async (name) => {
       await act(t("store.errRemoveContact", name), () => api.removeContact(name));
