@@ -1582,6 +1582,15 @@ describe("settings", () => {
     const field = (await screen.findByLabelText(
       "The name you show"
     )) as HTMLInputElement;
+    // Wait for the name to actually be in the field before clearing it. The field
+    // exists before the snapshot carrying it arrives, and it is controlled — so
+    // clearing an already-empty input changes nothing, fires no `change`, leaves
+    // the form clean, and leaves Save disabled. The click then does nothing and
+    // the assertion below reads an empty recorder. Locally the snapshot wins that
+    // race; on a slower machine it does not, which is how this reached CI green
+    // here and red there. Asserting the premise is also what the test *says*:
+    // clearing presupposes something to clear.
+    await waitFor(() => expect(field.value).toBe("Luca"));
     fireEvent.change(field, { target: { value: "" } });
     fireEvent.click(
       within(field.closest(".hstack-sm") as HTMLElement).getByText("Save")
