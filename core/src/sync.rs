@@ -107,12 +107,27 @@ pub struct MarkEntry {
     pub since: u64,
 }
 
-/// One TOFU seen counter. Merged by `max` (idempotent; preserves the only value
-/// ever consumed — the "seen before?" boolean).
+/// One TOFU seen counter, and when this identity was last exchanged with.
+///
+/// Both merged by `max`: idempotent, order-independent, and for the counter it
+/// preserves the only value ever consumed — the "seen before?" boolean.
+///
+/// `last` is here rather than in a ledger of its own because it answers a
+/// question about the same key and merges the same way. A date kept locally would
+/// read differently on each of your machines, which for an address book that
+/// syncs is worse than not showing it at all: "last week" here and "never" there,
+/// about the same person. Max is the right merge for a most-recent stamp — two
+/// machines that exchanged with somebody keep the later of the two, and neither
+/// has to be right about the clock beyond the day.
+///
+/// `0` means never — including for a contact last exchanged with before this
+/// field existed, which is the honest answer: we did not record it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SeenEntry {
     pub pubkey: String,
     pub count: u64,
+    #[serde(default)]
+    pub last: u64,
 }
 
 /// One advertised-name binding, keyed by pubkey (last-writer-wins, like a
@@ -299,6 +314,15 @@ pub struct RelayReg {
     pub deleted: bool,
 }
 
+/// What is known about exchanges with one key: how many were taken from it, and
+/// when the last one happened (0 = never recorded). Both merge by `max`, so this
+/// register needs no clock — see [`SeenEntry`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SeenReg {
+    pub count: u64,
+    pub last: u64,
+}
+
 /// The canonical, in-memory CRDT state — the merge target and the source of the
 /// projection into the four TOML ledgers. Kept as maps for O(log n) merge.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -309,8 +333,8 @@ pub struct SyncState {
     pub verified: BTreeMap<String, MarkReg>,
     /// pubkey → trusted mark.
     pub trusted: BTreeMap<String, MarkReg>,
-    /// pubkey → seen counter.
-    pub seen: BTreeMap<String, u64>,
+    /// pubkey → seen counter and last exchange.
+    pub seen: BTreeMap<String, SeenReg>,
     /// pubkey → advertised-name register.
     pub names: BTreeMap<String, NameReg>,
     /// pubkey → blocked mark.
@@ -393,7 +417,13 @@ impl SyncState {
             );
         }
         for e in &s.seen {
-            state.seen.insert(e.pubkey.clone(), e.count);
+            state.seen.insert(
+                e.pubkey.clone(),
+                SeenReg {
+                    count: e.count,
+                    last: e.last,
+                },
+            );
         }
         for n in &s.names {
             state.names.insert(
@@ -481,9 +511,10 @@ impl SyncState {
             seen: self
                 .seen
                 .iter()
-                .map(|(pubkey, count)| SeenEntry {
+                .map(|(pubkey, r)| SeenEntry {
                     pubkey: pubkey.clone(),
-                    count: *count,
+                    count: r.count,
+                    last: r.last,
                 })
                 .collect(),
             names: self
@@ -539,9 +570,10 @@ impl SyncState {
         merge_marks(&mut self.verified, &other.verified);
         merge_marks(&mut self.trusted, &other.trusted);
         merge_marks(&mut self.blocked, &other.blocked);
-        for (pubkey, count) in &other.seen {
-            let e = self.seen.entry(pubkey.clone()).or_insert(0);
-            *e = (*e).max(*count);
+        for (pubkey, incoming) in &other.seen {
+            let e = self.seen.entry(pubkey.clone()).or_default();
+            e.count = e.count.max(incoming.count);
+            e.last = e.last.max(incoming.last);
         }
         for (pubkey, incoming) in &other.names {
             match self.names.get(pubkey) {
@@ -866,6 +898,7 @@ mod tests {
             seen: vec![SeenEntry {
                 pubkey: "aaaa".into(),
                 count: 2,
+                last: 1_700_000_000,
             }],
             names: vec![],
             devices: vec![],
@@ -1025,6 +1058,7 @@ mod tests {
             seen: vec![SeenEntry {
                 pubkey: "k".into(),
                 count: 3,
+                last: 1_700_000_000,
             }],
             names: vec![],
             devices: vec![],
@@ -1045,6 +1079,7 @@ mod tests {
             seen: vec![SeenEntry {
                 pubkey: "k".into(),
                 count: 5,
+                last: 1_600_000_000,
             }],
             names: vec![],
             devices: vec![],
@@ -1052,7 +1087,15 @@ mod tests {
         });
         a.merge(&b);
         assert!(a.verified["k"].deleted, "later remove wins the 2P-set");
-        assert_eq!(a.seen["k"], 5, "seen merges by max");
+        assert_eq!(a.seen["k"].count, 5, "seen merges by max");
+        // The stamp beside it merges the same way, and the *later* one wins even
+        // though it arrived on the side with the smaller count: an address book
+        // that syncs must answer "when did I last deal with them" the same on
+        // every machine, and max is what makes that independent of merge order.
+        assert_eq!(
+            a.seen["k"].last, 1_700_000_000,
+            "the last exchange merges by max, not by whoever spoke last"
+        );
     }
 
     #[test]

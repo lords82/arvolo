@@ -113,6 +113,12 @@ export interface ContactDto {
   display_name: string;
   /** An advertised name awaiting approval ("" when none). */
   pending_name: string;
+  /** The relay this contact listens on. "" means "wherever you do", which is the
+   *  ordinary case and worth no UI. Routing, never identity. */
+  relay?: string;
+  /** Unix seconds of the last completed transfer either way; 0 = never, or older
+   *  than the stamp. Synced between your devices, so every one answers the same. */
+  last_exchange?: number;
 }
 
 /** One finished transfer from the daemon's history log (read-only). */

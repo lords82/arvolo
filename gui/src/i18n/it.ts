@@ -191,6 +191,8 @@ export const it: Dict = {
   "people.presenceOffTitle": "Non collegato",
   "people.presenceOn": "Collegato",
   "people.presenceOff": "Non collegato",
+  "people.lastExchange": (ago: string) => `ultimo scambio ${ago}`,
+  "people.listensOn": (relay: string) => `ascolta su ${relay}`,
 
   "people.menuDetails": "Dettagli e impronta",
   "people.menuUnverify": "Togli la verifica",

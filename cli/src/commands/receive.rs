@@ -332,6 +332,17 @@ pub(crate) fn record_history(manager: &TransferManager, id: u64, status: &str) {
         Direction::Recv => "recv",
     };
     let peer_id = t.peer.as_ref().map(encode_id);
+    // Stamp the address book while we are here, and only for a transfer that
+    // actually moved: "when did I last deal with this person" is answered by a
+    // file arriving or leaving, not by one that failed or was called back. It
+    // rides with the history record because this is the one place both directions
+    // pass through, already holding the peer — a second hook would be a second
+    // place to forget.
+    if status == "completed" {
+        if let Some(pk) = &peer_id {
+            crate::book::record_exchange(pk, crate::util::now_unix());
+        }
+    }
     let _ = history::record(
         direction,
         peer_id,

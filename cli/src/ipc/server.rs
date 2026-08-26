@@ -1077,6 +1077,7 @@ fn list_contacts() -> Vec<ContactDto> {
                 .map(|n| sanitize_display(&n))
                 .unwrap_or_default(),
             relay: crate::book::relay_of(&id).unwrap_or_default(),
+            last_exchange: crate::book::last_exchange(&id),
             name,
             id,
         })

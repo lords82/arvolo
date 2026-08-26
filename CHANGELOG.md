@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### Changed
+
+- **The address book says when you last dealt with someone, instead of eight
+  characters of their public id.** The name above already recognises them, and
+  verifying is done against the whole fingerprint in the details panel — which
+  left the line under the name answering nothing. It now carries the last
+  exchange ("3 days ago"), and where a contact listens when that is not where you
+  do. A contact with neither gets an empty line rather than filler.
+
+  The stamp is recorded where a transfer completes, in either direction, and it
+  rides in the synced ledger beside the TOFU counter, merged by `max`. That
+  matters: a date kept only locally would read "last week" on one of your
+  machines and "never" on another, about the same person — which is the objection
+  the code had written down against dating receipts at all, and the reason it is
+  answered rather than ignored.
+
 ### Fixed
 
 - **Pause and resume answered "Ok" for things they did not do.** Holding a

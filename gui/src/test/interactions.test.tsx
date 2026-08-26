@@ -1281,6 +1281,48 @@ describe("receiving from a pasted artefact", () => {
 // ---------------------------------------------------------------------------
 
 describe("the address book", () => {
+  // What the line under a name is for. It used to hold eight characters of the
+  // public id: the name above already recognises them, and verifying is done
+  // against the whole fingerprint in the panel, so it answered nothing.
+  it("157. a row says when you last dealt with somebody", async () => {
+    const threeDaysAgo = Math.floor(Date.now() / 1000) - 3 * 86400;
+    harness.snapshot.contacts = [
+      dto.contact({ name: "proj", id: "p1", last_exchange: threeDaysAgo }),
+    ];
+    render(<App />);
+    useStore.getState().go("people");
+    await screen.findByText("proj");
+    expect(
+      await screen.findByText(en["people.lastExchange"](en["ago.days"](3)))
+    ).toBeTruthy();
+    // And not the id it replaced.
+    expect(screen.queryByText(/^p1/)).toBeNull();
+  });
+
+  it("158. a contact on another relay says where, and one on yours says nothing", async () => {
+    harness.snapshot.contacts = [
+      dto.contact({ name: "altrove", id: "p1", relay: "https://other.relay.test" }),
+      // The ordinary case: the daemon's own relay. A column that repeats "same as
+      // you" on every row is a column that says nothing.
+      dto.contact({ name: "vicino", id: "p2", relay: "https://relay.test" }),
+    ];
+    render(<App />);
+    useStore.getState().go("people");
+    await screen.findByText("altrove");
+    expect(
+      await screen.findByText(en["people.listensOn"]("other.relay.test"))
+    ).toBeTruthy();
+    expect(screen.queryByText(en["people.listensOn"]("relay.test"))).toBeNull();
+  });
+
+  it("159. a contact with nothing to report gets no filler", async () => {
+    harness.snapshot.contacts = [dto.contact({ name: "nuovo", id: "p1" })];
+    render(<App />);
+    useStore.getState().go("people");
+    await screen.findByText("nuovo");
+    expect(screen.queryByText(/ultimo scambio|last exchange|listens on/)).toBeNull();
+  });
+
   it("an unreachable relay reads as unknown, never as offline", async () => {
     harness.snapshot.contacts = [dto.contact({ name: "proj", id: "p1" })];
     harness.fail = new Set(["presence"]);

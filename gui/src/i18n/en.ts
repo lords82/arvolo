@@ -230,6 +230,8 @@ export const en = {
   "people.presenceOffTitle": "Not connected",
   "people.presenceOn": "Connected",
   "people.presenceOff": "Not connected",
+  "people.lastExchange": (ago: string) => `last exchange ${ago}`,
+  "people.listensOn": (relay: string) => `listens on ${relay}`,
 
   "people.menuDetails": "Details and fingerprint",
   "people.menuUnverify": "Unverify",
