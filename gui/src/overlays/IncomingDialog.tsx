@@ -110,7 +110,16 @@ function IncomingBody({ offerId }: { offerId: string }) {
       // The store already reported it. The one refusal worth reacting to here is
       // the missing password: it is recoverable, and the user has nowhere else
       // to supply one.
-      if (/password/i.test(String(e))) setNeedsPassword(true);
+      //
+      // The daemon names it — `needsPassword` — so this no longer depends on the
+      // engine's English keeping the word "password" in it. The old test stays as
+      // the fallback for a daemon too old to send a code: without it, upgrading
+      // the app before the daemon would take the field away.
+      const code = (e as { code?: unknown } | null)?.code;
+      const named = typeof code === "string" && code !== "";
+      if (named ? code === "needsPassword" : /password/i.test(String(e))) {
+        setNeedsPassword(true);
+      }
     } finally {
       setBusy(null);
     }

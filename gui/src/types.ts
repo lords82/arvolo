@@ -170,6 +170,11 @@ export interface DepositDto {
 export interface StatusDto {
   version: string;
   public_id: string;
+  /** The identity in the form you give to somebody: `<id>@<relay>`. Assembled by
+   *  the daemon, which is also what `arvolo me` prints. Empty against a daemon
+   *  that predates it — fall back to `public_id`, which is the half that at least
+   *  works when both sides default to the same relay. */
+  shareable_id?: string;
   fingerprint: string;
   relay: string | null;
   transfers: number;
@@ -293,8 +298,11 @@ export type EngineEvent =
       size: number;
       note: string;
       sender_name: string;
-      /** The daemon is already downloading this one: the sender is trusted, so
-       *  there is no question to ask. Absent against an older daemon. */
+      /** The daemon is already downloading this one — the sender is trusted, or
+       *  is another of our own devices — so there is no question to ask, and the
+       *  board draws no offer row for it. Absent against an older daemon, where
+       *  false is the safe way to be wrong: at worst a prompt for something that
+       *  is already arriving. */
       auto?: boolean;
       /** See `OfferDto` — the same three stamps, on the pushed event. */
       fingerprint?: string;

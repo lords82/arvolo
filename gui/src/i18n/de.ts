@@ -118,6 +118,7 @@ export const de: Dict = {
   "waiting.parked": "aufs Relay geparkt — läuft ohne dich zu Ende",
   "waiting.relayCapped": (cap: string) => `Relay hält davon nur ${cap} — ab jetzt direkt`,
   "waiting.offloadFailed": (why: string) => `konnte nicht geparkt werden: ${why}`,
+  "waiting.noRoute": "kein Relay erreichbar — nur lokales Netz",
   "waiting.relayUnnamed": "das Relay konnte es nicht annehmen",
   "meta.incoming": "für Details öffnen",
   "meta.deposited": "wartet darauf, abgeholt zu werden",

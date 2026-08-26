@@ -22,6 +22,21 @@ import type {
   UpdateProgress,
 } from "./types";
 
+/** An accept that did not happen, carrying the daemon's word for why.
+ *
+ *  `code` is one of the engine's refusal codes (`needsPassword`, `p2pOff`,
+ *  `noLongerWaiting`) and empty for anything else — including a daemon too old to
+ *  send one, where the only thing left to read is the sentence. */
+export type AcceptError = Error & { code: string };
+
+export function asAcceptError(e: unknown): AcceptError {
+  const raw = e as { code?: unknown; message?: unknown } | null;
+  const message =
+    typeof raw?.message === "string" ? raw.message : String(e ?? "");
+  const code = typeof raw?.code === "string" ? raw.code : "";
+  return Object.assign(new Error(message), { code });
+}
+
 export const api = {
   status: () => invoke<StatusDto>("status"),
   listTransfers: () => invoke<TransferDto[]>("list_transfers"),
@@ -69,8 +84,25 @@ export const api = {
     invoke<string>("create_link", { item, ttl, max }),
   recv: (ticket: string, outItem: string | null, password: string | null) =>
     invoke<number>("recv", { ticket, outItem, password }),
-  acceptOffer: (offerId: string, outItem: string | null, password?: string | null) =>
-    invoke<number>("accept_offer", { offerId, outItem, password: password ?? null }),
+  acceptOffer: async (
+    offerId: string,
+    outItem: string | null,
+    password?: string | null
+  ) => {
+    try {
+      return await invoke<number>("accept_offer", {
+        offerId,
+        outItem,
+        password: password ?? null,
+      });
+    } catch (e) {
+      // This one command rejects with `{code, message}` rather than a bare
+      // string: a refusal carries the daemon's own word for itself, and the
+      // dialog acts on it. Re-thrown as an Error so `message` reads the same as
+      // every other failure, with the code riding along for whoever wants it.
+      throw asAcceptError(e);
+    }
+  },
   rejectOffer: (offerId: string) =>
     invoke<void>("reject_offer", { offerId }),
   pause: (id: number) => invoke<void>("pause", { id }),

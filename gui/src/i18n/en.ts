@@ -145,6 +145,7 @@ export const en = {
   "waiting.parked": "parked on the relay — finishes without you",
   "waiting.relayCapped": (cap: string) => `relay caps this at ${cap} — direct from here`,
   "waiting.offloadFailed": (why: string) => `couldn't park it: ${why}`,
+  "waiting.noRoute": "no relay reachable — local network only",
   // What goes where the relay's own words would, when it gave none.
   "waiting.relayUnnamed": "the relay could not take it",
   "meta.incoming": "open for the details",

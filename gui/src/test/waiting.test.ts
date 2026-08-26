@@ -27,6 +27,7 @@ const KNOWN = [
   "parked",
   "relayCapped",
   "offloadFailed",
+  "noRoute",
 ] as const;
 
 function row(over: Partial<UITransfer> = {}): UITransfer {

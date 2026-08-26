@@ -238,6 +238,38 @@ describe("an incoming offer", () => {
     );
   });
 
+  it("152. the field appears because the daemon named the refusal, not because the sentence said \"password\"", async () => {
+    // The refusal here carries `needsPassword` and a message with no such word in
+    // it. Before the code existed this was decided by /password/i over the
+    // engine's English, so rewording that sentence — or translating it — would
+    // have removed the only place a password can be typed, silently.
+    harness.fail = new Set(["acceptOffer:refused"]);
+    await renderAppWithOffer();
+    fireEvent.click(screen.getByText("arrivo.zip"));
+    fireEvent.click(await screen.findByText(en["incoming.accept"]));
+
+    const field = await screen.findByLabelText("Password");
+    expect(useStore.getState().transfers["oo1"], "the offer survives a refusal").toBeTruthy();
+    fireEvent.change(field, { target: { value: "segreto" } });
+    fireEvent.click(screen.getByText(en["incoming.accept"]));
+    await waitFor(() =>
+      expect(harness.recorder.accept[harness.recorder.accept.length - 1]).toEqual([
+        "o1",
+        null,
+        "segreto",
+      ])
+    );
+  });
+
+  it("153. a refusal that is not about a password asks for none", async () => {
+    harness.fail = new Set(["acceptOffer:p2pOff"]);
+    await renderAppWithOffer();
+    fireEvent.click(screen.getByText("arrivo.zip"));
+    fireEvent.click(await screen.findByText(en["incoming.accept"]));
+    await act(async () => {});
+    expect(screen.queryByLabelText("Password")).toBeNull();
+  });
+
   // The dialog used to show a stranger the raw base32 id and offer to hand over
   // words *after* they were saved — asking the reader to commit before it would
   // inform them. The fingerprint is a pure function of the key; the daemon stamps
@@ -382,6 +414,44 @@ describe("an incoming offer", () => {
       en["incoming.saveAsLabel"]
     )) as HTMLInputElement;
     expect(field.value).toBe("bruno");
+  });
+
+  // The bug this whole file exists for, in its second shape: not a button that
+  // does nothing, but a button that should never have been drawn. A trusted
+  // sender's file (or one from another of the user's own machines) is downloading
+  // before the window hears about it, so the daemon marks the arrival `auto` — and
+  // pressing Accetta on it reached for an offer the daemon had already consumed.
+  it("151. a file already arriving offers nothing to press", async () => {
+    render(<App />);
+    // Mounting refetches; emitting before that lands would race the snapshot.
+    await waitFor(() => expect(useStore.getState().connected).toBe(true));
+    act(() => {
+      harness.emit({
+        offer_received: {
+          id: "auto1",
+          from: PEER_ID,
+          name: "arrivo.zip",
+          size: 9,
+          note: "",
+          sender_name: "Anna",
+          auto: true,
+        },
+      });
+    });
+    await act(async () => {});
+
+    expect(screen.queryByText(en["incoming.accept"])).toBeNull();
+    expect(screen.queryByText(en["transfers.review"])).toBeNull();
+    expect(useStore.getState().incomingOfferId).toBeNull();
+
+    // And the download says it, once the daemon starts it.
+    act(() => {
+      harness.emit({
+        started: { id: 7, direction: "recv", name: "arrivo.zip", total_size: 9 },
+      });
+    });
+    expect(await screen.findByText("arrivo.zip")).toBeTruthy();
+    expect(screen.queryByText(en["incoming.accept"])).toBeNull();
   });
 
   it("135. it shows the sender's note", async () => {

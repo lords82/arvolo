@@ -185,6 +185,9 @@ function freshSnapshot(): Harness["snapshot"] {
     status: {
       version: "0.9.2",
       public_id: "if2xmnescalwohxlex5qylevzs2cypwdnjxe7sxb76wcphc7daha",
+      // As the daemon sends it: the id and where it listens, in one string.
+      shareable_id:
+        "if2xmnescalwohxlex5qylevzs2cypwdnjxe7sxb76wcphc7daha@relay.test",
       fingerprint: "able-otter-nine",
       relay: "https://relay.test",
       transfers: 0,
@@ -390,6 +393,24 @@ export function makeIpcMock() {
         if (harness.fail.has("acceptOffer:password") && !password) {
           return Promise.reject(
             new Error("this deposit is password-protected — supply the password")
+          );
+        }
+        // The same refusal from a daemon that names it. The message deliberately
+        // avoids the word the old code looked for: what the dialog acts on is the
+        // code, so the sentence can be rewritten (or translated) freely.
+        if (harness.fail.has("acceptOffer:refused") && !password) {
+          return Promise.reject(
+            Object.assign(new Error("the deposit is sealed — supply the secret"), {
+              code: "needsPassword",
+            })
+          );
+        }
+        // A refusal that is *not* about a password must not put the field up.
+        if (harness.fail.has("acceptOffer:p2pOff")) {
+          return Promise.reject(
+            Object.assign(new Error("this offer is a direct transfer and P2P is off"), {
+              code: "p2pOff",
+            })
           );
         }
         return guard("acceptOffer", 7);

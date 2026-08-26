@@ -218,8 +218,19 @@ export function SettingsView() {
           )}
         </Field>
 
+        {/* The form to hand somebody — id *and* relay. The id on its own says who
+            you are and not where you listen, so a friend given only that reaches
+            you if their client happens to default to your relay, and silently not
+            otherwise. Shown as one field rather than two: nobody needs the half
+            that cannot be acted on, and it is readable in front of the `@` anyway.
+            The bare id remains for a daemon too old to assemble the pair. */}
         <Field label={t("settings.publicIdLabel")}>
-          {() => <CopyField value={status?.public_id ?? ""} wrap />}
+          {() => (
+            <CopyField
+              value={status?.shareable_id || status?.public_id || ""}
+              wrap
+            />
+          )}
         </Field>
       </div>
 

@@ -199,6 +199,24 @@ pub(crate) fn is_self(id_b32: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Is an offer from this sender taken without asking?
+///
+/// Two senders qualify: a contact the user marked trusted, and another of our own
+/// devices — the second because there is nobody there to be asked to trust, only
+/// the user on the other side of the same desk.
+///
+/// One predicate rather than two matching expressions, because both ends of the
+/// socket need the same answer: the daemon *decides* with it, and the front-end is
+/// *told* with it (`stamp_offer` fills [`OfferReceived::auto`] from here). While
+/// they were written out separately they disagreed on our own devices, and a
+/// window that asks a question the daemon has already answered is exactly what
+/// that disagreement looks like from a chair.
+///
+/// [`OfferReceived::auto`]: arvolo_ipc::protocol::EventDto
+pub(crate) fn auto_accepts(id_b32: &str) -> bool {
+    crate::book::sender_status(id_b32).trusted || is_self(id_b32)
+}
+
 pub(crate) fn encode_id(p: &PublicId) -> String {
     data_encoding::BASE32_NOPAD
         .encode(&p.to_bytes())
@@ -208,6 +226,44 @@ pub(crate) fn encode_id(p: &PublicId) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The question the daemon answers by acting and the front-end is answered by
+    /// being told. It is pinned because the two used to be written out separately
+    /// and disagreed here: our own devices were downloaded automatically *and*
+    /// asked about, so the window offered a button for an offer the daemon had
+    /// already consumed, and pressing it produced an error next to a file that was
+    /// arriving perfectly well.
+    #[test]
+    fn auto_accept_covers_trusted_contacts_and_our_own_devices() {
+        let _guard = crate::testlock::ENV
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("ARVOLO_CONFIG_DIR", dir.path());
+        // Or the identity would be read from whoever is running the test.
+        std::env::remove_var("ARVOLO_IDENTITY");
+
+        let me = encode_id(&my_identity().unwrap().public());
+        assert!(
+            auto_accepts(&me),
+            "another of our own devices is taken without asking"
+        );
+
+        let stranger = encode_id(&Identity::generate().public());
+        assert!(!auto_accepts(&stranger), "a stranger is always a question");
+
+        // Saved is not trusted: knowing a name is not a standing decision to take
+        // whatever it sends.
+        let known = encode_id(&Identity::generate().public());
+        book::contact_add("giulia", &known).unwrap();
+        assert!(!auto_accepts(&known));
+
+        book::mark_verified("giulia").unwrap();
+        book::mark_trusted("giulia").unwrap();
+        assert!(auto_accepts(&known), "trust is what the flag is made of");
+
+        std::env::remove_var("ARVOLO_CONFIG_DIR");
+    }
 
     /// The rule `send --to` and the daemon's `Push` now share. It is worth a test
     /// of its own because the failure it prevents is silent: before, the desktop

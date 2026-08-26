@@ -590,6 +590,10 @@ async fn deliver_to_inner(
     // Read from the held send rather than owned here: this task is what a pause
     // destroys, and the preparation must not be. `Held` survives it.
     let prep = held_prep(inner, id);
+    // What the last live attempt learned about this network: true when no relay
+    // would have us. Kept across the loop because it is the first half of a
+    // sentence the second half finishes below — a relay we cannot reach either.
+    let mut local_only = false;
     loop {
         if cancel.is_cancelled() {
             handle_stop(inner, id, pause_flag);
@@ -628,7 +632,18 @@ async fn deliver_to_inner(
             });
         if online {
             match serve_live_once(
-                inner, id, cancel, relay, recipient, payload, name, archive, note, &prep, standing,
+                inner,
+                id,
+                cancel,
+                relay,
+                recipient,
+                payload,
+                name,
+                archive,
+                note,
+                &prep,
+                standing,
+                &mut local_only,
             )
             .await
             {
@@ -815,8 +830,18 @@ async fn deliver_to_inner(
                     set_waiting(inner, id, WaitingReason::RelayRetry(e.to_string()));
                     next_relay_try = Instant::now() + Duration::from_secs(RELAY_RETRY_SECS);
                 }
+                // The relay is unreachable. If our own endpoint could not find a
+                // relay either, that is not a relay having a moment: both ways out
+                // of this network are shut, and the only thing still working is the
+                // network itself. Say that instead — it is the difference between
+                // "try again in a minute" and "you are behind something".
                 Err(e @ flow::DepositError::Unavailable(_)) => {
-                    set_waiting(inner, id, WaitingReason::RelayRetry(e.to_string()));
+                    let reason = if local_only {
+                        WaitingReason::NoRoute
+                    } else {
+                        WaitingReason::RelayRetry(e.to_string())
+                    };
+                    set_waiting(inner, id, reason);
                     next_relay_try = Instant::now() + Duration::from_secs(RELAY_RETRY_SECS);
                 }
             }
@@ -919,6 +944,12 @@ pub(super) async fn serve_live_once(
     note: &str,
     prep: &flow::PrepSlot,
     standing: &mut Option<StandingOffer>,
+    // Set to what this attempt found: true when no relay would have us, so the
+    // ticket we just minted reaches this network and no further. The caller keeps
+    // it because the answer only becomes *useful* later — when the relay mailbox
+    // turns out to be unreachable too, and the two facts together are a closed
+    // network rather than a busy relay.
+    local_only: &mut bool,
 ) -> LiveOutcome {
     // Say what this is before doing it — but only when there is something to say.
     // The first attempt reads and encrypts the whole payload (a minute and a half
@@ -950,6 +981,7 @@ pub(super) async fn serve_live_once(
         Ok(s) => s,
         Err(e) => return LiveOutcome::Fatal(e.context("prepare send")),
     };
+    *local_only = session.local_only();
     // Written down *before* anyone is told about it. The invariant is that a ticket
     // in somebody's hands can be reproduced: put the offer out first and a crash in
     // between leaves the recipient holding a ticket this daemon can no longer serve,

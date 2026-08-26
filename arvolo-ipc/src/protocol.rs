@@ -194,6 +194,14 @@ pub enum Request {
         out: Option<String>,
         #[serde(default)]
         password: Option<String>,
+        /// "Answer a refusal with [`Response::Refused`] rather than a sentence."
+        ///
+        /// Opt-in so the new variant can only reach a client that asked for it —
+        /// the same guarantee [`Response::KeyChanged`] relies on. A client that
+        /// predates this field sends nothing, `serde(default)` reads it as false,
+        /// and it keeps getting the `Error(String)` it knows how to show.
+        #[serde(default)]
+        typed_refusal: bool,
     },
     /// Reject a parked offer → [`Response::Ok`].
     RejectOffer { offer_id: String },
@@ -419,6 +427,17 @@ pub enum Response {
         old_fingerprint: String,
         new_fingerprint: String,
     },
+    /// An accept that was **refused** rather than failed: nothing was taken, and
+    /// the offer is still parked (unless the code says it is not). `code` is one of
+    /// `AcceptRefusal`'s stable words — what a client acts on — and `message` the
+    /// engine's own sentence, for showing when it has nothing better.
+    ///
+    /// Only ever sent in answer to an `AcceptOffer { typed_refusal: true }`, so a
+    /// client too old to know this variant can never receive it.
+    Refused {
+        code: String,
+        message: String,
+    },
     Ok,
     Error(String),
 }
@@ -451,6 +470,19 @@ pub struct StatusDto {
     #[serde(default)]
     pub version: String,
     pub public_id: String,
+    /// The same identity in the form you hand to somebody: `<id>@<relay>`.
+    ///
+    /// The id alone says who you are and not *where you listen*, so a person given
+    /// only that can reach you when their client happens to default to your relay
+    /// and not otherwise — which fails silently, and looks like arvolo not working.
+    /// `arvolo me` has always printed this form and `contacts add` reads it back;
+    /// it is here so a window hands out the same thing rather than assembling it
+    /// from two fields and a rule about dropping `https://`.
+    ///
+    /// Optional on the wire: an older daemon does not send it, and a client should
+    /// fall back to [`Self::public_id`] rather than show nothing.
+    #[serde(default)]
+    pub shareable_id: String,
     pub fingerprint: String,
     pub relay: Option<String>,
     pub transfers: usize,
@@ -1453,6 +1485,25 @@ mod tests {
                 },
                 r#"{"offer_received":{"id":"off1","from":"if2xmne","name":"arrivo.zip","size":9,"note":"","sender_name":"Anna","auto":false,"fingerprint":"able-otter-nine","seen_count":2,"known_name":"Giulia"}}"#,
             ),
+            // And the same offer when the daemon is taking it by itself. Pinned
+            // separately because this is the value a front-end must act on — it
+            // draws an arrival rather than a question — and it travels no other
+            // way: the flag is stamped onto the event and appears in no snapshot.
+            (
+                EventDto::OfferReceived {
+                    id: "off2".into(),
+                    from: "if2xmne".into(),
+                    name: "arrivo.zip".into(),
+                    size: 9,
+                    note: String::new(),
+                    sender_name: "Anna".into(),
+                    auto: true,
+                    fingerprint: "able-otter-nine".into(),
+                    seen_count: 2,
+                    known_name: "Giulia".into(),
+                },
+                r#"{"offer_received":{"id":"off2","from":"if2xmne","name":"arrivo.zip","size":9,"note":"","sender_name":"Anna","auto":true,"fingerprint":"able-otter-nine","seen_count":2,"known_name":"Giulia"}}"#,
+            ),
             // A unit variant is a bare string, NOT an object — the frontend has to
             // handle both forms.
             (EventDto::ContactsChanged, r#""contacts_changed""#),
@@ -1464,6 +1515,31 @@ mod tests {
                 want,
                 "wire shape changed — update gui/src/events.ts to match"
             );
+        }
+    }
+
+    /// A client that predates typed refusals sends an accept without the flag, and
+    /// must go on getting the answer it can read.
+    ///
+    /// This is the whole safety of adding [`Response::Refused`]: the daemon sends
+    /// it only when asked, and an old client never asks. If this ever decoded as
+    /// `true`, such a client would receive a variant it cannot parse and the
+    /// accept would fail for a reason that has nothing to do with the offer.
+    #[test]
+    fn an_accept_without_the_flag_still_asks_for_the_old_answer() {
+        let old = r#"{"accept_offer":{"offer_id":"o1","out":null}}"#;
+        match serde_json::from_str::<Request>(old).unwrap() {
+            Request::AcceptOffer {
+                offer_id,
+                typed_refusal,
+                password,
+                ..
+            } => {
+                assert_eq!(offer_id, "o1");
+                assert!(!typed_refusal, "not asked for, not sent");
+                assert!(password.is_none());
+            }
+            other => panic!("expected an accept, got {other:?}"),
         }
     }
 

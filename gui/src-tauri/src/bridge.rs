@@ -28,6 +28,40 @@ pub struct CodeDto {
     pub code: String,
 }
 
+/// An accept that did not happen, as a window needs it.
+///
+/// `code` is the daemon's own word for a *refusal* — `needsPassword`, `p2pOff`,
+/// `noLongerWaiting` — and empty for everything else. It exists because the dialog
+/// has to act on one of those (put the password field up) and used to work it out
+/// by testing the message for the word "password": rewording an English sentence
+/// in the engine would then have quietly removed the only place a password can be
+/// typed. `message` is what to show, exactly as before.
+#[derive(Debug, Clone, Serialize)]
+pub struct AcceptFailed {
+    pub code: String,
+    pub message: String,
+}
+
+impl From<anyhow::Error> for AcceptFailed {
+    fn from(e: anyhow::Error) -> Self {
+        AcceptFailed {
+            code: arvolo_core::manager::AcceptRefusal::of(&e)
+                .map(|r| r.code().to_string())
+                .unwrap_or_default(),
+            message: format!("{e:#}"),
+        }
+    }
+}
+
+impl From<String> for AcceptFailed {
+    fn from(message: String) -> Self {
+        AcceptFailed {
+            code: String::new(),
+            message,
+        }
+    }
+}
+
 /// Connect to the daemon, mapping the "no daemon" error to a UI-friendly string.
 async fn client() -> Result<DaemonClient, String> {
     DaemonClient::connect().await.map_err(|e| format!("{e:#}"))
@@ -336,7 +370,7 @@ pub async fn accept_offer(
     offer_id: String,
     out_item: Option<String>,
     password: Option<String>,
-) -> Result<u64, String> {
+) -> Result<u64, AcceptFailed> {
     let out = match out_item {
         Some(id) => Some(state.resolve(std::slice::from_ref(&id))?.remove(0)),
         None => None,
@@ -344,7 +378,7 @@ pub async fn accept_offer(
     let mut c = client().await?;
     c.accept_with_password(offer_id, out.map(PathBuf::from), password)
         .await
-        .or_else(err)
+        .map_err(AcceptFailed::from)
 }
 
 #[tauri::command]
