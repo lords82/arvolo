@@ -623,6 +623,19 @@ pub struct TransferDto {
     /// one. Not ours, and not translatable — a diagnostic from another machine.
     #[serde(default)]
     pub waiting_detail: Option<String>,
+    /// Whether pausing this row would do anything.
+    ///
+    /// Not every running transfer can be held — a mailbox pickup is one fetch that
+    /// starts over rather than resuming, a share is not a delivery to anyone in
+    /// particular — and only the engine knows which is which. Without it a window
+    /// draws its pause button from the status alone, the daemon answers `Ok`, and
+    /// nothing happens.
+    ///
+    /// `None` means the daemon predates the field, where the honest fallback is to
+    /// keep offering the button: it is what that daemon has always done, and the
+    /// worst case is the behaviour of the day before.
+    #[serde(default)]
+    pub can_pause: Option<bool>,
 }
 
 /// A parked incoming offer awaiting the user's accept/reject.
@@ -1139,6 +1152,7 @@ impl From<&Transfer> for TransferDto {
             offer_status: (!t.offer_status.is_empty()).then(|| t.offer_status.clone()),
             waiting_code: (!t.waiting_code.is_empty()).then(|| t.waiting_code.clone()),
             waiting_detail: (!t.waiting_detail.is_empty()).then(|| t.waiting_detail.clone()),
+            can_pause: Some(t.can_pause),
         }
     }
 }

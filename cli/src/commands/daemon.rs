@@ -1314,6 +1314,7 @@ mod share_line_tests {
             offer_status: None,
             waiting_code: None,
             waiting_detail: None,
+            can_pause: None,
         }
     }
 

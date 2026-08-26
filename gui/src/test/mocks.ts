@@ -559,6 +559,10 @@ export const dto = {
       pieces_from_peers: 0,
       download_peers: 0,
       created: Math.floor(Date.now() / 1000),
+      // What the daemon says about holding it. The default is the ordinary case —
+      // a delivery with something to pick up again — so a test that cares about
+      // the other one has to say so.
+      can_pause: true,
       ...over,
     };
   },

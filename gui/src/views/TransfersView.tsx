@@ -326,7 +326,11 @@ function Row({
             </Button>
           ) : (
             <>
-              {tx.status === "active" && (
+              {/* Only where holding it means something. A mailbox pickup is one
+                  fetch that would start over, and a share is not a delivery to
+                  hold: the daemon refuses both, and a button that asks anyway is
+                  a button that does nothing. */}
+              {tx.status === "active" && tx.canPause && (
                 <IconButton
                   label={t("transfers.pause")}
                   onClick={() => fire(pause(tx.id))}
@@ -334,7 +338,11 @@ function Row({
                   <Icon.Pause size={14} />
                 </IconButton>
               )}
-              {(tx.status === "paused" || tx.status === "stalled") && (
+              {/* Paused, and nothing else. A stalled row is *already* trying —
+                  it is waiting on the relay or on the recipient — so play asked
+                  the daemon to resume something that was never paused, and got a
+                  silent no. */}
+              {tx.status === "paused" && (
                 <IconButton
                   label={t("transfers.resume")}
                   onClick={() => fire(resume(tx.id))}

@@ -598,6 +598,9 @@ export const useStore = create<State>((set, get) => {
       reason,
       waitingCode: d.waiting_code ?? undefined,
       waitingDetail: d.waiting_detail ?? undefined,
+      // A daemon that predates the field says nothing; keep the button, which is
+      // what that daemon has always done.
+      canPause: d.can_pause ?? true,
       peer: get().peerLabel(d.peer, prev?.peer),
       peerId: d.peer ?? prev?.peerId,
       // The sender's own claim about their name, kept so "save the sender" can
@@ -652,6 +655,8 @@ export const useStore = create<State>((set, get) => {
     bytesServed: 0,
     lastPickup: 0,
     fromDownload: 0,
+    // An offer is a decision, not a transfer: there is nothing running to hold.
+    canPause: false,
   });
 
   /** Merge a partial change into an existing transfer row (creating a stub if the
@@ -674,6 +679,9 @@ export const useStore = create<State>((set, get) => {
           downloadPeers: 0,
           firstSeen: now(),
           rank: rankFor(key),
+          // A row built from an event alone, before any snapshot: assume it can
+          // be held, as this window always did, and let the next snapshot say.
+          canPause: true,
         } as UITransfer);
       return { transfers: { ...s.transfers, [key]: fn(existing) } };
     });

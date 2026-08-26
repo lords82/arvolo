@@ -416,6 +416,36 @@ describe("an incoming offer", () => {
     expect(field.value).toBe("bruno");
   });
 
+  it("154. a transfer that cannot be held is not offered a pause", async () => {
+    // A pickup from the mailbox is one fetch — it would start over, not resume —
+    // and the daemon refuses to hold it. The window used to draw the button from
+    // the status alone, the daemon answered "Ok", and nothing happened.
+    await renderAppWithSend({ can_pause: false });
+    expect(screen.queryByLabelText(en["transfers.pause"])).toBeNull();
+    expect(harness.recorder.pause).toEqual([]);
+  });
+
+  it("155. a transfer that can be held keeps its pause", async () => {
+    await renderAppWithSend({ can_pause: true });
+    fireEvent.click(screen.getByLabelText(en["transfers.pause"]));
+    await waitFor(() => expect(harness.recorder.pause).toEqual([1]));
+  });
+
+  it("156. a stalled row is already trying, so it is offered no play", async () => {
+    // Stalled means waiting — on the relay, or on the recipient — not paused, and
+    // `resume` refuses anything that is not paused. The play button asked for it
+    // anyway and got a silent no.
+    await renderAppWithSend({
+      status: "waiting: offered — waiting for them to accept",
+      waiting_code: "offered",
+      can_pause: true,
+    });
+    // The row really is the stalled one, or the assertion below would pass for an
+    // active row that has no play button either.
+    expect(screen.getByText(en["waiting.offered"])).toBeTruthy();
+    expect(screen.queryByLabelText(en["transfers.resume"])).toBeNull();
+  });
+
   // The bug this whole file exists for, in its second shape: not a button that
   // does nothing, but a button that should never have been drawn. A trusted
   // sender's file (or one from another of the user's own machines) is downloading

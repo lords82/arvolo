@@ -280,13 +280,29 @@ async fn dispatch(d: &Daemon, cmd: Request) -> Response {
             Ok(_) => Response::Ok,
             Err(e) => Response::Error(format!("{e:#}")),
         },
+        // Both report their refusal, for the reason spelled out on `DepositNow`
+        // below: an `Ok` that changed nothing is a front-end telling the user
+        // something happened. Pausing is refused for a transfer that has nothing to
+        // pick up again — a mailbox pickup, a share — and resuming for one that is
+        // not paused, which is what the play button on a *stalled* row used to ask
+        // for and never got.
         Request::Pause { id } => {
-            d.manager.pause(id);
-            Response::Ok
+            if d.manager.pause(id) {
+                Response::Ok
+            } else {
+                Response::Error(
+                    "that transfer cannot be held: a mailbox pickup starts over rather \
+                     than resuming, and a share is not a delivery to hold"
+                        .into(),
+                )
+            }
         }
         Request::Resume { id } => {
-            d.manager.resume(id);
-            Response::Ok
+            if d.manager.resume(id) {
+                Response::Ok
+            } else {
+                Response::Error("that transfer is not paused".into())
+            }
         }
         // Unlike its neighbours, this one reports the refusal. `deposit_now` says
         // no for a send that is not waiting — one already under way, or already

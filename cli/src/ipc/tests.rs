@@ -116,6 +116,15 @@ async fn rpc_roundtrips_over_the_socket() {
         "the refusal arrived as a sentence, not as a reason: {e:#}"
     );
 
+    // Holding something that cannot be held says so, rather than answering Ok to
+    // a control that did nothing. Same for resuming what is not paused: that is
+    // what the play button on a stalled row was asking for, in silence.
+    assert!(
+        client.pause(999).await.is_err(),
+        "pausing a transfer nobody has must not report success"
+    );
+    assert!(client.resume(999).await.is_err());
+
     // A second client can connect concurrently and subscribe (handshake returns
     // an event stream without error).
     let client2 = DaemonClient::connect().await.expect("connect 2");

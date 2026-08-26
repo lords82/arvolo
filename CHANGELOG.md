@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **Pause and resume answered "Ok" for things they did not do.** Holding a
+  transfer only means something when there is something to come back to: a
+  download keeps its partial and continues from it, a held send parks without
+  re-preparing. A pickup from the mailbox has neither — it is one fetch that
+  would start over, which is why it is given no resume record — and a share is
+  not a delivery to anybody in particular. The daemon refused all of those and
+  reported success anyway, so the button did nothing and said nothing. It reports
+  the refusal now, and the window draws the button only where the daemon says it
+  can be used (`can_pause` on each row, from the same predicate `pause` obeys).
+
+- **The play button on a stalled row asked for something that cannot happen.**
+  Stalled means waiting — on the relay, or on the recipient — and resuming is for
+  what is *paused*, so pressing it was a silent no. The row keeps trying on its
+  own; the button is gone.
+
 ## v0.14.1 — nothing asks twice, and nothing waits for ever
 
 Four things the app knew and did not say. A file already arriving was put in
