@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
-use arvolo_core::manager::{ManagerEvent, TransferManager};
+use arvolo_core::manager::{AcceptRefusal, ManagerEvent, TransferManager};
 use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 #[cfg(unix)]
 use tokio::net::UnixListener;
@@ -81,6 +81,11 @@ impl Daemon {
         download_dir: PathBuf,
         pending: Arc<Mutex<HashMap<String, OfferDto>>>,
         front_ends: Arc<AtomicUsize>,
+        // Made by the caller, not here: the daemon's offer-intake task announces
+        // removals on it and starts before this server does. Deep enough that a
+        // client which stalls briefly does not miss a pairing code; a lagged
+        // receiver is skipped, never blocking the sender.
+        side_events: broadcast::Sender<EventDto>,
         shutdown: CancellationToken,
     ) -> Self {
         Daemon {
@@ -88,9 +93,7 @@ impl Daemon {
             relay,
             download_dir,
             pending,
-            // Deep enough that a client which stalls briefly does not miss a
-            // pairing code; a lagged receiver is skipped, never blocking the sender.
-            side_events: broadcast::channel(64).0,
+            side_events,
             pairings: Sessions::default(),
             sync_state: Arc::new(Mutex::new(SyncState::default())),
             front_ends,
@@ -314,6 +317,7 @@ async fn dispatch(d: &Daemon, cmd: Request) -> Response {
             offer_id,
             out,
             password,
+            typed_refusal,
         } => {
             match d
                 .manager
@@ -343,7 +347,16 @@ async fn dispatch(d: &Daemon, cmd: Request) -> Response {
                     });
                     Response::TransferId(id)
                 }
-                Err(e) => Response::Error(format!("{e:#}")),
+                // A refusal is not a failure, and a client that said it can tell
+                // them apart gets to. The sentence travels too, so a client that
+                // does not know the code still has something to show.
+                Err(e) => match AcceptRefusal::of(&e).filter(|_| typed_refusal) {
+                    Some(r) => Response::Refused {
+                        code: r.code().to_string(),
+                        message: r.text().to_string(),
+                    },
+                    None => Response::Error(format!("{e:#}")),
+                },
             }
         }
         Request::Push {
@@ -1365,8 +1378,10 @@ async fn stream_events(daemon: &Daemon, write: &mut (impl AsyncWrite + Unpin)) {
 /// not in the offer.
 ///
 /// `auto` marks one the daemon is about to auto-accept, so a front-end can say
-/// "arriving" instead of asking a question with only one answer; trust is read
-/// from the same book the auto-accept decision uses, so the two agree. The other
+/// "arriving" instead of asking a question with only one answer; it is read
+/// through the same predicate the auto-accept decision uses, so the two cannot
+/// disagree — spelling the rule out twice is how our own devices came to be
+/// auto-downloaded and asked about at the same time. The other
 /// three are what the user needs in order to *answer* the question — the sender's
 /// fingerprint, how many times they have been received from before, and the name
 /// this key is already on record as claiming.
@@ -1384,7 +1399,7 @@ fn stamp_offer(mut ev: EventDto) -> EventDto {
         ..
     } = &mut ev
     {
-        *auto = crate::book::sender_status(from).trusted;
+        *auto = crate::util::auto_accepts(from);
         *fingerprint = crate::book::fingerprint_of(from).unwrap_or_default();
         *seen_count = crate::book::seen_count(from);
         *known_name = crate::book::known_name_of(from)
@@ -1459,9 +1474,14 @@ impl Drop for FrontEnd {
 
 fn status(d: &Daemon) -> StatusDto {
     let pid = d.manager.public_id();
+    let id_b32 = crate::encode_id(&pid);
     StatusDto {
         version: env!("CARGO_PKG_VERSION").to_string(),
-        public_id: crate::encode_id(&pid),
+        // Assembled here, by the same function `arvolo me` prints, so a window and
+        // a terminal hand out the same string — and neither has to know that the
+        // form drops `https://`.
+        shareable_id: crate::book::shareable_id(&id_b32, d.relay.as_deref()),
+        public_id: id_b32,
         fingerprint: pid.fingerprint(),
         relay: d.relay.clone(),
         transfers: d.manager.list().len(),
@@ -1599,6 +1619,54 @@ mod tests {
         // A receipt, and the same offer now reads differently.
         crate::book::record_seen(&from);
         assert_eq!(stamp_offer_dto(parked).seen_count, 1);
+
+        std::env::remove_var("ARVOLO_CONFIG_DIR");
+    }
+
+    /// `auto` is the front-end's copy of a decision the daemon has already taken,
+    /// so it must be stamped from the same predicate the daemon decides with —
+    /// including the half that says an offer from ourselves needs nobody's
+    /// permission. Spelled out separately here once, it said "ask" for a file the
+    /// daemon was already downloading, and the window's Accept button then pointed
+    /// at an offer that had been consumed.
+    #[test]
+    fn an_offer_the_daemon_will_take_by_itself_is_stamped_as_arriving() {
+        let _guard = crate::testlock::ENV
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("ARVOLO_CONFIG_DIR", dir.path());
+        std::env::remove_var("ARVOLO_IDENTITY");
+
+        let auto_of = |from: &str| match stamp_offer(EventDto::OfferReceived {
+            id: "o1".into(),
+            from: from.into(),
+            name: "arrivo.zip".into(),
+            size: 9,
+            note: String::new(),
+            sender_name: String::new(),
+            auto: false,
+            fingerprint: String::new(),
+            seen_count: 0,
+            known_name: String::new(),
+        }) {
+            EventDto::OfferReceived { auto, .. } => auto,
+            other => panic!("stamping changed the event: {other:?}"),
+        };
+
+        let stranger = fresh_id();
+        assert!(!auto_of(&stranger), "a stranger is a question");
+
+        let me = crate::util::encode_id(&crate::util::my_identity().unwrap().public());
+        assert!(
+            auto_of(&me),
+            "our own device: the daemon takes it, so the window must not ask"
+        );
+
+        crate::book::contact_add("giulia", &stranger).unwrap();
+        crate::book::mark_verified("giulia").unwrap();
+        crate::book::mark_trusted("giulia").unwrap();
+        assert!(auto_of(&stranger), "trusted: taken without asking");
 
         std::env::remove_var("ARVOLO_CONFIG_DIR");
     }

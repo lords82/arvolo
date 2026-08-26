@@ -146,6 +146,17 @@ pub enum WaitingReason {
     /// same reason [`Self::RelayRetry`] does: they are a diagnostic from another
     /// machine, and translating them would be inventing their content.
     OffloadFailed(String),
+    /// Neither route out of this network is open: no relay would make us
+    /// reachable to a peer elsewhere, and the mailbox relay cannot be reached
+    /// either. What is left works on this network alone — a recipient in the same
+    /// building still gets the file — and the wait is for a better connection
+    /// rather than for the recipient.
+    ///
+    /// Its own reason rather than a [`Self::RelayRetry`] carrying an HTTP error,
+    /// because the two ask different things of the reader: one is "the relay is
+    /// having a moment", this one is "you are on a network that lets nothing
+    /// through".
+    NoRoute,
 }
 
 impl WaitingReason {
@@ -159,6 +170,7 @@ impl WaitingReason {
             WaitingReason::Parked => "parked",
             WaitingReason::RelayCapped(_) => "relayCapped",
             WaitingReason::OffloadFailed(_) => "offloadFailed",
+            WaitingReason::NoRoute => "noRoute",
         }
     }
 
@@ -182,6 +194,9 @@ impl WaitingReason {
             WaitingReason::OffloadFailed(why) => {
                 format!("couldn't park it on the relay: {why}")
             }
+            WaitingReason::NoRoute => "this network reaches no relay — sending on the \
+                 local network only, and waiting for a better connection"
+                .into(),
         }
     }
 
@@ -197,6 +212,98 @@ impl WaitingReason {
         }
     }
 }
+
+/// Why an accept did not happen, when the answer is a **refusal** rather than a
+/// failure.
+///
+/// The distinction is the whole point. A refusal is decided before the offer is
+/// taken, so nothing has moved: the offer is still parked and can be accepted
+/// again once whatever is missing is supplied. A failure happens after, when the
+/// offer has been consumed and acked off the relay, and there is nothing left to
+/// retry against.
+///
+/// Typed, like [`WaitingReason`], because two different programs act on it: the
+/// daemon falls back to asking the user, and a window shows the field where the
+/// answer goes. Both used to read the engine's English — the desktop app decided
+/// whether a deposit was password-protected by testing the error text for the word
+/// "password" — which makes rewording a sentence a behaviour change nothing would
+/// catch. Carried inside `anyhow::Error`, so the ordinary `Result<u64>` still says
+/// everything and callers that only want the sentence keep working unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AcceptRefusal {
+    /// The deposit is sealed with a password and none was supplied.
+    NeedsPassword,
+    /// A live (direct) offer, and P2P is switched off: there is no route to take
+    /// it by. The sender can be asked to deposit it instead.
+    P2pOff,
+    /// No offer is parked under that id: it was taken already — a trusted
+    /// sender's file downloads by itself — or the sender replaced it with a newer
+    /// one and this id is spent.
+    NoLongerWaiting,
+}
+
+impl AcceptRefusal {
+    /// The stable word a front-end matches on, in place of reading the sentence.
+    pub fn code(self) -> &'static str {
+        match self {
+            AcceptRefusal::NeedsPassword => "needsPassword",
+            AcceptRefusal::P2pOff => "p2pOff",
+            AcceptRefusal::NoLongerWaiting => "noLongerWaiting",
+        }
+    }
+
+    /// Read a code back — for a client that received one over the wire.
+    pub fn from_code(code: &str) -> Option<Self> {
+        match code {
+            "needsPassword" => Some(AcceptRefusal::NeedsPassword),
+            "p2pOff" => Some(AcceptRefusal::P2pOff),
+            "noLongerWaiting" => Some(AcceptRefusal::NoLongerWaiting),
+            _ => None,
+        }
+    }
+
+    /// What a client with no translation shows, and what the CLI prints.
+    pub fn text(self) -> &'static str {
+        match self {
+            AcceptRefusal::NeedsPassword => {
+                "this deposit is password-protected — supply the password"
+            }
+            AcceptRefusal::P2pOff => {
+                "this offer is a direct transfer and P2P is off. The offer stays \
+                 where it is — ask the sender to use `--mailbox` instead."
+            }
+            AcceptRefusal::NoLongerWaiting => {
+                "that offer is no longer waiting for an answer — it was already \
+                 taken, or the sender replaced it with a newer one"
+            }
+        }
+    }
+
+    /// Is the offer still parked, so accepting again can work?
+    ///
+    /// True for everything that is refused *before* the offer is taken. The
+    /// daemon reads this to decide between putting the question back in front of
+    /// the user and reporting a download that will not happen.
+    pub fn offer_survives(self) -> bool {
+        match self {
+            AcceptRefusal::NeedsPassword | AcceptRefusal::P2pOff => true,
+            AcceptRefusal::NoLongerWaiting => false,
+        }
+    }
+
+    /// The refusal inside an error, if that is what it is.
+    pub fn of(e: &anyhow::Error) -> Option<Self> {
+        e.downcast_ref::<AcceptRefusal>().copied()
+    }
+}
+
+impl std::fmt::Display for AcceptRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.text())
+    }
+}
+
+impl std::error::Error for AcceptRefusal {}
 
 /// A snapshot of one transfer, for a UI list.
 #[derive(Clone, Debug)]
@@ -1756,7 +1863,7 @@ impl TransferManager {
                 .and_then(|t| crate::offline::OfflineTicket::decode(&t).ok())
                 .is_some_and(|t| t.has_password());
             if needs {
-                anyhow::bail!("this deposit is password-protected — supply the password");
+                return Err(anyhow::Error::new(AcceptRefusal::NeedsPassword));
             }
         }
 
@@ -1775,20 +1882,23 @@ impl TransferManager {
                 .map(|o| crate::chunked::ChunkTicket::looks_like(&o.offer.ticket))
                 .unwrap_or(false);
             if live {
-                anyhow::bail!(
-                    "this offer is a direct transfer and P2P is off. The offer stays \
-                     where it is — ask the sender to use `--mailbox` instead."
-                );
+                return Err(anyhow::Error::new(AcceptRefusal::P2pOff));
             }
         }
 
+        // Not "no such offer": the id was real, and whoever is asking was shown it.
+        // It stops being pending for two ordinary reasons — it was taken already
+        // (a trusted sender's file downloads by itself), or the sender re-posted
+        // and the newer offer replaced it — and both are things that happened *for*
+        // the user, not to them. Say which, so the sentence reaching a window is one
+        // a person can act on rather than the name of a map lookup.
         let offer = self
             .inner
             .pending
             .lock()
             .unwrap()
             .remove(offer_id)
-            .context("no such pending offer")?;
+            .ok_or_else(|| anyhow::Error::new(AcceptRefusal::NoLongerWaiting))?;
 
         // The offer name is sender-supplied and untrusted (even a "trusted"
         // contact is auto-downloaded via this path): reduce it to a single safe
@@ -2181,6 +2291,22 @@ impl TransferManager {
         n
     }
 
+    /// Is an offer still parked under this id?
+    ///
+    /// The engine's map is the only authority on this, and the daemon keeps a map
+    /// of its own that can differ: it does not park what it is about to take
+    /// automatically. So after an auto-accept comes back with an error, "can this
+    /// still be offered to the user?" is a question only the engine can answer —
+    /// and answering it wrong means either a question about a file nobody can
+    /// deliver, or a file quietly dropped.
+    ///
+    /// [`AcceptRefusal::offer_survives`] says the same thing from the error's
+    /// side; this is the fact rather than the inference, and an unexpected error
+    /// (one carrying no refusal at all) can only be judged here.
+    pub fn is_pending(&self, offer_id: &str) -> bool {
+        self.inner.pending.lock().unwrap().contains_key(offer_id)
+    }
+
     /// Reject a pending offer: drop it and ack it so it stops coming back.
     pub async fn reject_offer(&self, offer_id: &str) {
         self.inner.pending.lock().unwrap().remove(offer_id);
@@ -2412,6 +2538,104 @@ mod held_prep_tests {
             load_prep(dir.path(), 99).is_none(),
             "an orphan preparation must not outlive the restart it was found on"
         );
+    }
+}
+
+#[cfg(test)]
+mod accept_refusal_tests {
+    use super::*;
+
+    /// A refusal is not a failure, and the difference is a fact about the offer:
+    /// after one, it is still there to be accepted again. The daemon leans on
+    /// exactly this when an automatic download comes back refused — it puts the
+    /// question in front of the user instead — so if a refusal ever started
+    /// consuming the offer, that fallback would offer a file nobody can deliver.
+    #[tokio::test]
+    async fn a_password_refusal_keeps_the_offer_where_it_was() {
+        let dl = tempfile::tempdir().unwrap();
+        let sender = Identity::generate();
+        let m = TransferManager::new(Identity::generate(), None, dl.path().to_path_buf());
+
+        // A deposit sealed with a password: a salt in the ticket is what says so.
+        let ticket = crate::offline::OfflineTicket {
+            relay: "https://relay.test".into(),
+            claim: "claim".into(),
+            sender: sender.public().to_bytes().to_vec(),
+            salt: vec![7; 16],
+            wrapped_key: vec![],
+            total_size: 4096,
+            name: "segreto.pdf".into(),
+        }
+        .encode();
+        m.inner.pending.lock().unwrap().insert(
+            "o1".to_string(),
+            crate::presence::ReceivedOffer {
+                id: "o1".to_string(),
+                sender: sender.public(),
+                offer: crate::presence::Offer {
+                    name: "segreto.pdf".into(),
+                    size: 4096,
+                    chunks: 1,
+                    ticket,
+                    note: String::new(),
+                    sender_name: String::new(),
+                    origin: None,
+                    target: None,
+                    relay: String::new(),
+                },
+            },
+        );
+
+        let err = m
+            .accept_offer("o1", None)
+            .await
+            .expect_err("no password was supplied");
+        assert_eq!(
+            AcceptRefusal::of(&err),
+            Some(AcceptRefusal::NeedsPassword),
+            "the reason travels as itself, not as a sentence to be re-read"
+        );
+        assert!(m.is_pending("o1"), "a refusal leaves the offer parked");
+        assert!(AcceptRefusal::NeedsPassword.offer_survives());
+    }
+
+    /// The other half: an id nobody holds. It reads as a refusal too — there is
+    /// nothing to take — but one the offer does *not* survive, which is what stops
+    /// the daemon from re-offering a file it can no longer deliver.
+    #[tokio::test]
+    async fn an_id_nobody_holds_is_refused_and_does_not_come_back() {
+        let dl = tempfile::tempdir().unwrap();
+        let m = TransferManager::new(Identity::generate(), None, dl.path().to_path_buf());
+
+        let err = m
+            .accept_offer("nope", None)
+            .await
+            .expect_err("no such offer");
+        assert_eq!(
+            AcceptRefusal::of(&err),
+            Some(AcceptRefusal::NoLongerWaiting)
+        );
+        assert!(!m.is_pending("nope"));
+        assert!(!AcceptRefusal::NoLongerWaiting.offer_survives());
+    }
+
+    /// The codes are the contract with every front-end: they are matched on, and
+    /// they travel over the wire, so a rename is a breaking change and belongs in
+    /// a diff somebody reads.
+    #[test]
+    fn every_refusal_has_a_stable_word_that_reads_back() {
+        for r in [
+            AcceptRefusal::NeedsPassword,
+            AcceptRefusal::P2pOff,
+            AcceptRefusal::NoLongerWaiting,
+        ] {
+            assert_eq!(AcceptRefusal::from_code(r.code()), Some(r));
+            assert!(!r.text().is_empty());
+        }
+        assert_eq!(AcceptRefusal::NeedsPassword.code(), "needsPassword");
+        assert_eq!(AcceptRefusal::P2pOff.code(), "p2pOff");
+        assert_eq!(AcceptRefusal::NoLongerWaiting.code(), "noLongerWaiting");
+        assert_eq!(AcceptRefusal::from_code("whatever"), None);
     }
 }
 

@@ -7,6 +7,8 @@ use std::path::PathBuf;
 use anyhow::{bail, Context, Result};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 
+use arvolo_core::manager::AcceptRefusal;
+
 use crate::protocol::{
     ConfigDto, ConfigPatch, ContactDto, DepositDto, EventDto, HistoryDto, OfferDto, PairKind,
     PresenceDto, RelayInfoDto, Request, RequestEnvelope, Response, ServerMessage, StatusDto,
@@ -426,10 +428,21 @@ impl DaemonClient {
                 offer_id,
                 out,
                 password,
+                typed_refusal: true,
             })
             .await?
         {
             Response::TransferId(id) => Ok(id),
+            // Hand the refusal back as itself, not as its sentence: a caller that
+            // has something to do about one — put the question back in front of the
+            // user, show the password field — can then ask what it is instead of
+            // reading English. `{e:#}` still prints the same words for everyone
+            // else. An unknown code (a daemon newer than this client) keeps the
+            // message and loses only the ability to act on it.
+            Response::Refused { code, message } => Err(match AcceptRefusal::from_code(&code) {
+                Some(r) => anyhow::Error::new(r),
+                None => anyhow::anyhow!(message),
+            }),
             other => unexpected(other),
         }
     }

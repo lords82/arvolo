@@ -97,6 +97,33 @@ afterEach(() => {
   setLangChoice("en");
 });
 
+describe("the id you hand to somebody", () => {
+  // The field exists to be copied and given away, and an id with no relay in it
+  // is half a destination: it reaches you only if the other side happens to
+  // default to your relay, and says nothing when it doesn't. One of these went
+  // to a real person before this test existed.
+  it("carries where you listen, not just who you are", async () => {
+    await openSettings();
+    const id = await screen.findByText(
+      "if2xmnescalwohxlex5qylevzs2cypwdnjxe7sxb76wcphc7daha@relay.test"
+    );
+    expect(id).toBeTruthy();
+  });
+
+  it("falls back to the bare id against a daemon that sends no pair", async () => {
+    harness.snapshot.status = {
+      ...harness.snapshot.status,
+      shareable_id: undefined,
+    } as typeof harness.snapshot.status;
+    await openSettings();
+    expect(
+      await screen.findByText(
+        "if2xmnescalwohxlex5qylevzs2cypwdnjxe7sxb76wcphc7daha"
+      )
+    ).toBeTruthy();
+  });
+});
+
 describe("saving who you are", () => {
   it("sends the typed name, trimmed", async () => {
     await openSettings();

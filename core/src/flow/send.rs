@@ -92,6 +92,16 @@ impl SendSession {
     pub fn node_seed(&self) -> [u8; 32] {
         self.sender.node_seed()
     }
+
+    /// True when no relay became reachable while this send was being prepared, so
+    /// the ticket it produced names this network's addresses and nothing else.
+    ///
+    /// Not a failure — a peer on the same LAN is reached by exactly those — but
+    /// the caller is the only one in a position to say so, and a wait nobody can
+    /// explain is the thing worth avoiding here.
+    pub fn local_only(&self) -> bool {
+        self.sender.local_only()
+    }
 }
 
 /// Ask the relay for its chunk-serving address + a seed token (`/v1/addr`), to

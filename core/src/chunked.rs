@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, Mutex as AsyncMutex};
 
 use crate::backfill::RelayRelease;
-use crate::node::{decode_ticket, encode_ticket, local_addr_of, remote_addr_of};
+use crate::node::{decode_ticket, encode_ticket};
 use crate::source::SendSource;
 use crate::transfer::{bind_endpoint, bind_endpoint_with_key, RelayChoice};
 
@@ -957,6 +957,10 @@ pub struct ChunkSender {
     router: Router,
     endpoint: Endpoint,
     addr: EndpointAddr,
+    /// No relay became reachable in time, so [`Self::addr`] carries this network's
+    /// addresses and nothing further. A peer on the same LAN connects; anyone else
+    /// cannot, and the caller has something true to say about the wait.
+    local_only: bool,
     chunks: Vec<Hash>,
     total_size: u64,
     key: [u8; crate::crypto::CHUNK_KEY_LEN],
@@ -1235,16 +1239,12 @@ impl ChunkSender {
             .accept(CHUNK_ALPN, chunk_server)
             .accept(CTRL_ALPN, handler)
             .spawn();
-        let addr = if use_relay {
-            endpoint.online().await;
-            remote_addr_of(&endpoint)
-        } else {
-            local_addr_of(&endpoint)
-        };
+        let (addr, local_only) = crate::node::published_addr(&endpoint, use_relay).await;
         Ok(Self {
             router,
             endpoint,
             addr,
+            local_only,
             chunks,
             total_size,
             key,
@@ -1261,6 +1261,11 @@ impl ChunkSender {
 
     pub fn addr(&self) -> EndpointAddr {
         self.addr.clone()
+    }
+    /// True when this sender is only reachable on the network it is sitting on:
+    /// the wait for a relay ran out. See [`crate::node::published_addr`].
+    pub fn local_only(&self) -> bool {
+        self.local_only
     }
     /// The transport secret seed this sender is bound under. Persisted by the CLI
     /// so a resumed send can rebind the *same* node id (see `flow::resume_send`).
@@ -1439,20 +1444,15 @@ impl ChunkSeeder {
             sent: SentBytes::default(),
         };
         // Mirror `ChunkSender::serve`: only wait to come "online" via a relay when
-        // one is configured. With `RelayChoice::Disabled` there is no relay to
-        // become reachable through, so `online()` would block forever — use the
-        // local direct address instead (LAN / relay-less swarming).
+        // one is configured, and never without a bound — with `RelayChoice::Disabled`
+        // there is no relay to become reachable through, and on a network where none
+        // answers the wait does not end either. See [`crate::node::published_addr`].
         let use_relay = !matches!(&relay, RelayChoice::Disabled);
         let endpoint = bind_endpoint(relay).await?;
         let router = Router::builder(endpoint.clone())
             .accept(CHUNK_ALPN, chunk_server)
             .spawn();
-        let addr = if use_relay {
-            endpoint.online().await;
-            remote_addr_of(&endpoint)
-        } else {
-            local_addr_of(&endpoint)
-        };
+        let (addr, _local_only) = crate::node::published_addr(&endpoint, use_relay).await;
         Ok(Self {
             router,
             endpoint,

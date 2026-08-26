@@ -212,6 +212,9 @@ function DeviceList() {
 export function DevicesView() {
   const t = useT();
   const sync = useStore((s) => s.sync);
+  // The shared identity is this daemon's identity, so the shareable spelling it
+  // reports is the same one — and the field below is for handing out.
+  const shareableId = useStore((s) => s.status?.shareable_id);
   const loading = useStore((s) => s.syncLoading);
   const error = useStore((s) => s.syncError);
   const reload = useStore((s) => s.loadSync);
@@ -278,7 +281,7 @@ export function DevicesView() {
 
         <div className="stack-sm">
           <div className="t-label">{t("devices.publicId")}</div>
-          <CopyField value={sync.public_id} wrap />
+          <CopyField value={shareableId || sync.public_id} wrap />
         </div>
 
         {/* The one thing a shared identity is *for*, reachable from the screen

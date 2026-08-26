@@ -205,11 +205,12 @@ export function fmtEta(tx: UITransfer): string {
  *  lists are kept in step by `waiting.test.ts`. */
 const WAITING_PLAIN: Record<
   string,
-  "waiting.offered" | "waiting.tooLarge" | "waiting.parked"
+  "waiting.offered" | "waiting.tooLarge" | "waiting.parked" | "waiting.noRoute"
 > = {
   offered: "waiting.offered",
   tooLarge: "waiting.tooLarge",
   parked: "waiting.parked",
+  noRoute: "waiting.noRoute",
 };
 
 /** The reasons that quote something from elsewhere inside them — the relay's own

@@ -356,6 +356,50 @@ describe("engine events → rows", () => {
     expect(rows().filter((t) => t.status === "incoming")).toHaveLength(2);
   });
 
+  it("11e. an offer the daemon takes by itself is an arrival, not a question", async () => {
+    // `auto` means the daemon has already accepted: the sender is trusted, or it is
+    // another of the user's own devices. Drawing the offer row anyway asked the user
+    // to choose something already chosen, and the answer landed on an offer the
+    // daemon had consumed — "no such pending offer", next to a file downloading
+    // perfectly well.
+    await boot();
+    harness.emit({
+      offer_received: {
+        id: "auto1",
+        from: PEER_ID,
+        name: "relazione.pdf",
+        size: 10,
+        note: "",
+        sender_name: "Anna",
+        auto: true,
+      },
+    });
+    expect(rows().filter((t) => t.status === "incoming")).toHaveLength(0);
+    expect(row("oauto1")).toBeUndefined();
+
+    // What the user sees instead: the download, which announces itself.
+    harness.emit({
+      started: { id: 7, direction: "recv", name: "relazione.pdf", total_size: 10 },
+    });
+    expect(row("t7")).toMatchObject({ status: "active", dir: "in", name: "relazione.pdf" });
+  });
+
+  it("11f. a re-post closes the dialog left open on the offer it replaces", async () => {
+    // The row is superseded (11b), but the open dialog held the old id of its own
+    // accord: closing it is what stops the same dead button reappearing by another
+    // route.
+    await boot();
+    const offer = (id: string) => ({
+      offer_received: { id, from: PEER_ID, name: "relazione.pdf", size: 10, note: "", sender_name: "" },
+    });
+    harness.emit(offer("old1"));
+    useStore.getState().openIncoming("old1");
+    expect(useStore.getState().incomingOfferId).toBe("old1");
+
+    harness.emit(offer("new2"));
+    expect(useStore.getState().incomingOfferId).toBeNull();
+  });
+
   it("11. an event for an unknown id still produces a row (no lost sends)", async () => {
     // A drop→send can land before any snapshot; the row must appear anyway.
     await boot();

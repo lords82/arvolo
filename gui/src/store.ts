@@ -546,13 +546,24 @@ export const useStore = create<State>((set, get) => {
    *  handlers that cannot await, so without this a rejection is swallowed by the
    *  event loop and the button looks broken rather than blocked. Re-throws so
    *  callers that *do* await (and want to react) still can. */
+  /** The words inside a failure, wherever they are.
+   *
+   *  A Tauri command rejects with a plain string; `acceptOffer` rejects with an
+   *  `Error` that also carries a refusal code, and `String()` on one of those
+   *  reads "Error: …". The user gets the same sentence either way. */
+  const errText = (e: unknown): string => {
+    if (typeof e === "string") return e;
+    const m = (e as { message?: unknown } | null)?.message;
+    return typeof m === "string" ? m : String(e);
+  };
+
   const act = async <T,>(what: string, fn: () => Promise<T>): Promise<T> => {
     try {
       const r = await fn();
       set({ actionError: null });
       return r;
     } catch (e) {
-      set({ actionError: `${what}: ${String(e)}` });
+      set({ actionError: `${what}: ${errText(e)}` });
       throw e;
     }
   };
@@ -933,15 +944,38 @@ export const useStore = create<State>((set, get) => {
             // ("no such pending offer"), which is precisely how Accetta came to do
             // nothing at all.
             const kept: Record<string, UITransfer> = {};
+            let dropped = false;
             for (const [k, tx] of Object.entries(s.transfers)) {
               const stale =
                 tx.status === "incoming" &&
                 tx.peerId === ev.from &&
                 tx.name === ev.name &&
                 tx.offerId !== ev.id;
+              if (stale && tx.offerId === s.incomingOfferId) dropped = true;
               if (!stale) kept[k] = tx;
             }
+            // A dialog left open on the offer we just dropped would be a decision
+            // about an id nobody holds any more — and the same dead button by
+            // another route. Close it; the newer offer draws its own.
+            const incomingOfferId = dropped ? null : s.incomingOfferId;
+            // The daemon takes this one by itself — the sender is trusted, or it is
+            // another of our own devices — so there is no decision to put in front
+            // of anybody. Drawing the question anyway is asking the user to choose
+            // something already chosen, and the answer they give lands on an offer
+            // the daemon has already consumed. The download says everything there
+            // is to say, and it arrives on its own as a `started` event.
+            if (ev.auto) {
+              // Including any row this very id already had: whatever the route it
+              // came by, an arrival being taken automatically leaves no question.
+              delete kept[`o${ev.id}`];
+              return {
+                transfers: kept,
+                incomingOfferId:
+                  incomingOfferId === ev.id ? null : incomingOfferId,
+              };
+            }
             return {
+              incomingOfferId,
               transfers: {
                 ...kept,
                 [`o${ev.id}`]: offerToUI(

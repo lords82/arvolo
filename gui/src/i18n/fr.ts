@@ -118,6 +118,7 @@ export const fr: Dict = {
   "waiting.parked": "déposé sur le relais — se termine sans vous",
   "waiting.relayCapped": (cap: string) => `le relais s'arrête à ${cap} — direct ensuite`,
   "waiting.offloadFailed": (why: string) => `impossible de le déposer : ${why}`,
+  "waiting.noRoute": "aucun relais joignable — réseau local seul",
   "waiting.relayUnnamed": "le relais n'a pas pu le prendre en charge",
   "meta.incoming": "ouvrir pour les détails",
   "meta.deposited": "en attente du retrait par le destinataire",

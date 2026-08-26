@@ -1,5 +1,76 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **A file already arriving was offered to you as a question, and the answer
+  failed.** A trusted contact's file — or one from another of your own machines
+  — is downloaded the moment it arrives, with nothing to decide. The daemon says
+  so on the arrival it sends the window, precisely so a front-end can announce it
+  instead of asking; the window read every other field and not that one. So the
+  same file appeared twice, once downloading and once waiting for permission, and
+  pressing Accept reached for an offer the daemon had already consumed: "no such
+  pending offer", next to a transfer that was going perfectly well.
+
+  The flag was also computed from trust alone while the decision behind it
+  covered trust *and* our own devices, which is why two of your own machines
+  disagreed the most reliably. Both now read one predicate, so the window and the
+  daemon cannot answer the same question differently.
+
+- **Offers the daemon disposed of by itself left a row behind.** Taking one
+  because the sender is trusted, dropping one because the sender is blocked, and
+  replacing one because the sender re-posted are all removals no window can see —
+  and the daemon announced none of them. It announced only what a front-end had
+  itself asked for. Each is now announced, so a row (and its button) cannot
+  outlive the offer it stands for, rather than depending on the window guessing
+  from the sender and the filename.
+
+- **Accepting an offer that was no longer waiting reported a map lookup.** It now
+  says what happened: the offer was already taken, or the sender replaced it with
+  a newer one.
+
+- **An automatic download that could not start took the file with it.** A trusted
+  sender's deposit sealed with a password, or a direct offer arriving with P2P
+  switched off, is *refused* by the engine rather than failed: nothing is taken,
+  and the offer stays exactly where it was so it can be accepted again. The daemon
+  threw it away anyway, printing a line to a terminal nobody had open. It now asks
+  instead — the offer becomes an ordinary question, with the password field where
+  the password goes. When the attempt really did consume the offer, it says so in
+  a notification rather than in silence, since a file arriving automatically is
+  deliberately not drawn as a row.
+
+- **A send on a network with no reachable relay never left "preparing".** Before
+  a ticket can name where to find the sender, the endpoint has to know how it can
+  be reached, and asking iroh that means `Endpoint::online()` — which waits for a
+  home relay and has no timeout. On a network where none answers (captive Wi-Fi,
+  a firewall that passes one port) the wait simply did not end: the file was read
+  and encrypted in milliseconds and then the row sat on a word that describes
+  local work, for as long as anyone cared to watch. The wait is now bounded, and
+  what it falls back to is this network's own addresses — which is the whole
+  answer for a recipient in the same building. A send left with no way out at all
+  says so: **"no relay reachable — local network only"**, rather than blaming the
+  relay for being busy.
+
+- **The app handed out an id with no relay in it.** Settings copies "your public
+  id", and the id alone says who you are and not where you listen — so a person
+  given one reaches you if their client happens to default to your relay, and
+  silently not otherwise. `arvolo me` has always printed the pair (`<id>@<relay>`)
+  and `contacts add` reads it back; the window now shows the same string, assembled
+  by the daemon rather than by pairing two fields and a rule about dropping
+  `https://`. Same for the id on the Devices screen.
+
+### Changed
+
+- **A refused accept now carries a reason, not a sentence.** `needsPassword`,
+  `p2pOff` and `noLongerWaiting` travel as codes (`Response::Refused`, asked for
+  per request so an older client keeps the plain error it can read), the way
+  waiting reasons already did. The desktop app decided whether to show its
+  password field by testing the engine's English for the word "password": that
+  made rewording — or translating — a sentence into a behaviour change, with the
+  only place a password can be typed as the thing at stake. It now reads the code,
+  and falls back to the old test only against a daemon too old to send one.
+
 ## v0.14.0 — the relay stops being something only the sender can see
 
 A transfer that leans on the relay used to depend on the sender being there
