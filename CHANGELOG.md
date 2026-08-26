@@ -1,6 +1,12 @@
 # Changelog
 
-## Unreleased
+## v0.14.1 — nothing asks twice, and nothing waits for ever
+
+Four things the app knew and did not say. A file already arriving was put in
+front of you as a question; a refusal travelled as an English sentence another
+program had to read; a send with no relay in reach waited for one silently, for
+ever; and the id you hand to somebody was missing the half that says where you
+listen.
 
 ### Fixed
 
