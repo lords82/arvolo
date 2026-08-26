@@ -219,6 +219,10 @@ pub async fn install_update(app: AppHandle, version: Option<String>) -> Result<(
 /// The message the frontend keys "installed, but you have to reopen it" off.
 /// Matched by prefix rather than by wording, so the sentence can be rewritten
 /// without silently turning that state back into a plain error.
+///
+/// Only macOS can reach the state: the other platforms either never come back
+/// through here or relaunch themselves, so the constant does not exist there.
+#[cfg(target_os = "macos")]
 pub const RELAUNCH_FAILED: &str = "relaunch-failed";
 
 /// Start the newly installed app and leave.
