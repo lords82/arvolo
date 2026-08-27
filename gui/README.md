@@ -140,19 +140,20 @@ Every verb has a home:
 
 | CLI | Where |
 |---|---|
-| `send --to` / `--deposit --ttl --max --password` | Invia → *A un contatto*, with *Lascia in casella* |
-| `code` (incl. multi-recipient) | Invia → *Codice* |
-| `link --ttl --max` | Invia → *Link* |
-| `ticket` | Invia → *Ticket* |
-| `recv` (code / `arvc…` / `arvm…` + password) | Ricevi |
+| `send --to` / `--mailbox --ttl --max --password` | Invia → *A un contatto*, with *Lascia in casella* |
+| `send --code` (incl. `--keep`) | Invia → *Codice* |
+| `send --link --ttl --max` | Invia → *Link* |
+| `send` (bare: the `.arvolo` ticket file) / `send --ticket` | Invia → *Ticket* |
+| `recv` (`.arvolo` / code / `arvc…` / `arvm…` / handle + password), `decline` | Ricevi |
 | `status`, `pause`, `resume`, `cancel`, `status clear` | Trasferimenti |
-| `contacts` add/list/rename/remove/verify/trust/block/prune | Persone |
-| `contacts pair` | Persone → *Scambia contatti* |
-| `contacts export` / `import` | Persone → *Esporta* / *Importa* |
+| `contacts` add/list/rename/remove/verify/trust/block | Persone |
+| `contacts add <name>` (pairing by code) | Persone → *Scambia contatti* |
+| `contacts list --json` / `import` | Persone → *Esporta* / *Importa* |
 | `contacts list` presence probe | Persone → *Chi c'è* |
 | `history`, `history clear` | Cronologia |
 | `device pair` / `join` / `sync` / `status` | I tuoi dispositivi |
 | `me`, `me name`, relay + download dir config | Impostazioni |
+| `daemon start/run/stop/status` | started/restarted by the shell itself |
 
 Pairing runs as a **session**, not a request/reply: the daemon answers with a
 handle and the code and outcome arrive as `pairing_*` events, because the

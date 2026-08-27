@@ -10,7 +10,7 @@
 //! chunk-by-chunk and stream the plaintext straight to disk (no whole-file RAM).
 //!
 //! Container layout (all integers little-endian), matching the decoder in the
-//! relay's `web/dl.js`:
+//! browser decryptor's `web/decryptor/src/dl.js`:
 //!
 //! ```text
 //!   [8]        magic  = b"ARVLNK01"
@@ -27,8 +27,6 @@
 //! nonce can never collide with a real data chunk (a file can't reach `u32::MAX`
 //! chunks at [`LINK_CHUNK_SIZE`]), so the per-transfer random key is never reused
 //! against the same nonce — the one invariant AES-GCM requires.
-
-use std::path::Path;
 
 use anyhow::{anyhow, Context, Result};
 
@@ -79,11 +77,18 @@ fn total_chunks_for(size: u64, chunk_size: u32) -> u32 {
 
 /// Encrypt `path` into a link container blob. Returns the blob, the per-transfer
 /// key (goes in the URL fragment), the file name, and its plaintext size.
-pub fn encrypt_link(path: &Path) -> Result<(Vec<u8>, [u8; CHUNK_KEY_LEN], String, u64)> {
-    anyhow::ensure!(path.is_file(), "{} is not a file", path.display());
-    let data = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+pub fn encrypt_link(
+    source: impl Into<crate::source::SendSource>,
+) -> Result<(Vec<u8>, [u8; CHUNK_KEY_LEN], String, u64)> {
+    let source = source.into();
+    if let crate::source::SendSource::Path(p) = &source {
+        anyhow::ensure!(p.is_file(), "{} is not a file", p.display());
+    }
+    let data = source.read_all()?;
     let size = data.len() as u64;
-    let name = path
+    // The label is the original path (or filename) even for a handed-off
+    // descriptor, so the download page never says "3" for `/dev/fd/3`.
+    let name = std::path::Path::new(&source.label())
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("download.bin")
@@ -209,7 +214,13 @@ pub async fn relay_allows_links(relay: &str) -> Result<bool> {
 /// sealed to a specific recipient: whoever holds the link (its fragment key) can
 /// download it — the link *is* the capability. The relay still only sees
 /// ciphertext.
-pub async fn deposit_link(path: &Path, relay: &str, ttl: u64, max: u32) -> Result<LinkOutcome> {
+pub async fn deposit_link(
+    source: impl Into<crate::source::SendSource>,
+    relay: &str,
+    ttl: u64,
+    max: u32,
+) -> Result<LinkOutcome> {
+    let source = source.into();
     // Fail fast (before encrypting/uploading) if the relay administrator has
     // turned links off — with a message that says exactly that.
     anyhow::ensure!(
@@ -218,7 +229,7 @@ pub async fn deposit_link(path: &Path, relay: &str, ttl: u64, max: u32) -> Resul
          send it sealed to a recipient with --to, or use a different relay"
     );
 
-    let (blob, key, name, size) = encrypt_link(path)?;
+    let (blob, key, name, size) = encrypt_link(source)?;
 
     // Sender-held revoke secret; the relay stores only its BLAKE3 hash.
     let revoke_token = random_token();
@@ -237,9 +248,18 @@ pub async fn deposit_link(path: &Path, relay: &str, ttl: u64, max: u32) -> Resul
         .body(blob)
         .send()
         .await
-        .context("deposit request")?
-        .error_for_status()
-        .context("relay rejected deposit")?;
+        .context("deposit request")?;
+    // The one refusal a person meets on a shared relay, and the one where the raw
+    // status says nothing they can act on: 507 means the relay is holding all the
+    // bytes its operator allows. It clears as deposits expire, so say "later or
+    // yours" rather than "rejected".
+    if resp.status() == reqwest::StatusCode::INSUFFICIENT_STORAGE {
+        anyhow::bail!(
+            "the relay is being used by a lot of people right now — try again shortly, \
+             or use a relay of your own"
+        );
+    }
+    let resp = resp.error_for_status().context("relay rejected deposit")?;
     let ttl_secs = crate::flow::granted_ttl(&resp, ttl);
     let claim = resp.text().await.context("read claim")?;
     let claim = claim.trim().to_string();

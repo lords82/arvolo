@@ -19,8 +19,14 @@ product or run a modified service without publishing changes.
 
 Business / Enterprise features (federation across relays, SSO/SAML, audit logs,
 admin console, managed hosting, advanced policies) are **not** part of this
-AGPL repository; they are distributed separately under the commercial license.
-See [`docs/COMMERCIAL.md`](docs/COMMERCIAL.md).
+AGPL repository; if they are built, they live in a separate repository under the
+commercial license.
+
+Two things follow from that, and they are the ones worth stating plainly. What is
+in this repository is AGPL-3.0 and stays that way — nothing here moves behind the
+commercial license later. And the commercial licence takes nothing away from it:
+it exists for organizations that cannot accept the AGPL's obligations, not to
+withhold anything from the people who can.
 
 Contact: info@termox.it
 

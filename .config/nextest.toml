@@ -35,8 +35,16 @@ heavy-transfers = { max-threads = 1 }
 # they ran *alongside* the serialized flow tests — swarm_fallback held 193s while
 # flow's resume_mid_transfer starved past its 240s deadline and died as a
 # "failure" that no code change had caused.
+#
+# `fetch_hedge` was the same omission one binary later, and it is the worst kind
+# of member to leave out: it binds three endpoints and fetches a chunk, *and* it
+# asserts on wall-clock — that the live provider wins after the 5s hedge and well
+# inside the 8s open bound. Starved of CPU those numbers stop describing the code
+# and start describing the machine, so it took 240s and died where alone it takes
+# 17. A timing assertion is only a statement about the product when the product
+# is the only thing running.
 [[profile.default.overrides]]
-filter = 'binary(flow) or binary(code_daemon) or binary(coswarm) or binary(disjoint_swarm) or binary(swarm_fallback) or binary(two_receivers) or binary(manager_resume)'
+filter = 'binary(flow) or binary(code_daemon) or binary(coswarm) or binary(disjoint_swarm) or binary(swarm_fallback) or binary(two_receivers) or binary(manager_resume) or binary(fetch_hedge)'
 test-group = 'heavy-transfers'
 
 [profile.ci]
@@ -45,8 +53,34 @@ test-group = 'heavy-transfers'
 slow-timeout = { period = "120s", terminate-after = 2 }
 fail-fast = false
 
+# Windows gets its own, wider deadlines — and these come FIRST, because for each
+# setting nextest takes the earliest override that specifies it.
+#
+# Why: the Windows runner is not merely slower, it is *erratically* slower. Same
+# commit, same 461 tests: one run finished in 602s with everything green and not a
+# single test flagged slow (so every one of them came in under 120s), the next took
+# 2009s and killed 21 tests at exactly the 240s mark. The suite takes ~49m on
+# Windows against ~13m on ubuntu even on a good day, and the bad day also carried
+# the runner-image bug that makes `install-action` retry its own installation.
+#
+# Nothing in those 21 is a product bug: `contacts_trust` spawns no relay, no daemon
+# and no network — it runs the binary and reads its output — and it still hit the
+# kill. A deadline that a healthy run clears by a factor of two, and a sick runner
+# misses by a factor of two, is measuring the runner, not the code. So Windows gets
+# room: the tests that are honestly slow there stay green, and a real hang is still
+# caught and named, just later.
 [[profile.ci.overrides]]
-filter = 'binary(flow) or binary(code_daemon) or binary(coswarm) or binary(disjoint_swarm) or binary(swarm_fallback) or binary(two_receivers) or binary(manager_resume)'
+platform = 'cfg(windows)'
+filter = 'binary(flow) or binary(code_daemon) or binary(coswarm) or binary(disjoint_swarm) or binary(swarm_fallback) or binary(two_receivers) or binary(manager_resume) or binary(fetch_hedge)'
+test-group = 'heavy-transfers'
+slow-timeout = { period = "120s", terminate-after = 6 }
+
+[[profile.ci.overrides]]
+platform = 'cfg(windows)'
+slow-timeout = { period = "120s", terminate-after = 4 }
+
+[[profile.ci.overrides]]
+filter = 'binary(flow) or binary(code_daemon) or binary(coswarm) or binary(disjoint_swarm) or binary(swarm_fallback) or binary(two_receivers) or binary(manager_resume) or binary(fetch_hedge)'
 test-group = 'heavy-transfers'
 # The heavy group alone gets the default profile's gentler deadline even in CI:
 # serialized they no longer wedge, but a 128 MiB swarm test on a cold 2-core

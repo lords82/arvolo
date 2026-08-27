@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
@@ -29,7 +29,16 @@ pub(super) const OFFLINE_TTL_SECS: u64 = 7 * 24 * 3600;
 pub(super) const LIVE_CONFIRM_SECS: u64 = 12;
 /// Phase 2: once the offer is seen, how long to let the P2P connection establish
 /// (cross-internet iroh cold-start + hole-punch is highly variable) before giving
-/// up and falling back to the mailbox.
+/// up on *this attempt*.
+///
+/// This is a network budget and nothing else. Running out of it does **not** mean
+/// the send falls back to the mailbox: the connection is opened by the recipient
+/// when a human accepts, so an offer that has been seen and not connected is
+/// overwhelmingly a decision nobody has taken yet. Spending this timeout on that
+/// question is measuring a person with a stopwatch meant for a handshake — and it
+/// is what made every send to a recipient who was not sitting at their screen
+/// upload the whole file to the relay after 102 seconds. See
+/// [`LiveOutcome::AwaitingDecision`] and `deposit_after_secs`.
 pub(super) const LIVE_CONNECT_SECS: u64 = 90;
 /// How often the watchdog polls the offer's seen-status during phase 1.
 pub(super) const OFFER_STATUS_POLL_SECS: u64 = 2;
@@ -106,6 +115,29 @@ fn share_days_limit() -> Option<u64> {
         .and_then(|s| s.trim().parse::<u64>().ok())
         .filter(|&n| n > 0)
 }
+
+/// How long a send whose offer has *reached* the recipient waits for them to
+/// accept before parking the file on the relay instead. From
+/// `ARVOLO_DEPOSIT_AFTER` (config key `deposit_after`), in seconds.
+///
+/// This is the deadline on a decision, not on a connection, so it is measured in
+/// what it takes somebody to notice a notification and answer it — half an hour,
+/// not a minute and a half. The whole time is free to the sender: their daemon is
+/// running anyway, the offer is already posted, and the relay-side long poll wakes
+/// the loop the instant the answer comes. What it saves is the thing that is not
+/// free — a full copy of the file sitting on the relay for a week because nobody
+/// happened to be at their screen.
+///
+/// `0` restores the old behaviour exactly: deposit the moment the live attempt
+/// gives up. It is the way out if this turns out to be wrong somewhere.
+pub(super) const DEPOSIT_AFTER_SECS: u64 = 30 * 60;
+
+fn deposit_after_secs() -> u64 {
+    std::env::var("ARVOLO_DEPOSIT_AFTER")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(DEPOSIT_AFTER_SECS)
+}
 /// Upper bound on how long a held (`Waiting`) send keeps trying before it gives up
 /// and fails — so a too-large file to a recipient who never returns doesn't pin a
 /// payload and a task forever. Mirrors the offline mailbox/offer lifetime.
@@ -118,18 +150,93 @@ pub(super) enum LiveOutcome {
     /// Nobody actually connected (stale presence / they vanished) — fall back to
     /// the relay, or keep waiting for them to reappear.
     NotConnected,
+    /// The offer reached one of their devices and the connection never came.
+    ///
+    /// Split out from [`Self::NotConnected`] because the two ask for opposite
+    /// answers. `NotConnected` means nothing on the far side ever acknowledged the
+    /// offer — the presence beacon was stale, or the post failed — and the mailbox
+    /// is the only route left. This one means their daemon has the offer in hand
+    /// and is waiting for somebody to say yes; the route is fine, the person has
+    /// not answered. Depositing here uploads the whole file to the relay because a
+    /// human did not click within ninety seconds, which is the wrong trade when
+    /// relay storage is the scarce thing and the sender's daemon is running
+    /// anyway.
+    AwaitingDecision,
+    /// The recipient started, dropped, and everything they still lack is now on
+    /// the relay — so this attempt ended on purpose and the recipient can finish
+    /// with us switched off.
+    ///
+    /// Emphatically **not** a reason to deposit. The file is already parked, in a
+    /// resumable form that keeps the partial the recipient has; uploading the whole
+    /// of it a second time as a sealed mailbox blob would spend the relay twice and
+    /// throw their progress away, because a mailbox fetch starts from zero.
+    Offloaded,
     /// The user cancelled the send.
     Cancelled,
     /// An unrecoverable error preparing or serving.
     Fatal(anyhow::Error),
 }
 
-pub(super) fn set_waiting(inner: &Arc<Inner>, id: u64, reason: &str) {
+/// A byte cap written for people. Carried inside the waiting reason rather than
+/// formatted at each end, so a translated client interpolates the same figure the
+/// CLI prints instead of rounding it its own way.
+fn mib(bytes: u64) -> String {
+    format!("{} MiB", bytes / (1024 * 1024))
+}
+
+pub(super) fn set_waiting(inner: &Arc<Inner>, id: u64, reason: WaitingReason) {
+    let text = reason.text();
     // Live status: keep the cancel token so pause/cancel still reach the loop.
-    inner.set_status_live(id, TransferStatus::Waiting(reason.to_string()));
+    inner.set_status_live(id, TransferStatus::Waiting(text.clone()));
+    // After the status, not before: setting a status clears the code, so a code
+    // written first would be wiped by the very call that makes it true.
+    inner.set_waiting_code(id, reason.code(), reason.detail().unwrap_or_default());
+    // Read back rather than passed in: the ladder belongs to the offer, not to
+    // this reason, and every caller of this would otherwise have to carry a value
+    // it has no opinion about.
+    let offer_status = inner
+        .transfers
+        .lock()
+        .unwrap()
+        .get(&id)
+        .map(|t| t.offer_status.clone())
+        .unwrap_or_default();
     inner.emit(ManagerEvent::Waiting {
         id,
-        reason: reason.to_string(),
+        reason: text,
+        code: reason.code().to_string(),
+        detail: reason.detail().unwrap_or_default().to_string(),
+        offer_status,
+    });
+}
+
+/// Record how far the standing offer has got, and say so.
+///
+/// Only the *change* is worth an event, and the caller decides that — but the
+/// event has to happen, because nothing else carries this to a front end between
+/// snapshots. Reuses the reason already on the row: what moved is the offer, not
+/// why the send is waiting.
+pub(super) fn set_offer_status_live(inner: &Arc<Inner>, id: u64, offer_status: &str) {
+    inner.set_offer_status(id, offer_status);
+    let (reason, code, detail) = {
+        let rows = inner.transfers.lock().unwrap();
+        let Some(t) = rows.get(&id) else { return };
+        match &t.status {
+            TransferStatus::Waiting(r) => {
+                (r.clone(), t.waiting_code.clone(), t.waiting_detail.clone())
+            }
+            // Not waiting any more — whatever it is doing now has its own status
+            // and its own event, and re-announcing it as waiting would walk it
+            // backwards.
+            _ => return,
+        }
+    };
+    inner.emit(ManagerEvent::Waiting {
+        id,
+        reason,
+        code,
+        detail,
+        offer_status: offer_status.to_string(),
     });
 }
 
@@ -142,15 +249,184 @@ pub(super) fn persist_held_record(inner: &Inner, id: u64, paused: bool, reason: 
             &SendToRecord {
                 id,
                 recipient: h.recipient.to_bytes(),
-                payload: h.payload.to_string_lossy().into_owned(),
+                // A handle's label is its original path: the best a restart can
+                // do is retry by name (and fail visibly if the daemon may not).
+                payload: h.source.label(),
                 name: h.name.clone(),
                 archive: h.archive,
                 paused,
                 reason: reason.to_string(),
                 note: h.note.clone(),
+                target: h.target,
+                relay: h.relay.clone(),
             },
         );
     }
+}
+
+/// What a payload looked like when its digests were taken.
+///
+/// A persisted preparation skips the read-and-encrypt pass, and that pass is also
+/// the only thing that would notice the file changed underneath it. This is the
+/// cheap stand-in: metadata that a rewrite, a truncation or a replacement almost
+/// always disturbs. `dev`/`ino` catch replacement outright on unix; elsewhere they
+/// are zero and only length and mtime speak.
+///
+/// Not a proof. A tool that restores a file's mtime, or an in-place rewrite of
+/// identical length within one filesystem timestamp tick, gets past it — and then
+/// the sender serves ciphertext its ticket does not describe, every chunk fails the
+/// receiver's integrity check, and the transfer simply never completes. Never a
+/// file that arrives wrong.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) struct PayloadStamp {
+    pub(super) len: u64,
+    pub(super) mtime_secs: u64,
+    pub(super) mtime_nanos: u32,
+    pub(super) dev: u64,
+    pub(super) ino: u64,
+}
+
+/// Stamp the file at `path`. `None` when it cannot be stat'ed or carries no mtime —
+/// and no stamp means no persisted preparation, because an unguarded one is worse
+/// than none: it would be believed.
+pub(super) fn payload_stamp(path: &std::path::Path) -> Option<PayloadStamp> {
+    let md = std::fs::metadata(path).ok()?;
+    let mtime = md
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?;
+    #[cfg(unix)]
+    let (dev, ino) = {
+        use std::os::unix::fs::MetadataExt;
+        (md.dev() as u64, md.ino())
+    };
+    #[cfg(not(unix))]
+    let (dev, ino) = (0u64, 0u64);
+    Some(PayloadStamp {
+        len: md.len(),
+        mtime_secs: mtime.as_secs(),
+        mtime_nanos: mtime.subsec_nanos(),
+        dev,
+        ino,
+    })
+}
+
+/// Write down the preparation a held send has just paid for, so a restarted daemon
+/// resumes the same send instead of minting a new one.
+///
+/// Two stamps, not one. A single stat after the pass has a hole in it: a file
+/// rewritten *while* the pass ran would be certified by digests taken across mixed
+/// content. Taking one before and one after and requiring them to agree closes it —
+/// and when they disagree we write nothing, so the next attempt pays for the pass
+/// again, which is exactly what happened before this record existed.
+fn persist_prep_record(
+    inner: &Inner,
+    id: u64,
+    payload: &crate::source::SendSource,
+    prep: &flow::PrepSlot,
+    before: Option<PayloadStamp>,
+) {
+    let Some(dir) = &inner.state_dir else { return };
+    let path = PathBuf::from(payload.label());
+    let (Some(before), Some(after)) = (before, payload_stamp(&path)) else {
+        return;
+    };
+    if before != after {
+        tracing::info!(
+            "not writing down the preparation for {}: it changed while being read",
+            path.display()
+        );
+        return;
+    }
+    let guard = prep.lock().unwrap();
+    let Some(p) = guard.as_ref() else { return };
+    persist_prep(
+        dir,
+        &PrepRecord {
+            id,
+            key: p.key().to_vec(),
+            node_seed: p.node_seed().to_vec(),
+            total_size: p.total_size(),
+            chunks: p.chunks().to_vec(),
+            payload: path.to_string_lossy().into_owned(),
+            len: after.len,
+            mtime_secs: after.mtime_secs,
+            mtime_nanos: after.mtime_nanos,
+            dev: after.dev,
+            ino: after.ino,
+        },
+    );
+}
+
+/// Rebuild a preparation from what was written down, if the payload is still the
+/// bytes it was taken from. `None` — for any reason at all — means preparing again,
+/// which is what every restart did before.
+pub(super) fn rebuild_prep(
+    rec: &PrepRecord,
+    source: &crate::source::SendSource,
+) -> Option<flow::ReusablePrep> {
+    let path = PathBuf::from(source.label());
+    let now = payload_stamp(&path)?;
+    let then = PayloadStamp {
+        len: rec.len,
+        mtime_secs: rec.mtime_secs,
+        mtime_nanos: rec.mtime_nanos,
+        dev: rec.dev,
+        ino: rec.ino,
+    };
+    if now != then || rec.len != rec.total_size {
+        tracing::info!(
+            "preparing {} again: it is not the file the stored preparation describes",
+            path.display()
+        );
+        return None;
+    }
+    let key: [u8; crate::crypto::CHUNK_KEY_LEN] = rec.key.as_slice().try_into().ok()?;
+    let node_seed: [u8; 32] = rec.node_seed.as_slice().try_into().ok()?;
+    match flow::ReusablePrep::from_parts(key, node_seed, rec.total_size, rec.chunks.clone()) {
+        Ok(p) => Some(p),
+        Err(e) => {
+            tracing::info!(
+                "stored preparation for {} is unusable: {e:#}",
+                path.display()
+            );
+            None
+        }
+    }
+}
+
+/// The preparation slot a held `send --to` owns, so the delivery loop reads it from
+/// something that outlives the loop. A send with no held entry gets a private slot:
+/// the reuse within one task still works, which is what the slot did before it had
+/// anywhere longer-lived to live.
+/// Whether somebody has asked for this send to stop waiting and go to the relay.
+pub(super) fn held_deposit_now(inner: &Inner, id: u64) -> bool {
+    inner
+        .held
+        .lock()
+        .unwrap()
+        .get(&id)
+        .is_some_and(|h| h.deposit_now.load(Ordering::Relaxed))
+}
+
+/// Publish (or clear) the live attempt's cancellation token, so
+/// [`TransferManager::deposit_now`] can end the attempt in flight rather than
+/// waiting out the watchdog.
+pub(super) fn set_held_attempt(inner: &Inner, id: u64, token: Option<CancellationToken>) {
+    if let Some(h) = inner.held.lock().unwrap().get(&id) {
+        *h.attempt.lock().unwrap() = token;
+    }
+}
+
+pub(super) fn held_prep(inner: &Inner, id: u64) -> flow::PrepSlot {
+    inner
+        .held
+        .lock()
+        .unwrap()
+        .get(&id)
+        .map(|h| h.prep.clone())
+        .unwrap_or_default()
 }
 
 /// Forget a `send --to`'s delivery state (memory + disk) — called on any terminal
@@ -159,6 +435,9 @@ pub(super) fn drop_held(inner: &Inner, id: u64) {
     inner.held.lock().unwrap().remove(&id);
     if let Some(dir) = &inner.state_dir {
         remove_sendto(dir, id);
+        // The preparation goes with it: it is only meaningful as this send's, and
+        // it holds a content key.
+        remove_prep(dir, id);
     }
 }
 
@@ -203,34 +482,128 @@ pub(super) async fn deliver_to(
     cancel: CancellationToken,
     relay: String,
     recipient: PublicId,
-    payload: PathBuf,
+    payload: crate::source::SendSource,
     name: String,
     archive: bool,
     note: String,
     pause_flag: Arc<std::sync::atomic::AtomicBool>,
 ) {
+    // The offer outlives the individual attempts now (see `deliver_to_inner`), so
+    // somebody has to own its end. The loop has a dozen ways out and every one of
+    // them means the same thing for the offer — nobody is serving it any more — so
+    // the withdrawal belongs here, once, rather than at each `return`.
+    let mut standing: Option<StandingOffer> = None;
+    deliver_to_inner(
+        &inner,
+        id,
+        &cancel,
+        &relay,
+        &recipient,
+        &payload,
+        &name,
+        archive,
+        &note,
+        &pause_flag,
+        &mut standing,
+    )
+    .await;
+    if let Some(s) = standing {
+        let _ = presence::retract_offer(
+            &inner.client,
+            &relay,
+            &recipient,
+            &s.posted.id,
+            &s.posted.poster_token,
+        )
+        .await;
+    }
+}
+
+/// The offer a held `send --to` keeps on the relay, and the last status we read
+/// for it. The pair travels together because the wake-up is a *change* of status:
+/// asking "is it still what I last saw?" needs both halves, and separating them
+/// invites asking with a reading that belongs to an offer already replaced.
+pub(super) struct StandingOffer {
+    posted: presence::PostedOffer,
+    seen: presence::OfferStatus,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn deliver_to_inner(
+    inner: &Arc<Inner>,
+    id: u64,
+    cancel: &CancellationToken,
+    relay: &str,
+    recipient: &PublicId,
+    payload: &crate::source::SendSource,
+    name: &str,
+    archive: bool,
+    note: &str,
+    pause_flag: &Arc<std::sync::atomic::AtomicBool>,
+    standing: &mut Option<StandingOffer>,
+) {
     use std::time::{Duration, Instant};
     let mut too_big = false;
+    // Sticky: the relay is already holding this transfer in resumable form, so the
+    // mailbox is not a fallback any more — it is a second, worse copy. Set only by
+    // a *complete* offload (see [`LiveOutcome::Offloaded`]); a capped or failed one
+    // must never set it, or a recipient who can make the relay refuse would have a
+    // remote switch for turning off somebody else's fallback path.
+    let mut offloaded = false;
     let mut next_relay_try = Instant::now();
     let give_up_at = Instant::now() + Duration::from_secs(MAX_WAITING_SECS);
-    // Backoff for live attempts that find nobody. Each attempt posts a fresh offer
-    // into the recipient's inbox, so retrying on the plain poll interval against a
-    // presence beacon that says "online" while nobody ever connects churns one
-    // offer every few seconds — eighty-four of them, in the case that prompted
-    // this. Growing the gap costs a slower reconnect when they really do come
-    // back, which the mailbox path covers anyway.
+    // How long this send may spend waiting for a person before the file is parked
+    // on the relay instead. Dated from the *send*, not from the attempt, so a
+    // sequence of retries cannot push it out for ever.
+    //
+    // `deposit_after = 0` puts it in the past from the start, which is exactly the
+    // old behaviour: the first live attempt to give up deposits.
+    let deposit_deadline = Instant::now() + Duration::from_secs(deposit_after_secs());
+    // Whether the recipient's presence beacon has ever been seen alive on this
+    // send. Read only in the direction "was up, is now down" — somebody closing
+    // their laptop, which is the one case where waiting out the grace would be
+    // wrong. Never in reverse: a recipient running a bare `arvolo recv` publishes
+    // no beacon at all (see `proven_present` below), and reading their silence as
+    // "they left" would take the live path away from precisely the people it still
+    // works for.
+    let mut beacon_ever_alive = false;
+    // Backoff for live attempts that find nobody. Retrying on the plain poll
+    // interval against a presence beacon that says "online" while nobody ever
+    // connects spends one whole preparation every few seconds — eighty-four of
+    // them, in the case that prompted this. Growing the gap costs a slower
+    // reconnect when they really do come back, which the wake-up below and the
+    // mailbox path both cover.
     let mut live_backoff = Duration::ZERO;
     let mut next_live_try = Instant::now();
+    // Set when the standing offer's status moves under us: somebody read it, or took
+    // it. That is better evidence of a recipient being there than a presence beacon
+    // — it is them *acting on this send* — and it is the only evidence there is for
+    // one running a bare `arvolo recv`, which reads its inbox and dials without ever
+    // publishing a beacon. Without this the wake-up would fire into a presence check
+    // that says "offline" and the attempt would be skipped.
+    let mut proven_present = false;
+    // The chunk digests, and the key and seed they belong to. Recomputing them per
+    // attempt made a large file spend most of its life re-encrypting itself between
+    // tries — and minted a new ticket each time, so an offer the recipient had
+    // already seen went stale. See [`flow::ReusablePrep`].
+    //
+    // Read from the held send rather than owned here: this task is what a pause
+    // destroys, and the preparation must not be. `Held` survives it.
+    let prep = held_prep(inner, id);
+    // What the last live attempt learned about this network: true when no relay
+    // would have us. Kept across the loop because it is the first half of a
+    // sentence the second half finishes below — a relay we cannot reach either.
+    let mut local_only = false;
     loop {
         if cancel.is_cancelled() {
-            handle_stop(&inner, id, &pause_flag);
+            handle_stop(inner, id, pause_flag);
             return;
         }
         // Held too long with no delivery → auto-pause (keep it, tell the user) so a
         // too-large file to a recipient who never returns doesn't retry forever.
         if Instant::now() >= give_up_at {
             set_paused(
-                &inner,
+                inner,
                 id,
                 &format!(
                     "still undelivered after {} days — paused; resume to keep trying, or cancel",
@@ -250,12 +623,27 @@ pub(super) async fn deliver_to(
         // quietly depositing it as the whole point of the setting is.
         let online = crate::transfer::p2p_enabled()
             && Instant::now() >= next_live_try
-            && presence::check_online(&inner.client, &relay, &recipient)
-                .await
-                .unwrap_or(false);
+            && (std::mem::take(&mut proven_present) || {
+                let up = presence::check_online(&inner.client, relay, recipient)
+                    .await
+                    .unwrap_or(false);
+                beacon_ever_alive |= up;
+                up
+            });
         if online {
             match serve_live_once(
-                &inner, id, &cancel, &relay, &recipient, &payload, &name, archive, &note,
+                inner,
+                id,
+                cancel,
+                relay,
+                recipient,
+                payload,
+                name,
+                archive,
+                note,
+                &prep,
+                standing,
+                &mut local_only,
             )
             .await
             {
@@ -271,15 +659,15 @@ pub(super) async fn deliver_to(
                     if let Some(total) = total {
                         inner.set_progress(id, total);
                     }
-                    finish(&inner, id, false, Ok(None));
+                    finish(inner, id, false, Ok(None));
                     return;
                 }
                 LiveOutcome::Cancelled => {
-                    handle_stop(&inner, id, &pause_flag);
+                    handle_stop(inner, id, pause_flag);
                     return;
                 }
                 LiveOutcome::Fatal(e) => {
-                    finish(&inner, id, false, Err(e));
+                    finish(inner, id, false, Err(e));
                     return;
                 }
                 LiveOutcome::NotConnected => {
@@ -291,29 +679,140 @@ pub(super) async fn deliver_to(
                     };
                     next_live_try = Instant::now() + live_backoff;
                 }
+                LiveOutcome::Offloaded => {
+                    // The relay holds everything they still lack. Two things follow.
+                    //
+                    // The mailbox is off for good on this send: depositing now would
+                    // re-upload the whole file as a sealed one-shot blob, spending
+                    // the relay a second time and discarding the partial they
+                    // already have (a mailbox fetch cannot resume). `offloaded` is
+                    // sticky for the same reason `too_big` is — the fact it records
+                    // does not stop being true later.
+                    //
+                    // And the loop goes back to waiting rather than ending: they may
+                    // still come back for a direct transfer, which is faster and
+                    // costs the relay nothing, and the wait is also what keeps
+                    // `give_up_at` reachable. Ending here would strand the row.
+                    offloaded = true;
+                    set_waiting(inner, id, WaitingReason::Parked);
+                    live_backoff = match live_backoff {
+                        Duration::ZERO => Duration::from_secs(LIVE_RETRY_MIN_SECS),
+                        d => (d * 2).min(Duration::from_secs(LIVE_RETRY_MAX_SECS)),
+                    };
+                    next_live_try = Instant::now() + live_backoff;
+                }
+                LiveOutcome::AwaitingDecision => {
+                    // Their daemon has the offer and is holding it in front of
+                    // somebody. The route works; the answer has not come. So this
+                    // is not a reason to spend the relay — hold the mailbox back
+                    // until the decision has had a real chance, and let the loop
+                    // fall into the long poll below, which the relay wakes the
+                    // instant they say yes.
+                    live_backoff = match live_backoff {
+                        Duration::ZERO => Duration::from_secs(LIVE_RETRY_MIN_SECS),
+                        d => (d * 2).min(Duration::from_secs(LIVE_RETRY_MAX_SECS)),
+                    };
+                    next_live_try = Instant::now() + live_backoff;
+                    // Unless they have gone. A beacon that was up and is now down is
+                    // somebody closing a lid, and waiting out the grace for a
+                    // machine that is off would strand the file for no gain.
+                    let left = beacon_ever_alive
+                        && !presence::check_online(&inner.client, relay, recipient)
+                            .await
+                            .unwrap_or(false);
+                    next_relay_try = if left {
+                        Instant::now()
+                    } else {
+                        deposit_deadline
+                    };
+                }
             }
         }
 
         // 2) Try the relay mailbox — unless it already refused as too large, or
         //    we're backing off after it was unavailable.
-        if !too_big && Instant::now() >= next_relay_try {
-            match deposit_offline_and_offer(
-                &inner,
-                &relay,
-                &recipient,
-                &payload,
-                &name,
-                &note,
-                &MailboxOpts::default(),
+        //
+        //    An explicit "park it now" jumps the queue: it is the user saying they
+        //    already know the answer is not coming, and making them wait out a grace
+        //    period they just overruled would be answering a different question.
+        let park_now = held_deposit_now(inner, id);
+        // "Park it on the relay" taken literally, when it can be. The recipient is
+        // already holding a chunk ticket (that is what a standing offer is), so the
+        // relay can hold the pieces it names and they can finish from there —
+        // resumably, keeping whatever they had already pulled, and without a second
+        // copy of the payload going up as a sealed blob.
+        //
+        // Reachable only with nothing yet delivered: a send that got as far as a
+        // receiver dropping has already offloaded from inside `serve`, and
+        // `offloaded` keeps this whole branch shut afterwards. So there is no
+        // delivered set to subtract here — only what the relay already holds, which
+        // `park_on_relay` asks it for.
+        if park_now && !too_big && !offloaded && standing.is_some() {
+            if let Some(out) = park_on_relay(
+                inner, id, cancel, relay, recipient, payload, name, archive, &prep,
             )
             .await
             {
+                clear_deposit_now(inner, id);
+                // Recorded before anything is said about it, for the same reason a
+                // deposit is: a parked send that nothing wrote down cannot be
+                // withdrawn or asked after, and the promise parking makes is that
+                // it can be.
+                let offer = standing
+                    .as_ref()
+                    .map(|s| (s.posted.id.clone(), s.posted.poster_token.clone()))
+                    .unwrap_or_default();
+                spawn_parked_confirm(inner, id, out, offer, relay.to_string(), recipient);
+                return;
+            }
+            // Couldn't park it all (capped, refused, unreachable): fall through to
+            // the mailbox, which is what the user asked for a route to.
+        }
+        if !too_big && !offloaded && (park_now || Instant::now() >= next_relay_try) {
+            // Interruptible: the upload is the longest thing this loop does, and a
+            // cancel that is only noticed once it *finishes* is a cancel that does
+            // nothing for as long as the file takes — minutes on a big one, with the
+            // UI saying "cancelling…" throughout. Dropping the future here abandons
+            // the request in flight; the partial blob expires on the relay with its
+            // slot, which is what an incomplete deposit does anyway.
+            // Defaults except for the target: this deposit is standing in for the
+            // live delivery the user asked for, so it has to be aimed at the same
+            // device. Losing it here would turn "put this on the desktop" into
+            // "put this on whichever machine wakes first" precisely when the
+            // desktop was not up — the case the aim was for.
+            let opts = MailboxOpts {
+                target: held_target(inner, id),
+                ..MailboxOpts::default()
+            };
+            // `relay` here is the recipient's — that is what the offer has to
+            // reach. The blob goes to ours when we have one, so we spend our own
+            // storage and not a stranger's; the `arvm…` carries whichever it was.
+            let deposit_relay = inner.relay.as_deref().unwrap_or(relay);
+            let attempt = deposit_offline_and_offer(
+                inner,
+                deposit_relay,
+                relay,
+                recipient,
+                payload,
+                name,
+                note,
+                &opts,
+            );
+            let outcome = tokio::select! {
+                _ = cancel.cancelled() => {
+                    handle_stop(inner, id, pause_flag);
+                    return;
+                }
+                out = attempt => out,
+            };
+            match outcome {
                 Ok(out) => {
-                    drop_held(&inner, id);
+                    drop_held(inner, id);
                     spawn_offline_confirm(
-                        &inner,
+                        inner,
                         id,
-                        relay.clone(),
+                        deposit_relay.to_string(),
+                        relay.to_string(),
                         out,
                         unix_now().saturating_add(OFFLINE_TTL_SECS),
                     );
@@ -321,36 +820,109 @@ pub(super) async fn deliver_to(
                 }
                 Err(flow::DepositError::TooLarge) => {
                     too_big = true;
-                    set_waiting(
-                        &inner,
-                        id,
-                        "file too large for this relay — waiting for the recipient to come online for a direct transfer",
-                    );
+                    set_waiting(inner, id, WaitingReason::TooLarge);
                 }
                 Err(flow::DepositError::Fatal(e)) => {
-                    finish(&inner, id, false, Err(e));
+                    finish(inner, id, false, Err(e));
                     return;
                 }
+                Err(e @ flow::DepositError::Busy) => {
+                    set_waiting(inner, id, WaitingReason::RelayRetry(e.to_string()));
+                    next_relay_try = Instant::now() + Duration::from_secs(RELAY_RETRY_SECS);
+                }
+                // The relay is unreachable. If our own endpoint could not find a
+                // relay either, that is not a relay having a moment: both ways out
+                // of this network are shut, and the only thing still working is the
+                // network itself. Say that instead — it is the difference between
+                // "try again in a minute" and "you are behind something".
                 Err(e @ flow::DepositError::Unavailable(_)) => {
-                    set_waiting(
-                        &inner,
-                        id,
-                        &format!(
-                            "{e} — retrying later, and delivering P2P as soon as the recipient is online"
-                        ),
-                    );
+                    let reason = if local_only {
+                        WaitingReason::NoRoute
+                    } else {
+                        WaitingReason::RelayRetry(e.to_string())
+                    };
+                    set_waiting(inner, id, reason);
                     next_relay_try = Instant::now() + Duration::from_secs(RELAY_RETRY_SECS);
                 }
             }
         }
 
-        // 3) Idle briefly, then re-check presence (react immediately to pause/cancel).
-        tokio::select! {
-            _ = cancel.cancelled() => {
-                handle_stop(&inner, id, &pause_flag);
-                return;
+        // 3) Wait for something to change, then go round again (reacting at once to
+        //    pause/cancel).
+        //
+        // "Something" is, above all, the recipient accepting. While an offer of ours
+        // stands we spend the wait held open on its status instead of asleep: the
+        // relay answers the moment they ack, so an accept lands here in a round trip
+        // rather than at the end of a backoff that grows to five minutes. That gap
+        // was the whole bug — a file too large for the mailbox can *only* move while
+        // both ends are awake together, and the sender was reliably asleep for the
+        // several minutes after the recipient said yes.
+        //
+        // `offer_status_waiting` never returns early without news, so this doubles
+        // as the idle sleep; a relay too old to hold the connection falls back to
+        // exactly the interval this used to sleep.
+        let woken = match standing.as_mut() {
+            Some(s) => {
+                let now = tokio::select! {
+                    _ = cancel.cancelled() => {
+                        handle_stop(inner, id, pause_flag);
+                        return;
+                    }
+                    st = presence::offer_status_waiting(
+                        &inner.client,
+                        relay,
+                        recipient,
+                        &s.posted.id,
+                        &s.posted.poster_token,
+                        s.seen,
+                        WAITING_POLL_SECS,
+                    ) => st.ok(),
+                };
+                match now {
+                    // An offer that expired or was withdrawn from under us is not
+                    // something to keep waiting on: forget it, and the next live
+                    // attempt posts a fresh one.
+                    Some(presence::OfferStatus::Gone) => {
+                        *standing = None;
+                        false
+                    }
+                    // A reading we did not have before: somebody on their side just
+                    // touched this offer. A relay that cannot hold the connection
+                    // answers the old reading instead, and this is false — which is
+                    // the polling behaviour this replaced.
+                    Some(st) => {
+                        let changed = st != s.seen;
+                        s.seen = st;
+                        // The same ladder the deposits list reads, on the live row
+                        // too. Until now only a deposited send carried it, so a send
+                        // holding an offer open had nothing on screen distinguishing
+                        // "it hasn't reached them" from "it is sitting in front of
+                        // them" — which, once the wait can last half an hour, is the
+                        // difference between something worth leaving alone and
+                        // something worth parking by hand.
+                        if changed {
+                            set_offer_status_live(inner, id, st.as_str());
+                        }
+                        changed
+                    }
+                    None => false,
+                }
             }
-            _ = tokio::time::sleep(Duration::from_secs(WAITING_POLL_SECS)) => {}
+            None => tokio::select! {
+                _ = cancel.cancelled() => {
+                    handle_stop(inner, id, pause_flag);
+                    return;
+                }
+                _ = tokio::time::sleep(Duration::from_secs(WAITING_POLL_SECS)) => false,
+            },
+        };
+        if woken {
+            // They are there, right now — the one moment worth spending an attempt
+            // on. Whatever the backoff had grown to was measuring how long nobody had
+            // come; that question is answered.
+            live_backoff = Duration::ZERO;
+            next_live_try = Instant::now();
+            proven_present = true;
         }
     }
 }
@@ -366,24 +938,57 @@ pub(super) async fn serve_live_once(
     cancel: &CancellationToken,
     relay: &str,
     recipient: &PublicId,
-    payload: &Path,
+    payload: &crate::source::SendSource,
     name: &str,
     archive: bool,
     note: &str,
+    prep: &flow::PrepSlot,
+    standing: &mut Option<StandingOffer>,
+    // Set to what this attempt found: true when no relay would have us, so the
+    // ticket we just minted reaches this network and no further. The caller keeps
+    // it because the answer only becomes *useful* later — when the relay mailbox
+    // turns out to be unreachable too, and the two facts together are a closed
+    // network rather than a busy relay.
+    local_only: &mut bool,
 ) -> LiveOutcome {
-    let session = match flow::prepare_send(
-        payload,
+    // Say what this is before doing it — but only when there is something to say.
+    // The first attempt reads and encrypts the whole payload (a minute and a half
+    // per 10 GB on an SSD) and posts nothing anywhere: the recipient cannot know a
+    // file is coming, because the offer carries a ticket this pass has not
+    // produced yet. Left as `Active` the row said "0 B" for all that time, which
+    // is indistinguishable from a transfer that is failing to move. A later
+    // attempt reuses that work and starts serving at once, so it says nothing.
+    let fresh = prep.lock().unwrap().is_none();
+    if fresh {
+        inner.set_status_live(id, TransferStatus::Preparing);
+        inner.emit(ManagerEvent::Preparing { id });
+    }
+    // Stamped before the pass, compared after it — see `persist_prep_record`.
+    let before = fresh
+        .then(|| payload_stamp(&PathBuf::from(payload.label())))
+        .flatten();
+    let session = match flow::prepare_send_in_slot(
+        payload.clone(),
         name,
         archive,
         Some((&inner.me, recipient)),
         Some(relay.to_string()),
         RelayChoice::from_env(),
+        prep,
     )
     .await
     {
         Ok(s) => s,
         Err(e) => return LiveOutcome::Fatal(e.context("prepare send")),
     };
+    *local_only = session.local_only();
+    // Written down *before* anyone is told about it. The invariant is that a ticket
+    // in somebody's hands can be reproduced: put the offer out first and a crash in
+    // between leaves the recipient holding a ticket this daemon can no longer serve,
+    // which is the whole bug.
+    if fresh {
+        persist_prep_record(inner, id, payload, prep, before);
+    }
 
     let offer = Offer {
         name: name.to_string(),
@@ -392,36 +997,98 @@ pub(super) async fn serve_live_once(
         ticket: session.ticket.clone(),
         note: note.to_string(),
         sender_name: inner.display_name.lock().unwrap().clone(),
+        origin: *inner.device_id.lock().unwrap(),
+        // Read from the held record rather than passed down: the mailbox fallback
+        // below posts its own offer and has to stamp the same value, and a second
+        // parameter through five functions is a second place to forget it.
+        target: held_target(inner, id),
+        // Ours, not `relay` — that one is where *they* listen, and telling them to
+        // answer at their own address would teach them nothing.
+        relay: inner.relay.clone().unwrap_or_default(),
     };
-    let posted = match presence::post_offer(
-        &inner.client,
-        relay,
-        recipient,
-        &inner.me,
-        &offer,
-        None,
-    )
-    .await
-    {
-        Ok(p) => p,
-        // Can't even notify them → treat as not-connected; the caller retries.
-        Err(_) => return LiveOutcome::NotConnected,
+    // Post an offer only when we don't already have one standing. The ticket is
+    // byte-stable across attempts (see [`flow::prepare_send_reusing`]), so a second
+    // post says nothing new — it just leaves another copy of the same offer in the
+    // recipient's inbox, and splits the one thing the caller waits on across ids it
+    // no longer holds. Whoever accepts the copy from an hour ago is then accepting
+    // an offer nobody is listening for.
+    //
+    // `Gone` (expired, or withdrawn) is the one answer that needs a fresh post; an
+    // unreachable relay reads as gone too, and re-posting is the safe way to be
+    // wrong about that.
+    if let Some(s) = standing.as_mut() {
+        match presence::offer_status(
+            &inner.client,
+            relay,
+            recipient,
+            &s.posted.id,
+            &s.posted.poster_token,
+        )
+        .await
+        {
+            Ok(presence::OfferStatus::Gone) => *standing = None,
+            Ok(st) => s.seen = st,
+            // An unreachable relay reads like a missing offer, and re-posting is the
+            // safe way to be wrong about that: a duplicate costs the recipient a
+            // second row, a missing one costs them the file.
+            Err(_) => *standing = None,
+        }
+    }
+    if standing.is_none() {
+        match presence::post_offer(&inner.client, relay, recipient, &inner.me, &offer, None).await {
+            Ok(p) => {
+                *standing = Some(StandingOffer {
+                    posted: p,
+                    seen: presence::OfferStatus::Pending,
+                })
+            }
+            // Can't even notify them → treat as not-connected; the caller retries.
+            // Say why in the log: a silent discard here once hid a systematically
+            // failing offer as an endless quiet retry loop.
+            Err(e) => {
+                tracing::warn!("posting offer for transfer {id} failed: {e:#}");
+                return LiveOutcome::NotConnected;
+            }
+        }
+    }
+    let (offer_id, poster_token) = {
+        let s = standing.as_ref().expect("an offer stands by here");
+        (s.posted.id.clone(), s.posted.poster_token.clone())
     };
-    inner.set_status(id, TransferStatus::Active);
+    // The offer is out and the payload is ready, but nobody has taken it yet —
+    // which is neither "preparing" nor "active", and saying either one is a lie
+    // with consequences. This used to set `Active` *silently*: no event, and the
+    // interface is fed by pushed events between snapshots, so a screen that had
+    // just been told "preparing" went on saying it for the whole time the offer
+    // sat there waiting to be accepted — minutes, sometimes — with the reading it
+    // showed being the one state that was certainly over.
+    //
+    // `set_waiting` says the true thing and announces it. `Active` follows below,
+    // when a receiver actually connects.
+    set_waiting(inner, id, WaitingReason::Offered);
 
     // Per-attempt child token: the watchdog cancels *this* to stop serving on
     // fallback, leaving the caller's token (user cancel) untouched.
     let attempt = cancel.child_token();
     let connected = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let delivered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // Which of the watchdog's two give-ups happened, if either. The token it
+    // cancels is the same in both cases, so without this the caller cannot tell
+    // "their beacon was lying" from "their daemon has it and nobody has said yes"
+    // — and those two want opposite answers from the loop above.
+    let seen_not_connected = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // Reachable from outside for as long as this attempt serves: a "park it on the
+    // relay now" ends the attempt through this, exactly as the watchdog does.
+    set_held_attempt(inner, id, Some(attempt.clone()));
 
     let wd_attempt = attempt.clone();
     let wd_connected = connected.clone();
+    let wd_seen_not_connected = seen_not_connected.clone();
     let wd_inner = inner.clone();
     let wd_relay = relay.to_string();
     let wd_recipient = recipient.clone();
-    let wd_offer = posted.id.clone();
-    let wd_token = posted.poster_token.clone();
+    let wd_offer = offer_id.clone();
+    let wd_token = poster_token.clone();
     let watchdog = tokio::spawn(async move {
         use std::time::{Duration, Instant};
         let phase1 = Instant::now() + Duration::from_secs(LIVE_CONFIRM_SECS);
@@ -462,16 +1129,36 @@ pub(super) async fn serve_live_once(
             }
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
-        wd_attempt.cancel(); // seen but never connected -> abandon this attempt
+        // Seen but never connected. Their daemon has the offer; what is missing is
+        // an answer. Flagged before the cancel so the verdict below cannot race it.
+        wd_seen_not_connected.store(true, Ordering::Relaxed);
+        wd_attempt.cancel(); // abandon this attempt, not the send
     });
 
     let c = connected.clone();
     let d = delivered.clone();
     let stop = attempt.clone();
     let inner_cb = inner.clone();
+    let recipient_cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let rc = recipient_cancelled.clone();
+    // Set when `serve` ends because the relay now holds everything the recipient
+    // still lacks, and when the relay refuses to hold any more of it.
+    let offloaded = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let capped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let off = offloaded.clone();
+    let capped_cb = capped.clone();
     let result = session
         .serve(attempt, move |ev| match ev {
-            SendEvent::ReceiverConnected => c.store(true, Ordering::Relaxed),
+            SendEvent::ReceiverConnected => {
+                c.store(true, Ordering::Relaxed);
+                // Somebody is on the other end now: no longer waiting on them.
+                // `set_status_live`, emphatically not `set_status`: the latter is
+                // for statuses that mean the task is over (terminal, or paused) and
+                // so drops the transfer's cancel token. Used here it threw the token
+                // away at the exact moment the send started serving — leaving a
+                // running transfer that nothing could stop.
+                inner_cb.set_status_live(id, TransferStatus::Active);
+            }
             SendEvent::Progress { transferred, total } => {
                 inner_cb.set_progress(id, transferred);
                 inner_cb.emit(ManagerEvent::Progress {
@@ -484,15 +1171,30 @@ pub(super) async fn serve_live_once(
                 d.store(true, Ordering::Relaxed);
                 stop.cancel();
             }
+            SendEvent::RecipientCancelled => rc.store(true, Ordering::Relaxed),
             SendEvent::Peers { count } => inner_cb.set_download_peers(id, count),
-            SendEvent::Ready { .. }
-            | SendEvent::ReceiverDropped { .. }
-            | SendEvent::Backfilled
-            | SendEvent::BackfillFailed { .. }
-            | SendEvent::RelayCapped { .. } => {}
+            SendEvent::Offloaded => off.store(true, Ordering::Relaxed),
+            // Say it. This used to be dropped on the floor with the rest: the relay
+            // refuses to hold any more of this transfer, the offload silently does
+            // not happen, and the send goes back to waiting with nothing on screen
+            // to distinguish that from a relay that is fine. It is also the input
+            // the loop needs to stop trying.
+            SendEvent::RelayCapped { limit_bytes } => {
+                capped_cb.store(true, Ordering::Relaxed);
+                set_waiting(&inner_cb, id, WaitingReason::RelayCapped(mib(limit_bytes)));
+            }
+            // Also said out loud, for the same reason as the cap above: a relay with
+            // no room left is the case where the file most needs the user to know
+            // the offload did not happen — and it was the quietest.
+            SendEvent::BackfillFailed { reason } => {
+                set_waiting(&inner_cb, id, WaitingReason::OffloadFailed(reason));
+            }
+            SendEvent::Ready { .. } | SendEvent::ReceiverDropped { .. } | SendEvent::Backfilled => {
+            }
         })
         .await;
     watchdog.abort();
+    set_held_attempt(inner, id, None);
 
     if let Err(e) = result {
         return LiveOutcome::Fatal(e);
@@ -500,19 +1202,34 @@ pub(super) async fn serve_live_once(
     if delivered.load(Ordering::Relaxed) {
         return LiveOutcome::Delivered;
     }
+    if recipient_cancelled.load(Ordering::Relaxed) {
+        // They said no, on the wire and on purpose. Retract the standing offer
+        // and end the send — retrying would re-offer a file just refused.
+        let _ = presence::retract_offer(&inner.client, relay, recipient, &offer_id, &poster_token)
+            .await;
+        *standing = None;
+        return LiveOutcome::Fatal(anyhow::anyhow!(
+            "the recipient cancelled the transfer on their side"
+        ));
+    }
     if cancel.is_cancelled() {
         return LiveOutcome::Cancelled;
     }
-    // Seen/served but nobody completed the pull → retract the dangling offer and
-    // report not-connected so the caller falls back to the relay / keeps waiting.
-    let _ = presence::retract_offer(
-        &inner.client,
-        relay,
-        recipient,
-        &posted.id,
-        &posted.poster_token,
-    )
-    .await;
+    // Read before the two "nobody came" verdicts below, because it outranks them:
+    // both of those are reasons to consider the mailbox, and this one says the file
+    // is already waiting on the relay in a form the recipient can finish from.
+    if offloaded.load(Ordering::Relaxed) {
+        return LiveOutcome::Offloaded;
+    }
+    // Seen/served but nobody completed the pull. The offer *stays*: this attempt is
+    // over, the send is not, and that row is the only way the recipient can say yes
+    // between attempts — and their saying yes is what wakes us (see the wait in
+    // `deliver_to_inner`). Withdrawing it here is what used to make every attempt
+    // post a new one, so the accept that did arrive named an offer this loop had
+    // already thrown away. The caller withdraws it once, when the send really ends.
+    if seen_not_connected.load(Ordering::Relaxed) {
+        return LiveOutcome::AwaitingDecision;
+    }
     LiveOutcome::NotConnected
 }
 
@@ -555,16 +1272,122 @@ pub(super) const OFFLINE_MAX_DOWNLOADS: u32 = 1;
 /// defaults — it is standing in for a live delivery the user asked for, and a
 /// password nobody typed cannot be part of that. An explicit deposit carries
 /// whatever the user chose.
-pub(super) async fn deposit_offline_and_offer(
-    inner: &Inner,
+/// The device a held send is aimed at, if any. `None` for every send to somebody
+/// else, and for a row whose held record has already been taken (a finished or
+/// cancelled send posts nothing more, so there is nothing to aim).
+fn held_target(inner: &Inner, id: u64) -> Option<crate::sync::DeviceId> {
+    inner.held.lock().unwrap().get(&id).and_then(|h| h.target)
+}
+
+/// Clear a consumed "park it now": the flag is a request, and leaving it set after
+/// the request has been carried out re-parks on every turn of the loop. The deposit
+/// path never had to do this — it drops the whole held record and returns.
+pub(super) fn clear_deposit_now(inner: &Inner, id: u64) {
+    if let Some(h) = inner.held.lock().unwrap().get(&id) {
+        h.deposit_now.store(false, Ordering::Relaxed);
+    }
+}
+
+/// Park a held send on the relay rather than depositing it: seed every piece the
+/// relay does not already hold, so the recipient can finish from there with this
+/// daemon off. `true` if the relay ended up holding all of it.
+///
+/// Requires a standing offer, which the caller checks: the relay's copy is
+/// addressed by the chunk hashes in the ticket, so with nothing in the recipient's
+/// inbox naming them, seeding would put the file somewhere they cannot reach. That
+/// case still belongs to the mailbox, which carries its own way in.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn park_on_relay(
+    inner: &Arc<Inner>,
+    id: u64,
+    cancel: &CancellationToken,
     relay: &str,
     recipient: &PublicId,
-    payload: &Path,
+    payload: &crate::source::SendSource,
+    name: &str,
+    archive: bool,
+    prep: &flow::PrepSlot,
+) -> Option<ParkOutcome> {
+    // Reuses the preparation, so this is the cheap path even on a large payload —
+    // and it binds the same node id, which is what lets the relay pull from us.
+    let session = match flow::prepare_send_in_slot(
+        payload.clone(),
+        name,
+        archive,
+        Some((&inner.me, recipient)),
+        Some(relay.to_string()),
+        RelayChoice::from_env(),
+        prep,
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!("parking transfer {id} on the relay: prepare failed: {e:#}");
+            return None;
+        }
+    };
+    if !session.has_relay {
+        // No relay in the ticket: nothing to park onto, and the recipient's copy of
+        // the ticket says the same, so they would never look there either.
+        session.shutdown().await;
+        return None;
+    }
+    let inner_cb = inner.clone();
+    let parked = session
+        .park_on_relay(flow::PARK_TTL_SECS, cancel, move |ev| match ev {
+            flow::SendEvent::RelayCapped { limit_bytes } => {
+                set_waiting(&inner_cb, id, WaitingReason::RelayCapped(mib(limit_bytes)))
+            }
+            flow::SendEvent::BackfillFailed { reason } => {
+                set_waiting(&inner_cb, id, WaitingReason::OffloadFailed(reason))
+            }
+            _ => {}
+        })
+        .await;
+    let release = session.relay_release();
+    let chunks = session.chunk_hashes();
+    let size = session.total_size;
+    session.shutdown().await;
+    let ttl = parked?;
+    Some(ParkOutcome {
+        release: release?,
+        chunks,
+        size,
+        ttl_secs: ttl,
+    })
+}
+
+/// What a successful park yields: where the pieces are, which pieces they are, and
+/// how long the relay agreed to hold them.
+///
+/// Kept for the same reasons a deposit's outcome is: a parked send has to be
+/// withdrawable (the token), askable-about (the hashes), and deadlined (the TTL) —
+/// otherwise parking is a worse promise than depositing, which is exactly what it
+/// is standing in for.
+pub(super) struct ParkOutcome {
+    pub(super) release: crate::backfill::RelayRelease,
+    pub(super) chunks: Vec<crate::hash::Hash>,
+    pub(super) size: u64,
+    pub(super) ttl_secs: u64,
+}
+
+/// `deposit_relay` holds the blob, `offer_relay` holds the notice pointing at it.
+/// They are the same string in the ordinary case and must not be collapsed into
+/// one: the recipient reads only their own inbox, while the `arvm…` names the
+/// relay it was uploaded to, so a cross-relay deposit needs both.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn deposit_offline_and_offer(
+    inner: &Inner,
+    deposit_relay: &str,
+    offer_relay: &str,
+    recipient: &PublicId,
+    payload: &crate::source::SendSource,
     name: &str,
     note: &str,
     opts: &MailboxOpts,
 ) -> std::result::Result<DepositOutcome, flow::DepositError> {
-    let size = std::fs::metadata(payload).map(|m| m.len()).unwrap_or(0);
+    let size = payload.len().unwrap_or(0);
     let ttl = opts.ttl.unwrap_or(OFFLINE_TTL_SECS);
     let max = opts.max.unwrap_or(OFFLINE_MAX_DOWNLOADS);
     let deposited = flow::deposit_offline(
@@ -572,7 +1395,7 @@ pub(super) async fn deposit_offline_and_offer(
         name,
         recipient,
         &inner.me,
-        relay,
+        deposit_relay,
         ttl,
         max,
         opts.password.as_deref(),
@@ -594,10 +1417,13 @@ pub(super) async fn deposit_offline_and_offer(
         ticket: deposited.ticket.encode(),
         note: note.to_string(),
         sender_name: inner.display_name.lock().unwrap().clone(),
+        origin: *inner.device_id.lock().unwrap(),
+        target: opts.target,
+        relay: inner.relay.clone().unwrap_or_default(),
     };
     let posted = presence::post_offer(
         &inner.client,
-        relay,
+        offer_relay,
         recipient,
         &inner.me,
         &offer,
@@ -645,9 +1471,12 @@ pub(super) fn cancel_deposited(inner: Arc<Inner>, id: u64) {
                 }
                 if !rec.offer_id.is_empty() {
                     if let Ok(recipient) = PublicId::from_bytes(&rec.recipient) {
+                        // Their relay, not the blob's: withdrawing the file and
+                        // withdrawing the notice are two calls to two servers when
+                        // the recipient is not on ours.
                         let _ = presence::retract_offer(
                             &inner.client,
-                            &rec.relay,
+                            &rec.offer_relay,
                             &recipient,
                             &rec.offer_id,
                             &rec.poster_token,
@@ -668,6 +1497,48 @@ pub(super) fn cancel_deposited(inner: Arc<Inner>, id: u64) {
     });
 }
 
+/// Cancel a **parked** send: take the pieces back off the relay and retract the
+/// notice pointing at them, then end the row.
+///
+/// The parked twin of [`cancel_deposited`], and it has to exist for the same
+/// reason: without it "cancel" would hide the row while the recipient could still
+/// collect the file — a cancel that cancels nothing. Both are tried within one
+/// bounded window, because the user is waiting and a relay that has gone away must
+/// not hold up their answer; what cannot be withdrawn lapses at its TTL.
+pub(super) fn cancel_parked(inner: Arc<Inner>, id: u64) {
+    let rec = inner
+        .state_dir
+        .as_ref()
+        .and_then(|dir| load_parkeds(dir).into_iter().find(|r| r.id == id));
+    tokio::spawn(async move {
+        if let Some(rec) = &rec {
+            let withdraw = async {
+                let _ = crate::backfill::revoke_seeded(&inner.client, &rec.relay, &rec.token).await;
+                if !rec.offer_id.is_empty() {
+                    if let Ok(recipient) = PublicId::from_bytes(&rec.recipient) {
+                        let _ = presence::retract_offer(
+                            &inner.client,
+                            &rec.offer_relay,
+                            &recipient,
+                            &rec.offer_id,
+                            &rec.poster_token,
+                        )
+                        .await;
+                    }
+                }
+            };
+            let _ =
+                tokio::time::timeout(std::time::Duration::from_secs(CANCEL_RELAY_SECS), withdraw)
+                    .await;
+        }
+        if let Some(dir) = &inner.state_dir {
+            remove_parked(dir, id);
+        }
+        inner.set_status(id, TransferStatus::Cancelled);
+        inner.emit(ManagerEvent::Cancelled { id });
+    });
+}
+
 /// Watch a deposited blob until its fate is known: Completed once the recipient
 /// fetches it, Failed once the relay-side TTL runs out with it still sitting
 /// there. Backs off from seconds to `POLL_MAX_SECS` and keeps watching for the
@@ -681,10 +1552,14 @@ pub(super) fn cancel_deposited(inner: Arc<Inner>, id: u64) {
 /// and if the deadline passes without a single successful look the transfer is
 /// left Deposited. "I never saw it picked up" and "it wasn't picked up" are
 /// different claims, and only the second one earns a terminal state.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn confirm_offline_delivery(
     inner: Arc<Inner>,
     id: u64,
     relay: String,
+    // Where the offer sits — the recipient's relay, which is where "have they seen
+    // it?" is answered. `relay` above is where the blob sits.
+    offer_relay: String,
     claim: String,
     expires: u64,
     offer: Option<(PublicId, String, String)>,
@@ -701,7 +1576,7 @@ pub(super) async fn confirm_offline_delivery(
             read_deposit(look.as_ref(), None, unix_now(), verdict_at),
         ) {
             (Some((recipient, offer_id, token)), Verdict::KeepWatching) => {
-                presence::offer_status(&inner.client, &relay, recipient, offer_id, token)
+                presence::offer_status(&inner.client, &offer_relay, recipient, offer_id, token)
                     .await
                     .ok()
             }
@@ -790,6 +1665,35 @@ pub(super) fn read_deposit(
     }
 }
 
+/// Decide a **parked** send's fate from one look. Pure, like [`read_deposit`], and
+/// the same shape for the same reasons — with one honest difference at the end.
+///
+/// `held` is how many of its pieces the relay still has. Zero means the recipient
+/// released them as they took them, which is what a completed download does. The
+/// recipient's ack on the offer outranks it: that is a person acting, not an
+/// inference from an absence.
+///
+/// The difference: a recipient who is *swarming* does not release, so pieces can
+/// sit there through a completed download. Their absence therefore proves a
+/// pickup, but their presence proves nothing — so this reports [`Verdict::Unknown`]
+/// at the deadline rather than claiming nobody came. Saying "expired" of a file
+/// that was collected would be worse than admitting we cannot tell.
+pub(super) fn read_parked(
+    held: Option<usize>,
+    offer: Option<presence::OfferStatus>,
+    now: u64,
+    verdict_at: u64,
+) -> Verdict {
+    if matches!(offer, Some(presence::OfferStatus::Taken)) {
+        return Verdict::PickedUp;
+    }
+    match held {
+        Some(0) => Verdict::PickedUp,
+        _ if now < verdict_at => Verdict::KeepWatching,
+        _ => Verdict::Unknown,
+    }
+}
+
 /// Retire a watched deposit's durable record: the blob is past saving either way,
 /// so dropping it also stops a restart from re-watching a dead deposit.
 fn retire_record(inner: &Arc<Inner>, id: u64) {
@@ -814,6 +1718,9 @@ pub(super) fn spawn_offline_confirm(
     inner: &Arc<Inner>,
     id: u64,
     relay: String,
+    // The recipient's relay, holding the notice. Equal to `relay` unless they
+    // listen somewhere else.
+    offer_relay: String,
     out: DepositOutcome,
     expires: u64,
 ) {
@@ -890,6 +1797,7 @@ pub(super) fn spawn_offline_confirm(
                 revoke_token,
                 offer_id,
                 poster_token,
+                offer_relay: offer_relay.clone(),
             },
         );
     }
@@ -897,10 +1805,143 @@ pub(super) fn spawn_offline_confirm(
         inner.clone(),
         id,
         relay,
+        offer_relay,
         claim,
         expires,
         offer_probe,
     ));
+}
+
+/// Retire a parked send's durable record: nothing more can be done for it either
+/// way, and leaving it would have a restart re-watch a copy that is gone.
+fn retire_parked(inner: &Arc<Inner>, id: u64) {
+    if let Some(dir) = &inner.state_dir {
+        remove_parked(dir, id);
+    }
+}
+
+/// Mark a transfer as parked on the relay and start confirming its pickup.
+///
+/// The parked twin of [`spawn_offline_confirm`], and deliberately the same shape:
+/// the same terminal status, the same durable record, the same watcher. A parked
+/// send and a deposited one are the same promise to the person who made it —
+/// "it is on the relay, they can collect it, you can take it back" — and a
+/// front end that had to tell them apart to say that would be a front end with
+/// two vocabularies for one fact.
+pub(super) fn spawn_parked_confirm(
+    inner: &Arc<Inner>,
+    id: u64,
+    out: ParkOutcome,
+    // The offer naming these pieces, and the token that retracts it. Empty when
+    // none stands, in which case there is no ack to wait for.
+    offer: (String, String),
+    offer_relay: String,
+    recipient: &PublicId,
+) {
+    let ParkOutcome {
+        release,
+        chunks,
+        size,
+        ttl_secs,
+    } = out;
+    let expires = unix_now().saturating_add(ttl_secs);
+    inner.set_progress(id, size);
+    inner.set_status(id, TransferStatus::Deposited);
+
+    let name = inner
+        .transfers
+        .lock()
+        .unwrap()
+        .get(&id)
+        .map(|t| t.name.clone())
+        .unwrap_or_default();
+    let (offer_id, poster_token) = offer;
+
+    if let Some(dir) = &inner.state_dir {
+        persist_parked(
+            dir,
+            &ParkedRecord {
+                id,
+                recipient: recipient.to_bytes().to_vec(),
+                name,
+                size,
+                relay: release.http.clone(),
+                token: release.token.clone(),
+                chunks: chunks.clone(),
+                expires,
+                offer_id: offer_id.clone(),
+                poster_token: poster_token.clone(),
+                offer_relay: offer_relay.clone(),
+            },
+        );
+    }
+    let probe = (!offer_id.is_empty() && !poster_token.is_empty())
+        .then(|| (recipient.clone(), offer_id, poster_token));
+    tokio::spawn(confirm_parked_delivery(
+        inner.clone(),
+        id,
+        release.http,
+        offer_relay,
+        chunks,
+        expires,
+        probe,
+    ));
+}
+
+/// Watch a parked send until its fate is known, on the same ladder a deposit is
+/// watched on: their ack if there is an offer, otherwise whether the relay still
+/// holds the pieces.
+pub(super) async fn confirm_parked_delivery(
+    inner: Arc<Inner>,
+    id: u64,
+    relay: String,
+    offer_relay: String,
+    chunks: Vec<crate::hash::Hash>,
+    expires: u64,
+    offer: Option<(PublicId, String, String)>,
+) {
+    let verdict_at = expires.saturating_sub(OFFLINE_CONFIRM_MARGIN_SECS);
+    let mut delay = OFFLINE_CONFIRM_POLL_SECS;
+    loop {
+        let held = crate::backfill::relay_have(&inner.client, &relay, &chunks)
+            .await
+            .ok()
+            .map(|h| h.len());
+        let offer_state = match (&offer, read_parked(held, None, unix_now(), verdict_at)) {
+            (Some((recipient, offer_id, token)), Verdict::KeepWatching) => {
+                presence::offer_status(&inner.client, &offer_relay, recipient, offer_id, token)
+                    .await
+                    .ok()
+            }
+            _ => None,
+        };
+        if let Some(st) = offer_state {
+            inner.set_offer_status(id, st.as_str());
+        }
+        match read_parked(held, offer_state, unix_now(), verdict_at) {
+            Verdict::PickedUp => {
+                inner.set_status(id, TransferStatus::Completed);
+                inner.emit(ManagerEvent::Completed { id, path: None });
+                retire_parked(&inner, id);
+                return;
+            }
+            // A parked copy cannot report an honest "nobody came" — see
+            // [`read_parked`] — so both endings retire quietly rather than
+            // accusing the recipient of not collecting.
+            Verdict::Expired | Verdict::Unknown => {
+                retire_parked(&inner, id);
+                return;
+            }
+            Verdict::KeepWatching => {}
+        }
+        let now = unix_now();
+        if now >= verdict_at {
+            continue;
+        }
+        let sleep = delay.min(verdict_at.saturating_sub(now).max(1));
+        tokio::time::sleep(std::time::Duration::from_secs(sleep)).await;
+        delay = (delay * 2).min(OFFLINE_CONFIRM_POLL_MAX_SECS);
+    }
 }
 
 /// Unix seconds now (0 on a pre-epoch clock — never panics).
@@ -1057,10 +2098,14 @@ pub(super) async fn serve_session(
                 });
             }
             SendEvent::Peers { count } => inner_cb.set_download_peers(id, count),
+            // A shared ticket outlives any single receiver's refusal — their
+            // abort already suppressed that receiver's backfill; keep serving.
+            SendEvent::RecipientCancelled => {}
             SendEvent::Ready { .. }
             | SendEvent::ReceiverConnected
             | SendEvent::ReceiverDropped { .. }
             | SendEvent::Backfilled
+            | SendEvent::Offloaded
             | SendEvent::BackfillFailed { .. }
             | SendEvent::RelayCapped { .. } => {}
         })
@@ -1084,6 +2129,11 @@ pub(super) fn finish(inner: &Inner, id: u64, cancelled: bool, result: Result<Opt
     }
     // Drop any held `send --to` delivery state (memory + its durable record).
     drop_held(inner, id);
+    // Terminal: this download stops answering for its content. A completed one
+    // deliberately included — the file may since have been deleted, and telling
+    // somebody "you already have this" is a different feature with a different way
+    // of being wrong.
+    inner.download_content.lock().unwrap().remove(&id);
     match result {
         Ok(path) if cancelled => {
             inner.set_status(id, TransferStatus::Cancelled);
@@ -1210,8 +2260,147 @@ fn close_reason_text(reason: crate::code::CloseReason) -> String {
 // ---- resumable-download persistence ---------------------------------------
 
 #[cfg(test)]
+mod prep_record_tests {
+    use super::*;
+
+    fn write(path: &std::path::Path, body: &[u8]) {
+        std::fs::write(path, body).unwrap();
+    }
+
+    /// The stamp is the whole guard: a persisted preparation is believed on its word,
+    /// and this is the word.
+    #[test]
+    fn a_stamp_notices_a_payload_that_moved_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("payload.bin");
+        write(&p, b"the original bytes");
+        let before = payload_stamp(&p).expect("stat");
+
+        assert_eq!(
+            Some(before),
+            payload_stamp(&p),
+            "an untouched file is itself"
+        );
+
+        // Different length: caught by length alone.
+        write(&p, b"the original bytes, and then some");
+        assert_ne!(Some(before), payload_stamp(&p));
+
+        // Same length, replaced file. On unix the inode catches this on its own,
+        // whatever the clock did. Off unix there is no inode in the stamp, so the
+        // mtime is the whole of it — and a rename carries the source file's
+        // timestamp across, so writing both files back to back is not enough:
+        // Windows file times move in ~15ms ticks and two writes microseconds apart
+        // land on the same one. The test used to rely on them differing and failed
+        // on Windows for exactly that reason.
+        //
+        // So the replacement is given a plainly different mtime before it is moved
+        // into place. That is not weakening the test, it is naming what the stamp
+        // actually promises off unix: a same-length swap is caught when the clock
+        // recorded it, and a swap inside a single timestamp tick is not detectable
+        // from metadata alone.
+        let same_len = dir.path().join("same-len.bin");
+        write(&same_len, b"the original bytez");
+        let older = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
+        std::fs::File::options()
+            .write(true)
+            .open(&same_len)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(older))
+            .unwrap();
+        std::fs::rename(&same_len, &p).unwrap();
+        assert_ne!(Some(before), payload_stamp(&p));
+
+        assert!(
+            payload_stamp(&dir.path().join("nothing-here")).is_none(),
+            "no file, no stamp — and no stamp means no persisted preparation"
+        );
+    }
+
+    /// What a restart reads. Also pins the permissions: the record carries the
+    /// content key in the clear.
+    #[test]
+    fn a_prep_record_round_trips_privately() {
+        let dir = tempfile::tempdir().unwrap();
+        let rec = PrepRecord {
+            id: 7,
+            key: vec![3u8; crate::crypto::CHUNK_KEY_LEN],
+            node_seed: vec![9u8; 32],
+            total_size: 1234,
+            chunks: vec![crate::hash::Hash::new(b"a"), crate::hash::Hash::new(b"b")],
+            payload: "/tmp/payload.bin".into(),
+            len: 1234,
+            mtime_secs: 42,
+            mtime_nanos: 7,
+            dev: 1,
+            ino: 2,
+        };
+        persist_prep(dir.path(), &rec);
+        let back = load_prep(dir.path(), 7).expect("written and read back");
+        assert_eq!(back.key, rec.key);
+        assert_eq!(back.node_seed, rec.node_seed);
+        assert_eq!(back.chunks, rec.chunks);
+        assert_eq!(back.total_size, rec.total_size);
+        assert_eq!(back.ino, rec.ino);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(prep_record_path(dir.path(), 7))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600, "it holds a content key");
+        }
+
+        remove_prep(dir.path(), 7);
+        assert!(load_prep(dir.path(), 7).is_none());
+    }
+
+    /// The guard says no to a payload that is not the one the digests came from, and
+    /// the send simply prepares again — which is what every restart used to do.
+    #[test]
+    fn a_changed_payload_is_prepared_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("payload.bin");
+        write(&p, &vec![7u8; 4096]);
+        let stamp = payload_stamp(&p).unwrap();
+        let source = crate::source::SendSource::Path(p.clone());
+        let mk = |stamp: PayloadStamp, total_size: u64| PrepRecord {
+            id: 1,
+            key: vec![3u8; crate::crypto::CHUNK_KEY_LEN],
+            node_seed: vec![9u8; 32],
+            total_size,
+            // One chunk's worth of digests for a payload well under 16 MiB.
+            chunks: vec![crate::hash::Hash::new(b"only-chunk")],
+            payload: p.to_string_lossy().into_owned(),
+            len: stamp.len,
+            mtime_secs: stamp.mtime_secs,
+            mtime_nanos: stamp.mtime_nanos,
+            dev: stamp.dev,
+            ino: stamp.ino,
+        };
+
+        assert!(
+            rebuild_prep(&mk(stamp, 4096), &source).is_some(),
+            "the file the digests were taken from is still there"
+        );
+
+        write(&p, &vec![7u8; 8192]);
+        assert!(
+            rebuild_prep(&mk(stamp, 4096), &source).is_none(),
+            "a payload that changed under us must be prepared again"
+        );
+
+        // A record whose own size and length disagree is not a preparation.
+        let stamp = payload_stamp(&p).unwrap();
+        assert!(rebuild_prep(&mk(stamp, 4096), &source).is_none());
+    }
+}
+
+#[cfg(test)]
 mod deposit_verdict_tests {
-    use super::{presence, read_deposit, Verdict};
+    use super::{presence, read_deposit, read_parked, Verdict};
     use crate::flow::ClaimInfo;
 
     const DEADLINE: u64 = 1_000;
@@ -1329,6 +2518,38 @@ mod deposit_verdict_tests {
         assert_eq!(
             read_deposit(None, None, DEADLINE, DEADLINE),
             Verdict::Unknown
+        );
+    }
+
+    /// Pickup, read the way a parked send can honestly read it: the relay no
+    /// longer holding the pieces means the recipient took them and released them
+    /// as they went.
+    ///
+    /// And the ending that matters more — pieces still sitting there at the
+    /// deadline may NOT be reported as "nobody came". A recipient who swarms never
+    /// releases, so their presence proves nothing, and saying nobody collected a
+    /// file that was collected is the one wrong answer available here.
+    #[test]
+    fn a_parked_pickup_is_read_from_what_the_relay_still_holds() {
+        assert_eq!(read_parked(Some(0), None, 10, DEADLINE), Verdict::PickedUp);
+        assert_eq!(
+            read_parked(Some(3), None, 10, DEADLINE),
+            Verdict::KeepWatching
+        );
+        // Their own ack outranks any inference drawn from an absence.
+        assert_eq!(
+            read_parked(Some(3), Some(presence::OfferStatus::Taken), 10, DEADLINE),
+            Verdict::PickedUp
+        );
+        assert_eq!(
+            read_parked(Some(3), None, DEADLINE, DEADLINE),
+            Verdict::Unknown,
+            "pieces still held at the deadline cannot prove nobody came"
+        );
+        assert_eq!(
+            read_parked(None, None, DEADLINE, DEADLINE),
+            Verdict::Unknown,
+            "a relay we could not ask is unknown, not a verdict"
         );
     }
 

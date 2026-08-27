@@ -6,9 +6,11 @@
 //! code, so the relay stays zero-knowledge (it only sees PAKE messages and the
 //! **encrypted** ticket) and a short code is safe (no offline dictionary attack).
 //!
-//! The code may embed the sender's relay (`code@https://relay…`) so it works even
-//! when the two sides use different relays; without it, the receiver's configured
-//! default relay is used.
+//! The code always carries the sender's relay (`code@relay…`), so it works even
+//! when the two sides use different relays and the receiver needs no config at
+//! all. A bare `N-word-word` is still accepted on the way in — codes minted by
+//! older builds, and anything typed by hand — and falls back to the receiver's own
+//! default relay.
 
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
@@ -46,21 +48,20 @@ pub fn parse_code(code: &str) -> Result<(String, String, Option<String>)> {
 }
 
 /// Ensure a relay base URL carries a scheme. A bare host (`relay.example.com`)
-/// gets `https://` — or `http://` when `use_http` is set (LAN / dev / plaintext).
-/// An address that already has an explicit scheme is left untouched.
-pub fn normalize_relay(raw: &str, use_http: bool) -> String {
+/// gets `https://`; write `http://host:port` explicitly for a LAN / dev /
+/// plaintext relay. An address that already has a scheme is left untouched.
+pub fn normalize_relay(raw: &str) -> String {
     let r = raw.trim();
     if r.contains("://") {
         return r.to_string();
     }
-    let scheme = if use_http { "http" } else { "https" };
-    format!("{scheme}://{r}")
+    format!("https://{r}")
 }
 
 /// The compact form embedded in a pairing code: `https://` (the default) is
 /// dropped so the code reads `code@host`; a non-default `http://` is kept
 /// explicit so the receiver still knows to skip TLS. Inverse of `normalize_relay`.
-fn compact_relay(relay: &str) -> String {
+pub fn compact_relay(relay: &str) -> String {
     relay
         .strip_prefix("https://")
         .map(str::to_string)
@@ -149,23 +150,15 @@ pub struct PairComplete {
 }
 
 /// Claim a rendezvous slot and post the sender's SPAKE2 message. Returns the code
-/// to display (with `@relay` appended when `embed_relay`) and a handle to finish
-/// the exchange. Retries on a slot collision.
-pub async fn publish_ticket(
-    ticket: &str,
-    relay: &str,
-    embed_relay: bool,
-) -> Result<(String, PairComplete)> {
-    publish_bytes(ticket.as_bytes().to_vec(), relay, embed_relay).await
+/// to display (always `secret@relay`) and a handle to finish the exchange. Retries
+/// on a slot collision.
+pub async fn publish_ticket(ticket: &str, relay: &str) -> Result<(String, PairComplete)> {
+    publish_bytes(ticket.as_bytes().to_vec(), relay).await
 }
 
 /// Like [`publish_ticket`] but transfers arbitrary bytes (e.g. a postcard-encoded
 /// device-pairing payload) instead of a UTF-8 ticket string.
-pub async fn publish_bytes(
-    payload: Vec<u8>,
-    relay: &str,
-    embed_relay: bool,
-) -> Result<(String, PairComplete)> {
+pub async fn publish_bytes(payload: Vec<u8>, relay: &str) -> Result<(String, PairComplete)> {
     let relay = relay.trim_end_matches('/').to_string();
     let client = crate::http::client();
 
@@ -185,11 +178,7 @@ pub async fn publish_bytes(
         break (slot, secret, p);
     };
 
-    let shown = if embed_relay {
-        format!("{secret}@{}", compact_relay(&relay))
-    } else {
-        secret
-    };
+    let shown = format!("{secret}@{}", compact_relay(&relay));
     Ok((
         shown,
         PairComplete {
@@ -254,7 +243,7 @@ pub async fn resolve_bytes_with(
     default_relay: Option<&str>,
     timeout: Duration,
 ) -> Result<Vec<u8>> {
-    exchange_bytes_with(code, default_relay, timeout, None)
+    exchange_bytes_with(code, default_relay, timeout, None, None)
         .await
         .map(|(payload, _)| payload)
 }
@@ -276,6 +265,7 @@ pub async fn exchange_bytes_with(
     default_relay: Option<&str>,
     timeout: Duration,
     reply: Option<&[u8]>,
+    extras: Option<&[u8]>,
 ) -> Result<(Vec<u8>, bool)> {
     let (slot, secret, relay_in_code) = parse_code(code)?;
     let relay = relay_in_code
@@ -285,11 +275,11 @@ pub async fn exchange_bytes_with(
         })?;
     // A bare host embedded in the code (`code@host`) means https; `http://…` is
     // kept as-is (see `compact_relay`).
-    let relay = normalize_relay(relay.trim_end_matches('/'), false);
+    let relay = normalize_relay(relay.trim_end_matches('/'));
     let client = crate::http::client();
 
     match detect_version(&client, &relay, &slot, timeout).await? {
-        RzVersion::V2 => resolve_v2(&client, &relay, &slot, &secret, timeout, reply).await,
+        RzVersion::V2 => resolve_v2(&client, &relay, &slot, &secret, timeout, reply, extras).await,
         RzVersion::V1 => resolve_v1(&client, &relay, &slot, &secret, timeout)
             .await
             .map(|payload| (payload, false)),
@@ -372,6 +362,16 @@ const P_TKT: &str = "t.";
 /// and a relay without the prefix rejects the write, which is how a client learns
 /// this rendezvous cannot carry a reply.
 const P_BACK: &str = "b.";
+/// The receiver's routing extras, alongside its reply: where it listens, so the
+/// two can go on talking when they are not on the same relay.
+///
+/// A key of its own rather than more bytes inside `b.`. The reply is the *id*,
+/// read by both old and new clients, and postcard-style framing is not what it
+/// is — it is a base32 string that an older `contacts pair` feeds straight to a
+/// decoder. Anything appended to it makes that decoder fail, so the addition goes
+/// somewhere the old side never looks: it stays on `b.`, learns nothing new, and
+/// pairs exactly as it did.
+const P_XTRA: &str = "x.";
 /// How long the sender waits for that reply once it has sealed its own half.
 ///
 /// Short on purpose. The receiver writes its reply immediately after opening the
@@ -469,6 +469,10 @@ pub enum HostEvent {
         sid: String,
         done: u32,
         reply: Option<Vec<u8>>,
+        /// The receiver's routing extras, when it sent any. Absent from an older
+        /// client, and from a relay that does not know the `x.` key — which is why
+        /// nothing that matters depends on it.
+        extras: Option<Vec<u8>>,
     },
     /// A receiver failed key confirmation — a wrong code, or someone guessing.
     BadCode {
@@ -535,6 +539,54 @@ pub async fn relay_rz_version(relay: &str) -> RzVersion {
     }
 }
 
+/// What a relay answered when asked about itself.
+///
+/// The two fields are separate because they are separate facts, and collapsing
+/// them loses the one distinction the caller needs. A relay that is **reachable
+/// with no version** predates the field in the relay's `features_handler` — it
+/// is running and healthy and simply cannot say how old it is. A relay that is
+/// **unreachable** said nothing at all. Reading the second as "old" would gate a
+/// laptop on a train; reading the first as "current" would recommend the upgrade
+/// this is here to prevent.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RelayProbe {
+    /// `GET /v1/features` answered with a success status.
+    pub reachable: bool,
+    /// The version it named, if it named one.
+    pub version: Option<String>,
+}
+
+/// Ask a relay what it is. One round trip; never fails.
+///
+/// Matched by hand rather than parsed, for the same reason the two probes above
+/// it are: this document has no JSON parser on the client side, and adding one
+/// for a single string would make the shape harder to change, not easier.
+pub async fn relay_probe(relay: &str) -> RelayProbe {
+    let url = format!("{}/v1/features", relay.trim_end_matches('/'));
+    let Ok(resp) = crate::http::client().get(&url).send().await else {
+        return RelayProbe::default();
+    };
+    if !resp.status().is_success() {
+        return RelayProbe::default();
+    }
+    let Ok(body) = resp.text().await else {
+        return RelayProbe::default();
+    };
+    RelayProbe {
+        reachable: true,
+        version: parse_version(&body),
+    }
+}
+
+/// Pull `"version":"…"` out of a features document, if it is in there.
+fn parse_version(body: &str) -> Option<String> {
+    let flat: String = body.split_whitespace().collect();
+    let value = flat.split("\"version\":\"").nth(1)?.split('"').next()?;
+    // A relay is free to answer nonsense, and an empty string is not a version:
+    // passing it on would look like a real answer everywhere above here.
+    (!value.is_empty()).then(|| value.to_string())
+}
+
 /// The owner token as it travels: base32, lowercase, in an `Authorization`
 /// header (never a query parameter — those get logged verbatim by proxies).
 fn token_string(token: &[u8; 32]) -> String {
@@ -568,6 +620,16 @@ fn ticket_key32(pake_key: &[u8], slot: &str, sid: &str) -> [u8; CHUNK_KEY_LEN] {
 /// directions can never be confused: a payload sealed for one will not open under
 /// the other, and a relay that swapped `t.` and `b.` rows would produce two AEAD
 /// failures rather than a silent crossover.
+fn extras_key32(pake_key: &[u8], slot: &str, sid: &str) -> [u8; CHUNK_KEY_LEN] {
+    let mut input = Vec::with_capacity(pake_key.len() + slot.len() + sid.len() + 2);
+    input.extend_from_slice(pake_key);
+    input.push(0);
+    input.extend_from_slice(slot.as_bytes());
+    input.push(0);
+    input.extend_from_slice(sid.as_bytes());
+    blake3::derive_key("arvolo/code/extras-key/v1", &input)
+}
+
 fn reply_key32(pake_key: &[u8], slot: &str, sid: &str) -> [u8; CHUNK_KEY_LEN] {
     let mut input = Vec::with_capacity(pake_key.len() + slot.len() + sid.len() + 2);
     input.extend_from_slice(pake_key);
@@ -596,7 +658,7 @@ fn confirm_mac(pake_key: &[u8], slot: &str, sid: &str) -> blake3::Hash {
 
 /// Claim a fresh v2 slot on `relay`, retrying on a nameplate collision exactly as
 /// v1 does. Returns the code to show and the state to keep (and to persist).
-pub async fn claim_code(relay: &str, embed_relay: bool) -> Result<(String, CodeHost)> {
+pub async fn claim_code(relay: &str) -> Result<(String, CodeHost)> {
     let relay = relay.trim_end_matches('/').to_string();
     let client = crate::http::client();
     let owner_token: [u8; 32] = rand::random();
@@ -622,21 +684,17 @@ pub async fn claim_code(relay: &str, embed_relay: bool) -> Result<(String, CodeH
             relay,
             owner_token,
         };
-        let shown = host.shown(embed_relay);
+        let shown = host.shown();
         return Ok((shown, host));
     }
     bail!("could not find a free pairing code on {relay} — try again")
 }
 
 impl CodeHost {
-    /// The code as the user sees it, with `@relay` appended when the receiver
-    /// should not have to be configured.
-    pub fn shown(&self, embed_relay: bool) -> String {
-        if embed_relay {
-            format!("{}@{}", self.secret, compact_relay(&self.relay))
-        } else {
-            self.secret.clone()
-        }
+    /// The code as the user sees it. Always carries `@relay`: the person reading
+    /// it back may not be on the same relay, and nothing in a bare code says so.
+    pub fn shown(&self) -> String {
+        format!("{}@{}", self.secret, compact_relay(&self.relay))
     }
 
     fn token(&self) -> String {
@@ -771,7 +829,7 @@ impl CodeHost {
                     .answer(&client, &sid, payload, &mut emitted, opts.await_reply)
                     .await
                 {
-                    Ok(Answer::Paired { reply }) => {
+                    Ok(Answer::Paired { reply, extras }) => {
                         state.sessions_done += 1;
                         outstanding.insert(sid.clone());
                         on_state(state);
@@ -779,6 +837,7 @@ impl CodeHost {
                             sid,
                             done: state.sessions_done,
                             reply,
+                            extras,
                         });
                     }
                     Ok(Answer::BadCode) => {
@@ -974,7 +1033,38 @@ impl CodeHost {
         } else {
             None
         };
-        Ok(Answer::Paired { reply })
+
+        // Best-effort, and short: the receiver writes this immediately after its
+        // reply, so it is either already there or never coming — an older client,
+        // or a relay that rejects the `x.` key. Either way the pairing itself has
+        // already succeeded, and this only decides whether we also learn where to
+        // reach them. One poll, not a wait loop.
+        let extras = if await_reply {
+            match self.get_once(client, &format!("{P_XTRA}{sid}")).await {
+                Some(ct) => {
+                    let xkey = extras_key32(&pake_key, &self.slot, sid);
+                    open_chunk(&xkey, 0, 1, &ct).ok()
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
+        Ok(Answer::Paired { reply, extras })
+    }
+
+    /// One GET, no polling and no error: for a value that is optional by design.
+    async fn get_once(&self, client: &reqwest::Client, key: &str) -> Option<Vec<u8>> {
+        let resp = client
+            .get(rz_url(&self.relay, &self.slot, key))
+            .bearer_auth(self.token())
+            .send()
+            .await
+            .ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+        Some(resp.bytes().await.ok()?.to_vec())
     }
 
     async fn put(&self, client: &reqwest::Client, key: &str, value: Vec<u8>) -> Result<()> {
@@ -994,8 +1084,11 @@ impl CodeHost {
 /// How one receiver's exchange ended.
 enum Answer {
     /// Confirmed and handed the payload, with the receiver's sealed reply if one
-    /// was asked for and arrived.
-    Paired { reply: Option<Vec<u8>> },
+    /// was asked for and arrived, and its routing extras if it sent any.
+    Paired {
+        reply: Option<Vec<u8>>,
+        extras: Option<Vec<u8>>,
+    },
     /// Confirmed wrong — a guess. Counts against the code.
     BadCode,
     /// Refused without charging the guess budget (reflection).
@@ -1021,18 +1114,14 @@ pub enum CodeSender {
 
 /// Publish `payload` under a fresh code, using v2 where the relay supports it and
 /// falling back to the v1 exchange where it does not.
-pub async fn publish_auto(
-    payload: &[u8],
-    relay: &str,
-    embed_relay: bool,
-) -> Result<(String, CodeSender)> {
+pub async fn publish_auto(payload: &[u8], relay: &str) -> Result<(String, CodeSender)> {
     match relay_rz_version(relay).await {
         RzVersion::V2 => {
-            let (shown, host) = claim_code(relay, embed_relay).await?;
+            let (shown, host) = claim_code(relay).await?;
             Ok((shown, CodeSender::V2(host)))
         }
         RzVersion::V1 => {
-            let (shown, pc) = publish_bytes(payload.to_vec(), relay, embed_relay).await?;
+            let (shown, pc) = publish_bytes(payload.to_vec(), relay).await?;
             Ok((shown, CodeSender::V1(pc)))
         }
     }
@@ -1072,6 +1161,7 @@ async fn detect_version(
 
 /// The v2 exchange, from the receiver's side: open a session of our own, prove we
 /// know the code, then collect the payload sealed to that session alone.
+#[allow(clippy::too_many_arguments)]
 async fn resolve_v2(
     client: &reqwest::Client,
     relay: &str,
@@ -1079,6 +1169,7 @@ async fn resolve_v2(
     secret: &str,
     timeout: Duration,
     reply: Option<&[u8]>,
+    extras: Option<&[u8]>,
 ) -> Result<(Vec<u8>, bool)> {
     let sid = gen_sid();
     let (pairing, mr) = pairing::start(secret);
@@ -1144,6 +1235,22 @@ async fn resolve_v2(
             .map(|r| r.status().is_success())
             .unwrap_or(false);
     }
+
+    // Extras ride alongside, on their own key, and their failure is not ours to
+    // report: an older relay rejects the write and an older sender never reads
+    // it, and in both cases the exchange the caller asked for has already
+    // happened. Posted after the reply so it can never be the thing that makes a
+    // pairing look half-done.
+    if let Some(body) = extras {
+        let xkey = extras_key32(&pake_key, slot, &sid);
+        if let Ok(sealed) = seal_chunk(&xkey, 0, 1, body) {
+            let _ = client
+                .post(rz_url(relay, slot, &format!("{P_XTRA}{sid}")))
+                .body(sealed)
+                .send()
+                .await;
+        }
+    }
     Ok((payload, replied))
 }
 
@@ -1168,22 +1275,20 @@ mod tests {
     fn relay_scheme_roundtrips_through_a_code() {
         // Bare host defaults to https; the code embeds the compact form, and the
         // receiver normalizes it back to the same URL.
-        let full = normalize_relay("relay.example.com", false);
+        let full = normalize_relay("relay.example.com");
         assert_eq!(full, "https://relay.example.com");
         assert_eq!(compact_relay(&full), "relay.example.com");
-        assert_eq!(normalize_relay(&compact_relay(&full), false), full);
+        assert_eq!(normalize_relay(&compact_relay(&full)), full);
 
-        // A plaintext relay keeps its scheme both in the code and after resolve.
-        let http = normalize_relay("relay.local:8787", true);
+        // A plaintext relay keeps its explicit scheme both in the code and
+        // after resolve.
+        let http = normalize_relay("http://relay.local:8787");
         assert_eq!(http, "http://relay.local:8787");
         assert_eq!(compact_relay(&http), "http://relay.local:8787");
-        assert_eq!(normalize_relay(&compact_relay(&http), false), http);
+        assert_eq!(normalize_relay(&compact_relay(&http)), http);
 
-        // An explicit scheme is never rewritten by the flag.
-        assert_eq!(
-            normalize_relay("http://relay.local", false),
-            "http://relay.local"
-        );
+        // An explicit scheme is never rewritten.
+        assert_eq!(normalize_relay("http://relay.local"), "http://relay.local");
     }
 
     #[test]

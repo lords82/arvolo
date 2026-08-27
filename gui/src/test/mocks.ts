@@ -7,6 +7,7 @@
 
 import { vi } from "vitest";
 import { normalizeEvent, type WireEvent } from "../events";
+import { STORAGE_KEYS } from "../update";
 import type {
   ConfigDto,
   ConfigPatch,
@@ -18,7 +19,36 @@ import type {
   PairKind,
   StatusDto,
   SyncDto,
-  TransferDto, PickedItem,} from "../types";
+  TransferDto, PickedItem,
+  DeviceDto,
+  UpdateInfo,
+  UpdateProgress,
+} from "../types";
+
+// ---- fixture values, at the size the real ones are ------------------------
+//
+// These used to be "peer1", "arvc-test", "arvm-test". Five and nine characters
+// standing in for fifty-two and several hundred — fine while a fixture only has
+// to match another fixture, and the reason a whole class of bug was invisible
+// here: an id and a ticket are single tokens with no space in them, and what
+// they do to a layout is precisely a question of their length. jsdom does not
+// lay anything out, so no test in this suite can catch that either way — but a
+// fixture that lies about its size cannot even be looked at by hand.
+
+/** Somebody else's public id: 52 base32 characters. Deliberately *not* the id in
+ *  `freshSnapshot`, which is the local identity — a peer that shares it is one of
+ *  your own devices, which is a different code path and a different screen. */
+export const PEER_ID = "wq7dlk4rn2zhcv6ax8mjt3pfsyeb95uog1i0kd7rvxn24qazhm3e";
+
+/** A peer-to-peer ticket, at length. This is a value the GUI displays whole. */
+export const P2P_TICKET =
+  "arvc1qyqszqgpqyqszqgpqyqszqgpqyqszqgp5vt4qh3xwvhdkzfpmn2ug7yq3d8kx" +
+  "wer9wcs8qatzqgpqyqszqgpqyqszqgpqyqszqgp5vt4qh3xwvhdkzfpmn2ug7yq3d8";
+
+/** The mailbox equivalent, sealed to a recipient. */
+export const MAILBOX_TICKET =
+  "arvm1qyqszqgpqyqszqgpqyqszqgpqyqszqgp5vt4qh3xwvhdkzfpmn2ug7yq3d8kx" +
+  "wer9wcs8qatzqgpqyqszqgpqyqszqgpqyqszqgp5vt4qh3xwvhdkzfpmn2ug7yq3d8";
 
 /** Calls the store made, so a test can assert the daemon was actually told. */
 export interface Recorder {
@@ -26,10 +56,14 @@ export interface Recorder {
   remove: number[];
   pause: number[];
   resume: number[];
+  depositNow: number[];
   accept: [string, string | null, string | null][];
   reject: string[];
   markVerified: string[];
-  sendTo: [string, string[], string][];
+  /** to, item ids, note, aimed device (null = whichever is awake). */
+  sendTo: [string, string[], string, string | null][];
+  renameThisDevice: string[];
+  forgetDevice: string[];
   revokeDeposit: string[];
   /** Counts fetches, so a test can prove the panel refreshes rather than trusting
    *  a list it fetched once and never again. */
@@ -51,11 +85,16 @@ export interface Recorder {
   listHistory: number;
   depositTo: [string, string[], number | null, number | null, string | null][];
   setConfig: ConfigPatch[];
-  pruneNames: number;
   syncNow: number;
   startPairing: [PairKind, string | null, string | null][];
   cancelPairing: string[];
   restartDaemon: number;
+  /** Paths handed to the system opener ("open file", "open the download folder"). */
+  openPath: string[];
+  /** How many times the app asked whether a newer release exists. The cadence
+   *  rules are all about this number staying low. */
+  checkUpdate: number;
+  installUpdate: number;
 }
 
 export interface Harness {
@@ -70,6 +109,12 @@ export interface Harness {
   failDaemon: (reason: string) => void;
   /** Deliver a registered drop, as the Rust window handler would. */
   dropFiles: (items: PickedItem[]) => void;
+  /** A .arvolo handed to the app (drop/double-click), as the window would emit it. */
+  arvoloTicket: (ticket: string) => void;
+  /** Push download progress for an update, as the Rust side emits it. */
+  updateProgress: (p: UpdateProgress) => void;
+  /** What `check_update` will answer. `null` — the default — is "nothing new". */
+  update: UpdateInfo | null;
   /** What `reload()` will find on the daemon. */
   snapshot: {
     status: StatusDto | null;
@@ -80,6 +125,8 @@ export interface Harness {
     history: HistoryDto[];
     config: ConfigDto;
     sync: SyncDto;
+    /** The device register, as the daemon would project it. */
+    devices: DeviceDto[];
     /** Who the relay reports as online, by id. Absent = "could not ask". */
     presence: Record<string, boolean | null>;
   };
@@ -97,10 +144,13 @@ function freshRecorder(): Recorder {
     remove: [],
     pause: [],
     resume: [],
+    depositNow: [],
     accept: [],
     reject: [],
     markVerified: [],
     sendTo: [],
+    renameThisDevice: [],
+    forgetDevice: [],
     revokeDeposit: [],
     listDeposits: 0,
     recv: [],
@@ -120,11 +170,13 @@ function freshRecorder(): Recorder {
     listHistory: 0,
     depositTo: [],
     setConfig: [],
-    pruneNames: 0,
     syncNow: 0,
     startPairing: [],
     cancelPairing: [],
     restartDaemon: 0,
+    openPath: [],
+    checkUpdate: 0,
+    installUpdate: 0,
   };
 }
 
@@ -133,6 +185,9 @@ function freshSnapshot(): Harness["snapshot"] {
     status: {
       version: "0.9.2",
       public_id: "if2xmnescalwohxlex5qylevzs2cypwdnjxe7sxb76wcphc7daha",
+      // As the daemon sends it: the id and where it listens, in one string.
+      shareable_id:
+        "if2xmnescalwohxlex5qylevzs2cypwdnjxe7sxb76wcphc7daha@relay.test",
       fingerprint: "able-otter-nine",
       relay: "https://relay.test",
       transfers: 0,
@@ -169,7 +224,21 @@ function freshSnapshot(): Harness["snapshot"] {
       last_sync: 0,
       last_merged: 0,
       last_error: "",
+      // The default harness is one machine on its own: sending to your own
+      // devices still works, it just has the "link one first" caveat on it.
+      paired: false,
     },
+    // …and the register agrees: only this machine has announced itself, so
+    // there is nobody to aim at. Tests that need a second one add it.
+    devices: [
+      {
+        id: "aa00000000000000000000000000aa00",
+        name: "this mac",
+        platform: "macos",
+        last_seen: 0,
+        is_this_device: true,
+      },
+    ],
   };
 }
 
@@ -179,6 +248,9 @@ export const harness: Harness = {
   setConnected: () => {},
   failDaemon: () => {},
   dropFiles: () => {},
+  arvoloTicket: () => {},
+  updateProgress: () => {},
+  update: null,
   snapshot: freshSnapshot(),
   fail: new Set(),
 };
@@ -187,13 +259,24 @@ export function resetHarness() {
   harness.recorder = freshRecorder();
   harness.snapshot = freshSnapshot();
   harness.fail = new Set();
+  harness.update = null;
+  // The update cadence remembers itself in localStorage, which outlives a test.
+  // Leaving it would let the first test that runs a check buy the next one a
+  // week of silence — the same state leak the zustand reset below exists for.
+  for (const key of STORAGE_KEYS) {
+    try {
+      localStorage.removeItem(key);
+    } catch {
+      // A jsdom without storage is fine: nothing was remembered to begin with.
+    }
+  }
 }
 
-function guard<T>(name: string, value: T): Promise<T> {
+function guard<T>(name: string, value: T, onSuccess?: Promise<T>): Promise<T> {
   if (harness.fail.has(name)) {
     return Promise.reject(new Error(`daemon refused: ${name}`));
   }
-  return Promise.resolve(value);
+  return onSuccess ?? Promise.resolve(value);
 }
 
 /** Install the mock. Must be called from a `vi.mock` factory for "../ipc". */
@@ -205,11 +288,31 @@ export function makeIpcMock() {
       listPending: () => guard("listPending", harness.snapshot.pending),
       listContacts: () => guard("listContacts", harness.snapshot.contacts),
       guiVersion: () => guard("guiVersion", "0.9.2"),
-      sendTo: (to: string, paths: string[], note: string) => {
-        harness.recorder.sendTo.push([to, paths, note]);
+      checkUpdate: () => {
+        harness.recorder.checkUpdate++;
+        return guard("checkUpdate", harness.update);
+      },
+      installUpdate: () => {
+        harness.recorder.installUpdate++;
+        // The real one never resolves on success: the process is replaced. A
+        // pending promise here is the honest stand-in — a resolved one would let
+        // a test assert on a state that cannot exist.
+        return guard("installUpdate", undefined, new Promise<void>(() => {}));
+      },
+      openPath: (path: string) => {
+        harness.recorder.openPath.push(path);
+        return guard("openPath", undefined);
+      },
+      sendTo: (
+        to: string,
+        paths: string[],
+        note: string,
+        device: string | null = null
+      ) => {
+        harness.recorder.sendTo.push([to, paths, note, device]);
         return guard("sendTo", 1);
       },
-      serveTicket: () => guard("serveTicket", { id: 1, ticket: "arvc-test" }),
+      serveTicket: () => guard("serveTicket", { id: 1, ticket: P2P_TICKET }),
       depositTo: (
         to: string,
         paths: string[],
@@ -219,7 +322,7 @@ export function makeIpcMock() {
         password: string | null
       ) => {
         harness.recorder.depositTo.push([to, paths, ttl, max, password]);
-        return guard("depositTo", { id: 2, ticket: "arvm-test" });
+        return guard("depositTo", { id: 2, ticket: MAILBOX_TICKET });
       },
       getConfig: () => guard("getConfig", harness.snapshot.config),
       setConfig: (patch: ConfigPatch) => {
@@ -231,11 +334,16 @@ export function makeIpcMock() {
           "presence",
           ids.map((id) => ({ id, online: harness.snapshot.presence[id] ?? null }))
         ),
-      pruneNames: () => {
-        harness.recorder.pruneNames++;
-        return guard("pruneNames", 0);
-      },
       syncStatus: () => guard("syncStatus", harness.snapshot.sync),
+      listDevices: () => guard("listDevices", harness.snapshot.devices),
+      renameThisDevice: (name: string) => {
+        harness.recorder.renameThisDevice.push(name);
+        return guard("renameThisDevice", undefined);
+      },
+      forgetDevice: (who: string) => {
+        harness.recorder.forgetDevice.push(who);
+        return guard("forgetDevice", undefined);
+      },
       syncNow: () => {
         harness.recorder.syncNow++;
         return guard("syncNow", harness.snapshot.sync);
@@ -256,6 +364,11 @@ export function makeIpcMock() {
       pickFiles: () => guard("pickFiles", [] as PickedItem[]),
       importContacts: () => guard("importContacts", "[]"),
       exportContacts: () => guard("exportContacts", "contacts.json"),
+      saveTicket: () => guard("saveTicket", "ticket.arvolo"),
+      // No pending .arvolo at test startup, and language changes are fire-and-
+      // forget toward the native side.
+      takePendingTicket: () => guard("takePendingTicket", null),
+      setUiLanguage: () => guard("setUiLanguage", undefined),
       serveCode: (paths: string[], _relay: string | null, keep: boolean) => {
         harness.recorder.serveCode.push([paths, keep]);
         return guard("serveCode", { id: 1, code: "4821-crater-mango" });
@@ -282,6 +395,24 @@ export function makeIpcMock() {
             new Error("this deposit is password-protected — supply the password")
           );
         }
+        // The same refusal from a daemon that names it. The message deliberately
+        // avoids the word the old code looked for: what the dialog acts on is the
+        // code, so the sentence can be rewritten (or translated) freely.
+        if (harness.fail.has("acceptOffer:refused") && !password) {
+          return Promise.reject(
+            Object.assign(new Error("the deposit is sealed — supply the secret"), {
+              code: "needsPassword",
+            })
+          );
+        }
+        // A refusal that is *not* about a password must not put the field up.
+        if (harness.fail.has("acceptOffer:p2pOff")) {
+          return Promise.reject(
+            Object.assign(new Error("this offer is a direct transfer and P2P is off"), {
+              code: "p2pOff",
+            })
+          );
+        }
         return guard("acceptOffer", 7);
       },
       rejectOffer: (offerId: string) => {
@@ -295,6 +426,10 @@ export function makeIpcMock() {
       resume: (id: number) => {
         harness.recorder.resume.push(id);
         return guard("resume", undefined);
+      },
+      depositNow: (id: number) => {
+        harness.recorder.depositNow.push(id);
+        return guard("depositNow", undefined);
       },
       cancel: (id: number) => {
         harness.recorder.cancel.push(id);
@@ -393,6 +528,14 @@ export function makeIpcMock() {
       harness.dropFiles = cb;
       return Promise.resolve(() => {});
     },
+    onArvoloTicket: (cb: (ticket: string) => void) => {
+      harness.arvoloTicket = cb;
+      return Promise.resolve(() => {});
+    },
+    onUpdateProgress: (cb: (p: UpdateProgress) => void) => {
+      harness.updateProgress = cb;
+      return Promise.resolve(() => {});
+    },
   };
 }
 
@@ -407,7 +550,7 @@ export const dto = {
     return {
       id: 1,
       direction: "send",
-      peer: "peer1",
+      peer: PEER_ID,
       name: "file.txt",
       total_size: 100,
       transferred: 0,
@@ -416,24 +559,34 @@ export const dto = {
       pieces_from_peers: 0,
       download_peers: 0,
       created: Math.floor(Date.now() / 1000),
+      // What the daemon says about holding it. The default is the ordinary case —
+      // a delivery with something to pick up again — so a test that cares about
+      // the other one has to say so.
+      can_pause: true,
       ...over,
     };
   },
   offer(over: Partial<OfferDto> = {}): OfferDto {
     return {
       id: "off1",
-      from: "peer1",
+      from: PEER_ID,
       name: "incoming.pdf",
       size: 500,
       note: "",
       sender_name: "",
+      // Stamped by the daemon from the address book. The default is a stranger
+      // whose key you have never taken anything from — the case the dialog has
+      // the most to say about.
+      fingerprint: "able-otter-nine-plum-river-cedar-lantern-fox",
+      seen_count: 0,
+      known_name: "",
       ...over,
     };
   },
   contact(over: Partial<ContactDto> = {}): ContactDto {
     return {
       name: "proj",
-      id: "peer1",
+      id: PEER_ID,
       fingerprint: "able-otter-nine",
       verified: false,
       trusted: false,

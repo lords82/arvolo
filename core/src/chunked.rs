@@ -15,8 +15,8 @@
 //!   (anti-double-send), and releases each relay chunk as it gets it.
 
 use std::collections::{HashMap, HashSet};
-use std::io::{Read, Seek, SeekFrom};
-use std::path::{Path, PathBuf};
+use std::io::{Seek, SeekFrom};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -31,7 +31,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, Mutex as AsyncMutex};
 
 use crate::backfill::RelayRelease;
-use crate::node::{decode_ticket, encode_ticket, local_addr_of, remote_addr_of};
+use crate::node::{decode_ticket, encode_ticket};
+use crate::source::SendSource;
 use crate::transfer::{bind_endpoint, bind_endpoint_with_key, RelayChoice};
 
 /// Chunk size: 16 MiB.
@@ -39,7 +40,7 @@ pub const CHUNK_SIZE: u32 = 16 * 1024 * 1024;
 
 /// Read from `f` until `buf` is full or EOF (a single `read` may return less).
 /// Returns the number of bytes filled (0 at EOF).
-fn fill(f: &mut std::fs::File, buf: &mut [u8]) -> std::io::Result<usize> {
+fn fill(f: &mut impl std::io::Read, buf: &mut [u8]) -> std::io::Result<usize> {
     let mut filled = 0;
     while filled < buf.len() {
         match f.read(&mut buf[filled..])? {
@@ -65,6 +66,11 @@ enum CtrlMsg {
     Have(u32),
     /// Sender: these chunk indices are now available on the relay.
     RelayHas(Vec<u32>),
+    /// Receiver is cancelling ON PURPOSE — not crashing, not pausing. The sender
+    /// must NOT keep the tail warm for it: no relay backfill, no re-offer; the
+    /// send ends. Appended last so an old sender, whose postcard decode fails on
+    /// the unknown index, reads it as EOF — today's "receiver gone" behavior.
+    Abort,
 }
 
 /// If the sender hears nothing on the control channel for this long, it treats
@@ -113,6 +119,52 @@ pub const CHUNK_ALPN: &[u8] = b"arvolo/chunk/1";
 /// so a malicious provider can't drive the receiver to OOM or fill the disk.
 const MAX_CHUNK_CT: u64 = CHUNK_SIZE as u64 + 16;
 
+/// How long a chunk fetch may go without receiving a single byte before it is
+/// treated as dead.
+///
+/// Not a deadline on the fetch: a chunk on a slow link can legitimately take
+/// minutes, and cutting it off mid-flow would turn a slow provider into a failing
+/// one. This bounds *silence*, which is a different thing and always a fault.
+///
+/// A fetch had no bound at all before this, and a provider that stopped sending
+/// without closing hung the task holding it — forever, since QUIC keeps a
+/// connection alive as long as the peer answers at the transport level. That is
+/// worse than a failure, because a failure is something the scheduler knows what to
+/// do with: it cools the provider down, re-queues the piece and reassigns it within
+/// seconds. Silence reaches none of that machinery. Observed: a 10.7 GiB download
+/// stopped at 97.4% and sat there for hours, no progress and no error, with the
+/// sender still counting a connected peer.
+///
+/// Thirty seconds is long enough to be unambiguous — no healthy transfer pauses
+/// that long between packets — and short against the cost of being wrong, which is
+/// one re-fetched chunk from another source.
+const CHUNK_STALL_SECS: u64 = 30;
+
+/// How long a fetch may spend *reaching* a provider before treating it as
+/// unreachable.
+///
+/// Deliberately not [`CHUNK_STALL_SECS`]: "I cannot reach you" and "you stopped
+/// talking to me half way" are different faults with different honest durations.
+/// Opening a chunk stream includes the connect, and so discovery and hole punching
+/// — which the delivery loop budgets `LIVE_CONNECT_SECS` (90s) for, calling the
+/// cross-internet cold start "highly variable". Bounding that at thirty seconds
+/// would turn a perfectly good provider behind an awkward NAT into a failing one,
+/// and where there is only one provider — the ordinary `send --to` — into a loop of
+/// thirty-second attempts in place of the wait that would have worked.
+const CHUNK_OPEN_SECS: u64 = 90;
+
+/// How long a chunk connection that has *already served a request* may go quiet
+/// before the sender hangs up on it.
+///
+/// The short bound belongs to a connection that has never asked for anything: that
+/// one has shown no purpose, and it is where the hang seen in the wild lives.
+/// Applying the same impatience afterwards would disconnect peers doing nothing
+/// wrong — a swarm seeder between requests, a provider the receiver's rarest-first
+/// ordering is not favouring at the moment — and charge them a fresh handshake for
+/// it. This is long enough that idling is not punished, and still an answer to
+/// "when does a connection nobody uses go away", which before was: never.
+const CHUNK_IDLE_SECS: u64 = 5 * 60;
+
 #[derive(Serialize, Deserialize)]
 struct ChunkReq {
     hash: Hash,
@@ -152,9 +204,10 @@ async fn read_frame<T: serde::de::DeserializeOwned>(recv: &mut RecvStream) -> Op
 /// A provider of chunk ciphertext: regenerated on the fly from a file (sender)
 /// or read from stored files (relay).
 enum ChunkBackend {
-    /// Regenerate any chunk from the original plaintext file, on demand.
+    /// Regenerate any chunk from the original plaintext source, on demand —
+    /// positional reads, so a handed-off descriptor serves as well as a path.
     OnTheFly {
-        path: PathBuf,
+        source: SendSource,
         key: [u8; crate::crypto::CHUNK_KEY_LEN],
         index: HashMap<Hash, u32>,
         total_chunks: u32,
@@ -186,17 +239,16 @@ impl ChunkBackend {
     fn produce(&self, hash: &Hash) -> Option<Vec<u8>> {
         match self {
             ChunkBackend::OnTheFly {
-                path,
+                source,
                 key,
                 index,
                 total_chunks,
             } => {
                 let idx = *index.get(hash)?;
-                let mut file = std::fs::File::open(path).ok()?;
-                file.seek(SeekFrom::Start(idx as u64 * CHUNK_SIZE as u64))
-                    .ok()?;
                 let mut buf = vec![0u8; CHUNK_SIZE as usize];
-                let n = fill(&mut file, &mut buf).ok()?;
+                let n = source
+                    .read_at_full(&mut buf, idx as u64 * CHUNK_SIZE as u64)
+                    .ok()?;
                 let ct = crate::crypto::seal_chunk(key, idx, *total_chunks, &buf[..n]).ok()?;
                 Some(ct)
             }
@@ -224,29 +276,100 @@ impl ChunkBackend {
     }
 }
 
-/// Live count of *distinct* peers currently connected to a [`ChunkServer`] —
-/// i.e. how many are downloading from us right now. Keyed by remote endpoint id
-/// so repeated connects from the same peer count once. Cheap `Arc<Mutex<…>>`
-/// clone shared between the server and its [`ChunkSender`].
+/// How recently a peer must have shown signs of life to count as "downloading
+/// from us right now" — a request arriving, or bytes still leaving for it.
+///
+/// The claim shown to the user is "downloading *now*", so the window is short:
+/// twenty display ticks (the sender polls the count every 500ms), several times
+/// the worst healthy gap — the body write loop stamps once per flow-control
+/// window, so even a KB/s-thin link stamps every few seconds mid-chunk, and
+/// between chunks the receiver's own provider cooldown is three seconds — and
+/// well under both clocks that eventually close the connection itself, because
+/// the point is that an idle peer stops *counting* long before it stops being
+/// *tracked*. No env override: tests backdate the stamp directly.
+const ACTIVE_WINDOW_SECS: u64 = 10;
+
+/// Milliseconds on the process clock. `Instant`-based, so immune to wall-clock
+/// steps; relaxed atomics carry it into hot loops. Always compare with
+/// `saturating_sub`.
+///
+/// The clock starts one window past zero, not at zero: with an origin of 0, a
+/// stamp meaning "already stale" is unrepresentable near process start —
+/// subtracting the window saturates back into "fresh". Every reading is offset
+/// equally, so comparisons are untouched.
+fn now_ms() -> u64 {
+    static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    EPOCH
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_millis() as u64
+        + ACTIVE_WINDOW_SECS * 1000
+        + 1
+}
+
+/// A tracked peer: how many of its connections are open, and when it last did
+/// anything. The two travel together but answer different questions — the
+/// refcount is bookkeeping (when may the entry be dropped), the stamp is the
+/// metric (does this peer count as downloading).
+struct PeerEntry {
+    conns: usize,
+    activity: Arc<AtomicU64>,
+}
+
+/// Live count of *distinct* peers downloading from a [`ChunkServer`] right now.
+/// Keyed by remote endpoint id so repeated connects from the same peer count
+/// once. Cheap `Arc<Mutex<…>>` clone shared between the server and its
+/// [`ChunkSender`].
+///
+/// "Downloading" means connected **and** active within [`ACTIVE_WINDOW_SECS`] —
+/// not merely connected. The distinction is not pedantry: a healthy receiver
+/// opens a fresh connection per 16 MiB chunk, so the only connection that stays
+/// open for long is precisely the pathological one — a peer that connected and
+/// then did nothing. Counted by open connections, the metric was at its most
+/// stable when it was least true, and "1 downloading" once meant a hung peer
+/// for two hours straight.
 #[derive(Clone, Default)]
-pub(crate) struct PeerCount(Arc<Mutex<HashMap<EndpointId, usize>>>);
+pub(crate) struct PeerCount(Arc<Mutex<HashMap<EndpointId, PeerEntry>>>);
 
 impl PeerCount {
-    fn enter(&self, id: EndpointId) {
-        *self.0.lock().unwrap().entry(id).or_insert(0) += 1;
+    /// Track one more connection from `id`, returning the stamp its serve loop
+    /// touches on every sign of life — taken once per connection, like
+    /// [`SentBytes::counter`], so the hot path pays a relaxed store and never a
+    /// map lookup.
+    fn enter(&self, id: EndpointId) -> Arc<AtomicU64> {
+        let mut m = self.0.lock().unwrap();
+        let e = m.entry(id).or_insert_with(|| PeerEntry {
+            conns: 0,
+            activity: Arc::new(AtomicU64::new(0)),
+        });
+        e.conns += 1;
+        e.activity.store(now_ms(), Ordering::Relaxed);
+        e.activity.clone()
     }
     fn leave(&self, id: EndpointId) {
         let mut m = self.0.lock().unwrap();
-        if let Some(c) = m.get_mut(&id) {
-            *c -= 1;
-            if *c == 0 {
+        if let Some(e) = m.get_mut(&id) {
+            e.conns -= 1;
+            if e.conns == 0 {
                 m.remove(&id);
             }
         }
     }
-    /// Number of distinct peers currently connected.
+    /// Number of distinct peers with a connection open *and* signs of life
+    /// within the window. An entry gone quiet stays in the map — the refcount
+    /// must still balance when its connections end — it just stops counting.
+    /// Filtered at read time: the sender polls this every 500ms, which is all
+    /// the sweeping the window needs.
     pub(crate) fn distinct(&self) -> usize {
-        self.0.lock().unwrap().len()
+        let now = now_ms();
+        self.0
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|e| {
+                now.saturating_sub(e.activity.load(Ordering::Relaxed)) <= ACTIVE_WINDOW_SECS * 1000
+            })
+            .count()
     }
 }
 
@@ -333,16 +456,74 @@ impl ProtocolHandler for ChunkServer {
         // Track this peer as an active downloader for the duration of the
         // connection (dropped when it ends, even on error).
         let peer = conn.remote_id();
-        self.peers.enter(peer);
+        let activity = self.peers.enter(peer);
         let _guard = PeerGuard(self.peers.clone(), peer);
         // Taken once for the connection: the write loop below then costs one atomic
         // add per flow-control window, exactly as it did when the counter was global.
         let sent = self.sent.counter(peer);
         // Serve one request per accepted bi-stream; a receiver may open several.
-        while let Ok((mut send, mut recv)) = conn.accept_bi().await {
-            let Some(req) = read_frame::<ChunkReq>(&mut recv).await else {
-                break;
+        // Every wait here is bounded, and it is the same bug the receiver's body read
+        // had, seen from this end: a peer that is present and silent used to hold this
+        // loop for ever, and with it a connection that goes on counting as an active
+        // downloader — the sender reporting someone downloading who will never ask for
+        // anything and never leave.
+        //
+        // The transport does not save us. Keep-alives run every second, so a
+        // connection with no application data on it is never *idle* by QUIC's
+        // reckoning: it answers at the transport level for as long as both processes
+        // live. Only this loop can decide that nothing is being asked.
+        //
+        // Bounding the accept, not just the read, is what actually closes it: a stream
+        // opened and never written to is invisible here — QUIC does not announce it to
+        // the peer until the first byte — so a receiver that opens one and says
+        // nothing leaves this waiting on `accept_bi`, never reaching the read at all.
+        //
+        // The first request and the ones after it get different patience, because
+        // they are different situations. A connection that has never asked for
+        // anything has not yet shown a purpose, and the one case seen in the wild sits
+        // exactly here. A connection that has already served is entitled to a quiet
+        // spell: a swarm seeder (`ARVOLO_SEED_AFTER`) or a provider the receiver's
+        // rarest-first ordering is not favouring right now can easily go longer than
+        // that between requests, and hanging up on it costs a fresh handshake every
+        // time. Within a running download the gaps are nothing like this — the
+        // receiver's own provider cooldown is three seconds — so the long branch only
+        // ever covers idling, never transferring.
+        let mut has_asked = false;
+        loop {
+            let patience = if has_asked {
+                idle_after()
+            } else {
+                stall_after()
             };
+            let accepted = match tokio::time::timeout(patience, conn.accept_bi()).await {
+                Ok(Ok(pair)) => pair,
+                Ok(Err(_)) => break,
+                Err(_) => {
+                    tracing::debug!(
+                        "chunk: connection idle for {}s with nothing asked; closing it",
+                        patience.as_secs()
+                    );
+                    break;
+                }
+            };
+            let (mut send, mut recv) = accepted;
+            let req = match tokio::time::timeout(stall_after(), read_frame::<ChunkReq>(&mut recv))
+                .await
+            {
+                Ok(Some(req)) => req,
+                Ok(None) => break,
+                Err(_) => {
+                    tracing::debug!("chunk: a receiver opened a stream and then asked nothing");
+                    break;
+                }
+            };
+            // It has asked for something: from here the connection has a purpose, and
+            // a quiet spell on it is idling rather than the shape of the hang. The
+            // request is also a sign of life for the peer *metric* — the two clocks
+            // are deliberately separate: this one decides when to hang up (minutes),
+            // the stamp decides when to stop calling it "downloading" (seconds).
+            has_asked = true;
+            activity.store(now_ms(), Ordering::Relaxed);
             // Producing a chunk opens the file and re-encrypts 16 MiB (CPU-bound).
             // Run it on the blocking pool so concurrent requests (parallel receiver
             // fetches) don't stall the async runtime's worker threads.
@@ -371,6 +552,11 @@ impl ProtocolHandler for ChunkServer {
                         let Ok(n) = send.write(body).await else { break };
                         body = &body[n..];
                         sent.fetch_add(n as u64, Ordering::Relaxed);
+                        // Bytes still leaving for this peer are a sign of life too —
+                        // essential, not decorative: a slow peer mid-16 MiB chunk can
+                        // legitimately make no *new* request for minutes, and must
+                        // keep counting as long as it keeps taking bytes.
+                        activity.store(now_ms(), Ordering::Relaxed);
                     }
                 }
                 None => {
@@ -410,18 +596,31 @@ fn with_causes(e: impl std::error::Error) -> String {
 /// combines with any staged prefix and checks BLAKE3).
 pub(crate) async fn fetch_chunk_wire(
     endpoint: &Endpoint,
+    pool: &ConnPool,
     addr: &EndpointAddr,
     hash: Hash,
     offset: u64,
 ) -> Result<(u64, Vec<u8>)> {
-    let mut stream = open_chunk_stream(endpoint, addr, hash, offset).await?;
+    let reach = open_after();
+    let mut stream =
+        match tokio::time::timeout(reach, open_chunk_stream(endpoint, pool, addr, hash, offset))
+            .await
+        {
+            Err(_) => anyhow::bail!("could not reach the chunk provider in {}s", reach.as_secs()),
+            Ok(r) => r?,
+        };
     let want = stream.total_len.saturating_sub(offset) as usize;
     let mut buf = vec![0u8; want];
-    stream
-        .recv
-        .read_exact(&mut buf)
-        .await
-        .map_err(|e| anyhow!("read chunk body: {}", with_causes(e)))?;
+    read_body_or_stall(
+        &mut stream.recv,
+        &mut buf,
+        stall_after(),
+        min_rate_floor(),
+        std::time::Duration::from_secs(MIN_RATE_GRACE_SECS),
+    )
+    .await?;
+    // A full body read is a connection worth keeping warm.
+    pool.checkin(addr.id, stream.conn);
     Ok((stream.total_len, buf))
 }
 
@@ -430,24 +629,96 @@ pub(crate) async fn fetch_chunk_wire(
 /// while the body is read. Lets [`ChunkReceiver::fetch_to_file`] *race* providers
 /// — open the request to all, then read the body only from the first that responds.
 struct ChunkStream {
-    _conn: Connection,
+    /// The live connection, kept while the body is read — and handed back to the
+    /// pool by the caller on success, so the next chunk skips the handshake.
+    conn: Connection,
     recv: RecvStream,
     total_len: u64,
 }
 
-/// Connect to `addr`, request chunk `hash` from `offset`, and read the response
-/// header — but not the body. Errors if the provider doesn't have it
-/// (`total_len == 0`) or is unreachable.
+/// How many idle connections to keep warm per provider. Matches the fetch
+/// concurrency's order of magnitude: more would hoard sockets nobody will use,
+/// fewer would re-pay handshakes under parallel fetches to one provider.
+const MAX_POOLED_PER_PROVIDER: usize = 4;
+
+/// Idle chunk connections, kept per provider so back-to-back fetches skip the
+/// handshake.
+///
+/// A receiver opens one connection per chunk — deliberately simple, but on a
+/// 10.7 GiB transfer that is ~680 QUIC handshakes to the same peer, and on a
+/// high-latency link each one is a round trip spent on ceremony. The pool is a
+/// checkout model, one stream per connection at a time: a fetch takes an idle
+/// connection (or dials), and puts it back only on success. That keeps the
+/// server side exactly as it is — parallel fetches to one provider still ride
+/// parallel connections, so its one-request-at-a-time serve loop never becomes a
+/// bottleneck behind a single shared connection.
+///
+/// A pooled connection can die underneath us — the server hangs up after its
+/// idle bound, the peer restarts — so checkout discards anything already closed,
+/// and the caller treats a failure on a pooled connection as "dial fresh", never
+/// as "the provider is down". Failed fetches don't check their connection back
+/// in: whatever went wrong, that connection is under suspicion and dropping it
+/// costs one handshake.
+#[derive(Default)]
+pub(crate) struct ConnPool(Mutex<HashMap<EndpointId, Vec<Connection>>>);
+
+impl ConnPool {
+    fn checkout(&self, id: &EndpointId) -> Option<Connection> {
+        let mut m = self.0.lock().unwrap();
+        let v = m.get_mut(id)?;
+        while let Some(c) = v.pop() {
+            if c.close_reason().is_none() {
+                return Some(c);
+            }
+        }
+        None
+    }
+    fn checkin(&self, id: EndpointId, conn: Connection) {
+        if conn.close_reason().is_some() {
+            return;
+        }
+        let mut m = self.0.lock().unwrap();
+        let v = m.entry(id).or_default();
+        if v.len() < MAX_POOLED_PER_PROVIDER {
+            v.push(conn);
+        }
+        // Over the cap the handle just drops; the connection closes with it.
+    }
+    #[cfg(test)]
+    fn idle(&self, id: &EndpointId) -> usize {
+        self.0.lock().unwrap().get(id).map(|v| v.len()).unwrap_or(0)
+    }
+}
+
+/// Request chunk `hash` from `offset` over a connection to `addr` — pooled when
+/// one is warm, freshly dialled otherwise — and read the response header, but not
+/// the body. Errors if the provider doesn't have it (`total_len == 0`) or is
+/// unreachable.
 async fn open_chunk_stream(
     endpoint: &Endpoint,
+    pool: &ConnPool,
     addr: &EndpointAddr,
     hash: Hash,
     offset: u64,
 ) -> Result<ChunkStream> {
+    // A warm connection first. If the exchange fails on it, that is the pooled
+    // connection having died underneath us (the server's idle bound, a restart),
+    // not the provider being down — fall through and pay the dial.
+    if let Some(conn) = pool.checkout(&addr.id) {
+        if let Ok(s) = request_chunk_on(conn, hash, offset).await {
+            return Ok(s);
+        }
+    }
     let conn = endpoint
         .connect(addr.clone(), CHUNK_ALPN)
         .await
         .map_err(|e| anyhow!("connect chunk provider: {e}"))?;
+    request_chunk_on(conn, hash, offset).await
+}
+
+/// The request/response-header exchange of [`open_chunk_stream`], on a connection
+/// already in hand.
+async fn request_chunk_on(conn: Connection, hash: Hash, offset: u64) -> Result<ChunkStream> {
     let (mut send, mut recv) = conn.open_bi().await.map_err(|e| anyhow!("open_bi: {e}"))?;
     write_frame(&mut send, &ChunkReq { hash, offset }).await?;
     send.finish().map_err(|e| anyhow!("finish req: {e}"))?;
@@ -462,10 +733,114 @@ async fn open_chunk_stream(
         "provider claims oversized chunk"
     );
     Ok(ChunkStream {
-        _conn: conn,
+        conn,
         recv,
         total_len: resp.total_len,
     })
+}
+
+/// How long a fetch tolerates silence, from `ARVOLO_CHUNK_STALL_SECS` (seconds).
+/// Overridable because the only way to exercise the bound in a test is to make it
+/// small; 0 or unparseable means the default. See [`CHUNK_STALL_SECS`].
+fn stall_after() -> std::time::Duration {
+    secs_from_env("ARVOLO_CHUNK_STALL_SECS", CHUNK_STALL_SECS)
+}
+
+/// How long a fetch may spend reaching a provider, from `ARVOLO_CHUNK_OPEN_SECS`.
+/// See [`CHUNK_OPEN_SECS`].
+fn open_after() -> std::time::Duration {
+    secs_from_env("ARVOLO_CHUNK_OPEN_SECS", CHUNK_OPEN_SECS)
+}
+
+/// How long a connection that has already served may go quiet, from
+/// `ARVOLO_CHUNK_IDLE_SECS`. See [`CHUNK_IDLE_SECS`].
+fn idle_after() -> std::time::Duration {
+    secs_from_env("ARVOLO_CHUNK_IDLE_SECS", CHUNK_IDLE_SECS)
+}
+
+fn secs_from_env(var: &str, default_secs: u64) -> std::time::Duration {
+    let secs = std::env::var(var)
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(default_secs);
+    std::time::Duration::from_secs(secs)
+}
+
+/// The slowest a chunk body may arrive, on average, before the provider counts as
+/// failed: bytes per second, from `ARVOLO_CHUNK_MIN_RATE` (0 disables the floor).
+///
+/// The stall bound alone has a hole a trickle fits through: one byte every 29
+/// seconds restarts the silence clock for ever, and the scheduler never reassigns
+/// a piece that still has a "working" source — so a provider drip-feeding at
+/// nothing per second could hold a chunk indefinitely while looking alive. A
+/// *floor on the average rate* closes it without punishing anyone honest: the
+/// judgment starts only after [`MIN_RATE_GRACE_SECS`] (a healthy chunk is long
+/// finished by then; a slow starter has had its window), and a kilobyte per
+/// second is an order of magnitude under any link that can ever finish a 16 MiB
+/// chunk in tolerable time. This is deliberately a floor, not a deadline — a
+/// deadline is the thing that turns a slow provider into a broken one.
+const CHUNK_MIN_RATE_BYTES_PER_SEC: u64 = 1024;
+
+/// How long a body read runs before the rate floor starts judging it.
+const MIN_RATE_GRACE_SECS: u64 = 30;
+
+fn min_rate_floor() -> u64 {
+    std::env::var("ARVOLO_CHUNK_MIN_RATE")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(CHUNK_MIN_RATE_BYTES_PER_SEC)
+}
+
+/// Fill `buf` from `recv`, giving up if no byte arrives for `stall` — or if, after
+/// `grace`, the average rate has stayed under `floor` bytes/sec.
+///
+/// Deliberately not `read_exact`: that waits for the whole body with no bound, so a
+/// provider that goes quiet mid-chunk parks the task for good. Bounding each read
+/// instead of the whole fetch keeps a slow-but-alive provider working — every byte
+/// received starts the clock over — while turning a silent one into an ordinary
+/// error, which is the only form the scheduler can act on. The rate floor covers
+/// what the silence clock cannot: a trickle is not silent, and not alive either.
+///
+/// A clean end-of-stream before the promised length is a fault too, and named as
+/// one: the provider said how long the chunk was in its header.
+async fn read_body_or_stall<R: tokio::io::AsyncRead + Unpin>(
+    recv: &mut R,
+    buf: &mut [u8],
+    stall: std::time::Duration,
+    floor: u64,
+    grace: std::time::Duration,
+) -> Result<()> {
+    use tokio::io::AsyncReadExt;
+    let want = buf.len();
+    let mut filled = 0;
+    let started = std::time::Instant::now();
+    while filled < want {
+        let read = tokio::time::timeout(stall, recv.read(&mut buf[filled..])).await;
+        let n = match read {
+            Err(_) => anyhow::bail!(
+                "read chunk body: nothing for {}s after {filled} of {want} bytes",
+                stall.as_secs()
+            ),
+            Ok(r) => r.map_err(|e| anyhow!("read chunk body: {}", with_causes(e)))?,
+        };
+        if n == 0 {
+            anyhow::bail!("read chunk body: ended after {filled} of {want} bytes");
+        }
+        filled += n;
+        let elapsed = started.elapsed();
+        if floor > 0 && elapsed >= grace {
+            let rate = filled as f64 / elapsed.as_secs_f64();
+            if rate < floor as f64 {
+                anyhow::bail!(
+                    "read chunk body: {filled} of {want} bytes after {}s ({rate:.0} B/s, \
+                     floor {floor} B/s) — a trickle is not a working provider",
+                    elapsed.as_secs()
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 // ---- sender ---------------------------------------------------------------
@@ -496,21 +871,19 @@ struct CtrlHandler {
     gone_tx: mpsc::UnboundedSender<(EndpointId, Vec<usize>)>,
     /// Signalled once per receiver, when its control channel connects.
     connected_tx: mpsc::UnboundedSender<()>,
+    /// Signalled when a receiver says [`CtrlMsg::Abort`]: it is cancelling on
+    /// purpose, and the send must end instead of keeping its tail warm.
+    abort_tx: mpsc::UnboundedSender<EndpointId>,
 }
 
 impl ProtocolHandler for CtrlHandler {
     async fn accept(&self, conn: Connection) -> std::result::Result<(), AcceptError> {
-        let dbg = std::env::var("ARVOLO_DEBUG").is_ok();
         let peer = conn.remote_id();
         let Ok((mut send, mut recv)) = conn.accept_bi().await else {
-            if dbg {
-                eprintln!("[ctrl] accept_bi failed");
-            }
+            tracing::debug!("ctrl: accept_bi failed");
             return Ok(());
         };
-        if dbg {
-            eprintln!("[ctrl] receiver connected");
-        }
+        tracing::debug!("ctrl: receiver connected");
         let _ = self.connected_tx.send(());
         // On connect, tell the receiver which chunks are already on the relay.
         let snapshot: Vec<u32> = self.on_relay.lock().unwrap().iter().copied().collect();
@@ -542,11 +915,19 @@ impl ProtocolHandler for CtrlHandler {
                         .or_default()
                         .insert(idx);
                 }
+                // A deliberate cancel: end the send, don't nurse the tail.
+                Ok(Some(CtrlMsg::Abort)) => break "aborted",
                 Ok(Some(_)) => {}        // Ping/Hello: keepalive
                 Ok(None) => break "eof", // closed cleanly
                 Err(_) => break "idle",  // idle: receiver gone
             }
         };
+        if reason == "aborted" {
+            tracing::debug!("ctrl: receiver aborted on purpose");
+            let _ = self.abort_tx.send(peer);
+            conn.close(0u32.into(), b"aborted");
+            return Ok(());
+        }
         // Receiver gone: report the chunks *this* receiver still lacks. What another
         // receiver happens to hold is no comfort to this one, and it is this one's
         // tail the relay is about to be asked to keep.
@@ -556,13 +937,11 @@ impl ProtocolHandler for CtrlHandler {
         let undelivered: Vec<usize> = (0..self.total)
             .filter(|i| !mine.contains(&(*i as u32)))
             .collect();
-        if dbg {
-            eprintln!(
-                "[ctrl] receiver gone ({reason}); delivered={} undelivered={}",
-                mine.len(),
-                undelivered.len()
-            );
-        }
+        tracing::debug!(
+            "ctrl: receiver gone ({reason}); delivered={} undelivered={}",
+            mine.len(),
+            undelivered.len()
+        );
         let _ = self.gone_tx.send((peer, undelivered));
         // Acknowledge the clean shutdown. We have read the receiver's stream to EOF,
         // so every `Have` it sent is already counted above; closing now lets its
@@ -578,6 +957,10 @@ pub struct ChunkSender {
     router: Router,
     endpoint: Endpoint,
     addr: EndpointAddr,
+    /// No relay became reachable in time, so [`Self::addr`] carries this network's
+    /// addresses and nothing further. A peer on the same LAN connects; anyone else
+    /// cannot, and the caller has something true to say about the wait.
+    local_only: bool,
     chunks: Vec<Hash>,
     total_size: u64,
     key: [u8; crate::crypto::CHUNK_KEY_LEN],
@@ -586,6 +969,7 @@ pub struct ChunkSender {
     on_relay: Arc<Mutex<HashSet<u32>>>,
     gone_rx: AsyncMutex<mpsc::UnboundedReceiver<(EndpointId, Vec<usize>)>>,
     connected_rx: AsyncMutex<mpsc::UnboundedReceiver<()>>,
+    abort_rx: AsyncMutex<mpsc::UnboundedReceiver<EndpointId>>,
     peers: PeerCount,
     sent: SentBytes,
 }
@@ -593,74 +977,119 @@ pub struct ChunkSender {
 /// What the hashing pass produces: the chunk digests plus the sizes derived from
 /// them. A named struct rather than a 4-tuple only because the pass now returns
 /// across a `spawn_blocking` boundary, where the tuple was unreadable.
-struct Hashed {
+///
+/// Public, and cloneable, because it is worth **keeping**. Producing it means
+/// reading and encrypting the entire payload — measured at ~127 MiB/s, so a
+/// minute and a half for 10 GB — while what it produces is one 32-byte digest per
+/// 16 MiB chunk: 22 KB for that same 10 GB file. A caller that has to serve the
+/// same bytes again (a delivery loop retrying while the recipient is not yet
+/// connectable) can hand it back instead of paying for the pass a second time.
+#[derive(Clone)]
+pub struct PreparedChunks {
     total_size: u64,
     total_chunks: u32,
     chunks: Vec<Hash>,
     index: HashMap<Hash, u32>,
 }
 
-impl ChunkSender {
-    /// Serve `path` under a fresh random per-transfer content key and node id.
-    pub async fn serve(path: &Path, relay: RelayChoice) -> Result<Self> {
-        Self::serve_resume(
-            path,
-            relay,
-            crate::crypto::random_chunk_key(),
-            crate::node::random_node_seed(),
-        )
-        .await
-    }
-
-    /// Serve `path` under an explicit content `key` and transport `node_seed`.
-    /// Used to *resume* a previous send: the same key over the same (unchanged)
-    /// file reproduces identical chunk hashes, and the same seed reproduces the
-    /// same node id — so the ticket the original session handed out stays valid.
-    pub async fn serve_resume(
-        path: &Path,
-        relay: RelayChoice,
+impl PreparedChunks {
+    /// Read and encrypt `source` chunk by chunk to compute the digests, keeping
+    /// none of the ciphertext — chunks are regenerated on demand while serving.
+    ///
+    /// On the blocking pool, not the async workers. This pass has no `.await`
+    /// anywhere in it, so run on the runtime it pins a worker for its whole
+    /// duration — tens of seconds per gigabyte. A handful of large sends prepared
+    /// at once therefore occupied every worker and the daemon stopped answering
+    /// its control socket at all: `arvolo status` and the GUI both hung until the
+    /// last one finished, which looks exactly like a crash and is not one.
+    /// Reading is sequential — one pass over the file, which is what a disk wants
+    /// — but the sealing and hashing of each chunk runs on [`PREP_WORKERS`]
+    /// threads. `seal_chunk` is a pure function of `(key, index, bytes)`, so the
+    /// chunks are independent by construction and the digests come out identical
+    /// to the single-threaded order; only the wall clock changes. Measured at
+    /// 132 MiB/s on one core, which on a 10 GB file is minutes the sender spends
+    /// before anyone has been offered anything.
+    pub async fn compute(
+        source: SendSource,
         key: [u8; crate::crypto::CHUNK_KEY_LEN],
-        node_seed: [u8; 32],
     ) -> Result<Self> {
-        // Compute the chunk hashes by streaming the file (bounded memory), WITHOUT
-        // storing any ciphertext — chunks are regenerated on demand while serving.
-        //
-        // On the blocking pool, not the async workers. This pass reads and
-        // encrypts the *whole* payload with no `.await` anywhere in it, so run
-        // directly on the runtime it pins a worker for its entire duration —
-        // tens of seconds for a gigabyte. A handful of large sends prepared at
-        // once therefore occupied every worker and the daemon stopped answering
-        // its control socket at all: `arvolo status` and the GUI both hung until
-        // the last one finished, which looks exactly like a crash and is not one.
-        let owned = path.to_path_buf();
-        let Hashed {
-            total_size,
-            total_chunks,
-            chunks,
-            index,
-        } = tokio::task::spawn_blocking(move || -> Result<Hashed> {
-            let total_size = std::fs::metadata(&owned)
-                .with_context(|| format!("stat {}", owned.display()))?
-                .len();
+        tokio::task::spawn_blocking(move || -> Result<Self> {
+            let total_size = source.len()?;
             let total_chunks = (total_size as usize).div_ceil(CHUNK_SIZE as usize) as u32;
-            let mut chunks = Vec::new();
-            let mut index: HashMap<Hash, u32> = HashMap::new();
-            let mut file =
-                std::fs::File::open(&owned).with_context(|| format!("open {}", owned.display()))?;
-            let mut buf = vec![0u8; CHUNK_SIZE as usize];
-            let mut idx: u32 = 0;
-            loop {
-                let n = fill(&mut file, &mut buf).context("read file")?;
-                if n == 0 {
-                    break;
+            let mut file = source
+                .sequential_reader()
+                .with_context(|| format!("open {}", source.label()))?;
+
+            let workers = prep_workers();
+            let (done_tx, done_rx) = std::sync::mpsc::channel::<Result<(u32, Hash)>>();
+            let mut hashes: Vec<Option<Hash>> = Vec::new();
+
+            std::thread::scope(|scope| -> Result<()> {
+                // One rendezvous channel per worker: `sync_channel(0)` hands a
+                // buffer over only when that worker is free, so the reader cannot
+                // run ahead and pull the whole file into memory. What is in flight
+                // is bounded at one chunk per worker plus the one being read.
+                let mut feed = Vec::with_capacity(workers);
+                for _ in 0..workers {
+                    let (tx, rx) = std::sync::mpsc::sync_channel::<(u32, Vec<u8>)>(0);
+                    feed.push(tx);
+                    let done = done_tx.clone();
+                    scope.spawn(move || {
+                        for (idx, buf) in rx {
+                            let out = crate::crypto::seal_chunk(&key, idx, total_chunks, &buf)
+                                .map(|ct| (idx, Hash::new(&ct)));
+                            // A closed receiver means the reader gave up (an I/O
+                            // error, or a worker before us failed): stop, don't
+                            // spend the rest of the file on an answer nobody wants.
+                            if done.send(out).is_err() {
+                                return;
+                            }
+                        }
+                    });
                 }
-                let ct = crate::crypto::seal_chunk(&key, idx, total_chunks, &buf[..n])?;
-                let hash = Hash::new(&ct);
-                chunks.push(hash);
-                index.insert(hash, idx);
-                idx += 1;
+                drop(done_tx);
+
+                let mut idx: u32 = 0;
+                loop {
+                    let mut buf = vec![0u8; CHUNK_SIZE as usize];
+                    let n = fill(&mut file, &mut buf).context("read file")?;
+                    if n == 0 {
+                        break;
+                    }
+                    buf.truncate(n);
+                    // Round-robin rather than a shared queue: the chunks are the
+                    // same size and cost the same, so there is nothing for work
+                    // stealing to balance, and a shared queue would need a lock
+                    // held across a blocking recv — which serialises the very
+                    // thing being parallelised.
+                    if feed[idx as usize % workers].send((idx, buf)).is_err() {
+                        break; // a worker died; the error comes back on `done_rx`
+                    }
+                    idx += 1;
+                }
+                drop(feed);
+                Ok(())
+            })?;
+
+            for got in done_rx {
+                let (idx, hash) = got?;
+                let i = idx as usize;
+                if hashes.len() <= i {
+                    hashes.resize(i + 1, None);
+                }
+                hashes[i] = Some(hash);
             }
-            Ok(Hashed {
+
+            // Back into file order, which is the order everything downstream
+            // assumes: the ticket's chunk list is indexed by position.
+            let mut chunks = Vec::with_capacity(hashes.len());
+            let mut index: HashMap<Hash, u32> = HashMap::new();
+            for (i, h) in hashes.into_iter().enumerate() {
+                let h = h.context("a chunk went missing while hashing")?;
+                chunks.push(h);
+                index.insert(h, i as u32);
+            }
+            Ok(Self {
                 total_size,
                 total_chunks,
                 chunks,
@@ -668,12 +1097,119 @@ impl ChunkSender {
             })
         })
         .await
-        .context("hash payload")??;
+        .context("hash payload")?
+    }
+
+    /// Rebuild from digests computed by an earlier pass — a preparation that was
+    /// written down and is being picked up again — without re-reading a byte of
+    /// the payload.
+    ///
+    /// `index` is a pure reverse map of `chunks`, so nothing is lost by not having
+    /// kept it (the same rebuild happens in [`ChunkSeeder::start`]). What *is* lost
+    /// is the proof the pass gives for free: that the payload still holds the bytes
+    /// these digests were taken from. The caller owes that guarantee — see
+    /// [`crate::flow::ReusablePrep::from_parts`], which is where it is spelled out.
+    ///
+    /// Refuses a digest list that does not describe `total_size`. That catches a
+    /// torn record and a payload that changed size, which is the cheapest half of
+    /// the guarantee the caller is otherwise carrying alone.
+    pub fn from_digests(total_size: u64, chunks: Vec<Hash>) -> Result<Self> {
+        let total_chunks = (total_size as usize).div_ceil(CHUNK_SIZE as usize) as u32;
+        anyhow::ensure!(
+            total_chunks as usize == chunks.len(),
+            "{} digests do not describe {total_size} bytes (expected {total_chunks})",
+            chunks.len()
+        );
+        let mut index: HashMap<Hash, u32> = HashMap::new();
+        for (i, h) in chunks.iter().enumerate() {
+            index.insert(*h, i as u32);
+        }
+        Ok(Self {
+            total_size,
+            total_chunks,
+            chunks,
+            index,
+        })
+    }
+
+    pub fn total_size(&self) -> u64 {
+        self.total_size
+    }
+
+    /// The ordered chunk digests — what a ticket carries, and what a persisted
+    /// preparation has to write down.
+    pub fn chunks(&self) -> &[Hash] {
+        &self.chunks
+    }
+}
+
+/// How many threads seal and hash chunks at once.
+///
+/// Capped rather than "every core": each worker holds a whole 16 MiB chunk, so
+/// this number is also a memory ceiling — and the daemon can be preparing several
+/// sends at the same time, which multiplies it. Four is where the wait stops being
+/// the thing you notice (a 10 GB file goes from about two minutes to about thirty
+/// seconds) without the footprint becoming the thing you notice instead.
+fn prep_workers() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .clamp(1, 4)
+}
+
+impl ChunkSender {
+    /// Serve `source` under a fresh random per-transfer content key and node id.
+    pub async fn serve(source: impl Into<SendSource>, relay: RelayChoice) -> Result<Self> {
+        Self::serve_resume(
+            source,
+            relay,
+            crate::crypto::random_chunk_key(),
+            crate::node::random_node_seed(),
+        )
+        .await
+    }
+
+    /// Serve `source` under an explicit content `key` and transport `node_seed`.
+    /// Used to *resume* a previous send: the same key over the same (unchanged)
+    /// file reproduces identical chunk hashes, and the same seed reproduces the
+    /// same node id — so the ticket the original session handed out stays valid.
+    pub async fn serve_resume(
+        source: impl Into<SendSource>,
+        relay: RelayChoice,
+        key: [u8; crate::crypto::CHUNK_KEY_LEN],
+        node_seed: [u8; 32],
+    ) -> Result<Self> {
+        let source = source.into();
+        let prepared = PreparedChunks::compute(source.clone(), key).await?;
+        Self::serve_prepared(source, relay, key, node_seed, prepared).await
+    }
+
+    /// [`serve_resume`](Self::serve_resume) with the hashing pass already done.
+    ///
+    /// The split exists so a caller that serves the same bytes more than once —
+    /// a delivery loop retrying against a recipient who has not connected yet —
+    /// pays for the read-and-encrypt pass once instead of once per attempt. Feed
+    /// it a [`PreparedChunks`] computed under this same `key`, or the digests will
+    /// not match the ciphertext this sender produces.
+    pub async fn serve_prepared(
+        source: impl Into<SendSource>,
+        relay: RelayChoice,
+        key: [u8; crate::crypto::CHUNK_KEY_LEN],
+        node_seed: [u8; 32],
+        prepared: PreparedChunks,
+    ) -> Result<Self> {
+        let source = source.into();
+        let PreparedChunks {
+            total_size,
+            total_chunks,
+            chunks,
+            index,
+        } = prepared;
         let peers = PeerCount::default();
         let sent = SentBytes::default();
         let chunk_server = ChunkServer {
             backend: Arc::new(ChunkBackend::OnTheFly {
-                path: path.to_path_buf(),
+                source,
                 key,
                 index,
                 total_chunks,
@@ -690,27 +1226,25 @@ impl ChunkSender {
         let on_relay = Arc::new(Mutex::new(HashSet::new()));
         let (gone_tx, gone_rx) = mpsc::unbounded_channel();
         let (connected_tx, connected_rx) = mpsc::unbounded_channel();
+        let (abort_tx, abort_rx) = mpsc::unbounded_channel();
         let handler = CtrlHandler {
             total: chunks.len(),
             delivered: delivered.clone(),
             on_relay: on_relay.clone(),
             gone_tx,
             connected_tx,
+            abort_tx,
         };
         let router = Router::builder(endpoint.clone())
             .accept(CHUNK_ALPN, chunk_server)
             .accept(CTRL_ALPN, handler)
             .spawn();
-        let addr = if use_relay {
-            endpoint.online().await;
-            remote_addr_of(&endpoint)
-        } else {
-            local_addr_of(&endpoint)
-        };
+        let (addr, local_only) = crate::node::published_addr(&endpoint, use_relay).await;
         Ok(Self {
             router,
             endpoint,
             addr,
+            local_only,
             chunks,
             total_size,
             key,
@@ -719,6 +1253,7 @@ impl ChunkSender {
             on_relay,
             gone_rx: AsyncMutex::new(gone_rx),
             connected_rx: AsyncMutex::new(connected_rx),
+            abort_rx: AsyncMutex::new(abort_rx),
             peers,
             sent,
         })
@@ -726,6 +1261,11 @@ impl ChunkSender {
 
     pub fn addr(&self) -> EndpointAddr {
         self.addr.clone()
+    }
+    /// True when this sender is only reachable on the network it is sitting on:
+    /// the wait for a relay ran out. See [`crate::node::published_addr`].
+    pub fn local_only(&self) -> bool {
+        self.local_only
     }
     /// The transport secret seed this sender is bound under. Persisted by the CLI
     /// so a resumed send can rebind the *same* node id (see `flow::resume_send`).
@@ -784,7 +1324,10 @@ impl ChunkSender {
         self.sent.best()
     }
 
-    /// How many distinct peers are currently downloading from this sender.
+    /// How many distinct peers are downloading from this sender *right now* —
+    /// connected and showing signs of life within the last few seconds, not
+    /// merely connected. See [`PeerCount`] for why the distinction is the whole
+    /// point.
     pub fn active_peers(&self) -> usize {
         self.peers.distinct()
     }
@@ -816,6 +1359,17 @@ impl ChunkSender {
     /// meant nothing anyway.
     pub async fn receiver_gone(&self) -> (EndpointId, Vec<usize>) {
         let mut rx = self.gone_rx.lock().await;
+        match rx.recv().await {
+            Some(v) => v,
+            None => std::future::pending().await,
+        }
+    }
+
+    /// Resolves when a receiver cancels ON PURPOSE ([`CtrlMsg::Abort`]): unlike
+    /// [`Self::receiver_gone`] there is no tail to keep warm — the send should
+    /// end. Never fires for crashes or network drops.
+    pub async fn receiver_aborted(&self) -> EndpointId {
+        let mut rx = self.abort_rx.lock().await;
         match rx.recv().await {
             Some(v) => v,
             None => std::future::pending().await,
@@ -890,20 +1444,15 @@ impl ChunkSeeder {
             sent: SentBytes::default(),
         };
         // Mirror `ChunkSender::serve`: only wait to come "online" via a relay when
-        // one is configured. With `RelayChoice::Disabled` there is no relay to
-        // become reachable through, so `online()` would block forever — use the
-        // local direct address instead (LAN / relay-less swarming).
+        // one is configured, and never without a bound — with `RelayChoice::Disabled`
+        // there is no relay to become reachable through, and on a network where none
+        // answers the wait does not end either. See [`crate::node::published_addr`].
         let use_relay = !matches!(&relay, RelayChoice::Disabled);
         let endpoint = bind_endpoint(relay).await?;
         let router = Router::builder(endpoint.clone())
             .accept(CHUNK_ALPN, chunk_server)
             .spawn();
-        let addr = if use_relay {
-            endpoint.online().await;
-            remote_addr_of(&endpoint)
-        } else {
-            local_addr_of(&endpoint)
-        };
+        let (addr, _local_only) = crate::node::published_addr(&endpoint, use_relay).await;
         Ok(Self {
             router,
             endpoint,
@@ -957,6 +1506,21 @@ impl Control {
         let _ = tokio::time::timeout(std::time::Duration::from_secs(5), self.conn.closed()).await;
         Ok(())
     }
+
+    /// Tell the sender this receiver is cancelling ON PURPOSE, then close. The
+    /// sender ends the transfer instead of backfilling the tail to the relay
+    /// and re-offering — see [`CtrlMsg::Abort`]. Best-effort: an old sender
+    /// reads it as a plain disconnect.
+    pub async fn abort(self) -> Result<()> {
+        self.heartbeat.abort();
+        {
+            let mut send = self.send.lock().await;
+            write_msg(&mut send, &CtrlMsg::Abort).await?;
+            send.finish().map_err(|e| anyhow!("ctrl abort: {e}"))?;
+        }
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), self.conn.closed()).await;
+        Ok(())
+    }
 }
 
 impl Drop for Control {
@@ -973,12 +1537,16 @@ impl Drop for Control {
 #[derive(Clone)]
 pub struct ChunkReceiver {
     endpoint: Endpoint,
+    /// Warm connections per provider; shared by clones, so every parallel fetch
+    /// draws from (and refills) the same pool.
+    pool: Arc<ConnPool>,
 }
 
 impl ChunkReceiver {
     pub async fn open(relay: RelayChoice) -> Result<Self> {
         Ok(Self {
             endpoint: bind_endpoint(relay).await?,
+            pool: Arc::new(ConnPool::default()),
         })
     }
 
@@ -1029,8 +1597,8 @@ impl ChunkReceiver {
         })
     }
 
-    /// Fetch a whole chunk by hash, trying each provider in order, and verify
-    /// `BLAKE3(ciphertext) == hash`. Bounded to one chunk in memory.
+    /// Fetch a whole chunk by hash from whichever provider answers first, and
+    /// verify `BLAKE3(ciphertext) == hash`. Bounded to one chunk in memory.
     pub async fn fetch_chunk(&self, providers: &[EndpointAddr], hash: Hash) -> Result<Vec<u8>> {
         let (ct, _rest) = self.fetch_from(providers, hash, &[]).await?;
         Ok(ct)
@@ -1038,21 +1606,46 @@ impl ChunkReceiver {
 
     /// Fetch the chunk `hash`, resuming from `prefix` (already-downloaded
     /// ciphertext bytes). Returns `(full_ciphertext, newly_downloaded_tail)` once
-    /// the full ciphertext is present and BLAKE3-verified. Tries providers in
-    /// order for fallback.
+    /// the full ciphertext is present and BLAKE3-verified.
+    ///
+    /// Providers are hedged, not queued: the first gets a head start of
+    /// [`FETCH_HEDGE_SECS`], each further one joins the race only if nobody has
+    /// delivered yet, and the first verified chunk wins (the rest are dropped
+    /// with the set). Tried strictly in order, a chunk whose sources were all
+    /// dead paid the full open bound *per provider* before failing — the worst
+    /// case grew linearly with the number of sources, all of it spent knowingly
+    /// waiting on timeouts. Hedged, the worst case is one open bound plus a few
+    /// seconds of stagger. The stagger is what keeps this from being a stampede:
+    /// a healthy first provider answers long before the second is even dialled,
+    /// so the common case still costs one connection.
     pub async fn fetch_from(
         &self,
         providers: &[EndpointAddr],
         hash: Hash,
         prefix: &[u8],
     ) -> Result<(Vec<u8>, Vec<u8>)> {
+        const FETCH_HEDGE_SECS: u64 = 5;
+        let offset = prefix.len() as u64;
+        let mut set = tokio::task::JoinSet::new();
+        for (i, addr) in providers.iter().cloned().enumerate() {
+            let endpoint = self.endpoint.clone();
+            let pool = self.pool.clone();
+            set.spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(FETCH_HEDGE_SECS * i as u64))
+                    .await;
+                fetch_chunk_wire(&endpoint, &pool, &addr, hash, offset).await
+            });
+        }
         let mut last_err = None;
-        for addr in providers {
-            match fetch_chunk_wire(&self.endpoint, addr, hash, prefix.len() as u64).await {
+        while let Some(joined) = set.join_next().await {
+            let Ok(res) = joined else { continue };
+            match res {
                 Ok((total_len, tail)) => {
                     let mut ct = Vec::with_capacity(total_len as usize);
                     ct.extend_from_slice(prefix);
                     ct.extend_from_slice(&tail);
+                    // An unverified winner must not end the race: whoever sent a
+                    // wrong body loses to any honest provider still running.
                     if ct.len() as u64 != total_len || Hash::new(&ct) != hash {
                         last_err = Some(anyhow!("chunk {hash} failed integrity check"));
                         continue;
@@ -1078,17 +1671,37 @@ impl ChunkReceiver {
         banned: &Mutex<HashSet<String>>,
     ) -> Result<()> {
         use std::io::Write;
-        let mut stream = open_chunk_stream(&self.endpoint, addr, hash, 0).await?;
+        // The open is bounded for the same reason the body is — an unbounded await
+        // there parks the task exactly as an unbounded read did — but on its own
+        // clock: reaching a provider is a different fault from one that goes quiet
+        // mid-chunk, and a far slower thing to do.
+        let reach = open_after();
+        let mut stream = match tokio::time::timeout(
+            reach,
+            open_chunk_stream(&self.endpoint, &self.pool, addr, hash, 0),
+        )
+        .await
+        {
+            Err(_) => {
+                anyhow::bail!("could not reach the chunk provider in {}s", reach.as_secs())
+            }
+            Ok(r) => r?,
+        };
         let mut buf = vec![0u8; stream.total_len as usize];
-        stream
-            .recv
-            .read_exact(&mut buf)
-            .await
-            .map_err(|e| anyhow!("read chunk body: {}", with_causes(e)))?;
+        read_body_or_stall(
+            &mut stream.recv,
+            &mut buf,
+            stall_after(),
+            min_rate_floor(),
+            std::time::Duration::from_secs(MIN_RATE_GRACE_SECS),
+        )
+        .await?;
         if Hash::new(&buf) != hash {
             banned.lock().unwrap().insert(addr.id.to_string());
             anyhow::bail!("chunk {hash} failed integrity check");
         }
+        // Verified whole: this connection earned its place in the pool.
+        self.pool.checkin(addr.id, stream.conn);
         out.set_len(0)?;
         out.seek(SeekFrom::Start(0))?;
         out.write_all(&buf)?;
@@ -1192,6 +1805,19 @@ impl ChunkTicket {
     pub fn looks_like(s: &str) -> bool {
         s.trim_start().starts_with(TICKET_PREFIX)
     }
+
+    /// What this ticket *serves*, as opposed to how to reach it:
+    /// [`crate::swarm::swarm_id`] over the digests and the size.
+    ///
+    /// Two tickets for the same send agree on it and nothing else has to: the
+    /// provider address changes with every socket bind, and the sealed key blob is
+    /// randomised by HPKE on every seal, so comparing ticket strings answers a
+    /// question nobody asked. It is also a strong claim about *which* send: the
+    /// digests are of ciphertext under a random 32-byte content key, so producing
+    /// the same id means holding that key.
+    pub fn content_id(&self) -> String {
+        crate::swarm::swarm_id(&self.chunks, self.total_size)
+    }
 }
 
 /// What the sender hands the relay to backfill chunks: the sender's address, the
@@ -1230,6 +1856,67 @@ impl SeedRequest {
     }
 }
 
+/// "Of these chunk hashes, which do you already hold?" — asked of the relay by
+/// both ends. Base32 `arvh…`; the answer is a bitfield over the same order (see
+/// [`encode_have_bitfield`]).
+///
+/// **Keyed on the hashes and nothing else**, deliberately not on the per-transfer
+/// seed token: `/v1/addr` mints a fresh token on every preparation and
+/// `PrepRecord` does not carry it, so a token-keyed query would fail in exactly
+/// the case it exists for — a sender that restarted and no longer knows what it
+/// left behind.
+///
+/// It tells a caller nothing they could not already find out. The relay serves
+/// any chunk it holds to whoever names its hash over [`CHUNK_ALPN`], without a
+/// token, so "do you have it" is answerable by just asking for it; this only
+/// makes the same question cheap and batched, which is why the relay caps the
+/// list length and spends the write budget on it. And the hashes are BLAKE3 of
+/// *ciphertext* sealed under a per-transfer random key — holding the same file
+/// does not let you compute them, so the ticket remains the capability.
+#[derive(Serialize, Deserialize)]
+pub struct HaveRequest {
+    pub chunks: Vec<Hash>,
+}
+
+impl HaveRequest {
+    pub fn encode(&self) -> Result<String> {
+        let bytes = postcard::to_allocvec(self).context("serialize have request")?;
+        Ok(format!(
+            "arvh{}",
+            data_encoding::BASE32_NOPAD.encode(&bytes)
+        ))
+    }
+    pub fn decode(s: &str) -> Result<Self> {
+        let body = s
+            .trim()
+            .strip_prefix("arvh")
+            .ok_or_else(|| anyhow!("not a have request"))?;
+        let bytes = data_encoding::BASE32_NOPAD
+            .decode(body.to_uppercase().as_bytes())
+            .context("decode have request")?;
+        postcard::from_bytes(&bytes).context("deserialize have request")
+    }
+}
+
+/// The answer to a [`HaveRequest`]: one bit per requested hash, in the order
+/// asked. Encoded here rather than at either end so the two cannot drift.
+pub fn encode_have_bitfield(bitfield: &[u8]) -> String {
+    data_encoding::BASE32_NOPAD.encode(bitfield).to_lowercase()
+}
+
+/// Decode a [`encode_have_bitfield`] answer. `n_chunks` is what we asked about:
+/// a reply claiming more bits than that is a reply to a different question.
+pub fn decode_have_bitfield(s: &str, n_chunks: usize) -> Result<Vec<u8>> {
+    let bytes = data_encoding::BASE32_NOPAD
+        .decode(s.trim().to_uppercase().as_bytes())
+        .context("decode have bitfield")?;
+    anyhow::ensure!(
+        bytes.len() <= crate::swarm::bitfield_bytes(n_chunks),
+        "have bitfield longer than the question asked"
+    );
+    Ok(bytes)
+}
+
 /// Encode/decode a relay provider address (its iroh address).
 pub fn encode_addr(addr: &EndpointAddr) -> Result<String> {
     encode_ticket(addr)
@@ -1265,5 +1952,365 @@ mod tests {
     #[test]
     fn nothing_sent_yet_is_zero_not_a_panic() {
         assert_eq!(SentBytes::default().best(), 0);
+    }
+
+    /// Backdate a peer's stamp past the activity window, as time passing would.
+    fn backdate(activity: &AtomicU64) {
+        let stale = now_ms().saturating_sub(ACTIVE_WINDOW_SECS * 1000 + 1);
+        activity.store(stale, Ordering::Relaxed);
+    }
+
+    /// The bug this metric replaces: a peer that connected and then did nothing
+    /// counted as "downloading" for as long as its connection lived — hours, in
+    /// the case that prompted this. It must drop out of the count while staying
+    /// tracked (the refcount has to balance when its connections finally end).
+    #[test]
+    fn a_connected_but_silent_peer_stops_counting() {
+        let peers = PeerCount::default();
+        let id = peer();
+        let activity = peers.enter(id);
+        assert_eq!(peers.distinct(), 1, "fresh entry counts");
+
+        backdate(&activity);
+        assert_eq!(peers.distinct(), 0, "gone quiet: no longer downloading");
+        assert_eq!(
+            peers.0.lock().unwrap().len(),
+            1,
+            "but still tracked — its connection is open and must balance on leave"
+        );
+
+        peers.leave(id);
+        assert!(peers.0.lock().unwrap().is_empty(), "leave still balances");
+    }
+
+    /// The other half of the definition: activity is not only "a request
+    /// arrived". A slow peer mid-16 MiB chunk makes no new request for minutes,
+    /// but bytes keep leaving for it — the write loop's stamp (this exact store)
+    /// must keep it counted.
+    #[test]
+    fn progress_in_the_body_write_loop_keeps_a_slow_peer_counted() {
+        let peers = PeerCount::default();
+        let activity = peers.enter(peer());
+
+        backdate(&activity);
+        assert_eq!(peers.distinct(), 0);
+        // What the write loop does after handing bytes to QUIC:
+        activity.store(now_ms(), Ordering::Relaxed);
+        assert_eq!(peers.distinct(), 1, "moving bytes is being downloaded from");
+    }
+
+    /// A receiver opens a fresh connection per chunk, so the same peer enters
+    /// and leaves repeatedly — one entry, counted once, removed only when its
+    /// last connection ends.
+    #[test]
+    fn reconnects_share_one_entry() {
+        let peers = PeerCount::default();
+        let id = peer();
+        peers.enter(id);
+        peers.enter(id);
+        assert_eq!(peers.distinct(), 1, "distinct peers, not connections");
+
+        peers.leave(id);
+        assert_eq!(peers.distinct(), 1, "one connection left, still here");
+        peers.leave(id);
+        assert_eq!(peers.distinct(), 0);
+        assert!(peers.0.lock().unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod conn_pool_tests {
+    use super::*;
+    use crate::transfer::RelayChoice;
+
+    async fn small_sender(dir: &std::path::Path) -> ChunkSender {
+        let path = dir.join("f.bin");
+        std::fs::write(&path, vec![5u8; 16 * 1024]).unwrap();
+        ChunkSender::serve(&path, RelayChoice::Disabled)
+            .await
+            .expect("sender")
+    }
+
+    /// The point of the pool: the second fetch rides the first fetch's
+    /// connection. `stable_id` is quinn's identity for the underlying connection,
+    /// so equality is proof of reuse, not of two connections that look alike.
+    #[tokio::test]
+    async fn sequential_fetches_reuse_the_provider_connection() {
+        let dir = tempfile::tempdir().unwrap();
+        let sender = small_sender(dir.path()).await;
+        let hash = sender.chunks()[0];
+        let receiver = ChunkReceiver::open(RelayChoice::Disabled)
+            .await
+            .expect("receiver");
+        let banned = Mutex::new(HashSet::new());
+
+        let mut out = tempfile::tempfile().unwrap();
+        receiver
+            .fetch_one(&sender.addr(), hash, &mut out, &banned)
+            .await
+            .expect("first fetch");
+        assert_eq!(receiver.pool.idle(&sender.addr().id), 1, "kept warm");
+        let first = receiver.pool.0.lock().unwrap()[&sender.addr().id][0].stable_id();
+
+        receiver
+            .fetch_one(&sender.addr(), hash, &mut out, &banned)
+            .await
+            .expect("second fetch");
+        assert_eq!(receiver.pool.idle(&sender.addr().id), 1, "back in the pool");
+        let second = receiver.pool.0.lock().unwrap()[&sender.addr().id][0].stable_id();
+        assert_eq!(first, second, "the second fetch paid no handshake");
+    }
+
+    /// A pooled connection can die underneath us — the server's idle bound, a
+    /// restart. Checkout must shrug and dial fresh, never report the provider
+    /// down on the strength of a stale connection.
+    #[tokio::test]
+    async fn a_dead_pooled_connection_is_replaced_not_fatal() {
+        let dir = tempfile::tempdir().unwrap();
+        let sender = small_sender(dir.path()).await;
+        let hash = sender.chunks()[0];
+        let receiver = ChunkReceiver::open(RelayChoice::Disabled)
+            .await
+            .expect("receiver");
+        let banned = Mutex::new(HashSet::new());
+
+        let mut out = tempfile::tempfile().unwrap();
+        receiver
+            .fetch_one(&sender.addr(), hash, &mut out, &banned)
+            .await
+            .expect("first fetch");
+        // Kill the pooled connection from under the pool, as the server's idle
+        // bound would.
+        receiver.pool.0.lock().unwrap()[&sender.addr().id][0].close(0u32.into(), b"gone");
+
+        receiver
+            .fetch_one(&sender.addr(), hash, &mut out, &banned)
+            .await
+            .expect("a stale pooled connection must cost a dial, not the fetch");
+        assert_eq!(
+            receiver.pool.idle(&sender.addr().id),
+            1,
+            "the fresh connection took the dead one's place"
+        );
+    }
+}
+
+#[cfg(test)]
+mod prepared_chunks_tests {
+    use super::*;
+
+    /// The digests are computed on several threads and collected out of order, so
+    /// the one thing that can break is the thing everything downstream depends on:
+    /// `chunks[i]` must be the hash of the i-th chunk of the file, and the reverse
+    /// index must agree. Checked against the definition itself — sealing each chunk
+    /// in place, sequentially — rather than against a previous run.
+    #[tokio::test]
+    async fn the_digests_come_back_in_file_order() {
+        // Two chunks and a half, so the tail (a short final chunk) is covered too.
+        let len = (2 * CHUNK_SIZE as usize) + (CHUNK_SIZE as usize / 2);
+        let body: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("payload.bin");
+        std::fs::write(&path, &body).unwrap();
+
+        let key = crate::crypto::random_chunk_key();
+        let prepared = PreparedChunks::compute(path.as_path().into(), key)
+            .await
+            .expect("hash the payload");
+
+        let total_chunks = body.len().div_ceil(CHUNK_SIZE as usize) as u32;
+        assert_eq!(prepared.total_chunks, total_chunks);
+        assert_eq!(prepared.total_size, body.len() as u64);
+        assert_eq!(prepared.chunks.len(), total_chunks as usize);
+
+        for i in 0..total_chunks {
+            let start = i as usize * CHUNK_SIZE as usize;
+            let end = (start + CHUNK_SIZE as usize).min(body.len());
+            let ct = crate::crypto::seal_chunk(&key, i, total_chunks, &body[start..end]).unwrap();
+            assert_eq!(
+                prepared.chunks[i as usize],
+                Hash::new(&ct),
+                "chunk {i} is not the hash of the bytes at that position"
+            );
+            assert_eq!(
+                prepared.index.get(&Hash::new(&ct)).copied(),
+                Some(i),
+                "the reverse index disagrees about where chunk {i} is"
+            );
+        }
+    }
+
+    /// A provider that goes quiet mid-chunk must become an error, not a wait.
+    ///
+    /// This is the whole point of the bound. The scheduler already knows how to
+    /// recover from a failed fetch — cool the provider down, re-queue the piece,
+    /// reassign it seconds later — and reaches none of that for a fetch that never
+    /// returns. A 10.7 GiB download once sat at 97.4% for hours on this.
+    #[tokio::test]
+    async fn a_silent_provider_fails_instead_of_hanging_for_ever() {
+        // Sends a few bytes, then holds the stream open saying nothing.
+        let (mut w, mut r) = tokio::io::duplex(64);
+        tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            w.write_all(b"half").await.unwrap();
+            // Never write the rest, never close: the shape of the hang.
+            std::future::pending::<()>().await;
+        });
+
+        let mut buf = [0u8; 16];
+        let started = std::time::Instant::now();
+        let out = read_body_or_stall(
+            &mut r,
+            &mut buf,
+            std::time::Duration::from_millis(200),
+            0,
+            std::time::Duration::ZERO,
+        )
+        .await;
+        let waited = started.elapsed();
+
+        let err = out.expect_err("a provider that stops sending is a failed fetch");
+        assert!(
+            err.to_string().contains("nothing for"),
+            "the error should say it went quiet, got: {err}"
+        );
+        assert!(
+            err.to_string().contains("4 of 16"),
+            "and how far it got, so a log line is worth reading, got: {err}"
+        );
+        assert!(
+            waited < std::time::Duration::from_secs(5),
+            "took {waited:?}"
+        );
+    }
+
+    /// The bound is on silence, not on duration: a provider that keeps sending, even
+    /// slowly, must not be cut off. Every byte starts the clock over.
+    #[tokio::test]
+    async fn a_slow_but_talking_provider_is_not_cut_off() {
+        let (mut w, mut r) = tokio::io::duplex(64);
+        tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            // Eight writes, each well inside the window but together far past it.
+            for _ in 0..8 {
+                tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+                w.write_all(b"ab").await.unwrap();
+            }
+        });
+
+        let mut buf = [0u8; 16];
+        read_body_or_stall(
+            &mut r,
+            &mut buf,
+            std::time::Duration::from_millis(200),
+            0,
+            std::time::Duration::ZERO,
+        )
+        .await
+        .expect("a slow provider is still a working provider");
+        assert_eq!(&buf, b"abababababababab");
+    }
+
+    /// The hole the stall bound cannot see: a byte every so often restarts the
+    /// silence clock for ever, and the scheduler never reassigns a piece with a
+    /// "working" source. A trickle must fail the rate floor once the grace is up.
+    #[tokio::test]
+    async fn a_trickling_provider_fails_the_rate_floor() {
+        let (mut w, mut r) = tokio::io::duplex(64);
+        tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            // One byte at a time, never long enough apart to trip the stall bound
+            // — the exact shape that used to pass for ever.
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                if w.write_all(b"x").await.is_err() {
+                    return;
+                }
+            }
+        });
+
+        let mut buf = [0u8; 4096];
+        let err = read_body_or_stall(
+            &mut r,
+            &mut buf,
+            std::time::Duration::from_millis(500),
+            1000, // 1000 B/s floor; the trickle manages ~20
+            std::time::Duration::from_millis(200),
+        )
+        .await
+        .expect_err("a trickle is not a working provider");
+        assert!(
+            err.to_string().contains("floor"),
+            "the error should name the floor, got: {err}"
+        );
+    }
+
+    /// And the floor must not bite anyone honest: a genuinely slow link that stays
+    /// above it finishes its chunk.
+    #[tokio::test]
+    async fn an_honest_slow_link_stays_above_the_floor() {
+        let (mut w, mut r) = tokio::io::duplex(64);
+        tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            for _ in 0..8 {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                if w.write_all(b"ab").await.is_err() {
+                    return;
+                }
+            }
+        });
+
+        let mut buf = [0u8; 16];
+        read_body_or_stall(
+            &mut r,
+            &mut buf,
+            std::time::Duration::from_millis(500),
+            10, // ~40 B/s of honest slowness against a 10 B/s floor
+            std::time::Duration::from_millis(100),
+        )
+        .await
+        .expect("slow but above the floor is a working provider");
+        assert_eq!(&buf, b"abababababababab");
+    }
+
+    /// A provider that closes early is a fault too — it promised a length in the
+    /// header — and must not leave the caller with a half-filled buffer it believes.
+    #[tokio::test]
+    async fn a_truncated_body_is_an_error_not_a_short_chunk() {
+        let (mut w, mut r) = tokio::io::duplex(64);
+        tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            w.write_all(b"short").await.unwrap();
+            w.shutdown().await.unwrap();
+        });
+
+        let mut buf = [0u8; 16];
+        let err = read_body_or_stall(
+            &mut r,
+            &mut buf,
+            std::time::Duration::from_secs(5),
+            0,
+            std::time::Duration::ZERO,
+        )
+        .await
+        .expect_err("a truncated body must not pass for a whole chunk");
+        assert!(
+            err.to_string().contains("ended after 5 of 16"),
+            "got: {err}"
+        );
+    }
+
+    /// An empty payload has no chunks — and must not hang waiting for one.
+    #[tokio::test]
+    async fn an_empty_payload_yields_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty.bin");
+        std::fs::write(&path, b"").unwrap();
+        let prepared =
+            PreparedChunks::compute(path.as_path().into(), crate::crypto::random_chunk_key())
+                .await
+                .expect("hash an empty payload");
+        assert_eq!(prepared.total_size, 0);
+        assert!(prepared.chunks.is_empty());
     }
 }

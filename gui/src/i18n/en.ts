@@ -10,6 +10,13 @@
 // Keys are dotted by area. The prefix is where the string is *shown*, not where
 // it happens to be constructed: `store.err.*` reads on screen as a toast, but it
 // is raised from the store, and grouping it with the screens would scatter it.
+//
+// All of the above is about the *keys*. What goes in the values is `docs/COPY.md`
+// — in short: say what happened, say what they can do, and put the reason on the
+// hint line rather than in the label. The key suffix decides how long a value may
+// be (`*Hint` and `*Body` are the second level and get room; `*.submit*` is a
+// button and gets almost none), which is why the suffixes are worth keeping
+// honest. `gui/src/test/copy.test.ts` enforces it and lists what is still over.
 
 export const en = {
   // ---- locale ------------------------------------------------------------
@@ -34,6 +41,8 @@ export const en = {
   "common.loading": "Loading…",
   "common.to": "to",
   "common.from": "from",
+  /** Said by three separate settings toasts, two of them word for word. */
+  "common.afterRestart": "It takes effect the next time the daemon starts.",
 
   // ---- app frame ---------------------------------------------------------
   "title.transfers": "Transfers",
@@ -43,12 +52,22 @@ export const en = {
   "title.devices": "Your devices",
   "title.settings": "Settings",
 
-  "app.disconnected":
-    "I can't reach the daemon. Transfers already running carry on, but this window can't see them.",
+  "app.disconnected": "Daemon unreachable",
+  "app.disconnectedDetail": "Running transfers carry on; this window can't see them.",
   "app.versionMismatch": (daemon: string, gui: string) =>
-    `The running daemon is version ${daemon}, the app is ${gui}. Restart it to line them up.`,
+    `Daemon ${daemon}, app ${gui} — restart it to line them up.`,
   "app.versionUnknown": "older",
   "app.restart": "Restart",
+  "app.updateAvailable": (version: string) => `Arvolo ${version} is out.`,
+  "app.updateNow": "Update",
+  "app.updateLater": "Not now",
+  "app.updateDownloading": (got: string, total: string) =>
+    `Downloading the update — ${got} of ${total}.`,
+  "app.updateDownloadingUnknown": "Downloading the update…",
+  "app.updateHeldBack": (latest: string, relay: string) =>
+    `${latest} is out, but ${relay} only carries this one.`,
+  "app.updateDevices":
+    "Update your other machines too, or they stop syncing.",
   "app.offerWaiting": "Someone wants to send you a file.",
   "app.offersWaiting": (n: number) => `${n} files waiting for you to confirm.`,
   "app.seeOffers": "See",
@@ -61,10 +80,13 @@ export const en = {
   "app.dropTitle": "Drop here to send",
   "app.dropHint": "Then choose who for: a contact, a code, a link.",
   "app.actionFailed": "That didn't work",
+  "app.errHintDaemon": "The daemon isn't answering — restart it and try again.",
+  "app.errHintRelay": "This needs a relay — set one under Settings → Network.",
+  "app.errHintPassword": "This one is password-protected — ask the sender for the password.",
+  "app.errOpenSettings": "Open Settings",
 
   "crash.title": "Something broke in the interface",
-  "crash.body":
-    "Your transfers don't stop: they carry on in the background daemon. You can pick up where you left off.",
+  "crash.body": "Transfers carry on in the daemon; you can pick up where you left off.",
 
   // ---- rail --------------------------------------------------------------
   "rail.nav": "Main navigation",
@@ -80,6 +102,8 @@ export const en = {
 
   // ---- transfer status ---------------------------------------------------
   "status.active": "Under way",
+  "status.preparing": "Preparing…",
+  "meta.preparing": "reading and encrypting — nothing sent yet",
   "status.sharing": "Shared",
 
   "share.title": "Shared file",
@@ -90,29 +114,40 @@ export const en = {
   "share.never": "never",
   "share.uploaded": "uploaded",
   "share.fromDownload": (when: string) =>
-    `You downloaded this ${when}, and your computer is now making it available to others.`,
+    `Downloaded ${when}; your computer is now sharing it.`,
   "share.seedingSetting": "Change this",
-  "share.countsNote":
-    "Copies taken, not people: a ticket carries no identity, so the same person fetching twice counts twice.",
+  "share.countsNote": "Copies taken, not people: fetching twice counts twice.",
   "status.completed": "Completed",
   "status.deposited": "Deposited",
   "status.paused": "Paused",
   "status.incoming": "To confirm",
+  "status.offered": "Offered",
   "status.stalled": "Stalled",
   "status.failed": "Failed",
   "status.cancelling": "Cancelling…",
   "status.cancelled": "Cancelled",
 
-  "method.p2p": "Direct",
-  "method.cloud": "Mailbox",
-  "method.link": "Link",
-  "method.ticket": "Ticket",
-
   "meta.paused": "paused",
   "meta.sharing": "available — nobody downloading it",
   "meta.sharingPeers": (n: number) =>
     n === 1 ? "1 person downloading it" : `${n} people downloading it`,
+  "meta.offered": "waiting for them to see it",
   "meta.stalled": "resumes as soon as it can",
+  // Why a send is waiting. One per `WaitingReason` in core/src/manager/mod.rs:
+  // the daemon sends a code, not this sentence, precisely so this sentence can be
+  // written in each language rather than arriving in English down a socket.
+  // Shorter than the daemon's own sentences on purpose. Those are written for a
+  // terminal, where a line has room to explain itself; this is the meta line
+  // under a row, and the copy rules cap it at a glance's worth of words.
+  "waiting.offered": "offered — waiting for them to accept",
+  "waiting.tooLarge": "too big for the relay — will send direct",
+  "waiting.relayRetry": (why: string) => `${why} — retrying, direct when they're online`,
+  "waiting.parked": "parked on the relay — finishes without you",
+  "waiting.relayCapped": (cap: string) => `relay caps this at ${cap} — direct from here`,
+  "waiting.offloadFailed": (why: string) => `couldn't park it: ${why}`,
+  "waiting.noRoute": "no relay reachable — local network only",
+  // What goes where the relay's own words would, when it gave none.
+  "waiting.relayUnnamed": "the relay could not take it",
   "meta.incoming": "open for the details",
   "meta.deposited": "waiting for the recipient to collect it",
   "meta.failed": "transfer failed",
@@ -142,21 +177,26 @@ export const en = {
   // ---- transfers ---------------------------------------------------------
   "transfers.pause": "Pause",
   "transfers.resume": "Resume",
+  "transfers.depositNow": "Leave it in their mailbox",
+  "transfers.depositNowDesc":
+    "Stop waiting for them to accept. The file goes to the relay and they collect it whenever.",
   "transfers.openFile": "Open file",
-  "transfers.openFileFailed": "I can't open the file",
-  "transfers.openFolder": "Open the folder",
-  "transfers.openFolderFailed": "I can't open the folder",
-  "transfers.revokeDeposit": "Withdraw the deposit",
+  "transfers.openFileFailed": "Couldn't open the file",
+  "transfers.openFolder": "Open folder",
+  "transfers.openFolderFailed": "Couldn't open the folder",
+  "transfers.revokeDeposit": "Withdraw",
   "transfers.cancel": "Cancel",
-  "transfers.removeRow": "Take off the list",
+  "transfers.removeRow": "Remove",
   "transfers.verifiedIdentity": "Verified identity",
   "transfers.swarm": "Transfer spread across several peers",
   "transfers.peers": (n: number) => (n === 1 ? "1 peer" : `${n} peers`),
   "transfers.liveCode": "code live",
   "transfers.review": "Review",
   "transfers.shareDetails": "Sharing details",
-  "transfers.reorder": (name: string) =>
-    `Move ${name}: drag, or use the up and down arrows`,
+  "transfers.saveSender": "Save the sender…",
+  "transfers.saveSenderTitle": "Save the sender to your contacts",
+  "transfers.saveSenderSub": (name: string) => `They sent you ${name}.`,
+  "transfers.reorder": (name: string) => `Move ${name}: drag or arrow keys`,
   "transfers.rowActions": (name: string) => `Actions for ${name}`,
   "transfers.progressOf": (name: string) => `Progress of ${name}`,
   "transfers.confirmRevokeTitle": "Withdraw the deposit?",
@@ -178,69 +218,96 @@ export const en = {
   "transfers.emptyOutAction": "Send something",
   "transfers.emptyInAction": "Paste a code",
   "transfers.firstRunTitle": "Drag the files you want to send here",
-  "transfers.firstRunBody":
-    "Or pick a contact, generate a short code to read out, or create a link that opens in any browser. Everything is encrypted end to end: the relay only ever sees unreadable bytes.",
+  // Not a list of the four modes: they are the four tabs of the send panel,
+  // one click away and labelled.
+  "transfers.firstRunBody": "Or use Send to pick a contact, a code, or a link.",
   "transfers.firstRunAction": "Send something",
 
   // ---- people ------------------------------------------------------------
-  "people.presenceUnknownTitle": "No idea: the relay didn't answer",
+  "people.presenceUnknownTitle": "The relay didn't answer",
   "people.presenceUnknownLabel": "Presence unknown",
   "people.presenceOnTitle": "Connected right now",
   "people.presenceOffTitle": "Not connected",
   "people.presenceOn": "Connected",
   "people.presenceOff": "Not connected",
+  "people.lastExchange": (ago: string) => `last exchange ${ago}`,
+  "people.listensOn": (relay: string) => `listens on ${relay}`,
 
   "people.menuDetails": "Details and fingerprint",
-  "people.menuUnverify": "Take back the verification",
+  "people.menuUnverify": "Unverify",
   "people.menuVerify": "Mark as verified…",
-  "people.menuUntrust": "No longer trusted: ask me every time",
-  "people.menuTrust": "Mark as trusted: download automatically",
+  "people.menuUntrust": "Stop trusting",
+  "people.menuUntrustDesc": "You'll be asked for each file.",
+  "people.menuTrust": "Trust",
+  "people.menuTrustDesc": "Their files download without asking.",
   "people.menuUnblock": "Unblock",
   "people.menuBlock": "Block",
-  "people.menuRemove": "Remove from the address book",
+  "people.menuRemove": "Remove from contacts",
   "people.rowActions": (name: string) => `Actions for ${name}`,
-  "people.goesBy": (name: string) => `goes by “${name}”`,
   "people.notVerified": "Not verified",
-  "people.notVerifiedTitle": "The fingerprint has never been compared",
-  "people.wantsToBeCalled": (name: string) => `Wants to be called “${name}”.`,
-  "people.approve": "Approve",
+  "people.notVerifiedTitle": "Fingerprint never compared",
+  "people.claimedPlain": (name: string) => `(“${name}”)`,
+  "people.claimedNew": (name: string) => `(calls themselves “${name}”)`,
+  "people.claimedChange": (now: string, before: string) =>
+    `(now: “${now}” — was: “${before}”)`,
+  // A tooltip: it has to be readable at a glance or it is not one.
+  "people.claimedTip": (mine: string) =>
+    `Their own label, not proof. Yours — “${mine}” — never changes on its own.`,
+  "people.claimedNote": (mine: string) =>
+    `The name they now advertise. Yours for them stays “${mine}”.`,
+  "people.acknowledge": "Got it",
   "people.send": "Send",
   "people.details": "Details",
 
   "people.confirmRemoveTitle": (name: string) => `Remove ${name}?`,
   "people.confirmRemoveBody":
-    "They disappear from the address book along with their verified and trusted marks. Transfers already made stay in the history.",
-  "people.confirmForceTitle": "Download automatically from an unverified key?",
+    "The verified and trusted marks go with them. Past transfers stay in the history.",
+  "people.confirmForceTitle": "Trust an unverified key?",
+  // Floored in copy-rules.ts: it must say the fingerprint was never compared
+  // *and* what that lets through. The footer is gone — it repeated the
+  // conclusion the body had just reached.
   "people.confirmForceBody": (name: string) =>
-    `Files from ${name} would be downloaded without asking you anything, but you have never compared their fingerprint in person. If somebody had got in the middle when you added them, you would be auto-downloading from that person.`,
-  "people.confirmForceFooter":
-    "The right way round is to compare the fingerprint and then mark them verified.",
+    `You have never compared ${name}'s fingerprint. If somebody got in the middle when you added them, you would be auto-downloading from that person.`,
   "people.confirmForceLabel": "Force it anyway",
   "people.confirmForceCancel": "I'll verify first",
 
   "people.addTitle": "Add by id",
-  "people.addSubtitle": "The long way round: you need their public id in full.",
+  "people.addSubtitle": "You need their public id in full.",
   "people.addNameLabel": "What you call them",
   "people.addNamePlaceholder": "e.g. Julia",
   "people.addIdLabel": "Public id",
   "people.addIdHint":
     "They find it with “arvolo me”, or on the Settings screen of their app.",
-  "people.addTip":
-    "Far simpler: Swap contacts. You read each other a short code and you both end up saved and already verified, without copying fifty characters.",
+  // A pointer, not a second telling: `pair.subContactHost` is where swapping
+  // codes is explained, on the sheet that does it.
+  "people.addTip": "Swapping codes is quicker.",
   "people.addSaved": (name: string) => `Saved ${name}`,
   "people.addSavedDetail":
     "They stay unverified until you compare the fingerprint.",
+  "people.addNameTaken": (name: string) =>
+    `“${name}” already belongs to someone. Saving will ask whether to move the name.`,
+  "people.confirmRekeyTitle": (name: string) => `Give “${name}” a new key?`,
+  // Floored in copy-rules.ts: the marks being dropped is the whole consequence,
+  // and a shorter wording turns an irreversible change into a confirmation.
+  "people.confirmRekeyBody": (name: string) =>
+    `“${name}” already points at another key. Moving the name drops their verified and trusted marks — the new key is unchecked until you compare it.`,
+  "people.confirmRekeyCurrent": "The key it points at now",
+  "people.confirmRekeyDo": "Move the name",
+  "people.rekeyed": (name: string) => `“${name}” now points at the new key`,
+  "people.rekeyedDetail": "Verified and trusted were dropped.",
 
   "person.fingerprint": "Fingerprint",
+  // The canonical wording. Everywhere else that needs this either points here
+  // or repeats it verbatim — nine near-variants was eight too many.
   "person.fingerprintHint":
-    "The same words have to appear on their screen. Compare them out loud or in person — not over a chat on the same channel you swapped ids on.",
+    "The same words must appear on their screen. Compare them out loud, not over the channel you swapped ids on.",
   "person.publicId": "Public id",
   "person.verified": "Verified",
   "person.verifiedBody": "You have confirmed this fingerprint out of band.",
-  "person.unverify": "Take back the verification",
+  "person.unverify": "Unverify",
   "person.notVerifiedYet": "Not verified yet",
   "person.notVerifiedBody":
-    "Until you compare the fingerprint, the only thing you know is that somebody gave you that id.",
+    "All you know so far is that somebody gave you that id.",
   "person.compared": (name: string) =>
     `I compared the fingerprint with ${name} outside this app.`,
   "person.markVerified": "Mark as verified",
@@ -248,31 +315,24 @@ export const en = {
   "person.renameHint": "The name is yours: the key and the marks stay put.",
 
   "people.swap": "Swap contacts",
-  "people.haveCode": "I have a code",
+  "people.haveCode": "Enter a code",
   "people.byId": "By id",
   "people.export": "Export",
   "people.import": "Import",
   "people.whoIsOnline": "Who's about",
-  "people.whoIsOnlineTitle": "Ask the relay who is connected right now",
-  "people.moreActions": "Other address-book actions",
-  "people.prune": "Clean up orphaned names",
-  "people.pruneNone": "Nothing to clean up",
-  "people.pruneOne": "Removed 1 record",
-  "people.pruneMany": (n: number) => `Removed ${n} records`,
-  "people.pruneDetail":
-    "They were names advertised by contacts you no longer have.",
-  "people.filterLabel": "Address-book filter",
+  "people.whoIsOnlineTitle": "Ask the relay who is connected",
+  "people.filterLabel": "Contact filter",
   "people.filterAll": "All",
   "people.filterVerified": "Verified",
   "people.filterTrusted": "Trusted",
   "people.filterBlocked": "Blocked",
   "people.filterBlockedN": (n: number) => `Blocked (${n})`,
   "people.searchPlaceholder": "Search by name or id…",
-  "people.searchLabel": "Search the address book",
+  "people.searchLabel": "Search contacts",
   "people.emptyNone": "Nobody in the address book",
   "people.emptyNoMatch": "No contact matches",
   "people.emptyNoneBody":
-    "The quickest way to add somebody is to read them a short code: you save each other and you are verified straight away, with no ids to copy by hand.",
+    "Swapping codes is quickest: you save each other, already verified.",
   "people.emptyNoMatchBody": "Try a different filter or search.",
   "people.exportFilename": "arvolo-contacts.json",
   "people.exportedOne": "Exported 1 contact",
@@ -313,12 +373,12 @@ export const en = {
   "deposit.active": "Live",
 
   "deposits.openInBrowser": "Open in the browser",
-  "deposits.openFailed": "I can't open the link",
+  "deposits.openFailed": "Couldn't open the link",
   "deposits.share": "Link",
-  "deposits.shareTicket": "Ticket",
+  "deposits.shareTicket": "Pickup code",
   "deposits.shareTicketTitle": "The ticket, again",
   "deposits.ticketDetail":
-    "Paste it to the recipient: it opens in their Arvolo, or with `arvolo recv`. Only they can decrypt it — it is sealed to their identity.",
+    "Paste it to the recipient. Only they can decrypt it — it is sealed to their identity.",
   "deposits.shareTitle": "The link, again",
   "deposits.publicLink": "Public link",
   "deposits.sealed": "Deposit",
@@ -328,17 +388,15 @@ export const en = {
   "deposits.confirmRevokeTitle": "Withdraw it?",
   "deposits.confirmRemoveTitle": "Remove the row?",
   "deposits.confirmRevokeLink":
-    "The link stops working for everyone you gave it to, and anyone who has already downloaded it keeps their copy. The file stays on your disk.",
+    "The link stops working for everyone. Copies already downloaded stay downloaded.",
   "deposits.confirmRevokeSealed":
-    "The file is taken off the relay and the offer withdrawn from the recipient's mailbox. If they haven't collected it yet, they no longer can.",
+    "It comes off the relay and out of their mailbox. If they have not collected it, they cannot.",
   "deposits.confirmRemoveBody":
     "There is nothing left on the relay to take away: only this row goes.",
-  "deposits.intro":
-    "What you have left on a relay and can still take back. The state is asked of the relay every time you open this screen — there is no other way to know it.",
+  "deposits.intro": "What you have left on a relay and can still take back.",
   "deposits.createLink": "Create a link",
   "deposits.emptyTitle": "No live link or deposit",
-  "deposits.emptyBody":
-    "When you create a public link, or leave a file in somebody's mailbox, it shows up here — and this is where you take it back.",
+  "deposits.emptyBody": "Public links and mailbox deposits show up here.",
   "deposits.sectionLinks": "Public links",
   "deposits.sectionSealed": "Sealed deposits",
 
@@ -369,22 +427,23 @@ export const en = {
   // ---- devices -----------------------------------------------------------
   "devices.identityTitle": "Your shared identity",
   "devices.identityHint":
-    "Every linked device uses this one. To the rest of the world you are a single person, wherever you open Arvolo.",
+    "Every linked device uses this one. To everyone else you are one person.",
   "devices.fingerprint": "Fingerprint",
   "devices.fingerprintHint":
-    "It must be identical on all your devices. If one machine reads different words, that machine is not linked: it is another identity.",
+    "It must match on all your devices. Different words mean a different identity.",
   "devices.publicId": "Public id",
+  "devices.sendToSelf": "Send to your devices",
   "devices.pairTitle": "Link a device",
+  // How it is done. What it *costs* is in `pair.deviceWarnRest`, on the sheet
+  // where the code appears — the moment somebody is about to read one out.
   "devices.pairBody":
-    "Linking is done from both ends: on this machine you show a code, on the other you type it in. It is a delicate operation — what crosses over is your secret identity, not a mere invitation.",
+    "You show a code here and type it in on the other machine.",
   "devices.showCode": "Show a code",
-  "devices.haveCode": "I have a code",
+  "devices.haveCode": "Enter a code",
   "devices.pairWarnLead": "Never on a machine that isn't yours.",
-  "devices.pairWarnRest":
-    "Whoever types the code becomes you to every intent and purpose: same mailbox, same address book, same ability to open what is sent to you.",
   "devices.syncTitle": "Address book in step",
   "devices.syncHint":
-    "Contacts travel between your devices inside an encrypted cell on your mailbox. The relay keeps bytes it cannot read.",
+    "Contacts travel inside an encrypted cell on your mailbox.",
   "devices.syncOn": "On",
   "devices.syncOff": "Off",
   "devices.contactCount": (n: number) =>
@@ -393,12 +452,40 @@ export const en = {
   "devices.neverSynced": "not synced since the daemon started",
   "devices.lastError": (err: string) => `The last round failed: ${err}`,
   "devices.syncNow": "Sync now",
+  "devices.listTitle": "The machines",
+  "devices.listHint":
+    "Each one adds itself when it syncs. Self-reported: nothing here proves a row is a computer that still exists.",
+  "devices.listEmpty": "No machine has announced itself yet.",
+  "devices.thisDevice": "this device",
+  "devices.neverSeen": "never synced",
+  "devices.seenAgo": (when: string) => `seen ${when}`,
+  "devices.rowActions": (name: string) => `Actions for ${name}`,
+  "devices.rename": "Rename",
+  "devices.renameTitle": "Name this device",
+  "devices.renameHint":
+    "Only this one: a device is described by itself, so the others are renamed on themselves.",
+  "devices.renameThereDesc": "On that machine: it writes its own row.",
+  "devices.forget": "Forget",
+  "devices.forgetHereDesc":
+    "You are on it — it would announce itself again on the next round.",
+  "devices.confirmForgetTitle": (name: string) => `Forget ${name}?`,
+  "devices.confirmForgetBody":
+    "It leaves the list on every machine. It keeps the identity — nothing takes that back — but if it is running it stops announcing itself.",
+  "devices.renamed": "Renamed",
+  "devices.renamedDetail": "Your other machines see it after the next sync.",
+  "devices.forgotten": "Forgotten",
+  "send.deviceLabel": "Which of them",
+  "send.deviceAny": "Whichever is awake",
+  "send.deviceAnyHint": "Whichever of your machines is awake takes it.",
+  "send.deviceOneHint":
+    "The others leave it alone. If that machine is asleep, it waits on the relay until it wakes.",
+  "store.renameDevice": "rename this device",
+  "store.forgetDevice": "forget that device",
   "devices.autoTitle": "Sync on its own",
   "devices.autoDesc":
-    "The daemon does a round every few minutes. Turn it off and the address book only lines up when you press the button above.",
+    "A round every few minutes. Off, it only lines up when you press the button.",
   "devices.autoOn": "Automatic sync on",
   "devices.autoOff": "Automatic sync off",
-  "devices.autoDetail": "It takes effect the next time the daemon starts.",
 
   // ---- settings ----------------------------------------------------------
   "settings.sourceEnv": "set by the ARVOLO_RELAY variable",
@@ -409,12 +496,13 @@ export const en = {
   "settings.nameSavedDetail":
     "It travels inside every offer you send, from now on.",
   "settings.relaySaved": "Relay saved",
-  "settings.relaySavedDetail":
-    "The daemon will use it at its next start: restart it below to apply it right away.",
+  "settings.relaySavedDetail": "Restart the daemon below to apply it now.",
   "settings.whoYouAre": "Who you are",
   "settings.nameLabel": "The name you show",
+  // Not "and the fingerprint is what identifies you" — that is the next field
+  // down, and it says so itself.
   "settings.nameHint":
-    "It travels inside every sealed offer you send. It is a label you pick yourself: whoever receives it sees it in quotes, because nothing guarantees it. The only thing that really identifies you is the fingerprint below.",
+    "A label you pick yourself: whoever receives it sees it in quotes.",
   "settings.namePlaceholder": "none",
   "settings.fingerprintLabel": "Your fingerprint",
   "settings.fingerprintHint":
@@ -428,104 +516,149 @@ export const en = {
   "settings.language": "Language",
   "settings.languageAuto": "System",
   "settings.languageHint":
-    "“System” follows the language your computer is set to, falling back to English when it is one Arvolo does not speak.",
+    "“System” follows your computer, falling back to English.",
   "settings.startup": "Startup",
   "settings.autostartTitle": "Start at login",
   "settings.autostartDesc":
-    "When you sign in, Arvolo starts hidden in the tray, ready to receive without opening a window. On Linux the login entry points at the AppImage's current location: if you move the file, switch this off and on again.",
+    "Starts hidden in the tray, ready to receive. On Linux, switch it off and on again if you move the AppImage.",
   "settings.autostartFailed": "Could not change the login setting",
   "settings.network": "Network",
   "settings.relayOn": "Relay live",
   "settings.relayOff": "No relay",
   "settings.relayLabel": "Relay",
   "settings.relayLocked":
-    "Right now the ARVOLO_RELAY environment variable decides: what you type here would have no effect while it is set.",
+    "ARVOLO_RELAY is set, so what you type here has no effect.",
   "settings.relayHint": (current: string, source: string) =>
-    `In use now: ${current} — ${source}. An address with no scheme becomes https://; for a plaintext relay write the scheme out in full, like http://relay.local:6282.`,
+    `In use now: ${current} — ${source}. No scheme means https://; write http:// out in full.`,
   "settings.relayNone": "none",
   "settings.relayPlaceholder": "relay.example.com",
+  // The one place this is said. Four other screens used to repeat it; this is
+  // where the relay is chosen, so this is where it belongs.
   "settings.relayNote":
-    "The relay routes the codes, the mailbox and the links. It never sees your files in the clear: what it keeps is encrypted with keys it does not have.",
+    "Routes the codes, the mailbox and the links. It never sees your files in the clear.",
   "settings.files": "Files",
-  "settings.downloadDirLabel": "Where received files land",
+  "settings.downloadDirLabel": "Where files land",
   "settings.downloadDirEnv": "Decided by the ARVOLO_DOWNLOAD_DIR variable.",
   "settings.downloadDirHint":
     "It applies to whatever you accept without picking a folder on the spot.",
   "settings.change": "Change",
   "settings.dirUpdated": "Folder updated",
-  "settings.dirUpdatedDetail": "The daemon will use it at its next start.",
-  "settings.cannotOpen": "I can't open it",
-  "settings.seedTitle": "Carry on sharing what you have downloaded",
-  "settings.seedDesc":
-    "Leaving seeding on helps whoever is downloading the same file. You can switch it off if you would rather not stay in the swarm.",
+  "settings.cannotOpen": "Couldn't open it",
+  "settings.seedTitle": "Keep sharing what you downloaded",
+  "settings.seedDesc": "It helps whoever is downloading the same file.",
   "settings.saved": "Setting saved",
-  "settings.savedDetail": "It takes effect the next time the daemon starts.",
   "settings.advanced": "Advanced",
   "settings.configFileLabel": "Configuration file",
   "settings.configFileHint":
-    "Everything that is not here — temp folder, NAT relay, log level — is set by hand in this file, which is commented line by line.",
+    "Temp folder, NAT relay, log level: set by hand here, commented line by line.",
   "settings.identityKeyLabel": "Identity key",
+  // Has a floor in copy-rules.ts: it must keep saying that the key *is* the
+  // identity, not merely that it is private.
   "settings.identityKeyHint":
-    "Your secret. Do not share it: whoever holds it becomes you. To use Arvolo on another machine of yours there is device linking, which hands it over encrypted.",
+    "Your secret: whoever holds it becomes you. To use another machine, link the device.",
   "settings.versions": (daemon: string, gui: string) =>
     `Daemon ${daemon} · interface ${gui}`,
+  "settings.daemonProcess": (pid: number, exe: string) => `pid ${pid} · ${exe}`,
   "settings.restartDaemon": "Restart the daemon",
+  "settings.updatesTitle": "Updates",
+  "settings.checkUpdates": "Check now",
+  "settings.updateIdle": "Checked about once a week.",
+  "settings.updateChecking": "Checking…",
+  "settings.updateNone": "You're on the latest version.",
+  "settings.updateFound": (version: string) => `Arvolo ${version} is out.`,
+  "settings.updateInstalling": "Installing — the app restarts itself.",
+  "settings.updateReopen": "Installed — open Arvolo again to finish.",
+  "settings.updateFailed": (why: string) => `Couldn't check: ${why}`,
+  "settings.confirmUpdateTitle": "Update while transfers are running?",
+  "settings.confirmUpdateBody":
+    "The daemon stops so the installer can replace it. Transfers in flight break off and pick up again when the app returns.",
+  "settings.autoUpdateTitle": "Check automatically",
+  "settings.autoUpdateDesc":
+    "Once a week, asks github.com if there's a new version — the only third party Arvolo talks to. Nothing installs itself.",
   "settings.confirmRestartTitle": "Restart the daemon?",
   "settings.confirmRestartBody":
-    "Transfers under way stop: the resumable ones pick up where they were, the rest have to be done again from scratch. It is what applies a relay or a folder you have just changed.",
+    "Transfers under way stop. Resumable ones pick up where they were; the rest start over.",
   "settings.restarting": "Daemon restarting",
   "settings.restartingDetail": "It comes back on its own in a few seconds.",
   "settings.refreshing": "Refreshing…",
 
   // ---- send sheet --------------------------------------------------------
   "send.modeContact": "To a contact",
+  "send.modeSelf": "Your devices",
   "send.modeCode": "Code",
   "send.modeLink": "Link",
   "send.modeTicket": "Ticket",
-  "send.blurbContact":
-    "Goes straight to somebody in your address book. If they are connected it passes directly from device to device; if they are not, it waits in their mailbox on the relay until they collect it.",
-  "send.blurbCode":
-    "A short code to read out or point a camera at. Whoever gets it pastes it into Arvolo — they need not be in your address book, but you both have to be connected right now.",
-  "send.blurbLink":
-    "An address that opens in any browser: whoever receives it needs neither Arvolo nor an account. The file is decrypted in the browser, the key travels in the URL fragment and never reaches the relay.",
-  "send.blurbTicket":
-    "An arvc… peer-to-peer ticket: it goes through neither the mailbox nor the Arvolo relay. Punching through NAT may need a connection relay, which only ever sees encrypted traffic.",
+  // Each mode gets a line saying what the *recipient* needs — the only thing
+  // that decides which one is right — and a second line for what it costs.
+  "send.blurbContact": "Straight to somebody in your address book.",
+  "send.blurbContactMore":
+    "Direct if they are online; otherwise it waits in their mailbox.",
+  "send.blurbSelf": "The other machines that hold your identity.",
+  "send.blurbSelfMore": "Nobody has to accept it.",
+  "send.blurbCode": "A short code to read out or scan.",
+  "send.blurbCodeMore":
+    "They need not be a contact, but you both have to be online right now.",
+  "send.blurbLink": "An address that opens in any browser.",
+  "send.blurbLinkMore": "Whoever gets it needs no account and nothing installed.",
+  "send.blurbTicket": "An arvc… ticket, straight from this machine.",
+  "send.blurbTicketMore":
+    "Neither the mailbox nor the Arvolo relay is involved.",
   "send.ttl1h": "1 hour",
   "send.ttl1d": "1 day",
   "send.ttl7d": "7 days",
   "send.ttl30d": "30 days",
+  "send.pickerEmptyTitle": "Your address book is empty",
   "send.pickerEmpty":
-    "You have nobody in your address book yet. Add somebody from People — the quickest way is the code swap, which saves you both, already verified.",
+    "Add somebody from People. Swapping codes is quickest — it saves you both, already verified.",
   "send.pickerSearch": "Search a contact…",
   "send.pickerRecipient": "Recipient",
+  // The machines that share this identity. Never "me": the destination is a set
+  // of computers, and one of them is the one being typed on.
+  "send.selfUnpairedHint":
+    "No other machine holds this identity yet — link one under Devices. What you send now waits on the relay.",
+  "send.selfDepositHint":
+    "A deposit is collected once: at one pickup, the first machine awake takes it and the others never see it.",
   "send.pickerNoMatch": (q: string) => `No contact matches “${q}”.`,
-  "send.depositResult": (to: string) =>
-    `Deposited for ${to}. The ticket below is your own copy: you only need it if you want to hand it over yourself — if ${to} never gets the offer, say.`,
+  "send.depositResult": (to: string) => `Deposited for ${to}`,
+  // Why the ticket is on screen at all when nobody has to do anything with it.
+  "send.depositResultDetail": (to: string) =>
+    `Your own copy, in case ${to} never gets the offer.`,
   "send.onItsWay": (to: string) => `On its way to ${to}`,
+  // Written whole rather than splicing a name in: "On its way to Your
+  // devices" capitalises mid-sentence, and the other three languages come out
+  // ungrammatical rather than merely odd.
+  "send.onItsWaySelf": "On its way to your devices",
+  "send.depositResultSelf": "Deposited for your devices",
+  "send.depositResultSelfDetail":
+    "The ticket, in case none of your machines sees the offer.",
+  "send.saveArvolo": "Save as .arvolo file…",
+  "send.arvoloSaved": (name: string) => `Saved ${name}`,
+  "send.arvoloSavedDetail": "Share it over any channel; they open it with Arvolo.",
   "send.onItsWayDetail":
     "If they are online it goes direct, otherwise it waits in their mailbox.",
+  "send.onItsWaySelfDetail":
+    "It waits on the relay until one of your machines is awake to take it.",
   "send.codeKeepDetail":
-    "The code stays good for several recipients until you cancel the send.",
-  "send.codeOnceDetail":
-    "The code is good for one recipient and then retires itself.",
+    "Good for several recipients, until you cancel the send.",
+  "send.codeOnceDetail": "Good for one recipient, then it retires.",
   "send.linkDetail":
-    "Anyone holding this address can download the file until it expires, runs out of allowed downloads, or you withdraw it from “Links and deposits”.",
+    "Anyone with the address can download it until it expires, runs out, or you withdraw it.",
   "send.ticketDetail":
-    "Peer-to-peer ticket: good for as long as the daemon is running and the send has not been cancelled.",
+    "Good for as long as the daemon runs and the send is not cancelled.",
   "send.countOne": "1 item",
-  "send.countMany": (n: number) =>
-    `${n} items · they will be packed into one archive`,
+  "send.countMany": (n: number) => `${n} items · packed into one archive`,
   "send.titleReady": "Ready",
   "send.title": "Send",
-  "send.subtitleReady": "Hand over what you see below.",
   "send.subtitle": "Encrypted end to end, always.",
-  "send.submitDeposit": "Deposit it",
+  "send.submitDeposit": "Deposit",
   "send.submitSend": "Send",
-  "send.submitCode": "Generate the code",
-  "send.submitLink": "Create the link",
-  "send.submitTicket": "Create the ticket",
+  "send.submitCode": "Generate code",
+  "send.submitLink": "Create link",
+  "send.submitTicket": "Create ticket",
+  // The one place the `#` is explained, and the reason `send.blurbLink` above
+  // does not mention it: this is where the link actually exists.
   "send.linkKeyNote":
-    "The link carries the key after the #: browsers do not send that part to the server, so the relay keeps only bytes it cannot read.",
+    "The key rides after the `#`, which browsers never send to the server.",
   "send.filesLabel": "What you are sending",
   "send.filesHint": "You can also drag files and folders into the window.",
   "send.filesRemove": (name: string) => `Remove ${name}`,
@@ -534,16 +667,15 @@ export const en = {
   "send.whoLabel": "Who it goes to",
   "send.modeLabel": "Way of sending",
   "send.noteLabel": "A couple of lines for the recipient (optional)",
-  "send.noteHint":
-    "It travels inside the sealed offer: the relay does not see it.",
+  "send.noteHint": "It travels inside the sealed offer.",
   "send.notePlaceholder": "Here are the files we talked about.",
   "send.keepCodeTitle": "Good for several people",
   "send.keepCodeDesc":
-    "By default the code is good for one recipient and then retires. Turn this on to leave it open until you cancel the send.",
-  "send.keepCodeLabel": "Code good for several people",
-  "send.depositTitle": "Leave it in the mailbox, don't wait",
+    "Otherwise the code retires after one recipient.",
+  "send.keepCodeLabel": "Code for several people",
+  "send.depositTitle": "Deposit and don't wait",
   "send.depositDesc":
-    "Deposit on the relay straight away even if they are connected: you close the window and forget about it. It unlocks expiry, number of collections and password.",
+    "Leaves it on the relay even if they are online, so you can close the window. Unlocks expiry, collections and password.",
   "send.depositLabel": "Leave it in the mailbox",
   "send.expiresAfter": "Expires after",
   "send.depositTtlLabel": "Deposit expiry",
@@ -552,36 +684,34 @@ export const en = {
   "send.maxPickupsHint":
     "One, normally: the moment they download it, the relay deletes it.",
   "send.passwordLabel": "Password (optional)",
+  // The sender's half of the password story: you choose it, and nobody can get
+  // it back for you. The recipient's half lives in `incoming.passwordHint`.
   "send.passwordHint":
-    "It encrypts the deposit against the recipient too: without this password it does not open. The relay does not know it and cannot recover it — lose it and the file is lost.",
+    "Nobody can recover it, the relay included. Lose it and the file is lost.",
   "send.passwordPlaceholder": "none",
   "send.linkTooMany":
-    "A link publishes one single item. Pick one, or put everything in a folder and select that.",
+    "A link publishes one item. Pick one, or put them in a folder.",
   "send.maxDownloadsLabel": "Downloads allowed",
   "send.maxDownloadsHint": "Leave it empty for no limit.",
   "send.maxDownloadsPlaceholder": "unlimited",
-  "send.noRelay":
-    "This way of sending needs a relay and none appears to be configured. Set one up under Settings.",
+  "send.noRelay": "This way of sending needs a relay. Set one up in Settings.",
   "send.noArvoloRelay": "No Arvolo relay",
 
   // ---- receive sheet -----------------------------------------------------
   "receive.explainEmpty":
-    "Paste a send code (like 4821-crater-mango) or an arvc… / arvm… ticket. To swap contacts with somebody, use People → I have a code instead.",
-  "receive.explainCode":
-    "Send code: I connect to whoever is showing it right now and download what they are sending.",
-  "receive.explainChunk":
-    "Peer-to-peer ticket: I download straight from the sender.",
-  "receive.explainMailbox":
-    "Mailbox ticket: I collect the file deposited on the relay.",
+    "A send code (like 4821-crater-mango) or an arvc… / arvm… ticket.",
+  "receive.explainCode": "Send code: downloads from whoever is showing it now.",
+  "receive.explainChunk": "Peer-to-peer ticket: straight from the sender.",
+  "receive.explainMailbox": "Mailbox ticket: collected from the relay.",
   "receive.explainUnknown":
-    "I don't recognise this shape. I'll try it anyway — the daemon is fussier than I am — but check you copied it whole.",
+    "Unfamiliar shape — worth trying, but check you copied it whole.",
   "receive.title": "Receive",
   "receive.subtitle": "Paste what you were given.",
   "receive.submit": "Receive",
   "receive.fieldLabel": "Code or ticket",
-  "receive.passwordLabel": "Password (only if protected)",
-  "receive.passwordHint":
-    "Whoever sent it will have told you separately. Without it, a protected deposit does not open.",
+  "receive.passwordLabel": "Password, if protected",
+  // The recipient's half of the password story; the sender's is in `send.*`.
+  "receive.passwordHint": "The sender will have told you separately.",
   "receive.passwordPlaceholder": "none",
   "receive.whereLabel": "Where to save it",
   "receive.whereHint": (dir: string) => `Default folder: ${dir}`,
@@ -597,35 +727,49 @@ export const en = {
   "incoming.title": "Somebody is sending you a file",
   "incoming.subtitle": "Only accept if you know who it is from.",
   "incoming.reject": "Reject",
-  "incoming.later": "I'll decide later",
-  "incoming.accept": "Accept and download",
+  "incoming.later": "Later",
+  "incoming.accept": "Accept",
   "incoming.notInBook": "Not in the address book",
-  "incoming.claimedName": (name: string) =>
-    `goes by “${name}” — a name they pick themselves, nothing guarantees it`,
+  "incoming.claimedName": (name: string) => `goes by “${name}” — unverified`,
   "incoming.keyFingerprint": "Fingerprint of the key",
   "incoming.senderId": "Sender's public id",
-  "incoming.hintVerified":
-    "You have already compared this fingerprint out of band: it is the same key you verified.",
+  "incoming.hintVerified": "Already compared: the same key you verified.",
   "incoming.hintKnown":
-    "Compare it out loud with whoever is sending you the file. It is the only way to be sure it really is them — a name does not prove it.",
-  "incoming.hintUnknown":
-    "This is not a fingerprint: it is the raw id of somebody who is not in your address book. Save them below and you will see the words to compare out loud with them.",
+    "Compare it out loud with the sender. A name does not prove who they are.",
+  // Floored in copy-rules.ts: it must say that nobody has checked these words
+  // yet, or the reader takes their presence for a check already made.
+  "incoming.hintStranger":
+    "Nobody has checked these words yet. Read them out to the sender over something other than this app.",
+  // Floored too, for the reason the words are missing: an id is not evidence.
+  "incoming.hintRawId":
+    "Not a fingerprint — the raw id, because this daemon is too old to send the words. Update it to be able to compare.",
+  // Floored: a first arrival is the one case where there is nothing at all to
+  // check against, and saying less than that would hide it.
+  "incoming.firstTime":
+    "First time this key has sent you anything — there is nothing yet to compare it with.",
+  "incoming.seenBefore": (n: string) =>
+    `You have taken ${n} transfer(s) from this key before.`,
+  "incoming.wasCalled": (name: string) => `Used to call itself “${name}”`,
   "incoming.attachedNote": "Message attached",
   "incoming.passwordLabel": "Password",
-  "incoming.passwordHint":
-    "This file is protected: without the password it does not open. Whoever sent it will have told you separately — it does not travel with the file, and the relay does not know it.",
+  "incoming.passwordHint": "The sender will have told you separately.",
   "incoming.ifYouKnowThem": "If you know them",
   "incoming.saveAsPlaceholder": "Save to the address book as…",
   "incoming.saveAsLabel": "Name to give the contact",
+  "incoming.saveAsSuggested":
+    "Proposed from the name they gave themselves. Change it: the name is yours.",
   "incoming.savedAs": (name: string) => `Saved as ${name}`,
-  "incoming.savedAsDetail":
-    "They stay unverified: confirm the fingerprint out loud and then mark them under People.",
-  "incoming.saveNote":
-    "Saving them does not verify them. They become verified only when you compare the fingerprint in person or out loud.",
+  "incoming.savedAsDetail": "Still unverified until you compare the fingerprint.",
+  "incoming.savedInline": (name: string) => `Saved as “${name}”, not verified`,
+  "incoming.saveNote": "Saving is not verifying.",
+  "incoming.acceptAndSave": "Accept and save",
+  // Floored: it has to name whose marks would go, or "already taken" reads as a
+  // tidiness rule rather than the reason it exists.
+  "incoming.nameTaken": (name: string) =>
+    `“${name}” is already someone else here. Re-pointing it would drop their verified and trusted marks.`,
   "incoming.blockAndReject": "Block and reject",
   "incoming.blocked": "Blocked",
-  "incoming.blockedDetail":
-    "Their offers will be dropped on arrival, with no notice to you.",
+  "incoming.blockedDetail": "Their offers are dropped on arrival.",
 
   // ---- pairing sheet -----------------------------------------------------
   "pair.titleContact": "Swap contacts",
@@ -638,36 +782,34 @@ export const en = {
   "pair.subDeviceJoin":
     "It replaces this device's identity with the shared one.",
   "pair.restarting": "Daemon restarting",
-  "pair.restartingDetail":
-    "It is coming back up with the shared identity: a few seconds and everything is back.",
+  "pair.restartingDetail": "Back in a few seconds, with the shared identity.",
   "pair.restartAndClose": "Restart and close",
   "pair.link": "Link",
   "pair.done": "Done",
   "pair.needsRestart":
-    "The daemon is still running with the previous identity. It has to be restarted for the change to take effect — the button below does it.",
+    "The daemon still has the previous identity. Restart it below.",
   "pair.failed": "That didn't work",
   "pair.deviceWarnLead": "This shares your secret identity.",
+  // Has a floor in copy-rules.ts. It must keep saying that the person typing
+  // the code *becomes* you — "gets access" is a different, smaller claim.
   "pair.deviceWarnRest":
-    "Whoever types the code becomes you: same public id, same mailbox, same address book. Use it only on a machine of your own. The code is good for one device and expires the moment it is used.",
-  "pair.captionDevice":
-    "On the other device: Your devices → I have a code.",
-  "pair.captionContact":
-    "Read it out to them. They open People → I have a code and type it in.",
-  "pair.waitingOther": "Waiting for the other side… you can close to cancel.",
+    "Whoever types it becomes you: same id, same mailbox, same address book. Only on a machine of your own.",
+  "pair.captionDevice": "On the other device: Your devices → Enter a code.",
+  "pair.captionContact": "Read it out. They open People → Enter a code.",
+  "pair.waitingOther": "Waiting for the other side… close to cancel.",
   "pair.preparingCode": "Preparing the code…",
-  "pair.contactNote":
-    "Only public ids are exchanged. Your secret identity and your address book do not leave this machine.",
+  "pair.contactNote": "Only public ids are exchanged.",
   "pair.joinWarnLead": "Careful: this cannot be undone.",
+  // Floored too: "replaced" and "stops opening" are the whole warning.
   "pair.joinWarnRest":
-    "This device's current identity is replaced by the shared one. Anything still sealed to the old identity stops being openable here.",
+    "This device's identity is replaced by the shared one. Anything sealed to the old one stops opening here.",
   "pair.codeLabel": "Code",
   "pair.codeHint":
     "The one shown on the other machine, something like 4821-crater-mango.",
-  "pair.nameLabel": "What you call them (optional)",
+  "pair.nameLabel": "Your name for them",
   "pair.nameHint":
-    "Leave it empty and I'll save them under a name derived from their fingerprint; you can rename them whenever you like.",
-  "pair.understood":
-    "I understand: this device loses its current identity.",
+    "Leave it empty for a name derived from their fingerprint. You can rename them later.",
+  "pair.understood": "I understand: this device loses its identity.",
   "pair.waitingMachine": "Waiting for the other machine…",
   "pair.cancelled": "Cancelled.",
 
@@ -681,17 +823,17 @@ export const en = {
   "palette.receive": "Receive…",
   "palette.receiveHint": "paste a code or a ticket",
   "palette.receiveKw": "download get paste",
-  "palette.pairContact": "Swap contacts with somebody",
+  "palette.pairContact": "Swap contacts",
   "palette.pairContactHint": "you save each other, already verified",
   "palette.pairContactKw": "pairing pair add person verify",
   "palette.pairDevice": "Link another device of yours",
   "palette.pairDeviceKw": "multidevice identity sync",
-  "palette.sync": "Sync the address book now",
+  "palette.sync": "Sync contacts now",
   "palette.syncKw": "contacts devices",
   "palette.resumeAll": "Resume every transfer",
-  "palette.pauseAll": "Pause every transfer",
+  "palette.pauseAll": "Pause everything",
   "palette.pauseAllKw": "pause all stop hold resume",
-  "palette.clearFinished": "Clear the finished transfers",
+  "palette.clearFinished": "Clear finished",
   "palette.clearFinishedKw": "empty completed tidy",
   "palette.navTransfersKw": "board sends",
   "palette.navPeopleKw": "contacts address book",
@@ -709,24 +851,26 @@ export const en = {
   "palette.openCard": (name: string) => `Open ${name}'s card`,
   "palette.personKw": "fingerprint verify",
   "palette.label": "Search and run",
-  "palette.placeholder": "Search a command or a person…",
+  "palette.placeholder": "Search commands and people…",
   "palette.noMatch": (q: string) => `Nothing matches “${q}”.`,
 
   // ---- store: failures and notices ---------------------------------------
   "store.unknownPeer": "unknown",
+  // Our own id, wherever a row names its peer. Not a contact and not a stranger:
+  // the other machines that are also us.
+  "store.selfPeer": "Your devices",
   "store.loadTransfers": (e: string) =>
-    `I can't read the transfers from the daemon: ${e}`,
+    `Couldn't read the transfers: ${e}`,
   "store.loadHistory": (e: string) =>
-    `I can't read the history from the daemon: ${e}`,
+    `Couldn't read the history: ${e}`,
   "store.loadDeposits": (e: string) =>
-    `I can't read the links from the daemon: ${e}`,
+    `Couldn't read the links: ${e}`,
   "store.loadConfig": (e: string) =>
-    `I can't read the settings from the daemon: ${e}`,
-  "store.loadSync": (e: string) => `I can't read the device state: ${e}`,
+    `Couldn't read the settings: ${e}`,
+  "store.loadSync": (e: string) => `Couldn't read the device state: ${e}`,
   "store.errClearHistory": "Couldn't empty the history",
   "store.errRevokeLink": "Couldn't withdraw the link",
   "store.errSaveConfig": "Couldn't save the settings",
-  "store.errPruneNames": "Couldn't clean up the names",
   "store.errSend": (to: string) => `Sending to ${to} failed`,
   "store.errDeposit": (to: string) => `The deposit for ${to} failed`,
   "store.errTicket": "Couldn't create the ticket",
@@ -735,8 +879,11 @@ export const en = {
   "store.errReceive": "Receiving failed",
   "store.errAccept": "Couldn't accept the file",
   "store.errReject": "Couldn't reject the file",
+  "store.declined": (who: string) => who ? `Offer from ${who} declined.` : "Offer declined.",
+  "bits.qrTooDense": "Too much data for a QR — use Copy.",
   "store.errPause": "Couldn't pause it",
   "store.errResume": "Couldn't resume it",
+  "store.errDepositNow": "Couldn't leave it in the mailbox",
   "store.errCancel": "Couldn't cancel it",
   "store.errRemove": "Couldn't delete it",
   "store.errVerify": (name: string) => `Couldn't verify ${name}`,

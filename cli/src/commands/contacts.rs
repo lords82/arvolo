@@ -5,6 +5,7 @@ use anyhow::{Context, Result};
 use crate::book;
 
 use crate::args::ContactAction;
+use crate::output::vprintln;
 use crate::ui::*;
 use crate::util::*;
 
@@ -29,7 +30,17 @@ struct Row {
     online: Option<bool>,
     /// Seconds since the verified mark was made; `None` when unverified, or
     /// verified before the stamp was recorded.
+    ///
+    /// JSON only, on purpose. It reads as a freshness the mark does not have: a
+    /// verification binds a fingerprint, and the fingerprint *is* the id — a key
+    /// that changes becomes a different contact, showing as unverified, so an old
+    /// mark cannot go stale in place. Nothing expires it and nothing reads the
+    /// number, which made it a column that answered a question nobody asked, in
+    /// the one spot beside a presence dot where every reader expects "last seen".
     verified_ago: Option<u64>,
+    /// Where they listen, when it isn't wherever you listen. `None` means your
+    /// own relay, which is the ordinary case and worth no ink.
+    relay: Option<String>,
 }
 
 /// `arvolo contacts list` — the address book, and who is reachable right now.
@@ -60,6 +71,7 @@ async fn list_contacts(filter: Option<String>, no_presence: bool, json: bool) ->
             advertised: book::display_name_of(&id).map(|n| sanitize_display(&n)),
             pending: book::pending_name_of(&id).map(|n| sanitize_display(&n)),
             online: None,
+            relay: book::relay_of(&id),
             name,
             id,
         })
@@ -82,10 +94,13 @@ async fn list_contacts(filter: Option<String>, no_presence: bool, json: bool) ->
 /// `default_relay_or_builtin` rather than `default_relay`: a zero-config install
 /// still sends through the built-in relay, so reporting "unknown" for everyone
 /// would describe a machine that isn't this one.
+///
+/// Each contact is asked at **their** relay. Presence lives on the relay the
+/// person publishes their beacon to, so asking yours about someone who listens
+/// elsewhere doesn't return "offline" so much as "I looked in the wrong place" —
+/// which is precisely how a cross-relay contact used to read.
 async fn probe_presence(rows: &mut [Row]) {
-    let Some(relay) = book::default_relay_or_builtin() else {
-        return;
-    };
+    let mine = book::default_relay_or_builtin();
     let client = arvolo_core::http::client_with_timeout(PRESENCE_TIMEOUT);
 
     let mut set = tokio::task::JoinSet::new();
@@ -93,7 +108,12 @@ async fn probe_presence(rows: &mut [Row]) {
         let Ok(pk) = book::decode_id(&row.id) else {
             continue;
         };
-        let (client, relay) = (client.clone(), relay.clone());
+        // Someone with a relay of their own is still reachable on a machine that
+        // has none configured, so this is per-row rather than an early return.
+        let Some(relay) = row.relay.clone().or_else(|| mine.clone()) else {
+            continue;
+        };
+        let client = client.clone();
         set.spawn(async move {
             (
                 idx,
@@ -121,6 +141,7 @@ async fn probe_presence(rows: &mut [Row]) {
 /// Render the listing, dropping any column nothing has anything to say in — an
 /// empty column is width spent on the absence of information.
 fn print_table(rows: &[Row], asked_presence: bool) {
+    let mine = book::default_relay_or_builtin();
     // Widths from the content, so ids and fingerprints line up instead of relying
     // on tab stops that break the moment one name is long.
     let name_w = rows
@@ -133,14 +154,13 @@ fn print_table(rows: &[Row], asked_presence: bool) {
         .map(|r| r.advertised.as_deref().map_or(0, display_width))
         .max()
         .unwrap_or(0);
-    // "verified 3mo ago" only earns a column if some row can fill it.
-    let ages: Vec<String> = rows
-        .iter()
-        .map(|r| r.verified_ago.map(human_duration).unwrap_or_default())
-        .collect();
-    let age_w = ages.iter().map(|a| display_width(a)).max().unwrap_or(0);
+    // No time column at all. The row answers who they are, whether you checked
+    // their fingerprint, and whether they are reachable now — the dates that used
+    // to sit here (when the mark was made, when a transfer last landed) are not
+    // questions anyone asks of an address book, and beside a presence dot any
+    // date is read as the one thing it is not: "last seen".
 
-    for (i, r) in rows.iter().enumerate() {
+    for r in rows {
         let mut line = String::new();
         if asked_presence {
             line.push_str(match r.online {
@@ -168,9 +188,6 @@ fn print_table(rows: &[Row], asked_presence: bool) {
                 ));
             }
         }
-        if age_w > 0 {
-            line.push_str(&format!("  {:<age_w$}", ages[i]));
-        }
         line.push_str(&format!("  {}", r.id));
         if let Some(fp) = &r.fingerprint {
             line.push_str(&format!("  {fp}"));
@@ -179,9 +196,19 @@ fn print_table(rows: &[Row], asked_presence: bool) {
 
         if let Some(p) = &r.pending {
             println!(
-                "    ⚠ wants to be called “{p}” — approve: arvolo contacts accept-name {}",
+                "    ⚠ wants to be called “{p}” — approve: arvolo contacts rename {}",
                 r.name
             );
+        }
+        // Only when it differs from where we listen: printing "same relay as you"
+        // on every row would be a column that says nothing on the common path.
+        if let Some(relay) = &r.relay {
+            if Some(relay) != mine.as_ref() {
+                println!(
+                    "    ↪ listens on {}",
+                    arvolo_core::code::compact_relay(relay)
+                );
+            }
         }
     }
 }
@@ -207,6 +234,7 @@ fn print_json(rows: &[Row]) {
                 "advertised_name": r.advertised,
                 "pending_name": r.pending,
                 "online": r.online,
+                "relay": r.relay,
             })
         })
         .collect();
@@ -218,30 +246,83 @@ fn print_json(rows: &[Row]) {
 
 pub(crate) async fn contacts_cmd(action: ContactAction) -> Result<()> {
     match action {
-        ContactAction::Add { name, id } => {
-            let key_change = book::contact_add(&name, &id)?;
-            println!("Saved contact '{name}'.");
-            if let Some(kc) = key_change {
-                eprintln!(
-                    "\n⚠  The key for '{name}' CHANGED — this could be a reinstall, or a MITM."
-                );
-                eprintln!("      was fingerprint: {}", kc.old_fingerprint);
-                eprintln!("      now fingerprint: {}", kc.new_fingerprint);
-                // Say *both*: `contact_add` clears trusted as well, so someone who
-                // had this contact auto-downloading has just lost that too, and
-                // needs to know it isn't coming back on its own.
-                eprintln!(
-                    "   The 'verified' and 'trusted' marks were both cleared — their files\n   \
-                     will ask for approval again. Confirm the new fingerprint out-of-band,"
-                );
-                eprintln!("   then: arvolo contacts verify {name}");
+        // One door for adding someone, three forms: a public id saves directly, a
+        // pairing code joins their exchange, nothing at all hosts one. The two
+        // arguments cannot be confused — an id is one long run of base32, a code
+        // has dashes (`4821-crater-mango`).
+        ContactAction::Add {
+            name,
+            id_or_code,
+            qr,
+            relay,
+        } => {
+            match id_or_code {
+                None => return crate::commands::pair::pair_host(Some(name), relay.relay, qr).await,
+                Some(c) if arvolo_core::code::looks_like_code(&c) => {
+                    return crate::commands::pair::pair_join(c, Some(name)).await
+                }
+                Some(id) => {
+                    // `--relay` overrides an `@relay` riding on the id: one is
+                    // what they handed you, the other is what you just typed on
+                    // purpose. Until now this flag was parsed and then dropped on
+                    // this branch, which read as "accepted, ignored".
+                    let id = match &relay.relay {
+                        Some(r) => format!("{}@{r}", book::split_id_and_relay(&id).0),
+                        None => id,
+                    };
+                    let key_change = book::contact_add(&name, &id)?;
+                    println!("Saved contact '{name}'.");
+                    if let (_, Some(r)) = book::split_id_and_relay(&id) {
+                        if Some(&r) != book::default_relay_or_builtin().as_ref() {
+                            eprintln!(
+                                "   They listen on {} — sends will go there.",
+                                arvolo_core::code::compact_relay(&r)
+                            );
+                        }
+                    }
+                    if let Some(kc) = key_change {
+                        eprintln!(
+                            "\n⚠  The key for '{name}' CHANGED — this could be a reinstall, or a MITM."
+                        );
+                        eprintln!("      was fingerprint: {}", kc.old_fingerprint);
+                        eprintln!("      now fingerprint: {}", kc.new_fingerprint);
+                        // Say *both*: `contact_add` clears trusted as well, so someone who
+                        // had this contact auto-downloading has just lost that too, and
+                        // needs to know it isn't coming back on its own.
+                        eprintln!(
+                            "   The 'verified' and 'trusted' marks were both cleared — their files\n   \
+                             will ask for approval again. Confirm the new fingerprint out-of-band,"
+                        );
+                        eprintln!("   then: arvolo contacts verify {name}");
+                    }
+                }
             }
         }
         ContactAction::List {
             filter,
             no_presence,
             json,
-        } => return list_contacts(filter, no_presence, json).await,
+            blocked,
+        } => {
+            if blocked {
+                let list = book::blocked_list();
+                if list.is_empty() {
+                    eprintln!("(nobody is blocked)");
+                }
+                for (id, since) in list {
+                    let when = match book::marked_ago(since) {
+                        Some(secs) => format!("  (blocked {} ago)", human_duration(secs)),
+                        None => String::new(),
+                    };
+                    match book::resolve_name(&id) {
+                        Some(name) => println!("{name}\t{id}{when}"),
+                        None => println!("{id}{when}"),
+                    }
+                }
+                return Ok(());
+            }
+            return list_contacts(filter, no_presence, json).await;
+        }
         ContactAction::Remove { name } => {
             // Clear the ledgers first — they resolve the id via the contact name,
             // which is gone once removed.
@@ -253,40 +334,38 @@ pub(crate) async fn contacts_cmd(action: ContactAction) -> Result<()> {
                 eprintln!("No such contact '{name}'.");
             }
         }
-        ContactAction::Rename { old, new } => {
-            book::contact_rename(&old, &new)?;
-            println!("Renamed '{old}' to '{new}' — verified and trusted marks kept.");
-        }
-        ContactAction::Pair {
-            code,
-            name,
-            relay,
-            use_http,
-            qr,
-        } => {
-            return match code {
-                Some(c) => crate::commands::pair::pair_join(c, name).await,
-                None => crate::commands::pair::pair_host(name, relay, use_http, qr).await,
+        ContactAction::Rename { old, new } => match new {
+            Some(new) => {
+                book::contact_rename(&old, &new)?;
+                println!("Renamed '{old}' to '{new}'");
+                vprintln!("the verified and trusted marks stay with the key, not the name");
             }
-        }
-        ContactAction::Export => {
-            // Same shape `list --json` produces, minus the things that describe
-            // *this* machine rather than the book: presence is a live reading, and
-            // a pending name is an unanswered question only you can answer.
-            let rows: Vec<_> = book::contact_list()
-                .into_iter()
-                .map(|(name, id)| {
-                    serde_json::json!({
-                        "name": name,
-                        "id": id,
-                        "verified": book::is_verified(&id),
-                        "trusted": book::is_trusted(&id),
-                    })
-                })
-                .collect();
-            println!("{}", serde_json::to_string_pretty(&rows)?);
-            eprintln!("({} contact(s) exported)", rows.len());
-        }
+            // No new name: adopt the display name they advertised for themselves
+            // (the pending row `contacts list` shows), after asking — it is the
+            // sender's own text, not something to take on silently.
+            None => {
+                let id = encode_id(&book::resolve_recipient(&old)?);
+                let pending = book::pending_name_of(&id).with_context(|| {
+                    format!(
+                        "no pending advertised name for '{old}' — to rename, give the \
+                         new name: arvolo contacts rename {old} <new>"
+                    )
+                })?;
+                // Sanitized before it is echoed, as everywhere else — this is the
+                // one place the sender's own text reaches the terminal.
+                let shown = sanitize_display(&pending);
+                if std::io::stdin().is_terminal()
+                    && !crate::ui::confirm_blocking(&format!(
+                        "Adopt “{shown}” as the shown name for '{old}'?"
+                    ))
+                {
+                    eprintln!("Left '{old}' as it is.");
+                    return Ok(());
+                }
+                book::accept_name(&old)?;
+                println!("Approved “{shown}” as the advertised name for '{old}'.");
+            }
+        },
         ContactAction::Import { file, with_marks } => {
             let text = if file == "-" {
                 std::io::read_to_string(std::io::stdin()).context("read stdin")?
@@ -315,7 +394,14 @@ pub(crate) async fn contacts_cmd(action: ContactAction) -> Result<()> {
                     skipped += 1;
                     continue;
                 }
-                if book::contact_add(name, id).is_err() {
+                // A `relay` column is honoured when present and simply absent from
+                // a book exported before this existed — the `<id>@<relay>` form
+                // carries it in without a second field to thread through.
+                let id = match row.get("relay").and_then(|v| v.as_str()) {
+                    Some(r) if !r.trim().is_empty() => format!("{}@{r}", id.trim()),
+                    _ => id.to_string(),
+                };
+                if book::contact_add(name, &id).is_err() {
                     eprintln!("   skipped '{name}' — not a valid public id");
                     skipped += 1;
                     continue;
@@ -338,46 +424,59 @@ pub(crate) async fn contacts_cmd(action: ContactAction) -> Result<()> {
                 eprintln!("   All unverified: verify each one out-of-band with `arvolo contacts verify <name>`.");
             }
         }
-        ContactAction::Block { who } => match who {
-            None => {
-                let list = book::blocked_list();
-                if list.is_empty() {
-                    eprintln!("(nobody is blocked)");
-                }
-                for (id, since) in list {
-                    let when = match book::marked_ago(since) {
-                        Some(secs) => format!("  (blocked {} ago)", human_duration(secs)),
-                        None => String::new(),
-                    };
-                    match book::resolve_name(&id) {
-                        Some(name) => println!("{name}\t{id}{when}"),
-                        None => println!("{id}{when}"),
+        ContactAction::Relay { name, url, clear } => {
+            let id = book::resolve_recipient_id(&name)?;
+            match (url, clear) {
+                (Some(url), _) => {
+                    book::set_relay(&id, &url)?;
+                    let stored = book::relay_of(&id).unwrap_or_default();
+                    println!("'{name}' listens on {stored}");
+                    if Some(&stored) == book::default_relay_or_builtin().as_ref() {
+                        eprintln!("   That's your relay too, so nothing changes about how you reach them.");
                     }
                 }
+                (None, true) => {
+                    if book::clear_relay(&id)? {
+                        println!("Cleared the relay for '{name}' — back to yours.");
+                    } else {
+                        println!("'{name}' had no relay of their own.");
+                    }
+                }
+                (None, false) => match book::relay_of(&id) {
+                    Some(r) => println!("{r}"),
+                    None => {
+                        eprintln!("'{name}' has no relay recorded — sends go to yours.");
+                        eprintln!("   Set one: arvolo contacts relay {name} <host>");
+                    }
+                },
             }
-            Some(who) => {
-                let id = book::mark_blocked(&who)?;
-                println!("Blocked '{who}' — their offers are dropped on arrival, silently.");
-                eprintln!("   id: {id}");
-                eprintln!("   Undo with: arvolo contacts unblock {who}");
-            }
-        },
+        }
+        ContactAction::Block { who } => {
+            let id = book::mark_blocked(&who)?;
+            println!("Blocked '{who}'  ({id})");
+            eprintln!("   arvolo contacts unblock {who}");
+            vprintln!("their offers are dropped on arrival, with nothing printed");
+        }
         ContactAction::Unblock { who } => {
             if book::unmark_blocked(&who)? {
-                println!("Unblocked '{who}' — their offers reach you again.");
+                println!("Unblocked '{who}'");
             } else {
                 eprintln!("'{who}' was not blocked — nothing to undo.");
             }
         }
-        ContactAction::Prune => {
-            let n = book::prune_orphan_names()?;
-            match n {
-                0 => eprintln!("(nothing to prune)"),
-                1 => println!("Dropped 1 leftover advertised-name record."),
-                n => println!("Dropped {n} leftover advertised-name records."),
+        ContactAction::Verify {
+            name, undo: true, ..
+        } => {
+            // Report what actually happened: claiming to have cleared a mark that
+            // was never set reads as "done" for a security state the user may
+            // have meant to change on a different contact.
+            if book::unmark_verified(&name)? {
+                println!("Cleared verified mark for '{name}'.");
+            } else {
+                eprintln!("'{name}' was not marked verified — nothing to clear.");
             }
         }
-        ContactAction::Verify { name, yes } => {
+        ContactAction::Verify { name, yes, .. } => {
             // Show the fingerprint FIRST and require an explicit confirmation, so
             // marking verified is a deliberate act — not a side effect of running
             // the command to read the fingerprint.
@@ -391,12 +490,8 @@ pub(crate) async fn contacts_cmd(action: ContactAction) -> Result<()> {
                          out-of-band: arvolo contacts verify {name} --yes"
                     );
                 }
-                use std::io::Write;
-                print!("Have you confirmed this fingerprint out-of-band? [y/N]: ");
-                let _ = std::io::stdout().flush();
-                let mut line = String::new();
-                std::io::stdin().read_line(&mut line).ok();
-                if !matches!(line.trim().to_lowercase().as_str(), "y" | "yes") {
+                if !crate::ui::confirm_blocking("Have you confirmed this fingerprint out-of-band?")
+                {
                     eprintln!("Aborted — '{name}' left unverified.");
                     return Ok(());
                 }
@@ -405,24 +500,37 @@ pub(crate) async fn contacts_cmd(action: ContactAction) -> Result<()> {
             // which is id-keyed, and `id` was already resolved above for the
             // fingerprint.
             let already = book::is_verified(&id);
+            // The one place the age of a mark answers something: you are being
+            // told you already did this, so how long ago says whether that was a
+            // decision you remember making.
+            // Under a minute it says nothing anyone needs — "previously verified
+            // 0s ago" is just the command you have already run, twice.
+            let previously = book::verified_since(&id)
+                .and_then(book::marked_ago)
+                .filter(|secs| *secs >= 60);
             book::mark_verified(&name)?;
             if already {
-                println!("Re-verified '{name}' — the clock on that check starts again now.");
+                match previously {
+                    Some(secs) => println!(
+                        "Re-verified '{name}' — previously verified {} ago.",
+                        human_duration(secs)
+                    ),
+                    None => println!("Re-verified '{name}'"),
+                }
             } else {
                 println!("Marked '{name}' verified.");
             }
         }
-        ContactAction::Unverify { name } => {
-            // Report what actually happened: claiming to have cleared a mark that
-            // was never set reads as "done" for a security state the user may
-            // have meant to change on a different contact.
-            if book::unmark_verified(&name)? {
-                println!("Cleared verified mark for '{name}'.");
+        ContactAction::Trust {
+            name, undo: true, ..
+        } => {
+            if book::unmark_trusted(&name)? {
+                println!("No longer trusting '{name}'");
             } else {
-                eprintln!("'{name}' was not marked verified — nothing to clear.");
+                eprintln!("'{name}' was not trusted — nothing to clear.");
             }
         }
-        ContactAction::Trust { name, force } => {
+        ContactAction::Trust { name, force, .. } => {
             // Trust means auto-download without a prompt, so it must sit on a key
             // you've confirmed is really theirs. Refuse an unverified contact
             // unless the user explicitly overrides with --force.
@@ -438,41 +546,13 @@ pub(crate) async fn contacts_cmd(action: ContactAction) -> Result<()> {
             }
             let id = book::mark_trusted(&name)?;
             let fp = book::fingerprint_of(&id).unwrap_or_default();
-            println!("Trusting '{name}' — files from them auto-download without a prompt.");
+            println!("Trusting '{name}'");
+            vprintln!("their files now download without asking");
             eprintln!("   (fingerprint: {fp})");
             if !book::is_verified(&id) {
                 eprintln!(
                     "   ⚠  trusted WITHOUT verification (--force) — confirm the fingerprint \
                      out-of-band, then: arvolo contacts verify {name}"
-                );
-            }
-        }
-        ContactAction::Untrust { name } => {
-            if book::unmark_trusted(&name)? {
-                println!("Cleared trust for '{name}' — their files will ask for approval again.");
-            } else {
-                eprintln!("'{name}' was not trusted — nothing to clear.");
-            }
-        }
-        ContactAction::AcceptName { who, all } => {
-            if all {
-                let n = book::accept_all_names()?;
-                match n {
-                    0 => eprintln!("(no pending names to approve)"),
-                    1 => println!("Approved 1 advertised name."),
-                    n => println!("Approved {n} advertised names."),
-                }
-            } else {
-                let who = who.context(
-                    "give a contact name or id (or --all): arvolo contacts accept-name <who>",
-                )?;
-                let approved = book::accept_name(&who)?;
-                // The approved name is the sender's own text — sanitize it here as
-                // everywhere else, or the one place we echo it back becomes the
-                // way to get escape sequences onto the user's terminal.
-                println!(
-                    "Approved “{}” as the advertised name for '{who}'.",
-                    sanitize_display(&approved)
                 );
             }
         }

@@ -20,16 +20,159 @@ use crate::util::*;
 use crate::commands::daemon::{
     daemon_client, push_via_daemon, serve_code_via_daemon, serve_ticket_via_daemon,
 };
-use crate::commands::offline::send_offline;
+use crate::commands::offline::{send_link, send_sealed};
 use crate::commands::receive::record_history;
 use crate::output::verbosity;
 
+/// The unified `arvolo send`: one verb, four shapes. Which one runs is decided
+/// here, from flags clap has already checked for consistency — by the time this
+/// is called the combination is known to make sense.
+pub(crate) struct SendOpts {
+    pub(crate) paths: Vec<PathBuf>,
+    pub(crate) to: Option<String>,
+    pub(crate) device: Option<String>,
+    pub(crate) mailbox: bool,
+    pub(crate) link: bool,
+    pub(crate) code: bool,
+    pub(crate) ticket: bool,
+    pub(crate) note: Option<String>,
+    pub(crate) ttl: u64,
+    pub(crate) max: Option<u32>,
+    pub(crate) password: Option<String>,
+    pub(crate) keep: bool,
+    pub(crate) foreground: bool,
+    pub(crate) qr: bool,
+    pub(crate) relay: Option<String>,
+}
+
+pub(crate) async fn send_cmd(opts: SendOpts) -> Result<()> {
+    guard_contact_in_path_slot(&opts.paths, opts.to.is_some())?;
+    guard_readable(&opts.paths)?;
+    // `--password` with no value means "prompt me" (clap stores the empty
+    // string); resolve it before anything leaves the machine.
+    let password = match opts.password {
+        Some(p) if p.is_empty() => Some(prompt_password()?),
+        other => other,
+    };
+    if let Some(who) = opts.to {
+        return send_to(
+            who,
+            opts.paths,
+            opts.mailbox,
+            opts.note,
+            opts.relay,
+            opts.ttl,
+            opts.max,
+            password,
+            opts.device,
+        )
+        .await;
+    }
+    if opts.link {
+        // Through the daemon when it runs and the payload is one plain file: the
+        // link then has a live engine row — visible in the GUI, cancelled in one
+        // place — same as code/ticket/push already do. Several paths are packed
+        // into a temp archive this process must clean up, so those stay here.
+        if opts.paths.len() == 1 && opts.paths[0].is_file() {
+            if let Some(mut client) = daemon_client().await {
+                let abs = std::fs::canonicalize(&opts.paths[0])
+                    .with_context(|| format!("{}", opts.paths[0].display()))?
+                    .to_string_lossy()
+                    .into_owned();
+                let (handoff, _offer) = crate::commands::daemon::offer_sources(&opts.paths);
+                match client
+                    .create_link(abs, Some(opts.ttl), opts.max, handoff)
+                    .await
+                {
+                    Ok(url) => {
+                        println!("{url}");
+                        eprintln!("\nAnyone with the link can download it in a browser.");
+                        eprintln!("Listed in `arvolo status`; `arvolo cancel <id>` withdraws it.");
+                        if opts.qr {
+                            print_qr(&url);
+                        }
+                        return Ok(());
+                    }
+                    // An older daemon or a relay hiccup — deposit from here
+                    // instead, and say so.
+                    Err(e) => eprintln!("Depositing from here instead ({e:#})."),
+                }
+            }
+        }
+        return send_link(opts.paths, opts.relay, opts.ttl, opts.max, opts.qr).await;
+    }
+    if opts.code {
+        return code_cmd(opts.paths, opts.relay, opts.keep, opts.foreground, opts.qr).await;
+    }
+    // Default: a `.arvolo` ticket file, like a .torrent — `--ticket` skips the
+    // file and prints the raw ticket for scripts.
+    let out = if opts.ticket {
+        TicketOut::Raw
+    } else {
+        TicketOut::File
+    };
+    ticket_cmd(opts.paths, opts.relay, opts.foreground, out).await
+}
+
+/// The habit guard for the old `send <who> <paths…>` shape: with `--to` gone
+/// missing, a contact name lands in the *paths* and the natural failure would be
+/// "file does not exist" — true, useless. Say what actually happened.
+fn guard_contact_in_path_slot(paths: &[PathBuf], has_to: bool) -> Result<()> {
+    if has_to {
+        return Ok(());
+    }
+    let Some(first) = paths.first() else {
+        return Ok(());
+    };
+    if first.exists() {
+        return Ok(());
+    }
+    let s = first.to_string_lossy();
+    if book::resolve_recipient(&s).is_ok() {
+        anyhow::bail!(
+            "'{s}' is a contact, not a file. The recipient is a flag now:\n\n    \
+             arvolo send <files…> --to {s}\n"
+        );
+    }
+    Ok(())
+}
+
+/// Prove every source is readable from THIS process before anything is queued.
+/// macOS keeps Downloads/Desktop/Documents behind per-app consent, and a daemon
+/// spawned outside the granted app gets `Operation not permitted` on open — a
+/// send queued anyway used to sit as a silent "active, 0 B" forever. An open()
+/// here fails fast, in the terminal the user is looking at, with the fix named.
+fn guard_readable(paths: &[PathBuf]) -> Result<()> {
+    for p in paths {
+        let probe = if p.is_dir() {
+            std::fs::read_dir(p).map(|_| ())
+        } else {
+            std::fs::File::open(p).map(|_| ())
+        };
+        if let Err(e) = probe {
+            let hint = if e.kind() == std::io::ErrorKind::PermissionDenied {
+                "\n  This folder is privacy-guarded (macOS asks per app). Move the file \
+                 somewhere neutral, or grant access in System Settings → Privacy & \
+                 Security → Files and Folders (or Full Disk Access)."
+            } else {
+                ""
+            };
+            anyhow::bail!("cannot read {}: {e}{hint}", p.display());
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn push(
     paths: Vec<PathBuf>,
     to: String,
     relay: Option<String>,
-    use_http: bool,
     note: &str,
+    ttl: Option<u64>,
+    max: Option<u32>,
+    password: Option<String>,
+    device: Option<String>,
 ) -> Result<()> {
     anyhow::ensure!(
         !paths.is_empty(),
@@ -37,19 +180,47 @@ pub(crate) async fn push(
     );
 
     // If a daemon is running, hand the send off to it (concurrent, survives our
-    // exit); otherwise fall back to a one-shot in-process send.
+    // exit); otherwise fall back to a one-shot in-process send. The mailbox
+    // options ride along: the daemon re-probes presence, and a recipient who
+    // dropped offline in between must still get the ttl/max/password asked for.
     {
         if let Some(client) = daemon_client().await {
-            return push_via_daemon(client, paths, to, note.to_string()).await;
+            return push_via_daemon(
+                client,
+                paths,
+                to,
+                note.to_string(),
+                ttl,
+                max,
+                password,
+                device,
+            )
+            .await;
         }
     }
 
-    let relay = require_relay(relay, use_http)?;
-    let recipient = book::resolve_recipient(&to)?;
+    // Aiming needs the daemon: the device register is resolved there, and a
+    // one-shot send has no way to be told which machine takes the offer.
+    if device.is_some() {
+        eprintln!(
+            "note: no daemon is running, so `--device` cannot be honoured — start one \
+             with `arvolo daemon start` and send again, or this goes to whichever of \
+             your devices takes it first."
+        );
+    }
+
+    let relay = require_relay(relay)?;
+    // Two relays from here on: ours, which the manager is built with and which
+    // holds anything we deposit, and theirs, which is the only inbox they read.
+    // They are the same string unless the contact carries a relay of their own.
+    let (recipient, theirs) = book::resolve_recipient_with_relay(&to)?;
     vprintln!(
         "recipient {to} resolved (fingerprint {})",
         recipient.fingerprint()
     );
+    if let Some(r) = theirs.as_deref().filter(|r| *r != relay) {
+        vprintln!("{to} listens on {r}, not on our own relay");
+    }
     let me = my_identity()?;
     let (payload, name, archive, temp) = resolve_payload(&paths)?;
     if archive {
@@ -64,19 +235,28 @@ pub(crate) async fn push(
 
     let manager = TransferManager::new(me, Some(relay.clone()), PathBuf::from("."));
     manager.set_display_name(book::my_display_name());
+    manager.set_device_id(book::load_or_init_device());
     let mut events = manager.subscribe();
 
     // `send_to` decides live-vs-mailbox itself (with a presence grace window and a
     // watchdog); the up-front check is only a hint for the opening line.
     vprintln!("checking {to}'s presence on the relay…");
-    if manager.is_online(&recipient).await {
+    if manager.is_online(&recipient, theirs.as_deref()).await {
         eprintln!("{to} looks online — trying a direct transfer…");
     } else {
         eprintln!("{to} looks offline — will deposit to the mailbox…");
     }
     eprintln!("Sending offer to {to}… (Ctrl-C to abort)\n");
     let id = manager
-        .send_to(&recipient, payload, name.clone(), archive, note.to_string())
+        .send_to(
+            &recipient,
+            payload,
+            name.clone(),
+            archive,
+            note.to_string(),
+            None,
+            theirs,
+        )
         .await
         .inspect_err(|_| {
             if let Some(t) = &temp {
@@ -85,7 +265,8 @@ pub(crate) async fn push(
         })?;
 
     let cancel = cancel_on_ctrl_c();
-    let mut last_pct = u64::MAX;
+    // Built on the first Progress event, which is what carries the total.
+    let mut progress: Option<Progress> = None;
     loop {
         tokio::select! {
             _ = cancel.cancelled() => {
@@ -95,22 +276,20 @@ pub(crate) async fn push(
             ev = events.recv() => {
                 match ev {
                     Ok(ManagerEvent::Progress { id: eid, transferred, total_size }) if eid == id && total_size > 0 => {
-                        let pct = transferred * 100 / total_size;
-                        if pct != last_pct {
-                            last_pct = pct;
-                            eprint!("\r  {pct}% ({}/{})   ", human_size(transferred), human_size(total_size));
-                            use std::io::Write;
-                            let _ = std::io::stderr().flush();
-                        }
+                        progress
+                            .get_or_insert_with(|| Progress::new("sending", total_size))
+                            .update(transferred);
                     }
                     Ok(ManagerEvent::Completed { id: eid, .. }) if eid == id => {
                         // The offline path emits Deposited first (handled below); a
                         // Completed here is a live P2P delivery.
-                        eprintln!("\n✓ delivered.");
+                        if let Some(p) = progress.take() { p.finish(); }
+                        eprintln!("✓ delivered.");
                         record_history(&manager, id, "completed");
                         break;
                     }
                     Ok(ManagerEvent::Deposited { id: eid, info }) if eid == id => {
+                        if let Some(p) = progress.take() { p.finish(); }
                         eprintln!("✓ deposited to the mailbox (delivered when they return).");
                         record_history(&manager, id, "deposited");
                         // This manager has no state_dir, so the engine keeps no record
@@ -125,8 +304,13 @@ pub(crate) async fn push(
                         );
                         break;
                     }
-                    Ok(ManagerEvent::Waiting { id: eid, reason }) if eid == id => {
-                        eprintln!("\n⏳ held: {reason}");
+                    // The code rides along for clients that translate; this one
+                    // prints the sentence, which is what a terminal wants.
+                    Ok(ManagerEvent::Waiting {
+                        id: eid, reason, ..
+                    }) if eid == id => {
+                        if let Some(p) = progress.take() { p.finish(); }
+                        eprintln!("⏳ held: {reason}");
                         eprintln!(
                             "   The daemon keeps trying in the background — see `arvolo status`."
                         );
@@ -134,13 +318,15 @@ pub(crate) async fn push(
                         break;
                     }
                     Ok(ManagerEvent::Paused { id: eid, reason }) if eid == id => {
-                        eprintln!("\n⏸  paused: {reason}");
+                        if let Some(p) = progress.take() { p.finish(); }
+                        eprintln!("⏸  paused: {reason}");
                         eprintln!("   `arvolo resume {id}` to continue, or `arvolo cancel {id}`.");
                         record_history(&manager, id, &format!("paused: {reason}"));
                         break;
                     }
                     Ok(ManagerEvent::Failed { id: eid, error }) if eid == id => {
-                        eprintln!("\n✗ failed: {error}");
+                        if let Some(p) = progress.take() { p.finish(); }
+                        eprintln!("✗ failed: {error}");
                         record_history(&manager, id, &format!("failed: {error}"));
                         break;
                     }
@@ -177,35 +363,47 @@ fn announce_payload(paths: &[PathBuf]) -> Result<(PathBuf, String, bool, Option<
     Ok((payload, name, archive, temp))
 }
 
-/// `arvolo send <who> <paths…>` — deliver to a known recipient.
+/// `arvolo send <paths…> --to <who>` — deliver to a known recipient.
 ///
-/// Online (their daemon is reachable) → delivered live; offline, or `--deposit`
+/// Online (their daemon is reachable) → delivered live; offline, or `--mailbox`
 /// → left on the mailbox as an inbox offer, with an `arvm…` ticket printed so
 /// the sender can hand it over by another route too.
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn send_to(
+async fn send_to(
     who: String,
     paths: Vec<PathBuf>,
-    deposit: bool,
+    mailbox: bool,
     note: Option<String>,
     relay: Option<String>,
-    use_http: bool,
     ttl: u64,
     max: Option<u32>,
     password: Option<String>,
-    qr: bool,
+    device: Option<String>,
 ) -> Result<()> {
     // The note rides inside the sealed offer; cap it so it fits comfortably.
     let note = note.unwrap_or_default();
     anyhow::ensure!(note.len() <= 4096, "--note is too long (max 4096 bytes)");
 
-    let relay_url = require_relay(relay, use_http)?;
+    let relay_url = require_relay(relay)?;
+
+    // `--to me`: your own paired devices. Answered before the address book, and
+    // differently all the way down — see `send_to_self`.
+    if who == SELF_RECIPIENT {
+        return send_to_self(paths, mailbox, &note, relay_url, ttl, max, password, device).await;
+    }
+
+    anyhow::ensure!(
+        device.is_none(),
+        "--device names one of *your* machines, so it only goes with `--to me` — \
+         {who} decides which of theirs takes it"
+    );
+
     let recipient = book::resolve_recipient(&who)?;
     book::warn_if_unverified(&who, &encode_id(&recipient));
     // With P2P off there is nothing to gain from the probe: a live delivery is not
     // available whatever it answers, so don't spend the request — and say why, or the
     // sudden absence of the live path looks like the recipient never being online.
-    let online = if deposit {
+    let online = if mailbox {
         false
     } else if !arvolo_core::transfer::p2p_enabled() {
         vprintln!("P2P is off — depositing on the relay instead of probing presence");
@@ -218,60 +416,140 @@ pub(crate) async fn send_to(
     };
     if online {
         // Not a flag conflict — which of the two paths runs is decided by the
-        // presence probe, so this can only be found out here.
+        // presence probe, so this can only be found out here. The options are
+        // NOT dropped: if the daemon's own probe disagrees and the send falls
+        // back to the mailbox, they apply there.
         if max.is_some() || password.is_some() {
-            eprintln!(
-                "note: --max/--password apply to a deposited send; ignored for a live delivery."
-            );
+            eprintln!("note: --max/--password apply only if this send falls back to the mailbox.");
         }
-        return push(paths, who, Some(relay_url), use_http, &note).await;
+        // No aim: `--device` is refused above for anybody but ourselves.
+        return push(
+            paths,
+            who,
+            Some(relay_url),
+            &note,
+            Some(ttl),
+            max,
+            password,
+            None,
+        )
+        .await;
     }
-    send_offline(
-        paths,
-        Some(who),
-        false,
-        Some(relay_url),
-        use_http,
-        ttl,
-        max,
-        password,
-        qr,
-        true,
-        &note,
-    )
-    .await
+    send_sealed(paths, who, Some(relay_url), ttl, max, password, true, &note).await
 }
 
-/// `arvolo link <paths…>` — a public, browser-openable download URL.
+/// `arvolo send <paths…> --to me` — deliver to your own other devices.
+///
+/// Devices paired with `device pair` share one identity, so "me" is a real
+/// recipient: the file is sealed to our own public key, lands in the inbox slot
+/// every device of ours reads, and whichever one is up takes it. Two things have
+/// to differ from a send to somebody else:
+///
+/// - **no presence probe.** It reports the beacon *this* process is publishing, so
+///   for a shared identity it answers "online" and means nothing. Skipping it goes
+///   straight to the held delivery, which tries live and falls back on its own —
+///   with a shorter window, because the probe is not the only signal that lies
+///   here (see `SELF_LIVE_CONNECT_SECS`).
+/// - **no verification warning.** Being told you have not verified yourself is
+///   noise, and noise in a security warning is how the real ones stop being read.
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn link(
+async fn send_to_self(
     paths: Vec<PathBuf>,
-    relay: Option<String>,
-    use_http: bool,
+    mailbox: bool,
+    note: &str,
+    relay_url: String,
     ttl: u64,
     max: Option<u32>,
     password: Option<String>,
-    qr: bool,
+    device: Option<String>,
 ) -> Result<()> {
-    send_offline(
-        paths, None, true, relay, use_http, ttl, max, password, qr, false, "",
+    let me = my_identity()?;
+    let my_id = encode_id(&me.public());
+
+    // First, before any advice: a device name that does not resolve is a refusal,
+    // and notes printed above a refusal are notes about a send that is not going
+    // to happen. Resolved against the *local* register — the daemon resolves it
+    // again on its side, and that is the resolution that counts — because failing
+    // here beats packing an archive first and then being told it was a typo.
+    let aimed_here = match &device {
+        Some(who) => Some(book::resolve_device(who)?),
+        None => None,
+    };
+    if aimed_here == Some(book::load_or_init_device()) {
+        eprintln!(
+            "note: that is this device — it will not take its own offer, so this waits on \
+             the relay until you send it from somewhere else."
+        );
+    }
+
+    // A contact really called "me" is reachable, just not by that name any more.
+    // Say it here rather than silently doing the other thing.
+    if book::resolve_name(&my_id).as_deref() != Some(SELF_RECIPIENT)
+        && book::contact_list()
+            .iter()
+            .any(|(n, _)| n == SELF_RECIPIENT)
+    {
+        eprintln!(
+            "note: '{SELF_RECIPIENT}' is reserved for your own devices, so it wins over your \
+             contact of that name — send to them with their public id, or rename them."
+        );
+    }
+
+    if !book::paired_with_another_device() {
+        eprintln!(
+            "note: no other device shares this identity yet — pair one with `arvolo device pair`. \
+             What you send now waits on the relay until then."
+        );
+    }
+
+    if mailbox {
+        // A deposit is collected once by default, so an aimed one is the same
+        // instruction said twice — but only the offer carries the aim, and the
+        // one-shot deposit path does not post through the daemon. Say so rather
+        // than aim at nothing.
+        if device.is_some() && daemon_client().await.is_none() {
+            eprintln!(
+                "note: no daemon is running, so `--device` cannot be honoured for a mailbox \
+                 deposit — whichever of your devices collects it first gets it."
+            );
+        }
+        return send_sealed(
+            paths,
+            my_id,
+            Some(relay_url),
+            ttl,
+            max,
+            password,
+            true,
+            note,
+        )
+        .await;
+    }
+    push(
+        paths,
+        my_id,
+        Some(relay_url),
+        note,
+        Some(ttl),
+        max,
+        password,
+        device,
     )
     .await
 }
 
-/// `arvolo code <paths…>` — hand the ticket over as a short pairing code.
-pub(crate) async fn code_cmd(
+/// `arvolo send --code` — hand the ticket over as a short pairing code.
+async fn code_cmd(
     paths: Vec<PathBuf>,
     relay: Option<String>,
-    use_http: bool,
     keep: bool,
     foreground: bool,
     qr: bool,
 ) -> Result<()> {
     // A code brokers a *direct* transfer: the rendezvous only carries the ticket.
     ensure_p2p("a pairing code")?;
-    // A bare relay host gets a scheme (https by default, http with --use-http).
-    let relay = relay.map(|r| book::normalize_relay(&r, use_http));
+    // A bare relay host gets a scheme (https unless written explicitly).
+    let relay = relay.map(|r| book::normalize_relay(&r));
 
     // By default hand the code to a running daemon: it hosts the rendezvous in
     // the background, survives this terminal *and* a daemon restart, and shows up
@@ -301,19 +579,59 @@ pub(crate) async fn code_cmd(
     send_with_code(payload, name, archive, temp, relay, None, qr).await
 }
 
-/// `arvolo ticket <paths…>` — a self-contained `arvc…` ticket to share.
-pub(crate) async fn ticket_cmd(
+/// Where the `arvc…` ticket of a serve ends up.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TicketOut {
+    /// The raw ticket alone on stdout — for scripts and pipes (`--ticket`).
+    Raw,
+    /// A `<name>.arvolo` file in the current directory, its path alone on
+    /// stdout — the default: share the file like a .torrent.
+    File,
+}
+
+/// Deliver a ready ticket the way [`TicketOut`] asks: stdout carries exactly the
+/// artefact (the ticket, or the path of the `.arvolo` file it was written to);
+/// everything else goes to stderr.
+fn emit_ticket(out: TicketOut, base_name: &str, ticket: &str) {
+    match out {
+        TicketOut::Raw => {
+            println!("{ticket}");
+            eprintln!("\nOn the other device:  arvolo recv <the ticket above>");
+        }
+        TicketOut::File => match write_arvolo_file(base_name, ticket) {
+            Ok(path) => {
+                println!("{}", path.display());
+                eprintln!(
+                    "\nTicket file written. Share it over any channel; on the other device:\n"
+                );
+                eprintln!("    arvolo recv {}\n", path.display());
+            }
+            // The send is already serving — a file that can't be written must
+            // not kill it. Fall back to the raw ticket, and say why.
+            Err(e) => {
+                eprintln!(
+                    "(could not write the .arvolo file: {e:#} — printing the ticket instead)"
+                );
+                println!("{ticket}");
+                eprintln!("\nOn the other device:  arvolo recv <the ticket above>");
+            }
+        },
+    }
+}
+
+/// `arvolo send` (default) / `arvolo send --ticket` — a self-contained `arvc…`
+/// ticket, as a shareable `.arvolo` file or raw on stdout.
+async fn ticket_cmd(
     paths: Vec<PathBuf>,
     relay: Option<String>,
-    use_http: bool,
     foreground: bool,
-    qr: bool,
+    out: TicketOut,
 ) -> Result<()> {
     // An `arvc…` ticket is an invitation to connect to this node directly; the
     // relay can only ever backfill chunks behind it.
     ensure_p2p("an arvc… ticket")?;
-    // A bare relay host gets a scheme (https by default, http with --use-http).
-    let relay = relay.map(|r| book::normalize_relay(&r, use_http));
+    // A bare relay host gets a scheme (https unless written explicitly).
+    let relay = relay.map(|r| book::normalize_relay(&r));
     // Swarm is the norm: embed the configured relay in every arvc… ticket so the
     // recipient can backfill from it AND the relay acts as the swarm tracker
     // (peers seed to each other). Best-effort in the core — if the relay is
@@ -329,7 +647,14 @@ pub(crate) async fn ticket_cmd(
     {
         if !foreground {
             if let Some(client) = daemon_client().await {
-                return serve_ticket_via_daemon(client, paths, seed_relay, qr).await;
+                let base = arvolo_base_name(&paths);
+                let (id, ticket) = serve_ticket_via_daemon(client, paths, seed_relay).await?;
+                emit_ticket(out, &base, &ticket);
+                eprintln!(
+                    "Serving via the daemon — follow it with `arvolo status`, stop it with \
+                     `arvolo cancel {id}`."
+                );
+                return Ok(());
             }
         }
     }
@@ -362,7 +687,8 @@ pub(crate) async fn ticket_cmd(
     ) {
         eprintln!("(note: could not save resumable session: {e:#})");
     }
-    let result = serve_session(session, qr).await;
+    let record_id = crate::sessions::id_for(&session.ticket);
+    let result = serve_session(session, Some((out, name)), Some(record_id)).await;
     // The payload (a packed archive) had to stay readable for the whole session,
     // since chunks are produced on the fly; clean it up now that serving ended.
     if let Some(t) = &temp {
@@ -371,9 +697,56 @@ pub(crate) async fn ticket_cmd(
     result
 }
 
-/// Drive a prepared/resumed [`flow::SendSession`] to completion, printing the
-/// ticket when it's ready. Shared by fresh sends and both resume paths.
-pub(crate) async fn serve_session(session: flow::SendSession, qr: bool) -> Result<()> {
+/// The stem the `.arvolo` file is named after: the first path's file name, the
+/// same rule [`resolve_payload`] uses for the payload's suggested name.
+fn arvolo_base_name(paths: &[PathBuf]) -> String {
+    paths
+        .first()
+        .and_then(|p| p.file_name())
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "bundle".into())
+}
+
+/// Write `<base>.arvolo` in the current directory, never clobbering: an existing
+/// file gets ` (1)`, ` (2)`, … appended, the same rule downloads use.
+fn write_arvolo_file(base: &str, ticket: &str) -> Result<PathBuf> {
+    use std::io::Write;
+    let mut n = 0u32;
+    loop {
+        let candidate = if n == 0 {
+            PathBuf::from(format!("{base}.arvolo"))
+        } else {
+            PathBuf::from(format!("{base} ({n}).arvolo"))
+        };
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(mut f) => {
+                f.write_all(ticket.as_bytes())
+                    .context("write ticket file")?;
+                f.write_all(b"\n").context("write ticket file")?;
+                return Ok(candidate);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => n += 1,
+            Err(e) => return Err(e).with_context(|| format!("create {}", candidate.display())),
+        }
+    }
+}
+
+/// Drive a prepared/resumed [`flow::SendSession`] to completion, emitting the
+/// ticket when it's ready. Shared by fresh sends and both resume paths;
+/// `emit` is `None` when the caller already announced the artefact (resume
+/// reprints it itself).
+pub(crate) async fn serve_session(
+    session: flow::SendSession,
+    emit: Option<(TicketOut, String)>,
+    // The resumable-session record backing this serve, dropped once a receiver
+    // has the whole file — a delivered send listed as "resumable" forever was
+    // the old leak (`cancel` used to be the only remover).
+    session_record: Option<String>,
+) -> Result<()> {
     let cancel = cancel_on_ctrl_c();
     // Last progress percent we narrated, so `-v` shows a few milestones instead
     // of one line per ack. Shared because `serve`'s callback is `Fn`, not `FnMut`.
@@ -386,21 +759,28 @@ pub(crate) async fn serve_session(session: flow::SendSession, qr: bool) -> Resul
                 ticket,
                 has_relay,
             } => {
-                println!("\nFile ready ({chunks} chunks). On the other device:\n");
-                println!("    arvolo recv {ticket}\n");
-                if qr {
-                    print_qr(&ticket);
+                match &emit {
+                    Some((out, base)) => emit_ticket(*out, base, &ticket),
+                    None => {
+                        // A resume: the caller said what's happening; reprint the
+                        // ticket bare so it can be piped like a fresh one.
+                        println!("{ticket}");
+                        eprintln!("\nOn the other device:  arvolo recv <the ticket above>");
+                    }
                 }
                 if has_relay {
-                    println!("P2P-first; if the receiver drops, only the missing chunks are backfilled to the relay.");
+                    vprintln!("P2P first; only the missing chunks are backfilled to the relay");
                 }
                 vprintln!(
                     "serving {chunks} chunk(s), {} total; waiting for a receiver to connect",
                     human_size(total_size)
                 );
-                println!("Ctrl-C to stop.");
+                eprintln!("Ctrl-C to stop.");
             }
             SendEvent::ReceiverConnected => vprintln!("receiver connected — chunk pull started"),
+            SendEvent::RecipientCancelled => {
+                eprintln!("✗ Receiver cancelled — stopping.");
+            }
             SendEvent::Progress { transferred, total } if total > 0 => {
                 let pct = (transferred * 100 / total) as u8;
                 // Narrate every ~10% step, once each.
@@ -414,15 +794,25 @@ pub(crate) async fn serve_session(session: flow::SendSession, qr: bool) -> Resul
                 }
             }
             SendEvent::Progress { .. } => {}
-            SendEvent::Delivered => eprintln!("✓ A receiver got the whole file."),
+            SendEvent::Delivered => {
+                eprintln!("✓ A receiver got the whole file.");
+                if let Some(id) = &session_record {
+                    crate::sessions::remove_if_present(id);
+                }
+            }
             SendEvent::ReceiverDropped { missing } => {
                 eprintln!("Receiver dropped — backfilling {missing} missing chunks to the relay…")
             }
             SendEvent::Backfilled => {
-                eprintln!("Backfilled. You can close this; the relay can finish the delivery.")
+                eprintln!("Backfilled — you can close this.")
+            }
+            SendEvent::Offloaded => {
+                eprintln!("Everything they still need is on the relay — closing here is safe.")
             }
             SendEvent::BackfillFailed { reason } => eprintln!("Relay backfill failed: {reason}"),
-            SendEvent::RelayCapped { limit_bytes } => eprintln!("{}", relay_capped_line(limit_bytes)),
+            SendEvent::RelayCapped { limit_bytes } => {
+                eprintln!("{}", relay_capped_line(limit_bytes))
+            }
             SendEvent::Peers { count } => {
                 vprintln!("{count} peer(s) downloading");
             }
@@ -434,7 +824,7 @@ pub(crate) async fn serve_session(session: flow::SendSession, qr: bool) -> Resul
 /// ticket so it stays valid after the sender restarted. The key rides in the
 /// ticket, so no saved session is needed. Tickets sealed to a recipient resume
 /// by session id instead (`arvolo resume <id>`).
-pub(crate) async fn resume_by_ticket(ticket: &str, path: &Path, qr: bool) -> Result<()> {
+pub(crate) async fn resume_by_ticket(ticket: &str, path: &Path) -> Result<()> {
     let expected = ChunkTicket::decode(ticket).context("parse ticket")?;
     let key: [u8; 32] = match &expected.key {
         KeyDelivery::Plain(bytes) => bytes
@@ -455,13 +845,13 @@ pub(crate) async fn resume_by_ticket(ticket: &str, path: &Path, qr: bool) -> Res
          start sends normally and resume by session id: `arvolo resume <id>`."
     );
     let session = flow::resume_send(path, key, None, &expected, RelayChoice::from_env()).await?;
-    serve_session(session, qr).await
+    serve_session(session, None, None).await
 }
 
 /// `arvolo resume <id>`: replay a saved session (covers deliveries to a contact
 /// too, which is why it needs no file). A
 /// single file is re-served in place; an archive is repacked deterministically.
-pub(crate) async fn resume_by_id(id: &str, qr: bool) -> Result<()> {
+pub(crate) async fn resume_by_id(id: &str) -> Result<()> {
     let rec = sessions::load(id)?;
     let expected = ChunkTicket::decode(&rec.ticket).context("parse saved ticket")?;
     let key = rec.key()?;
@@ -495,15 +885,16 @@ pub(crate) async fn resume_by_id(id: &str, qr: bool) -> Result<()> {
         RelayChoice::from_env(),
     )
     .await?;
-    let result = serve_session(session, qr).await;
+    let result = serve_session(session, None, Some(id.to_string())).await;
     if let Some(t) = &temp {
         let _ = std::fs::remove_file(t);
     }
     result
 }
 
-/// `arvolo code`: hand the ticket to the receiver via a short pairing code over a
-/// relay rendezvous, serving the file (and using the relay for backfill) meanwhile.
+/// `arvolo send --code`: hand the ticket to the receiver via a short pairing code
+/// over a relay rendezvous, serving the file (and using the relay for backfill)
+/// meanwhile.
 pub(crate) async fn send_with_code(
     payload: PathBuf,
     name: String,
@@ -513,24 +904,17 @@ pub(crate) async fn send_with_code(
     to: Option<(&Identity, &PublicId)>,
     qr: bool,
 ) -> Result<()> {
-    // An explicit --relay is embedded in the code (works with no receiver config);
-    // otherwise fall back to the default relay (short code, shared default).
-    let (relay_url, embed) = match relay {
-        Some(r) => (r, true),
-        None => match book::default_relay_or_builtin() {
-            Some(r) => (r, false),
-            None => anyhow::bail!("--code needs a relay: pass --relay <host>, set ARVOLO_RELAY, or configure `relay` in config.toml"),
-        },
+    // Always embedded, wherever the relay came from. It used to ride along only
+    // with an explicit `--relay`, which made the same command self-contained or not
+    // depending on whether a daemon happened to be running — the daemon path has
+    // always embedded it (see `ipc::server::serve_code`) — and left the receiver to
+    // discover the difference by having the code not resolve.
+    let relay_url = match relay.or_else(book::default_relay_or_builtin) {
+        Some(r) => r,
+        None => anyhow::bail!("--code needs a relay: pass --relay <host>, set ARVOLO_RELAY, or configure `relay` in config.toml"),
     };
 
-    vprintln!(
-        "rendezvous relay: {relay_url} ({})",
-        if embed {
-            "embedded in the code — receiver needs no config"
-        } else {
-            "shared default — not embedded"
-        }
-    );
+    vprintln!("rendezvous relay: {relay_url} (embedded in the code — receiver needs no config)");
     eprintln!("Splitting and serving chunks…");
     let session = flow::prepare_send(
         &payload,
@@ -546,16 +930,19 @@ pub(crate) async fn send_with_code(
         session.chunks,
         human_size(session.total_size)
     );
-    let (shown_code, complete) = code::publish_ticket(&session.ticket, &relay_url, embed)
+    let (shown_code, complete) = code::publish_ticket(&session.ticket, &relay_url)
         .await
         .context("start pairing")?;
 
-    println!("\nOn the other device:\n");
-    println!("    arvolo recv {shown_code}\n");
+    // The artefact alone on stdout (`arvolo send --code f | pbcopy` copies just
+    // the code); the words around it are narration and go to stderr.
+    println!("{shown_code}");
+    eprintln!("\nOn the other device:\n");
+    eprintln!("    arvolo recv {shown_code}\n");
     if qr {
         print_qr(&shown_code);
     }
-    println!("Ctrl-C to stop.");
+    eprintln!("Ctrl-C to stop.");
 
     let cancel = cancel_on_ctrl_c();
     // Finish the pairing (publish the encrypted ticket once the receiver shows up)
@@ -571,7 +958,10 @@ pub(crate) async fn send_with_code(
                 eprintln!("Receiver dropped — backfilling {missing} missing chunks to the relay…")
             }
             SendEvent::Backfilled => {
-                eprintln!("Backfilled. You can close this; the relay can finish the delivery.")
+                eprintln!("Backfilled — you can close this.")
+            }
+            SendEvent::Offloaded => {
+                eprintln!("Everything they still need is on the relay — closing here is safe.")
             }
             SendEvent::BackfillFailed { reason } => eprintln!("Relay backfill failed: {reason}"),
             SendEvent::RelayCapped { limit_bytes } => {
@@ -580,6 +970,9 @@ pub(crate) async fn send_with_code(
             SendEvent::Delivered => eprintln!("✓ A receiver got the whole file."),
             SendEvent::ReceiverConnected => vprintln!("receiver connected — chunk pull started"),
             SendEvent::Peers { count } => vprintln!("{count} peer(s) downloading"),
+            SendEvent::RecipientCancelled => {
+                eprintln!("A receiver cancelled. Others are unaffected.")
+            }
             SendEvent::Progress { .. } => {}
             SendEvent::Ready { .. } => {} // code already printed
         })

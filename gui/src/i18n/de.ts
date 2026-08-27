@@ -26,6 +26,7 @@ export const de: Dict = {
   "common.loading": "Wird geladen…",
   "common.to": "an",
   "common.from": "von",
+  "common.afterRestart": "Wirkt beim nächsten Start des Daemons.",
 
   "title.transfers": "Übertragungen",
   "title.people": "Personen",
@@ -34,12 +35,22 @@ export const de: Dict = {
   "title.devices": "Ihre Geräte",
   "title.settings": "Einstellungen",
 
-  "app.disconnected":
-    "Ich erreiche den Daemon nicht. Laufende Übertragungen gehen weiter, aber dieses Fenster sieht sie nicht.",
+  "app.disconnected": "Daemon nicht erreichbar",
+  "app.disconnectedDetail": "Laufende Übertragungen gehen weiter; dieses Fenster sieht sie nicht.",
   "app.versionMismatch": (daemon, gui) =>
-    `Der laufende Daemon hat Version ${daemon}, die App ${gui}. Starten Sie ihn neu, damit beide zusammenpassen.`,
+    `Daemon ${daemon}, App ${gui} — neu starten zum Angleichen.`,
   "app.versionUnknown": "älter",
   "app.restart": "Neu starten",
+  "app.updateAvailable": (version) => `Arvolo ${version} ist da.`,
+  "app.updateNow": "Aktualisieren",
+  "app.updateLater": "Nicht jetzt",
+  "app.updateDownloading": (got, total) =>
+    `Update wird geladen — ${got} von ${total}.`,
+  "app.updateDownloadingUnknown": "Update wird geladen…",
+  "app.updateHeldBack": (latest, relay) =>
+    `${latest} ist da, aber ${relay} trägt nur diese hier.`,
+  "app.updateDevices":
+    "Aktualisieren Sie auch Ihre anderen Geräte, sonst synchronisieren sie nicht mehr.",
   "app.offerWaiting": "Jemand möchte Ihnen eine Datei schicken.",
   "app.offersWaiting": (n) => `${n} Dateien warten auf Ihre Bestätigung.`,
   "app.seeOffers": "Ansehen",
@@ -52,11 +63,13 @@ export const de: Dict = {
   "app.dropTitle": "Zum Senden hier ablegen",
   "app.dropHint": "Danach wählen Sie, an wen: Kontakt, Code oder Link.",
   "app.actionFailed": "Das hat nicht geklappt",
+  "app.errHintDaemon": "Der Daemon antwortet nicht — starte ihn neu und versuch es wieder.",
+  "app.errHintRelay": "Dafür braucht es ein Relay — unter Einstellungen → Netzwerk setzen.",
+  "app.errHintPassword": "Passwortgeschützt — frag den Absender nach dem Passwort.",
+  "app.errOpenSettings": "Einstellungen öffnen",
 
   "crash.title": "In der Oberfläche ist etwas kaputtgegangen",
-  "crash.body":
-    "Ihre Übertragungen halten nicht an: Sie laufen im Hintergrund im Daemon weiter. Sie können dort weitermachen, wo Sie waren.",
-
+  "crash.body": "Übertragungen laufen im Daemon weiter; Sie können fortsetzen.",
   "rail.nav": "Hauptnavigation",
   "rail.meTitle": "Ihre Identität und die Einstellungen",
   "rail.meFallback": "Ich",
@@ -69,6 +82,8 @@ export const de: Dict = {
   "rail.palette": "Suchen und ausführen",
 
   "status.active": "Läuft",
+  "status.preparing": "Wird vorbereitet…",
+  "meta.preparing": "lesen und verschlüsseln — noch nichts gesendet",
   "status.sharing": "Geteilt",
 
   "share.title": "Geteilte Datei",
@@ -78,30 +93,33 @@ export const de: Dict = {
   "share.lastPickup": "zuletzt abgeholt",
   "share.never": "nie",
   "share.uploaded": "hochgeladen",
-  "share.fromDownload": (when: string) =>
-    `Sie haben das ${when} heruntergeladen, und Ihr Rechner stellt es jetzt anderen zur Verfügung.`,
+  "share.fromDownload": (when) => `${when} geladen; Ihr Rechner teilt es jetzt.`,
   "share.seedingSetting": "Einstellung ändern",
-  "share.countsNote":
-    "Kopien, keine Personen: Ein Ticket trägt keine Identität, dieselbe Person z\u00e4hlt beim zweiten Abholen erneut.",
+  "share.countsNote": "Abgeholte Kopien, nicht Personen: zweimal holen zählt zweimal.",
   "status.completed": "Abgeschlossen",
   "status.deposited": "Abgelegt",
   "status.paused": "Pausiert",
   "status.incoming": "Zu bestätigen",
+  "status.offered": "Angeboten",
   "status.stalled": "Wartet",
   "status.failed": "Fehlgeschlagen",
   "status.cancelling": "Wird abgebrochen…",
   "status.cancelled": "Abgebrochen",
 
-  "method.p2p": "Direkt",
-  "method.cloud": "Postfach",
-  "method.link": "Link",
-  "method.ticket": "Ticket",
-
   "meta.paused": "pausiert",
   "meta.sharing": "verfügbar — niemand lädt es gerade",
   "meta.sharingPeers": (n) =>
     n === 1 ? "1 Person lädt es" : `${n} Personen laden es`,
+  "meta.offered": "wartet, dass sie es sehen",
   "meta.stalled": "läuft weiter, sobald es geht",
+  "waiting.offered": "angeboten — wartet auf die Annahme",
+  "waiting.tooLarge": "zu groß fürs Relay — wird direkt gesendet",
+  "waiting.relayRetry": (why: string) => `${why} — neuer Versuch, direkt sobald online`,
+  "waiting.parked": "aufs Relay geparkt — läuft ohne dich zu Ende",
+  "waiting.relayCapped": (cap: string) => `Relay hält davon nur ${cap} — ab jetzt direkt`,
+  "waiting.offloadFailed": (why: string) => `konnte nicht geparkt werden: ${why}`,
+  "waiting.noRoute": "kein Relay erreichbar — nur lokales Netz",
+  "waiting.relayUnnamed": "das Relay konnte es nicht annehmen",
   "meta.incoming": "für Details öffnen",
   "meta.deposited": "wartet darauf, abgeholt zu werden",
   "meta.failed": "Übertragung fehlgeschlagen",
@@ -125,21 +143,26 @@ export const de: Dict = {
 
   "transfers.pause": "Pausieren",
   "transfers.resume": "Fortsetzen",
+  "transfers.depositNow": "Im Postfach hinterlegen",
+  "transfers.depositNowDesc":
+    "Nicht länger auf die Zusage warten. Die Datei geht ans Relay und wird abgeholt, wann immer.",
   "transfers.openFile": "Datei öffnen",
-  "transfers.openFileFailed": "Ich kann die Datei nicht öffnen",
+  "transfers.openFileFailed": "Datei konnte nicht geöffnet werden",
   "transfers.openFolder": "Ordner öffnen",
-  "transfers.openFolderFailed": "Ich kann den Ordner nicht öffnen",
-  "transfers.revokeDeposit": "Ablage zurückziehen",
+  "transfers.openFolderFailed": "Ordner konnte nicht geöffnet werden",
+  "transfers.revokeDeposit": "Zurückziehen",
   "transfers.cancel": "Abbrechen",
-  "transfers.removeRow": "Von der Liste nehmen",
+  "transfers.removeRow": "Entfernen",
   "transfers.verifiedIdentity": "Verifizierte Identität",
   "transfers.swarm": "Übertragung auf mehrere Peers verteilt",
   "transfers.peers": (n) => (n === 1 ? "1 Peer" : `${n} Peers`),
   "transfers.liveCode": "Code aktiv",
   "transfers.review": "Ansehen",
   "transfers.shareDetails": "Details zum Teilen",
-  "transfers.reorder": (name) =>
-    `${name} verschieben: ziehen oder die Pfeiltasten hoch/runter benutzen`,
+  "transfers.saveSender": "Absender speichern…",
+  "transfers.saveSenderTitle": "Absender in den Kontakten speichern",
+  "transfers.saveSenderSub": (name) => `Hat Ihnen ${name} geschickt.`,
+  "transfers.reorder": (name) => `${name} verschieben: ziehen oder Pfeiltasten`,
   "transfers.rowActions": (name) => `Aktionen für ${name}`,
   "transfers.progressOf": (name) => `Fortschritt von ${name}`,
   "transfers.confirmRevokeTitle": "Ablage zurückziehen?",
@@ -163,71 +186,81 @@ export const de: Dict = {
   "transfers.emptyOutAction": "Etwas senden",
   "transfers.emptyInAction": "Code einfügen",
   "transfers.firstRunTitle": "Ziehen Sie die Dateien zum Senden hierher",
-  "transfers.firstRunBody":
-    "Oder wählen Sie einen Kontakt, erzeugen Sie einen kurzen Code zum Vorlesen, oder erstellen Sie einen Link, der sich in jedem Browser öffnet. Alles ist Ende-zu-Ende verschlüsselt: das Relay sieht nur unlesbare Bytes.",
+  "transfers.firstRunBody": "Oder über Senden einen Kontakt, einen Code oder einen Link wählen.",
   "transfers.firstRunAction": "Etwas senden",
 
-  "people.presenceUnknownTitle": "Weiß ich nicht: das Relay hat nicht geantwortet",
+  "people.presenceUnknownTitle": "Das Relay hat nicht geantwortet",
   "people.presenceUnknownLabel": "Anwesenheit unbekannt",
   "people.presenceOnTitle": "Gerade verbunden",
   "people.presenceOffTitle": "Nicht verbunden",
   "people.presenceOn": "Verbunden",
   "people.presenceOff": "Nicht verbunden",
+  "people.lastExchange": (ago: string) => `letzter Austausch ${ago}`,
+  "people.listensOn": (relay: string) => `erreichbar über ${relay}`,
 
   "people.menuDetails": "Details und Fingerabdruck",
-  "people.menuUnverify": "Verifizierung zurücknehmen",
+  "people.menuUnverify": "Verifizierung entziehen",
   "people.menuVerify": "Als verifiziert markieren…",
-  "people.menuUntrust": "Nicht mehr vertrauenswürdig: jedes Mal nachfragen",
-  "people.menuTrust": "Als vertrauenswürdig markieren: automatisch laden",
+  "people.menuUntrust": "Vertrauen entziehen",
+  "people.menuUntrustDesc": "Sie werden bei jeder Datei gefragt.",
+  "people.menuTrust": "Vertrauen",
+  "people.menuTrustDesc": "Ihre Dateien laden ohne Rückfrage.",
   "people.menuUnblock": "Entsperren",
   "people.menuBlock": "Sperren",
-  "people.menuRemove": "Aus dem Adressbuch entfernen",
+  "people.menuRemove": "Aus Kontakten entfernen",
   "people.rowActions": (name) => `Aktionen für ${name}`,
-  "people.goesBy": (name) => `nennt sich „${name}“`,
   "people.notVerified": "Nicht verifiziert",
-  "people.notVerifiedTitle": "Der Fingerabdruck wurde nie verglichen",
-  "people.wantsToBeCalled": (name) => `Möchte „${name}“ genannt werden.`,
-  "people.approve": "Übernehmen",
+  "people.notVerifiedTitle": "Fingerabdruck nie verglichen",
+  "people.claimedPlain": (name) => `(„${name}“)`,
+  "people.claimedNew": (name) => `(nennt sich „${name}“)`,
+  "people.claimedChange": (now, before) =>
+    `(jetzt: „${now}“ — vorher: „${before}“)`,
+  "people.claimedTip": (mine) =>
+    `Ihr eigenes Etikett, kein Beweis. Ihres — „${mine}“ — ändert sich nie von selbst.`,
+  "people.claimedNote": (mine) =>
+    `Der Name, unter dem sie jetzt auftreten. Für Sie bleibt es „${mine}“.`,
+  "people.acknowledge": "Gesehen",
   "people.send": "Senden",
   "people.details": "Details",
 
   "people.confirmRemoveTitle": (name) => `${name} entfernen?`,
-  "people.confirmRemoveBody":
-    "Verschwindet mitsamt den Markierungen für Verifizierung und Vertrauen aus dem Adressbuch. Bereits erfolgte Übertragungen bleiben im Verlauf.",
-  "people.confirmForceTitle":
-    "Von einem nicht verifizierten Schlüssel automatisch laden?",
+  "people.confirmRemoveBody": "Die Markierungen für Verifizierung und Vertrauen gehen mit. Frühere Übertragungen bleiben im Verlauf.",
+  "people.confirmForceTitle": "Nicht verifiziertem Schlüssel vertrauen?",
   "people.confirmForceBody": (name) =>
-    `Dateien von ${name} würden ohne Rückfrage geladen, obwohl Sie den Fingerabdruck nie persönlich verglichen haben. Hätte sich beim Hinzufügen jemand dazwischengeschaltet, würden Sie automatisch von dieser Person laden.`,
-  "people.confirmForceFooter":
-    "Der richtige Weg ist, den Fingerabdruck zu vergleichen und den Kontakt dann als verifiziert zu markieren.",
+    `Sie haben den Fingerabdruck von ${name} nie verglichen. Hat sich beim Hinzufügen jemand dazwischengeschoben, würden Sie automatisch von dieser Person laden.`,
   "people.confirmForceLabel": "Trotzdem erzwingen",
   "people.confirmForceCancel": "Ich verifiziere erst",
 
   "people.addTitle": "Über die ID hinzufügen",
-  "people.addSubtitle":
-    "Der lange Weg: Sie brauchen die vollständige öffentliche ID.",
+  "people.addSubtitle": "Sie brauchen die vollständige öffentliche ID.",
   "people.addNameLabel": "Wie Sie die Person nennen",
   "people.addNamePlaceholder": "z. B. Julia",
   "people.addIdLabel": "Öffentliche ID",
   "people.addIdHint":
     "Sie findet sie mit „arvolo me“, oder im Einstellungen-Fenster ihrer App.",
-  "people.addTip":
-    "Viel einfacher: Kontakte tauschen. Sie lesen einander einen kurzen Code vor und sind beide gespeichert und schon verifiziert, ohne fünfzig Zeichen abzutippen.",
+  "people.addTip": "Codes tauschen geht schneller.",
   "people.addSaved": (name) => `${name} gespeichert`,
   "people.addSavedDetail":
     "Bleibt unverifiziert, bis Sie den Fingerabdruck vergleichen.",
+  "people.addNameTaken": (name) =>
+    `„${name}“ gehört bereits jemandem. Beim Speichern werden Sie gefragt, ob der Name umziehen soll.`,
+  "people.confirmRekeyTitle": (name) => `„${name}“ einen neuen Schlüssel geben?`,
+  "people.confirmRekeyBody": (name) =>
+    `„${name}“ zeigt bereits auf einen anderen Schlüssel. Den Namen umzuziehen löscht die Markierungen verifiziert und vertraut: der neue Schlüssel ist ungeprüft, bis Sie ihn vergleichen.`,
+  "people.confirmRekeyCurrent": "Der Schlüssel, auf den er jetzt zeigt",
+  "people.confirmRekeyDo": "Namen umziehen",
+  "people.rekeyed": (name) => `„${name}“ zeigt jetzt auf den neuen Schlüssel`,
+  "people.rekeyedDetail": "Verifiziert und vertraut wurden gelöscht.",
 
   "person.fingerprint": "Fingerabdruck",
-  "person.fingerprintHint":
-    "Dieselben Wörter müssen auf dem anderen Bildschirm stehen. Vergleichen Sie sie mündlich oder persönlich — nicht per Chat über denselben Kanal, über den Sie die IDs getauscht haben.",
+  "person.fingerprintHint": "Dieselben Wörter müssen auf dem anderen Bildschirm stehen. Mündlich vergleichen, nicht über den Kanal des ID-Tauschs.",
   "person.publicId": "Öffentliche ID",
   "person.verified": "Verifiziert",
   "person.verifiedBody":
     "Sie haben diesen Fingerabdruck außerhalb des Kanals bestätigt.",
-  "person.unverify": "Verifizierung zurücknehmen",
+  "person.unverify": "Verifizierung entziehen",
   "person.notVerifiedYet": "Noch nicht verifiziert",
-  "person.notVerifiedBody":
-    "Solange Sie den Fingerabdruck nicht vergleichen, wissen Sie nur, dass Ihnen jemand diese ID gegeben hat.",
+  "person.notVerifiedBody": "Bislang wissen Sie nur, dass Ihnen jemand diese ID gegeben hat.",
   "person.compared": (name) =>
     `Ich habe den Fingerabdruck mit ${name} außerhalb dieser App verglichen.`,
   "person.markVerified": "Als verifiziert markieren",
@@ -236,31 +269,23 @@ export const de: Dict = {
     "Der Name gehört Ihnen: Schlüssel und Markierungen bleiben.",
 
   "people.swap": "Kontakte tauschen",
-  "people.haveCode": "Ich habe einen Code",
+  "people.haveCode": "Code eingeben",
   "people.byId": "Über die ID",
   "people.export": "Exportieren",
   "people.import": "Importieren",
   "people.whoIsOnline": "Wer ist da",
-  "people.whoIsOnlineTitle": "Das Relay fragen, wer gerade verbunden ist",
-  "people.moreActions": "Weitere Adressbuch-Aktionen",
-  "people.prune": "Verwaiste Namen aufräumen",
-  "people.pruneNone": "Nichts aufzuräumen",
-  "people.pruneOne": "1 Eintrag entfernt",
-  "people.pruneMany": (n) => `${n} Einträge entfernt`,
-  "people.pruneDetail":
-    "Das waren Namen von Kontakten, die Sie nicht mehr haben.",
-  "people.filterLabel": "Adressbuch-Filter",
+  "people.whoIsOnlineTitle": "Das Relay fragen, wer verbunden ist",
+  "people.filterLabel": "Kontaktfilter",
   "people.filterAll": "Alle",
   "people.filterVerified": "Verifiziert",
   "people.filterTrusted": "Vertrauenswürdig",
   "people.filterBlocked": "Gesperrt",
   "people.filterBlockedN": (n) => `Gesperrt (${n})`,
   "people.searchPlaceholder": "Nach Name oder ID suchen…",
-  "people.searchLabel": "Im Adressbuch suchen",
+  "people.searchLabel": "Kontakte durchsuchen",
   "people.emptyNone": "Niemand im Adressbuch",
   "people.emptyNoMatch": "Kein Kontakt passt",
-  "people.emptyNoneBody":
-    "Am schnellsten fügen Sie jemanden hinzu, indem Sie ihm einen kurzen Code vorlesen: Sie speichern einander und sind sofort verifiziert, ganz ohne IDs abzutippen.",
+  "people.emptyNoneBody": "Codes tauschen geht am schnellsten: Sie speichern einander, gleich verifiziert.",
   "people.emptyNoMatchBody": "Versuchen Sie einen anderen Filter oder Suchtext.",
   "people.exportFilename": "arvolo-kontakte.json",
   "people.exportedOne": "1 Kontakt exportiert",
@@ -301,12 +326,11 @@ export const de: Dict = {
   "deposit.active": "Aktiv",
 
   "deposits.openInBrowser": "Im Browser öffnen",
-  "deposits.openFailed": "Ich kann den Link nicht öffnen",
+  "deposits.openFailed": "Link konnte nicht geöffnet werden",
   "deposits.share": "Link",
-  "deposits.shareTicket": "Ticket",
+  "deposits.shareTicket": "Abholcode",
   "deposits.shareTicketTitle": "Das Ticket, noch einmal",
-  "deposits.ticketDetail":
-    "Fügen Sie es der Empfängerseite ein: es öffnet sich in deren Arvolo, oder mit `arvolo recv`. Entschlüsseln kann es nur sie — es ist auf ihre Identität versiegelt.",
+  "deposits.ticketDetail": "Geben Sie es der Gegenseite. Nur sie kann es entschlüsseln — es ist auf ihre Identität versiegelt.",
   "deposits.shareTitle": "Der Link, noch einmal",
   "deposits.publicLink": "Öffentlicher Link",
   "deposits.sealed": "Ablage",
@@ -314,18 +338,14 @@ export const de: Dict = {
   "deposits.sealedFor": (who, detail) => `versiegelt für ${who} · ${detail}`,
   "deposits.confirmRevokeTitle": "Zurückziehen?",
   "deposits.confirmRemoveTitle": "Zeile entfernen?",
-  "deposits.confirmRevokeLink":
-    "Der Link hört für alle auf zu funktionieren, denen Sie ihn gegeben haben; wer schon geladen hat, behält seine Kopie. Die Datei bleibt auf Ihrer Platte.",
-  "deposits.confirmRevokeSealed":
-    "Die Datei wird vom Relay genommen und das Angebot aus dem Postfach der Empfängerseite zurückgezogen. Wer sie noch nicht abgeholt hat, kann es dann nicht mehr.",
+  "deposits.confirmRevokeLink": "Der Link funktioniert für niemanden mehr. Bereits geladene Kopien bleiben.",
+  "deposits.confirmRevokeSealed": "Kommt vom Relay und aus dem Postfach. Nicht Abgeholtes ist nicht mehr abholbar.",
   "deposits.confirmRemoveBody":
     "Auf dem Relay ist nichts mehr wegzunehmen: es verschwindet nur diese Zeile.",
-  "deposits.intro":
-    "Was Sie auf einem Relay liegen haben und noch zurückholen können. Der Zustand wird bei jedem Öffnen dieses Fensters beim Relay erfragt — anders lässt er sich nicht wissen.",
+  "deposits.intro": "Was Sie auf einem Relay liegen haben und zurückholen können.",
   "deposits.createLink": "Link erstellen",
   "deposits.emptyTitle": "Kein aktiver Link, keine Ablage",
-  "deposits.emptyBody":
-    "Wenn Sie einen öffentlichen Link erstellen oder eine Datei in jemandes Postfach legen, taucht sie hier auf — und von hier holen Sie sie zurück.",
+  "deposits.emptyBody": "Öffentliche Links und Postfach-Ablagen erscheinen hier.",
   "deposits.sectionLinks": "Öffentliche Links",
   "deposits.sectionSealed": "Versiegelte Ablagen",
 
@@ -354,23 +374,18 @@ export const de: Dict = {
     "Das Protokoll wird vollständig vergessen und lässt sich nicht wiederherstellen. Bereits empfangene Dateien bleiben, wo sie sind; das hier löscht nur die Liste.",
 
   "devices.identityTitle": "Ihre gemeinsame Identität",
-  "devices.identityHint":
-    "Jedes verbundene Gerät benutzt diese eine. Für den Rest der Welt sind Sie eine einzige Person, wo immer Sie Arvolo öffnen.",
+  "devices.identityHint": "Jedes verbundene Gerät benutzt diese eine. Für alle anderen sind Sie eine Person.",
   "devices.fingerprint": "Fingerabdruck",
-  "devices.fingerprintHint":
-    "Er muss auf allen Ihren Geräten gleich sein. Zeigt ein Rechner andere Wörter, ist er nicht verbunden: das ist eine andere Identität.",
+  "devices.fingerprintHint": "Er muss auf allen Geräten gleich sein. Andere Wörter sind eine andere Identität.",
   "devices.publicId": "Öffentliche ID",
+  "devices.sendToSelf": "An Ihre Geräte senden",
   "devices.pairTitle": "Ein Gerät verbinden",
-  "devices.pairBody":
-    "Das Verbinden geschieht von beiden Seiten: auf diesem Rechner zeigen Sie einen Code, auf dem anderen geben Sie ihn ein. Das ist heikel — was übergeht, ist Ihre geheime Identität, keine bloße Einladung.",
+  "devices.pairBody": "Sie zeigen hier einen Code und geben ihn auf dem anderen Rechner ein.",
   "devices.showCode": "Code anzeigen",
-  "devices.haveCode": "Ich habe einen Code",
+  "devices.haveCode": "Code eingeben",
   "devices.pairWarnLead": "Niemals auf einem Rechner, der nicht Ihrer ist.",
-  "devices.pairWarnRest":
-    "Wer den Code eingibt, wird in jeder Hinsicht zu Ihnen: gleiches Postfach, gleiches Adressbuch, dieselbe Fähigkeit zu öffnen, was Ihnen geschickt wird.",
   "devices.syncTitle": "Adressbuch im Gleichstand",
-  "devices.syncHint":
-    "Kontakte wandern zwischen Ihren Geräten in einer verschlüsselten Zelle in Ihrem Postfach. Das Relay verwahrt Bytes, die es nicht lesen kann.",
+  "devices.syncHint": "Kontakte wandern in einer verschlüsselten Zelle in Ihrem Postfach.",
   "devices.syncOn": "Aktiv",
   "devices.syncOff": "Deaktiviert",
   "devices.contactCount": (n) =>
@@ -379,12 +394,40 @@ export const de: Dict = {
   "devices.neverSynced": "seit dem Start des Daemons noch nicht abgeglichen",
   "devices.lastError": (err) => `Die letzte Runde ist fehlgeschlagen: ${err}`,
   "devices.syncNow": "Jetzt abgleichen",
+  "devices.listTitle": "Die Maschinen",
+  "devices.listHint":
+    "Jede trägt sich beim Synchronisieren selbst ein. Selbst gemeldet: nichts hier beweist, dass eine Zeile ein Rechner ist, den es noch gibt.",
+  "devices.listEmpty": "Noch hat sich keine Maschine gemeldet.",
+  "devices.thisDevice": "dieses Gerät",
+  "devices.neverSeen": "nie synchronisiert",
+  "devices.seenAgo": (when) => `gesehen ${when}`,
+  "devices.rowActions": (name) => `Aktionen für ${name}`,
+  "devices.rename": "Umbenennen",
+  "devices.renameTitle": "Dieses Gerät benennen",
+  "devices.renameHint":
+    "Nur dieses: jede Maschine beschreibt sich selbst, die anderen benennen Sie dort um.",
+  "devices.renameThereDesc": "Auf jener Maschine: sie schreibt ihre Zeile selbst.",
+  "devices.forget": "Vergessen",
+  "devices.forgetHereDesc":
+    "Sie sitzen daran — sie würde sich in der nächsten Runde neu melden.",
+  "devices.confirmForgetTitle": (name) => `${name} vergessen?`,
+  "devices.confirmForgetBody":
+    "Sie verschwindet überall aus der Liste. Die Identität behält sie — die holt nichts zurück — aber läuft sie noch, meldet sie sich nicht mehr.",
+  "devices.renamed": "Umbenannt",
+  "devices.renamedDetail":
+    "Ihre anderen Maschinen sehen es nach der nächsten Synchronisierung.",
+  "devices.forgotten": "Vergessen",
+  "send.deviceLabel": "Auf welche",
+  "send.deviceAny": "Die wache",
+  "send.deviceAnyHint": "Eine Ihrer wachen Maschinen nimmt es.",
+  "send.deviceOneHint":
+    "Die anderen lassen es liegen. Schläft die Maschine, wartet es auf dem Relay, bis sie aufwacht.",
+  "store.renameDevice": "dieses Gerät umbenennen",
+  "store.forgetDevice": "dieses Gerät vergessen",
   "devices.autoTitle": "Von allein abgleichen",
-  "devices.autoDesc":
-    "Der Daemon dreht alle paar Minuten eine Runde. Wenn Sie das abschalten, gleicht sich das Adressbuch nur ab, wenn Sie oben auf den Knopf drücken.",
+  "devices.autoDesc": "Alle paar Minuten eine Runde. Aus, gleicht es sich nur auf Knopfdruck ab.",
   "devices.autoOn": "Automatischer Abgleich aktiv",
   "devices.autoOff": "Automatischer Abgleich aus",
-  "devices.autoDetail": "Wirkt beim nächsten Start des Daemons.",
 
   "settings.sourceEnv": "durch die Variable ARVOLO_RELAY vorgegeben",
   "settings.sourceConfig": "in den Einstellungen gespeichert",
@@ -394,12 +437,10 @@ export const de: Dict = {
   "settings.nameSavedDetail":
     "Er reist ab sofort in jedem Angebot mit, das Sie senden.",
   "settings.relaySaved": "Relay gespeichert",
-  "settings.relaySavedDetail":
-    "Der Daemon benutzt es beim nächsten Start: starten Sie ihn unten neu, um es sofort anzuwenden.",
+  "settings.relaySavedDetail": "Starten Sie den Daemon unten neu, um es sofort anzuwenden.",
   "settings.whoYouAre": "Wer Sie sind",
   "settings.nameLabel": "Angezeigter Name",
-  "settings.nameHint":
-    "Er reist in jedem versiegelten Angebot mit, das Sie senden. Es ist ein Etikett, das Sie selbst wählen: die Gegenseite sieht es in Anführungszeichen, weil nichts dafür bürgt. Was Sie wirklich identifiziert, ist der Fingerabdruck darunter.",
+  "settings.nameHint": "Ein Etikett, das Sie selbst wählen: die Gegenseite sieht es in Anführungszeichen.",
   "settings.namePlaceholder": "keiner",
   "settings.fingerprintLabel": "Ihr Fingerabdruck",
   "settings.fingerprintHint":
@@ -412,106 +453,131 @@ export const de: Dict = {
   "settings.themeDark": "Dunkel",
   "settings.language": "Sprache",
   "settings.languageAuto": "System",
-  "settings.languageHint":
-    "„System“ folgt der Sprache Ihres Rechners und fällt auf Englisch zurück, wenn es eine ist, die Arvolo nicht spricht.",
+  "settings.languageHint": "„System“ folgt Ihrem Rechner und fällt auf Englisch zurück.",
   "settings.startup": "Start",
   "settings.autostartTitle": "Beim Anmelden starten",
-  "settings.autostartDesc":
-    "Beim Anmelden startet Arvolo verborgen im Infobereich, empfangsbereit ohne offenes Fenster. Unter Linux zeigt der Eintrag auf den aktuellen Ort des AppImage: Wird die Datei verschoben, den Schalter einmal aus- und wieder einschalten.",
+  "settings.autostartDesc": "Startet verborgen im Infobereich, empfangsbereit. Unter Linux aus- und wieder einschalten, wenn Sie das AppImage verschieben.",
   "settings.autostartFailed": "Automatischer Start ließ sich nicht ändern",
   "settings.network": "Netzwerk",
   "settings.relayOn": "Relay aktiv",
   "settings.relayOff": "Kein Relay",
   "settings.relayLabel": "Relay",
-  "settings.relayLocked":
-    "Im Moment entscheidet die Umgebungsvariable ARVOLO_RELAY: was Sie hier schreiben, hätte keine Wirkung, solange sie gesetzt ist.",
+  "settings.relayLocked": "ARVOLO_RELAY ist gesetzt, was Sie hier schreiben, hat also keine Wirkung.",
   "settings.relayHint": (current, source) =>
-    `Gerade in Benutzung: ${current} — ${source}. Eine Adresse ohne Schema wird zu https://; für ein unverschlüsseltes Relay schreiben Sie das Schema aus, etwa http://relay.local:6282.`,
+    `Gerade in Benutzung: ${current} — ${source}. Ohne Schema wird https://; http:// ausschreiben.`,
   "settings.relayNone": "keines",
   "settings.relayPlaceholder": "relay.beispiel.de",
-  "settings.relayNote":
-    "Das Relay vermittelt die Codes, das Postfach und die Links. Es sieht Ihre Dateien nie im Klartext: was es aufbewahrt, ist mit Schlüsseln verschlüsselt, die es nicht hat.",
+  "settings.relayNote": "Vermittelt die Codes, das Postfach und die Links. Sieht Ihre Dateien nie im Klartext.",
   "settings.files": "Dateien",
-  "settings.downloadDirLabel": "Wohin empfangene Dateien kommen",
+  "settings.downloadDirLabel": "Wohin Dateien kommen",
   "settings.downloadDirEnv":
     "Wird von der Variable ARVOLO_DOWNLOAD_DIR bestimmt.",
   "settings.downloadDirHint":
     "Gilt für alles, was Sie annehmen, ohne dabei einen Ordner zu wählen.",
   "settings.change": "Ändern",
   "settings.dirUpdated": "Ordner aktualisiert",
-  "settings.dirUpdatedDetail":
-    "Der Daemon benutzt ihn beim nächsten Start.",
-  "settings.cannotOpen": "Ich kann das nicht öffnen",
-  "settings.seedTitle": "Weiterhin teilen, was Sie geladen haben",
-  "settings.seedDesc":
-    "Aktives Seeding hilft allen, die dieselbe Datei laden. Sie können es abschalten, wenn Sie lieber nicht im Schwarm bleiben.",
+  "settings.cannotOpen": "Konnte nicht geöffnet werden",
+  "settings.seedTitle": "Weiter teilen, was Sie laden",
+  "settings.seedDesc": "Hilft allen, die dieselbe Datei laden.",
   "settings.saved": "Einstellung gespeichert",
-  "settings.savedDetail": "Wirkt beim nächsten Start des Daemons.",
   "settings.advanced": "Erweitert",
   "settings.configFileLabel": "Konfigurationsdatei",
-  "settings.configFileHint":
-    "Alles, was hier nicht auftaucht — temporärer Ordner, NAT-Relay, Log-Stufe — stellen Sie von Hand in dieser Datei ein, die Zeile für Zeile kommentiert ist.",
+  "settings.configFileHint": "Temporärer Ordner, NAT-Relay, Log-Stufe: hier von Hand einstellen, Zeile für Zeile kommentiert.",
   "settings.identityKeyLabel": "Identitätsschlüssel",
-  "settings.identityKeyHint":
-    "Ihr Geheimnis. Geben Sie es nicht weiter: wer es hat, ist Sie. Um Arvolo auf einem weiteren eigenen Rechner zu nutzen, gibt es die Geräteverbindung, die es verschlüsselt überträgt.",
+  "settings.identityKeyHint": "Ihr Geheimnis: wer es hat, ist Sie. Für einen weiteren Rechner verbinden Sie das Gerät.",
   "settings.versions": (daemon, gui) =>
     `Daemon ${daemon} · Oberfläche ${gui}`,
+  "settings.daemonProcess": (pid, exe) => `pid ${pid} · ${exe}`,
   "settings.restartDaemon": "Daemon neu starten",
+  "settings.updatesTitle": "Updates",
+  "settings.checkUpdates": "Jetzt prüfen",
+  "settings.updateIdle": "Wird etwa einmal pro Woche geprüft.",
+  "settings.updateChecking": "Wird geprüft…",
+  "settings.updateNone": "Sie haben die neueste Version.",
+  "settings.updateFound": (version) => `Arvolo ${version} ist da.`,
+  "settings.updateInstalling": "Wird installiert — die App startet neu.",
+  "settings.updateReopen": "Installiert — zum Abschluss neu öffnen.",
+  "settings.updateFailed": (why) => `Prüfung nicht möglich: ${why}`,
+  "settings.confirmUpdateTitle": "Aktualisieren, während Übertragungen laufen?",
+  "settings.confirmUpdateBody":
+    "Der Daemon wird beendet, damit das Installationsprogramm ihn ersetzen kann. Laufende Übertragungen brechen ab und laufen von selbst weiter, sobald die App wieder da ist.",
+  "settings.autoUpdateTitle": "Automatisch prüfen",
+  "settings.autoUpdateDesc":
+    "Fragt einmal pro Woche bei github.com nach einer neuen Version — der einzige Dritte, mit dem Arvolo spricht. Installiert nichts von selbst.",
   "settings.confirmRestartTitle": "Daemon neu starten?",
-  "settings.confirmRestartBody":
-    "Laufende Übertragungen halten an: die fortsetzbaren machen dort weiter, wo sie waren, die übrigen müssen neu gemacht werden. Nötig, um ein gerade geändertes Relay oder einen geänderten Ordner anzuwenden.",
+  "settings.confirmRestartBody": "Laufende Übertragungen halten an. Fortsetzbare machen weiter, die übrigen beginnen neu.",
   "settings.restarting": "Daemon startet neu",
   "settings.restartingDetail": "Er kommt in ein paar Sekunden von allein zurück.",
   "settings.refreshing": "Wird aktualisiert…",
 
   "send.modeContact": "An einen Kontakt",
+  "send.modeSelf": "Ihre Geräte",
   "send.modeCode": "Code",
   "send.modeLink": "Link",
   "send.modeTicket": "Ticket",
-  "send.blurbContact":
-    "Geht direkt an jemanden aus Ihrem Adressbuch. Ist die Person verbunden, läuft es direkt von Gerät zu Gerät; ist sie es nicht, bleibt es in ihrem Postfach auf dem Relay, bis sie es abholt.",
-  "send.blurbCode":
-    "Ein kurzer Code zum Vorlesen oder Abscannen. Wer ihn bekommt, fügt ihn in Arvolo ein — die Person muss nicht im Adressbuch stehen, aber Sie müssen beide gerade verbunden sein.",
-  "send.blurbLink":
-    "Eine Adresse, die sich in jedem Browser öffnet: wer sie bekommt, braucht weder Arvolo noch ein Konto. Die Datei wird im Browser entschlüsselt, der Schlüssel reist im URL-Fragment und erreicht das Relay nie.",
-  "send.blurbTicket":
-    "Ein arvc…-Peer-to-Peer-Ticket: es läuft weder über das Postfach noch über das Arvolo-Relay. Um NAT zu durchstoßen, kann ein Verbindungsrelay nötig sein; es sieht nur verschlüsselten Verkehr.",
+  "send.blurbContact": "Direkt an jemanden aus Ihrem Adressbuch.",
+  "send.blurbContactMore":
+    "Direkt, wenn die Person online ist; sonst wartet es im Postfach.",
+  "send.blurbSelf": "Die anderen Maschinen mit Ihrer Identität.",
+  "send.blurbSelfMore": "Niemand muss zustimmen.",
+  "send.blurbCode": "Ein kurzer Code zum Vorlesen oder Scannen.",
+  "send.blurbCodeMore":
+    "Kein Kontakt nötig, aber Sie müssen beide gerade online sein.",
+  "send.blurbLink": "Eine Adresse, die sich in jedem Browser öffnet.",
+  "send.blurbLinkMore":
+    "Wer sie bekommt, braucht kein Konto und muss nichts installieren.",
+  "send.blurbTicket": "Ein arvc…-Ticket, direkt von diesem Rechner.",
+  "send.blurbTicketMore":
+    "Weder das Postfach noch das Arvolo-Relay sind beteiligt.",
   "send.ttl1h": "1 Stunde",
   "send.ttl1d": "1 Tag",
   "send.ttl7d": "7 Tage",
   "send.ttl30d": "30 Tage",
+  "send.pickerEmptyTitle": "Ihr Adressbuch ist leer",
   "send.pickerEmpty":
-    "Sie haben noch niemanden im Adressbuch. Fügen Sie unter Personen jemanden hinzu — am schnellsten über den Code-Tausch, der Sie beide speichert und gleich verifiziert.",
+    "Fügen Sie unter Personen jemanden hinzu. Am schnellsten geht der Code-Tausch: er speichert Sie beide, gleich verifiziert.",
   "send.pickerSearch": "Kontakt suchen…",
   "send.pickerRecipient": "Empfänger",
+  "send.selfUnpairedHint":
+    "Noch trägt keine andere Maschine diese Identität — verbinden Sie eine unter Geräte. Was Sie jetzt senden, wartet auf dem Relay.",
+  "send.selfDepositHint":
+    "Eine Ablage wird einmal abgeholt: bei einer Abholung nimmt sie die erste wache Maschine, die anderen sehen sie nie.",
   "send.pickerNoMatch": (q) => `Kein Kontakt passt zu „${q}“.`,
-  "send.depositResult": (to) =>
-    `Für ${to} abgelegt. Das Ticket unten ist Ihre eigene Kopie: Sie brauchen es nur, wenn Sie es selbst übergeben wollen — etwa, wenn ${to} das Angebot nicht erhält.`,
+  "send.depositResult": (to) => `Für ${to} abgelegt`,
+  "send.depositResultDetail": (to) =>
+    `Ihre eigene Kopie, falls ${to} das Angebot nicht erhält.`,
   "send.onItsWay": (to) => `Unterwegs zu ${to}`,
+  "send.onItsWaySelf": "Unterwegs zu Ihren Geräten",
+  "send.depositResultSelf": "Für Ihre Geräte abgelegt",
+  "send.depositResultSelfDetail":
+    "Das Ticket, falls keine Ihrer Maschinen das Angebot sieht.",
+  "send.saveArvolo": "Als .arvolo-Datei speichern…",
+  "send.arvoloSaved": (name: string) => `${name} gespeichert`,
+  "send.arvoloSavedDetail":
+    "Über jeden Kanal teilbar; drüben öffnet man sie mit Arvolo.",
   "send.onItsWayDetail":
     "Ist die Person online, geht es direkt, sonst bleibt es in ihrem Postfach.",
+  "send.onItsWaySelfDetail":
+    "Es wartet auf dem Relay, bis eine Ihrer Maschinen wach ist und es nimmt.",
   "send.codeKeepDetail":
-    "Der Code bleibt für mehrere Empfänger gültig, bis Sie den Versand abbrechen.",
-  "send.codeOnceDetail":
-    "Der Code gilt für einen einzigen Empfänger und zieht sich dann selbst zurück.",
+    "Für mehrere Empfänger gültig, bis Sie den Versand abbrechen.",
+  "send.codeOnceDetail": "Gilt für einen Empfänger, dann zieht er sich zurück.",
   "send.linkDetail":
-    "Wer diese Adresse hat, kann die Datei laden, bis sie abläuft, bis die erlaubten Downloads aufgebraucht sind, oder bis Sie sie unter „Links und Ablagen“ zurückziehen.",
+    "Wer die Adresse hat, kann laden, bis sie abläuft, aufgebraucht oder zurückgezogen ist.",
   "send.ticketDetail":
-    "Peer-to-Peer-Ticket: gültig, solange der Daemon läuft und der Versand nicht abgebrochen wurde.",
+    "Gültig, solange der Daemon läuft und der Versand nicht abgebrochen ist.",
   "send.countOne": "1 Element",
-  "send.countMany": (n) =>
-    `${n} Elemente · sie werden in ein Archiv gepackt`,
+  "send.countMany": (n) => `${n} Elemente · in ein Archiv gepackt`,
   "send.titleReady": "Fertig",
   "send.title": "Senden",
-  "send.subtitleReady": "Geben Sie weiter, was Sie unten sehen.",
   "send.subtitle": "Immer Ende-zu-Ende verschlüsselt.",
-  "send.submitDeposit": "Ablegen",
+  "send.submitDeposit": "Hinterlegen",
   "send.submitSend": "Senden",
   "send.submitCode": "Code erzeugen",
   "send.submitLink": "Link erstellen",
   "send.submitTicket": "Ticket erstellen",
   "send.linkKeyNote":
-    "Der Link trägt den Schlüssel hinter dem #: Browser schicken diesen Teil nicht an den Server, das Relay verwahrt also nur Bytes, die es nicht lesen kann.",
+    "Der Schlüssel steht hinter dem `#`, den Browser nie an den Server schicken.",
   "send.filesLabel": "Was Sie senden",
   "send.filesHint":
     "Sie können Dateien und Ordner auch ins Fenster ziehen.",
@@ -521,16 +587,15 @@ export const de: Dict = {
   "send.whoLabel": "An wen es geht",
   "send.modeLabel": "Versandart",
   "send.noteLabel": "Zwei Zeilen für die Gegenseite (optional)",
-  "send.noteHint":
-    "Reisen im versiegelten Angebot mit: das Relay sieht sie nicht.",
+  "send.noteHint": "Reisen im versiegelten Angebot mit.",
   "send.notePlaceholder": "Hier sind die Dateien, von denen wir sprachen.",
   "send.keepCodeTitle": "Gilt für mehrere Personen",
   "send.keepCodeDesc":
-    "Normalerweise gilt der Code für einen Empfänger und zieht sich dann zurück. Schalten Sie das ein, um ihn offen zu lassen, bis Sie den Versand abbrechen.",
-  "send.keepCodeLabel": "Code für mehrere Personen gültig",
-  "send.depositTitle": "Ins Postfach legen, nicht warten",
+    "Sonst zieht sich der Code nach einem Empfänger zurück.",
+  "send.keepCodeLabel": "Mehrfachcode",
+  "send.depositTitle": "Hinterlegen, nicht warten",
   "send.depositDesc":
-    "Legt sofort auf dem Relay ab, auch wenn die Gegenseite verbunden ist: Sie schließen das Fenster und vergessen es. Schaltet Ablauf, Zahl der Abholungen und Passwort frei.",
+    "Bleibt auch bei verbundener Gegenseite auf dem Relay, Sie können also schließen. Schaltet Ablauf, Abholungen und Passwort frei.",
   "send.depositLabel": "Ins Postfach legen",
   "send.expiresAfter": "Läuft ab nach",
   "send.depositTtlLabel": "Ablauf der Ablage",
@@ -540,34 +605,28 @@ export const de: Dict = {
     "Normalerweise nur eine: sobald geladen wurde, löscht das Relay sie.",
   "send.passwordLabel": "Passwort (optional)",
   "send.passwordHint":
-    "Verschlüsselt die Ablage auch gegen die Empfängerseite: ohne dieses Passwort geht sie nicht auf. Das Relay kennt es nicht und kann es nicht wiederherstellen — verlieren Sie es, ist die Datei verloren.",
+    "Niemand kann es wiederherstellen, das Relay eingeschlossen. Verloren heißt verloren.",
   "send.passwordPlaceholder": "keines",
   "send.linkTooMany":
-    "Ein Link veröffentlicht genau ein Element. Wählen Sie eines, oder packen Sie alles in einen Ordner und wählen Sie den.",
+    "Ein Link veröffentlicht ein Element. Wählen Sie eines, oder nehmen Sie einen Ordner.",
   "send.maxDownloadsLabel": "Erlaubte Downloads",
   "send.maxDownloadsHint": "Leer lassen für kein Limit.",
   "send.maxDownloadsPlaceholder": "unbegrenzt",
   "send.noRelay":
-    "Diese Versandart braucht ein Relay, und es scheint keines konfiguriert zu sein. Richten Sie eines unter Einstellungen ein.",
+    "Diese Versandart braucht ein Relay. Richten Sie eines unter Einstellungen ein.",
   "send.noArvoloRelay": "Kein Arvolo-Relay",
 
-  "receive.explainEmpty":
-    "Fügen Sie einen Sendecode ein (etwa 4821-crater-mango) oder ein arvc… / arvm…-Ticket. Um mit jemandem Kontakte zu tauschen, nehmen Sie stattdessen Personen → Ich habe einen Code.",
-  "receive.explainCode":
-    "Sendecode: ich verbinde mich mit dem, der ihn gerade zeigt, und lade herunter, was er schickt.",
-  "receive.explainChunk":
-    "Peer-to-Peer-Ticket: ich lade direkt von der Gegenseite.",
-  "receive.explainMailbox":
-    "Postfach-Ticket: ich hole die auf dem Relay abgelegte Datei.",
-  "receive.explainUnknown":
-    "Diese Form erkenne ich nicht. Ich versuche es trotzdem — der Daemon ist genauer als ich — aber prüfen Sie, ob Sie sie vollständig kopiert haben.",
+  "receive.explainEmpty": "Ein Sendecode (etwa 4821-crater-mango) oder ein arvc… / arvm…-Ticket.",
+  "receive.explainCode": "Sendecode: lädt von dem, der ihn gerade zeigt.",
+  "receive.explainChunk": "Peer-to-Peer-Ticket: direkt von der Gegenseite.",
+  "receive.explainMailbox": "Postfach-Ticket: vom Relay geholt.",
+  "receive.explainUnknown": "Unbekannte Form — einen Versuch wert, aber prüfen Sie die Kopie.",
   "receive.title": "Empfangen",
   "receive.subtitle": "Fügen Sie ein, was man Ihnen gegeben hat.",
   "receive.submit": "Empfangen",
   "receive.fieldLabel": "Code oder Ticket",
-  "receive.passwordLabel": "Passwort (nur wenn geschützt)",
-  "receive.passwordHint":
-    "Wer es geschickt hat, wird es Ihnen getrennt gesagt haben. Ohne das geht eine geschützte Ablage nicht auf.",
+  "receive.passwordLabel": "Passwort, falls geschützt",
+  "receive.passwordHint": "Die Gegenseite wird es Ihnen getrennt gesagt haben.",
   "receive.passwordPlaceholder": "keines",
   "receive.whereLabel": "Wohin damit",
   "receive.whereHint": (dir) => `Standardordner: ${dir}`,
@@ -583,36 +642,36 @@ export const de: Dict = {
   "incoming.title": "Jemand schickt Ihnen eine Datei",
   "incoming.subtitle": "Nehmen Sie nur an, wenn Sie wissen, von wem sie kommt.",
   "incoming.reject": "Ablehnen",
-  "incoming.later": "Ich entscheide später",
-  "incoming.accept": "Annehmen und laden",
+  "incoming.later": "Später",
+  "incoming.accept": "Annehmen",
   "incoming.notInBook": "Nicht im Adressbuch",
-  "incoming.claimedName": (name) =>
-    `nennt sich „${name}“ — ein selbst gewählter Name, nichts bürgt dafür`,
+  "incoming.claimedName": (name) => `nennt sich „${name}“ — unverifiziert`,
   "incoming.keyFingerprint": "Fingerabdruck des Schlüssels",
   "incoming.senderId": "Öffentliche ID des Absenders",
-  "incoming.hintVerified":
-    "Sie haben diesen Fingerabdruck bereits außerhalb des Kanals verglichen: es ist derselbe Schlüssel, den Sie verifiziert haben.",
-  "incoming.hintKnown":
-    "Vergleichen Sie ihn mündlich mit der Person, die Ihnen die Datei schickt. Nur so sind Sie sicher, dass sie es wirklich ist — ein Name beweist das nicht.",
-  "incoming.hintUnknown":
-    "Das ist kein Fingerabdruck: es ist die rohe ID von jemandem, den Sie nicht im Adressbuch haben. Speichern Sie ihn unten, dann sehen Sie die Wörter, die Sie mündlich vergleichen können.",
+  "incoming.hintVerified": "Bereits verglichen: derselbe Schlüssel, den Sie verifiziert haben.",
+  "incoming.hintKnown": "Mündlich mit der Gegenseite vergleichen. Ein Name beweist nichts.",
+  "incoming.hintStranger": "Diese Wörter hat noch niemand geprüft. Lesen Sie sie der Gegenseite über einen anderen Kanal als diese App vor.",
+  "incoming.hintRawId": "Kein Fingerabdruck — die rohe ID, weil dieser Daemon zu alt ist, um die Wörter zu senden. Aktualisieren Sie ihn, um vergleichen zu können.",
+  "incoming.firstTime": "Dieser Schlüssel schickt Ihnen zum ersten Mal etwas — es gibt noch nichts, womit man ihn vergleichen könnte.",
+  "incoming.seenBefore": (n) => `Sie haben von diesem Schlüssel bereits ${n} Übertragung(en) angenommen.`,
+  "incoming.wasCalled": (name) => `Nannte sich früher „${name}“`,
   "incoming.attachedNote": "Beigelegte Nachricht",
   "incoming.passwordLabel": "Passwort",
-  "incoming.passwordHint":
-    "Diese Datei ist geschützt: ohne das Passwort geht sie nicht auf. Wer sie geschickt hat, wird es Ihnen getrennt gesagt haben — es reist nicht mit der Datei, und das Relay kennt es nicht.",
+  "incoming.passwordHint": "Die Gegenseite wird es Ihnen getrennt gesagt haben.",
   "incoming.ifYouKnowThem": "Wenn Sie die Person kennen",
   "incoming.saveAsPlaceholder": "Ins Adressbuch speichern als…",
   "incoming.saveAsLabel": "Name für den Kontakt",
+  "incoming.saveAsSuggested": "Vorgeschlagen nach dem Namen, den er sich gibt. Ändern Sie ihn: der Name gehört Ihnen.",
   "incoming.savedAs": (name) => `Als ${name} gespeichert`,
-  "incoming.savedAsDetail":
-    "Bleibt unverifiziert: bestätigen Sie den Fingerabdruck mündlich und markieren Sie ihn dann unter Personen.",
-  "incoming.saveNote":
-    "Speichern verifiziert nicht. Verifiziert wird die Person erst, wenn Sie den Fingerabdruck persönlich oder mündlich vergleichen.",
+  "incoming.savedAsDetail": "Unverifiziert, bis Sie den Fingerabdruck vergleichen.",
+  "incoming.savedInline": (name) => `Als „${name}“ gespeichert, nicht verifiziert`,
+  "incoming.saveNote": "Speichern ist nicht Verifizieren.",
+  "incoming.acceptAndSave": "Annehmen und speichern",
+  "incoming.nameTaken": (name) =>
+    `„${name}“ ist hier bereits jemand anderes. Den Namen zu verschieben würde dessen Markierungen verifiziert und vertraut löschen.`,
   "incoming.blockAndReject": "Sperren und ablehnen",
   "incoming.blocked": "Gesperrt",
-  "incoming.blockedDetail":
-    "Angebote dieser Person werden bei Ankunft verworfen, ohne Hinweis an Sie.",
-
+  "incoming.blockedDetail": "Angebote dieser Person werden bei Ankunft verworfen.",
   "pair.titleContact": "Kontakte tauschen",
   "pair.titleDeviceHost": "Ein weiteres eigenes Gerät verbinden",
   "pair.titleDeviceJoin": "Dieses Gerät verbinden",
@@ -623,37 +682,27 @@ export const de: Dict = {
   "pair.subDeviceJoin":
     "Ersetzt die Identität dieses Geräts durch die gemeinsame.",
   "pair.restarting": "Daemon startet neu",
-  "pair.restartingDetail":
-    "Er fährt mit der gemeinsamen Identität wieder hoch: ein paar Sekunden, dann ist alles zurück.",
+  "pair.restartingDetail": "In ein paar Sekunden zurück, mit der gemeinsamen Identität.",
   "pair.restartAndClose": "Neu starten und schließen",
   "pair.link": "Verbinden",
   "pair.done": "Fertig",
-  "pair.needsRestart":
-    "Der Daemon läuft noch mit der vorherigen Identität. Er muss neu gestartet werden, damit die Änderung wirkt — der Knopf unten erledigt das.",
+  "pair.needsRestart": "Der Daemon hat noch die vorherige Identität. Starten Sie ihn unten neu.",
   "pair.failed": "Das hat nicht geklappt",
   "pair.deviceWarnLead": "Das teilt Ihre geheime Identität.",
-  "pair.deviceWarnRest":
-    "Wer den Code eingibt, wird zu Ihnen: gleiche öffentliche ID, gleiches Postfach, gleiches Adressbuch. Nur auf einem eigenen Rechner benutzen. Der Code gilt für ein Gerät und verfällt, sobald er benutzt wurde.",
-  "pair.captionDevice":
-    "Auf dem anderen Gerät: Ihre Geräte → Ich habe einen Code.",
-  "pair.captionContact":
-    "Lesen Sie ihn vor. Die Gegenseite öffnet Personen → Ich habe einen Code und gibt ihn ein.",
-  "pair.waitingOther":
-    "Warte auf die andere Seite… zum Abbrechen einfach schließen.",
+  "pair.deviceWarnRest": "Wer ihn eingibt, wird zu Ihnen: gleiche ID, gleiches Postfach, gleiches Adressbuch. Nur auf einem eigenen Rechner.",
+  "pair.captionDevice": "Auf dem anderen Gerät: Ihre Geräte → Code eingeben.",
+  "pair.captionContact": "Lesen Sie ihn vor. Die Gegenseite öffnet Personen → Code eingeben.",
+  "pair.waitingOther": "Warten auf die andere Seite… zum Abbrechen schließen.",
   "pair.preparingCode": "Ich bereite den Code vor…",
-  "pair.contactNote":
-    "Getauscht werden nur die öffentlichen IDs. Ihre geheime Identität und Ihr Adressbuch verlassen diesen Rechner nicht.",
+  "pair.contactNote": "Getauscht werden nur die öffentlichen IDs.",
   "pair.joinWarnLead": "Achtung: das lässt sich nicht rückgängig machen.",
-  "pair.joinWarnRest":
-    "Die aktuelle Identität dieses Geräts wird durch die gemeinsame ersetzt. Alles, was noch für die alte Identität versiegelt ist, lässt sich hier nicht mehr öffnen.",
+  "pair.joinWarnRest": "Die Identität dieses Geräts wird durch die gemeinsame ersetzt. Für die alte Versiegeltes lässt sich hier nicht mehr öffnen.",
   "pair.codeLabel": "Code",
   "pair.codeHint":
     "Der auf dem anderen Rechner angezeigte, etwa 4821-crater-mango.",
-  "pair.nameLabel": "Wie Sie die Person nennen (optional)",
-  "pair.nameHint":
-    "Lassen Sie es leer, speichere ich sie unter einem Namen aus ihrem Fingerabdruck; umbenennen können Sie jederzeit.",
-  "pair.understood":
-    "Verstanden: dieses Gerät verliert seine bisherige Identität.",
+  "pair.nameLabel": "Ihr Name für sie",
+  "pair.nameHint": "Leer lassen für einen Namen aus dem Fingerabdruck. Umbenennen geht später.",
+  "pair.understood": "Verstanden: dieses Gerät verliert seine Identität.",
   "pair.waitingMachine": "Warte auf den anderen Rechner…",
   "pair.cancelled": "Abgebrochen.",
 
@@ -666,24 +715,24 @@ export const de: Dict = {
   "palette.receive": "Empfangen…",
   "palette.receiveHint": "einen Code oder ein Ticket einfügen",
   "palette.receiveKw": "herunterladen download einfuegen",
-  "palette.pairContact": "Mit jemandem Kontakte tauschen",
+  "palette.pairContact": "Kontakte tauschen",
   "palette.pairContactHint": "Sie speichern einander, schon verifiziert",
   "palette.pairContactKw": "pairing koppeln person hinzufuegen verifizieren",
   "palette.pairDevice": "Ein weiteres eigenes Gerät verbinden",
   "palette.pairDeviceKw": "multidevice identitaet abgleich",
-  "palette.sync": "Adressbuch jetzt abgleichen",
+  "palette.sync": "Kontakte abgleichen",
   "palette.syncKw": "kontakte geraete",
   "palette.resumeAll": "Alle Übertragungen fortsetzen",
-  "palette.pauseAll": "Alle Übertragungen pausieren",
+  "palette.pauseAll": "Alles pausieren",
   "palette.pauseAllKw": "pause alle anhalten stoppen fortsetzen",
-  "palette.clearFinished": "Abgeschlossene Übertragungen aufräumen",
+  "palette.clearFinished": "Erledigte aufräumen",
   "palette.clearFinishedKw": "leeren fertige",
   "palette.navTransfersKw": "board sendungen",
   "palette.navPeopleKw": "kontakte adressbuch",
   "palette.navDepositsKw": "relay zurueckziehen",
   "palette.navHistoryKw": "protokoll log vergangenheit",
   "palette.navDevicesKw": "abgleich identitaet",
-  "palette.navSettingsKw": "config relay name",
+  "palette.navSettingsKw": "konfig relay name einstellungen",
   "palette.themeLight": "Zum hellen Erscheinungsbild wechseln",
   "palette.themeSystem": "Dem System folgen",
   "palette.themeDark": "Zum dunklen Erscheinungsbild wechseln",
@@ -694,23 +743,19 @@ export const de: Dict = {
   "palette.openCard": (name) => `Karte von ${name} öffnen`,
   "palette.personKw": "fingerabdruck fingerprint verifizieren",
   "palette.label": "Suchen und ausführen",
-  "palette.placeholder": "Befehl oder Person suchen…",
+  "palette.placeholder": "Befehle und Personen suchen…",
   "palette.noMatch": (q) => `Nichts passt zu „${q}“.`,
 
   "store.unknownPeer": "unbekannt",
-  "store.loadTransfers": (e) =>
-    `Ich kann die Übertragungen nicht vom Daemon lesen: ${e}`,
-  "store.loadHistory": (e) =>
-    `Ich kann den Verlauf nicht vom Daemon lesen: ${e}`,
-  "store.loadDeposits": (e) =>
-    `Ich kann die Links nicht vom Daemon lesen: ${e}`,
-  "store.loadConfig": (e) =>
-    `Ich kann die Einstellungen nicht vom Daemon lesen: ${e}`,
-  "store.loadSync": (e) => `Ich kann den Gerätezustand nicht lesen: ${e}`,
+  "store.selfPeer": "Ihre Geräte",
+  "store.loadTransfers": (e) => `Übertragungen nicht lesbar: ${e}`,
+  "store.loadHistory": (e) => `Verlauf nicht lesbar: ${e}`,
+  "store.loadDeposits": (e) => `Links nicht lesbar: ${e}`,
+  "store.loadConfig": (e) => `Einstellungen nicht lesbar: ${e}`,
+  "store.loadSync": (e) => `Gerätezustand nicht lesbar: ${e}`,
   "store.errClearHistory": "Der Verlauf ließ sich nicht leeren",
   "store.errRevokeLink": "Der Link ließ sich nicht zurückziehen",
   "store.errSaveConfig": "Die Einstellungen ließen sich nicht speichern",
-  "store.errPruneNames": "Die Namen ließen sich nicht aufräumen",
   "store.errSend": (to) => `Das Senden an ${to} ist fehlgeschlagen`,
   "store.errDeposit": (to) => `Die Ablage für ${to} ist fehlgeschlagen`,
   "store.errTicket": "Das Ticket ließ sich nicht erstellen",
@@ -719,8 +764,11 @@ export const de: Dict = {
   "store.errReceive": "Der Empfang ist fehlgeschlagen",
   "store.errAccept": "Die Datei ließ sich nicht annehmen",
   "store.errReject": "Die Datei ließ sich nicht ablehnen",
+  "store.declined": (who: string) => who ? `Angebot von ${who} abgelehnt.` : "Angebot abgelehnt.",
+  "bits.qrTooDense": "Zu viele Daten für einen QR — Kopieren benutzen.",
   "store.errPause": "Pausieren nicht möglich",
   "store.errResume": "Fortsetzen nicht möglich",
+  "store.errDepositNow": "Hinterlegen nicht möglich",
   "store.errCancel": "Abbrechen nicht möglich",
   "store.errRemove": "Löschen nicht möglich",
   "store.errVerify": (name) => `${name} ließ sich nicht verifizieren`,

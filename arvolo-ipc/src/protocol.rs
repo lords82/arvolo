@@ -66,12 +66,58 @@ pub enum Request {
         /// End-to-end password on the deposit; the recipient must supply it.
         #[serde(default)]
         password: Option<String>,
+        /// Aim this at one of *our own* machines: a device name, or a prefix of
+        /// its id, as [`Request::ListDevices`] reports them. Only meaningful
+        /// when `to` resolves to our own identity — a send to somebody else has
+        /// no business naming a machine on their side, and the daemon refuses
+        /// it rather than sending something that would quietly go nowhere.
+        ///
+        /// `#[serde(default)]` like the mailbox options above: an older daemon
+        /// decodes the request and ignores the aim, which lands the file on
+        /// whichever machine takes it first — the behaviour that came before.
+        #[serde(default)]
+        device: Option<String>,
+        /// Descriptor hand-off (unix): a one-shot socket + pairing token where
+        /// the client serves the sources' open fds, one per path in order —
+        /// see [`crate::fdpass`]. The daemon then reads files the OS would not
+        /// let it open by path (macOS privacy-guarded folders). Both default
+        /// to `None` and an old daemon ignores them: plain path behavior.
+        #[serde(default)]
+        fd_socket: Option<String>,
+        #[serde(default)]
+        fd_token: Option<String>,
     },
+    /// The machines that share this identity → [`Response::Devices`].
+    ///
+    /// Self-reported, and the DTO says so by carrying `last_seen` rather than a
+    /// presence flag: nothing outside the encrypted snapshot knows which
+    /// computers hold an identity, so this lists what those computers have said
+    /// about themselves, and a machine that has never synced is not in it.
+    ListDevices,
+    /// Rename **this** machine in the register.
+    ///
+    /// This one and no other: a device row may only be written by the device it
+    /// describes (see the authorship rule in `arvolo_core::sync`), so renaming a
+    /// different machine is something to do on that machine. A UI should say so
+    /// rather than offer a field whose value the next sync round would discard.
+    RenameThisDevice { name: String },
+    /// Forget a machine: tombstone its row so it leaves every device's register.
+    ///
+    /// Bookkeeping, not revocation — it still holds the identity secret, and if
+    /// it is still running it will notice it was retired and stop announcing
+    /// itself, which works because it is your machine running your software and
+    /// for no stronger reason than that.
+    ForgetDevice { who: String },
     /// Serve an anonymous P2P ticket in the background (no recipient); paths are on
     /// the *daemon's* filesystem. → [`Response::Served`].
     ServeTicket {
         paths: Vec<String>,
         seed_relay: Option<String>,
+        /// Descriptor hand-off, exactly as on [`Request::Push`].
+        #[serde(default)]
+        fd_socket: Option<String>,
+        #[serde(default)]
+        fd_token: Option<String>,
     },
     /// Serve a short pairing code in the background: the daemon hosts the
     /// rendezvous *and* the ticket behind it. → [`Response::CodeServed`].
@@ -85,6 +131,11 @@ pub enum Request {
         relay: Option<String>,
         #[serde(default)]
         keep: bool,
+        /// Descriptor hand-off, exactly as on [`Request::Push`].
+        #[serde(default)]
+        fd_socket: Option<String>,
+        #[serde(default)]
+        fd_token: Option<String>,
     },
     /// Deposit a public, browser-openable **download link** for `path` (on the
     /// daemon's filesystem) on the relay → [`Response::Link`]. `ttl` defaults to
@@ -93,6 +144,11 @@ pub enum Request {
         path: String,
         ttl: Option<u64>,
         max: Option<u32>,
+        /// Descriptor hand-off (single fd), exactly as on [`Request::Push`].
+        #[serde(default)]
+        fd_socket: Option<String>,
+        #[serde(default)]
+        fd_token: Option<String>,
     },
     /// Cancel a transfer by id → [`Response::Ok`].
     Cancel { id: u64 },
@@ -115,6 +171,15 @@ pub enum Request {
     RevokeDeposit { id: String },
     /// Pause an in-progress `send --to` by id → [`Response::Ok`].
     Pause { id: u64 },
+    /// Stop waiting for the recipient to accept and park the file on the relay
+    /// now → [`Response::Ok`], or [`Response::Error`] if the send is not waiting.
+    ///
+    /// A `send --to` holds a live offer open for a while before falling back to
+    /// the mailbox, because the recipient's client having the offer is not the
+    /// same as a person having answered it. This is how somebody who already knows
+    /// the answer is not coming skips that wait, without cancelling and sending
+    /// the file a second time.
+    DepositNow { id: u64 },
     /// Resume a paused `send --to` by id → [`Response::Ok`].
     Resume { id: u64 },
     /// Accept a parked offer, optionally to a specific path → [`Response::TransferId`].
@@ -129,6 +194,14 @@ pub enum Request {
         out: Option<String>,
         #[serde(default)]
         password: Option<String>,
+        /// "Answer a refusal with [`Response::Refused`] rather than a sentence."
+        ///
+        /// Opt-in so the new variant can only reach a client that asked for it —
+        /// the same guarantee [`Response::KeyChanged`] relies on. A client that
+        /// predates this field sends nothing, `serde(default)` reads it as false,
+        /// and it keeps getting the `Error(String)` it knows how to show.
+        #[serde(default)]
+        typed_refusal: bool,
     },
     /// Reject a parked offer → [`Response::Ok`].
     RejectOffer { offer_id: String },
@@ -143,10 +216,24 @@ pub enum Request {
         out: Option<String>,
         password: Option<String>,
     },
-    /// Save (or re-key) a contact → [`Response::Ok`]. Re-keying an existing name
-    /// clears its verified/trusted marks, exactly as `arvolo contacts add` does —
-    /// a UI should warn before sending that.
-    AddContact { name: String, id: String },
+    /// Save a contact → [`Response::Ok`].
+    ///
+    /// A name already bound to a *different* key is refused unless `rebind`.
+    /// Re-keying clears that name's verified and trusted marks — so a front-end
+    /// that sends a name straight from a stranger's offer would silently demote
+    /// whoever already held it. Refusing by default puts the warning where it
+    /// cannot be forgotten, and `serde(default)` means an older client (which
+    /// cannot warn, because it does not know) gets the safe half.
+    ///
+    /// With `rebind`, the reply is [`Response::KeyChanged`] rather than
+    /// [`Response::Ok`], carrying the two fingerprints so the caller can say what
+    /// it just did.
+    AddContact {
+        name: String,
+        id: String,
+        #[serde(default)]
+        rebind: bool,
+    },
     /// Remove a saved contact by name → [`Response::Ok`] (error if unknown).
     RemoveContact { name: String },
     /// Rename a contact, keeping its key and verified/trusted marks → [`Response::Ok`].
@@ -186,15 +273,24 @@ pub enum Request {
     /// comments it out → [`Response::Config`] with the state that resulted, so a
     /// UI never has to guess what the daemon made of its patch.
     SetConfig(ConfigPatch),
-    /// Drop advertised-name records left behind by contacts that no longer exist
-    /// → [`Response::Cleared`] with the count (`arvolo contacts prune`).
-    PruneNames,
     /// Ask the relay who, among these ids, has a live presence beacon
     /// → [`Response::Presence`]. Deliberately separate from
     /// [`Request::ListContacts`]: the book is read from disk and is instant,
     /// while this is a network round trip per contact, and folding the two would
     /// make every address-book refresh wait on a relay.
     Presence { ids: Vec<String> },
+    /// What the configured relay is and what version it says it is
+    /// → [`Response::RelayInfo`].
+    ///
+    /// Asked by the desktop app before it offers an update. A client newer than
+    /// the relay it depends on is the one upgrade order `docs/DEPLOY.md` asks
+    /// people not to do, and the app is about to become the main way people
+    /// upgrade — so it needs to know. The probe lives here rather than in the
+    /// GUI because the relay is the daemon's business: it knows which one is in
+    /// force after the environment, the config file and the built-in default
+    /// have had their say, and it reaches it under whatever proxy the engine was
+    /// told to use.
+    RelayInfo,
     /// Read-only multi-device summary: shared identity, book size, whether auto
     /// sync is on, and when a round last succeeded → [`Response::Sync`].
     SyncStatus,
@@ -225,6 +321,10 @@ pub enum Request {
     /// sends when its pairing sheet is closed: an unattended `device pair` would
     /// otherwise keep offering this device's identity secret for its full window.
     CancelPairing { session: String },
+    /// Ask the daemon to exit cleanly → [`Response::Ok`] (sent before it goes).
+    /// What `arvolo daemon stop` and the GUI's restart use, instead of hunting
+    /// the pidfile for a process to signal.
+    Shutdown,
     /// Turn this connection into an event stream (no further requests on it).
     Subscribe,
 }
@@ -307,6 +407,10 @@ pub enum Response {
     Config(ConfigDto),
     /// The multi-device summary.
     Sync(SyncDto),
+    /// What the relay is, and what it says it is.
+    RelayInfo(RelayInfoDto),
+    /// The device register, newest sighting first.
+    Devices(Vec<DeviceDto>),
     /// Who is reachable right now, one entry per id asked about.
     Presence(Vec<PresenceDto>),
     /// A pairing session is running; its code and outcome arrive as events.
@@ -315,6 +419,25 @@ pub enum Response {
     },
     /// How many rows a bulk removal actually dropped.
     Cleared(usize),
+    /// A [`Request::AddContact`] with `rebind` re-pointed an existing name at a
+    /// new key, dropping its verified/trusted marks. Only ever sent in answer to
+    /// a request that asked for it, so a client too old to know this variant can
+    /// never receive it.
+    KeyChanged {
+        old_fingerprint: String,
+        new_fingerprint: String,
+    },
+    /// An accept that was **refused** rather than failed: nothing was taken, and
+    /// the offer is still parked (unless the code says it is not). `code` is one of
+    /// `AcceptRefusal`'s stable words — what a client acts on — and `message` the
+    /// engine's own sentence, for showing when it has nothing better.
+    ///
+    /// Only ever sent in answer to an `AcceptOffer { typed_refusal: true }`, so a
+    /// client too old to know this variant can never receive it.
+    Refused {
+        code: String,
+        message: String,
+    },
     Ok,
     Error(String),
 }
@@ -347,6 +470,19 @@ pub struct StatusDto {
     #[serde(default)]
     pub version: String,
     pub public_id: String,
+    /// The same identity in the form you hand to somebody: `<id>@<relay>`.
+    ///
+    /// The id alone says who you are and not *where you listen*, so a person given
+    /// only that can reach you when their client happens to default to your relay
+    /// and not otherwise — which fails silently, and looks like arvolo not working.
+    /// `arvolo me` has always printed this form and `contacts add` reads it back;
+    /// it is here so a window hands out the same thing rather than assembling it
+    /// from two fields and a rule about dropping `https://`.
+    ///
+    /// Optional on the wire: an older daemon does not send it, and a client should
+    /// fall back to [`Self::public_id`] rather than show nothing.
+    #[serde(default)]
+    pub shareable_id: String,
     pub fingerprint: String,
     pub relay: Option<String>,
     pub transfers: usize,
@@ -359,12 +495,34 @@ pub struct StatusDto {
     /// Optional on the wire for older daemons.
     #[serde(default)]
     pub display_name: String,
+    /// The daemon's process id, and the binary it is running.
+    ///
+    /// Which daemon is answering is not a detail once more than one build of it
+    /// exists on a machine — a released install, a debug build from a checkout,
+    /// one the desktop app spawned. Everything else here describes the *identity*,
+    /// which is the same for all of them; only these two say which **process** you
+    /// are actually talking to, and the answer is what a stale row, an unexpected
+    /// version or "is it even running?" all come down to. `ps` is no substitute:
+    /// the command line is `arvolo … daemon run`, so the obvious search for
+    /// "arvolo daemon" finds nothing at all.
+    ///
+    /// Both optional on the wire: an older daemon predates them and reports 0 / "".
+    #[serde(default)]
+    pub pid: u32,
+    #[serde(default)]
+    pub exe: String,
 }
 
 /// Serializable mirror of [`Transfer`] with a base32 peer id.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TransferDto {
     pub id: u64,
+    /// The 8-hex handle a person types (`arvolo pause/resume/cancel <handle>`).
+    /// Derived from what the engine persists (`created`, direction, name, size),
+    /// so — unlike `id`, a per-process counter — it survives a daemon restart.
+    /// `#[serde(default)]` so an older peer's DTO still decodes (empty = absent).
+    #[serde(default)]
+    pub handle: String,
     /// "send" or "recv".
     pub direction: String,
     pub peer: Option<String>,
@@ -431,6 +589,16 @@ pub struct TransferDto {
     /// `None` for a send, an unfinished receive, or a daemon that predates it.
     #[serde(default)]
     pub path: Option<String>,
+    /// What the sender of an incoming transfer calls themselves, from the offer it
+    /// came from. Empty for a send, a pasted ticket, or a sender advertising
+    /// nothing — and always a claim, never evidence.
+    ///
+    /// Here so a client can offer to save a stranger *while their file arrives*
+    /// with the name already filled in. The offer that carried it is gone by then:
+    /// accepting consumes it, so a row that did not keep the name has no way back
+    /// to it.
+    #[serde(default)]
+    pub sender_name: String,
     /// How far the inbox offer for a **deposited** send has got: `"pending"`,
     /// `"arrived"`, `"taken"`, `"gone"`. `None` when there is nothing to say —
     /// any other kind of row, or a relay not yet asked.
@@ -440,10 +608,44 @@ pub struct TransferDto {
     /// things to keep in step.
     #[serde(default)]
     pub offer_status: Option<String>,
+    /// Why a waiting send is waiting, as a stable code — `"offered"`,
+    /// `"tooLarge"`, `"relayRetry"` — with `waiting_detail` carrying the relay's
+    /// own words when there are any. `None` for a row that is not waiting, or a
+    /// daemon that predates the field.
+    ///
+    /// `status` already says it in English, and keeps saying it: this rides
+    /// *alongside*, so the CLI and any older client are untouched while a
+    /// localized one can look the reason up instead of printing a sentence it
+    /// cannot translate.
+    #[serde(default)]
+    pub waiting_code: Option<String>,
+    /// The relay's message quoted inside a `"relayRetry"` reason, when there is
+    /// one. Not ours, and not translatable — a diagnostic from another machine.
+    #[serde(default)]
+    pub waiting_detail: Option<String>,
+    /// Whether pausing this row would do anything.
+    ///
+    /// Not every running transfer can be held — a mailbox pickup is one fetch that
+    /// starts over rather than resuming, a share is not a delivery to anyone in
+    /// particular — and only the engine knows which is which. Without it a window
+    /// draws its pause button from the status alone, the daemon answers `Ok`, and
+    /// nothing happens.
+    ///
+    /// `None` means the daemon predates the field, where the honest fallback is to
+    /// keep offering the button: it is what that daemon has always done, and the
+    /// worst case is the behaviour of the day before.
+    #[serde(default)]
+    pub can_pause: Option<bool>,
 }
 
 /// A parked incoming offer awaiting the user's accept/reject.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+///
+/// The last three fields are what the address book already knows about `from`,
+/// carried here so a front-end can put it on screen *before* the decision. They
+/// are not part of the offer: the daemon stamps them on the way out (see
+/// `stamp_offer`), because between parking an offer and looking at it the book
+/// can move.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct OfferDto {
     pub id: String,
     pub from: String,
@@ -452,6 +654,20 @@ pub struct OfferDto {
     pub note: String,
     #[serde(default)]
     pub sender_name: String,
+    /// `from`'s word fingerprint — a pure function of the key, so it exists for a
+    /// stranger exactly as it does for a saved contact. Without it a front-end
+    /// has only the base32 id to show for the one person it knows least about.
+    #[serde(default)]
+    pub fingerprint: String,
+    /// How many transfers have been *taken* from this key before (the TOFU
+    /// ledger). `0` is the first time — the one case worth an alarm.
+    #[serde(default)]
+    pub seen_count: u64,
+    /// The display name this key was already known to claim, if any. Shown
+    /// against `sender_name`: a key that used to call itself something else is
+    /// what impersonation looks like from this side.
+    #[serde(default)]
+    pub known_name: String,
 }
 
 /// An address-book entry for the send panel's "Persone" grid.
@@ -480,6 +696,22 @@ pub struct ContactDto {
     /// surfaced so a UI can offer [`Request::AcceptName`].
     #[serde(default)]
     pub pending_name: String,
+    /// The relay this contact listens on, when one is recorded. Empty means
+    /// "wherever you do", which is the ordinary case and worth no UI.
+    ///
+    /// Unix seconds of the last completed transfer with this contact, either
+    /// direction. `0` = never, or before the stamp existed.
+    ///
+    /// Kept in the synced ledger beside the TOFU counter and merged by `max`, so
+    /// every one of the user's machines answers the same. It is what an address
+    /// book of forty people is actually asked — who do I still deal with — and the
+    /// question a truncated public id under a name was never going to answer.
+    #[serde(default)]
+    pub last_exchange: u64,
+    /// Routing, not identity: it never affects verification, and a UI showing it
+    /// should read as an address, not as a credential.
+    #[serde(default)]
+    pub relay: String,
 }
 
 /// One finished transfer from the history log — read-only by construction (the
@@ -635,6 +867,26 @@ pub struct PresenceDto {
     pub online: Option<bool>,
 }
 
+/// What the daemon's relay is, and how far along it is.
+///
+/// The three fields answer three different questions, and the difference between
+/// the last two is the whole point of the type. `reachable` says the probe got a
+/// reply; `version` says what that reply claimed. A reachable relay with no
+/// version is one that predates the field — running, fine, just old enough that
+/// it cannot say how old. A caller that collapsed the two would either treat
+/// every unreachable relay as ancient or every silent one as current, and both
+/// readings are wrong in the direction that matters.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RelayInfoDto {
+    /// The relay in force, after env, config and the built-in default. `None`
+    /// when this daemon is configured without one at all.
+    pub url: Option<String>,
+    /// Whether `GET /v1/features` answered.
+    pub reachable: bool,
+    /// What it said it was, when it said.
+    pub version: Option<String>,
+}
+
 /// Multi-device state: one identity across several machines, and the address book
 /// they keep in step through an encrypted cell on the relay inbox.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -660,6 +912,39 @@ pub struct SyncDto {
     /// Why the last round failed, empty when it didn't.
     #[serde(default)]
     pub last_error: String,
+    /// Does another machine share this identity, as far as this device can tell?
+    ///
+    /// Evidence, not bookkeeping — there is no device roster to consult, so this
+    /// reads the pairing marker and the CRDT clocks, and a fresh pairing that has
+    /// not synced yet still reads `false`. Good enough for its one job: deciding
+    /// whether sending to your own devices is worth warning about, exactly as
+    /// `arvolo send --to me` warns on stderr. `#[serde(default)]` so an older
+    /// daemon (which predates the field) reads as "no evidence" rather than
+    /// failing to decode.
+    #[serde(default)]
+    pub paired: bool,
+}
+
+/// One machine holding this identity, as it describes itself.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DeviceDto {
+    /// Lowercase hex of its device id. Shown only as a short prefix, and only to
+    /// tell two machines with the same name apart.
+    pub id: String,
+    pub name: String,
+    /// `macos`, `linux`, `windows`… — for an icon, never for a decision.
+    pub platform: String,
+    /// Unix seconds of that machine's last sync round, as *it* reported them.
+    ///
+    /// Not a presence light and not to be rendered as one. It moves once per
+    /// sync round, so it lags by up to five minutes; it comes from another
+    /// machine's clock, so it can sit in the future if the clocks disagree; and
+    /// a machine that has just gone to sleep looks exactly like one that is
+    /// still awake. Show it as elapsed time, which carries its own uncertainty.
+    pub last_seen: u64,
+    /// Is this the machine the daemon is running on? The one row a UI may offer
+    /// to rename, and the one it should not offer to forget.
+    pub is_this_device: bool,
 }
 
 /// Serializable mirror of [`ManagerEvent`].
@@ -687,6 +972,18 @@ pub enum EventDto {
         /// be wrong: the worst case is a prompt for something already downloading.
         #[serde(default)]
         auto: bool,
+        /// `from`'s word fingerprint. Same reasoning, and same filled-in-by-the-
+        /// daemon route, as [`OfferDto::fingerprint`].
+        #[serde(default)]
+        fingerprint: String,
+        /// Transfers already taken from this key — `0` on a first arrival. See
+        /// [`OfferDto::seen_count`].
+        #[serde(default)]
+        seen_count: u64,
+        /// The name this key was already known to claim. See
+        /// [`OfferDto::known_name`].
+        #[serde(default)]
+        known_name: String,
     },
     Started {
         id: u64,
@@ -706,9 +1003,27 @@ pub enum EventDto {
     Deposited {
         id: u64,
     },
+    /// A send has begun reading and encrypting its payload; nothing is on the wire
+    /// and the recipient has not been offered anything yet.
+    Preparing {
+        id: u64,
+    },
     Waiting {
         id: u64,
         reason: String,
+        /// Stable code for `reason`, so a localized client can say it in its own
+        /// words. `#[serde(default)]` on all three: an older daemon sends none of
+        /// them, and its event must still decode.
+        #[serde(default)]
+        code: String,
+        /// The relay's own message quoted inside the reason, when there is one.
+        #[serde(default)]
+        detail: String,
+        /// How far the offer this send holds open has got (`pending` / `arrived` /
+        /// `taken`), empty when none stands. Orthogonal to `code`: that says why
+        /// the send waits, this says how far the thing it waits on has come.
+        #[serde(default)]
+        offer_status: String,
     },
     Paused {
         id: u64,
@@ -745,6 +1060,13 @@ pub enum EventDto {
     /// window is open. Carries nothing: drop what *you* consider finished, by the
     /// same rule the daemon uses (a deposit awaiting pickup is not finished).
     FinishedCleared,
+    /// A waiting offer left the daemon's parked list by *another* client's hand —
+    /// accepted or declined over IPC (`arvolo recv <handle>` / `arvolo decline`
+    /// while a window is open). Without this the other front-ends keep showing a
+    /// row wired to an offer that no longer exists.
+    OfferGone {
+        id: String,
+    },
     /// A hosted pairing session has its code — this is what the other machine
     /// types. Only ever emitted for the `*Host` kinds.
     PairingCode {
@@ -787,6 +1109,7 @@ fn status_str(s: &TransferStatus) -> String {
         TransferStatus::Active => "active".into(),
         TransferStatus::Completed => "completed".into(),
         TransferStatus::Deposited => "deposited".into(),
+        TransferStatus::Preparing => "preparing".into(),
         TransferStatus::Waiting(r) => format!("waiting: {r}"),
         TransferStatus::Paused(r) => format!("paused: {r}"),
         TransferStatus::Cancelled => "cancelled".into(),
@@ -794,10 +1117,26 @@ fn status_str(s: &TransferStatus) -> String {
     }
 }
 
+/// The visible handle of a transfer: first 4 bytes of a BLAKE3 over the fields
+/// the engine persists, hex. Restart-stable where `id` is not — a restored share
+/// keeps its `created`/name/size, so it keeps its handle too.
+pub fn transfer_handle(t: &Transfer) -> String {
+    use arvolo_core::reexport::Hash;
+    let seed = format!(
+        "{}-{}-{}-{}",
+        t.created,
+        direction_str(t.direction),
+        t.name,
+        t.total_size
+    );
+    data_encoding::HEXLOWER.encode(&Hash::new(seed.as_bytes()).as_bytes()[..4])
+}
+
 impl From<&Transfer> for TransferDto {
     fn from(t: &Transfer) -> Self {
         TransferDto {
             id: t.id,
+            handle: transfer_handle(t),
             direction: direction_str(t.direction).into(),
             peer: t.peer.as_ref().map(encode_id),
             name: t.name.clone(),
@@ -818,7 +1157,11 @@ impl From<&Transfer> for TransferDto {
             last_pickup: t.last_pickup,
             from_download: t.from_download,
             path: t.path.as_ref().map(|p| p.to_string_lossy().into_owned()),
+            sender_name: t.sender_name.clone(),
             offer_status: (!t.offer_status.is_empty()).then(|| t.offer_status.clone()),
+            waiting_code: (!t.waiting_code.is_empty()).then(|| t.waiting_code.clone()),
+            waiting_detail: (!t.waiting_detail.is_empty()).then(|| t.waiting_detail.clone()),
+            can_pause: Some(t.can_pause),
         }
     }
 }
@@ -833,6 +1176,11 @@ impl From<&ManagerEvent> for EventDto {
                 size,
                 note,
                 sender_name,
+                // Not forwarded: the daemon records it in the address book as the
+                // offer arrives, so a front-end reads it from `ContactDto::relay`
+                // rather than being handed a routing hint it would have to store
+                // itself. Same reasoning as `auto` below, in the other direction.
+                relay: _,
             } => EventDto::OfferReceived {
                 id: id.clone(),
                 from: encode_id(from),
@@ -840,9 +1188,13 @@ impl From<&ManagerEvent> for EventDto {
                 size: *size,
                 note: note.clone(),
                 sender_name: sender_name.clone(),
-                // Left false on purpose: trust is an address-book fact the engine
-                // has no access to. The daemon overwrites it on the way out.
+                // Left empty/false on purpose: all four are address-book facts the
+                // engine has no access to. The daemon overwrites them on the way
+                // out — see `stamp_offer`.
                 auto: false,
+                fingerprint: String::new(),
+                seen_count: 0,
+                known_name: String::new(),
             },
             ManagerEvent::Started {
                 id,
@@ -873,9 +1225,19 @@ impl From<&ManagerEvent> for EventDto {
             // a sender-only secret, and every subscriber on the socket would get a
             // copy. A UI only ever needs the id — it asks the daemon to withdraw.
             ManagerEvent::Deposited { id, .. } => EventDto::Deposited { id: *id },
-            ManagerEvent::Waiting { id, reason } => EventDto::Waiting {
+            ManagerEvent::Preparing { id } => EventDto::Preparing { id: *id },
+            ManagerEvent::Waiting {
+                id,
+                reason,
+                code,
+                detail,
+                offer_status,
+            } => EventDto::Waiting {
                 id: *id,
                 reason: reason.clone(),
+                code: code.clone(),
+                detail: detail.clone(),
+                offer_status: offer_status.clone(),
             },
             ManagerEvent::Paused { id, reason } => EventDto::Paused {
                 id: *id,
@@ -920,6 +1282,9 @@ mod tests {
                 ttl: None,
                 max: None,
                 password: None,
+                device: None,
+                fd_socket: None,
+                fd_token: None,
             },
         };
         let line = serde_json::to_string(&env).unwrap();
@@ -947,6 +1312,9 @@ mod tests {
                 ttl: None,
                 max: None,
                 password: None,
+                device: None,
+                fd_socket: None,
+                fd_token: None,
             }
         );
     }
@@ -1109,8 +1477,11 @@ mod tests {
                 EventDto::Waiting {
                     id: 3,
                     reason: "relay unavailable".into(),
+                    code: "relayRetry".into(),
+                    detail: "relay unavailable".into(),
+                    offer_status: String::new(),
                 },
-                r#"{"waiting":{"id":3,"reason":"relay unavailable"}}"#,
+                r#"{"waiting":{"id":3,"reason":"relay unavailable","code":"relayRetry","detail":"relay unavailable","offer_status":""}}"#,
             ),
             (
                 EventDto::Failed {
@@ -1120,6 +1491,42 @@ mod tests {
                 r#"{"failed":{"id":5,"error":"boom"}}"#,
             ),
             (EventDto::Cancelled { id: 6 }, r#"{"cancelled":{"id":6}}"#),
+            // The one event carrying address-book stamps. Field order is part of
+            // the shape a front-end is written against, so it is pinned here.
+            (
+                EventDto::OfferReceived {
+                    id: "off1".into(),
+                    from: "if2xmne".into(),
+                    name: "arrivo.zip".into(),
+                    size: 9,
+                    note: String::new(),
+                    sender_name: "Anna".into(),
+                    auto: false,
+                    fingerprint: "able-otter-nine".into(),
+                    seen_count: 2,
+                    known_name: "Giulia".into(),
+                },
+                r#"{"offer_received":{"id":"off1","from":"if2xmne","name":"arrivo.zip","size":9,"note":"","sender_name":"Anna","auto":false,"fingerprint":"able-otter-nine","seen_count":2,"known_name":"Giulia"}}"#,
+            ),
+            // And the same offer when the daemon is taking it by itself. Pinned
+            // separately because this is the value a front-end must act on — it
+            // draws an arrival rather than a question — and it travels no other
+            // way: the flag is stamped onto the event and appears in no snapshot.
+            (
+                EventDto::OfferReceived {
+                    id: "off2".into(),
+                    from: "if2xmne".into(),
+                    name: "arrivo.zip".into(),
+                    size: 9,
+                    note: String::new(),
+                    sender_name: "Anna".into(),
+                    auto: true,
+                    fingerprint: "able-otter-nine".into(),
+                    seen_count: 2,
+                    known_name: "Giulia".into(),
+                },
+                r#"{"offer_received":{"id":"off2","from":"if2xmne","name":"arrivo.zip","size":9,"note":"","sender_name":"Anna","auto":true,"fingerprint":"able-otter-nine","seen_count":2,"known_name":"Giulia"}}"#,
+            ),
             // A unit variant is a bare string, NOT an object — the frontend has to
             // handle both forms.
             (EventDto::ContactsChanged, r#""contacts_changed""#),
@@ -1132,6 +1539,102 @@ mod tests {
                 "wire shape changed — update gui/src/events.ts to match"
             );
         }
+    }
+
+    /// A client that predates typed refusals sends an accept without the flag, and
+    /// must go on getting the answer it can read.
+    ///
+    /// This is the whole safety of adding [`Response::Refused`]: the daemon sends
+    /// it only when asked, and an old client never asks. If this ever decoded as
+    /// `true`, such a client would receive a variant it cannot parse and the
+    /// accept would fail for a reason that has nothing to do with the offer.
+    #[test]
+    fn an_accept_without_the_flag_still_asks_for_the_old_answer() {
+        let old = r#"{"accept_offer":{"offer_id":"o1","out":null}}"#;
+        match serde_json::from_str::<Request>(old).unwrap() {
+            Request::AcceptOffer {
+                offer_id,
+                typed_refusal,
+                password,
+                ..
+            } => {
+                assert_eq!(offer_id, "o1");
+                assert!(!typed_refusal, "not asked for, not sent");
+                assert!(password.is_none());
+            }
+            other => panic!("expected an accept, got {other:?}"),
+        }
+    }
+
+    /// A daemon that predates the address-book stamps sends an offer without them,
+    /// and a client built against the new shape must still read it — that is the
+    /// whole reason those fields carry `serde(default)`. The same in reverse for
+    /// `AddContact`: an older client sends no `rebind`, and the safe half of the
+    /// collision guard is the one it must land on.
+    #[test]
+    fn older_peers_stay_readable_and_default_to_the_safe_half() {
+        let old = r#"{"offer_received":{"id":"o1","from":"if2xmne","name":"a.zip","size":1,"note":"","sender_name":""}}"#;
+        match serde_json::from_str::<EventDto>(old).unwrap() {
+            EventDto::OfferReceived {
+                fingerprint,
+                seen_count,
+                known_name,
+                auto,
+                ..
+            } => {
+                assert!(fingerprint.is_empty());
+                assert_eq!(seen_count, 0);
+                assert!(known_name.is_empty());
+                assert!(!auto);
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+
+        let old_offer = r#"{"id":"o1","from":"if2xmne","name":"a.zip","size":1,"note":""}"#;
+        let o: OfferDto = serde_json::from_str(old_offer).unwrap();
+        assert!(o.fingerprint.is_empty());
+        assert_eq!(o.seen_count, 0);
+
+        let old_add = r#"{"add_contact":{"name":"giulia","id":"if2xmne"}}"#;
+        match serde_json::from_str::<Request>(old_add).unwrap() {
+            Request::AddContact { rebind, .. } => assert!(
+                !rebind,
+                "a client that cannot warn about a re-key must not be able to ask for one"
+            ),
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    /// The whole point of adding the code *beside* the sentence rather than in
+    /// place of it: a daemon that predates the field still speaks a language this
+    /// client understands. If these ever stopped decoding, upgrading the GUI ahead
+    /// of the daemon would break the transfer list rather than merely leave one
+    /// reason in English.
+    #[test]
+    fn a_waiting_reason_from_an_older_daemon_still_decodes() {
+        let ev: EventDto =
+            serde_json::from_str(r#"{"waiting":{"id":3,"reason":"relay unavailable"}}"#).unwrap();
+        assert_eq!(
+            ev,
+            EventDto::Waiting {
+                id: 3,
+                reason: "relay unavailable".into(),
+                code: String::new(),
+                detail: String::new(),
+                offer_status: String::new(),
+            },
+            "a missing code must read as absent, not fail the whole event"
+        );
+
+        let dto: TransferDto = serde_json::from_str(
+            r#"{"id":1,"direction":"send","peer":null,"name":"f","total_size":1,
+                "transferred":0,"status":"waiting: offered — waiting for them to accept"}"#,
+        )
+        .unwrap();
+        assert_eq!(dto.waiting_code, None);
+        assert_eq!(dto.waiting_detail, None);
+        // And the sentence is still there, which is what such a client shows.
+        assert!(dto.status.contains("waiting for them to accept"));
     }
 
     /// The live fields are `Option`s on purpose: "the relay could not be asked" is a
@@ -1189,6 +1692,8 @@ mod tests {
             blocked: false,
             display_name: "Alice A.".into(),
             pending_name: String::new(),
+            relay: String::new(),
+            last_exchange: 1_700_000_000,
         }]);
         let s = serde_json::to_string(&r).unwrap();
         assert_eq!(serde_json::from_str::<Response>(&s).unwrap(), r);
@@ -1200,6 +1705,10 @@ mod tests {
             panic!("expected contacts")
         };
         assert!(!v[0].trusted && !v[0].blocked && v[0].pending_name.is_empty());
+        assert_eq!(
+            v[0].last_exchange, 0,
+            "no stamp from an older daemon reads as never, which is what it knows"
+        );
     }
 
     #[test]

@@ -98,6 +98,12 @@ fn random_token() -> String {
 pub enum DepositError {
     /// The relay refused the file as larger than its per-file cap.
     TooLarge,
+    /// The relay has no room at this moment: it is holding as many bytes as its
+    /// operator allows. Distinct from [`Unavailable`](Self::Unavailable) because
+    /// nothing is broken and nothing is unreachable — the mailbox is simply full
+    /// right now, which on a shared relay means other people are using it. It
+    /// clears on its own as deposits expire, so it is worth retrying.
+    Busy,
     /// The relay was unreachable or returned a transient error. Human reason.
     Unavailable(String),
     /// A local, unrecoverable error (couldn't read or seal the file).
@@ -108,6 +114,11 @@ impl std::fmt::Display for DepositError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             DepositError::TooLarge => write!(f, "the relay refused the file as too large"),
+            DepositError::Busy => write!(
+                f,
+                "the relay is being used by a lot of people right now — try again \
+                 shortly, or use a relay of your own"
+            ),
             DepositError::Unavailable(m) => write!(f, "relay unavailable: {m}"),
             DepositError::Fatal(e) => write!(f, "{e:#}"),
         }
@@ -118,7 +129,7 @@ impl std::error::Error for DepositError {}
 
 #[allow(clippy::too_many_arguments)]
 pub async fn deposit_offline(
-    path: &Path,
+    source: &crate::source::SendSource,
     name: &str,
     recipient: &PublicId,
     me: &Identity,
@@ -129,14 +140,15 @@ pub async fn deposit_offline(
 ) -> std::result::Result<Deposited, DepositError> {
     use std::sync::{Arc, Mutex};
 
-    use tokio::io::AsyncReadExt;
     use DepositError::Fatal;
-    let io = |e: std::io::Error| Fatal(anyhow::Error::from(e));
 
-    if !path.is_file() {
-        return Err(Fatal(anyhow::anyhow!("{} is not a file", path.display())));
+    // Only a path can be pre-checked; a handed-off descriptor IS the access.
+    if let crate::source::SendSource::Path(p) = source {
+        if !p.is_file() {
+            return Err(Fatal(anyhow::anyhow!("{} is not a file", p.display())));
+        }
     }
-    let total_size = tokio::fs::metadata(path).await.map_err(io)?.len();
+    let total_size = source.len().map_err(Fatal)?;
     let total_chunks = if total_size == 0 {
         0
     } else {
@@ -183,31 +195,45 @@ pub async fn deposit_offline(
     // Stash it out of band: after the request fails, a stashed error means Fatal, its
     // absence means the network. Without this, a mid-file read error would demote to
     // Unavailable and invite a pointless retry.
-    let src = path.to_path_buf();
+    let src = source.clone();
     let fatal: Arc<Mutex<Option<anyhow::Error>>> = Arc::new(Mutex::new(None));
     let fatal_w = fatal.clone();
     let body = reqwest::Body::wrap_stream(async_stream::stream! {
-        let mut infile = match tokio::fs::File::open(&src).await {
-            Ok(f) => f,
-            Err(e) => {
-                *fatal_w.lock().unwrap() = Some(anyhow::Error::from(e));
-                yield Err(std::io::Error::other("open source file"));
-                return;
-            }
-        };
-        let mut buf = vec![0u8; CHUNK_SIZE as usize];
         for idx in 0..total_chunks {
             let want = if idx == total_chunks - 1 {
                 (total_size - idx as u64 * CHUNK_SIZE as u64) as usize
             } else {
                 CHUNK_SIZE as usize
             };
-            if let Err(e) = infile.read_exact(&mut buf[..want]).await {
-                *fatal_w.lock().unwrap() = Some(anyhow::Error::from(e));
-                yield Err(std::io::Error::other("read source file"));
-                return;
-            }
-            match seal_chunk(&key, idx, total_chunks, &buf[..want]) {
+            // Positional reads through the source (path OR handed-off
+            // descriptor), off the async workers: a 16 MiB read is blocking.
+            let s = src.clone();
+            let read = tokio::task::spawn_blocking(move || -> std::io::Result<Vec<u8>> {
+                let mut buf = vec![0u8; want];
+                let n = s.read_at_full(&mut buf, idx as u64 * CHUNK_SIZE as u64)?;
+                if n != want {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "source shrank mid-deposit",
+                    ));
+                }
+                Ok(buf)
+            })
+            .await;
+            let buf = match read {
+                Ok(Ok(buf)) => buf,
+                Ok(Err(e)) => {
+                    *fatal_w.lock().unwrap() = Some(anyhow::Error::from(e));
+                    yield Err(std::io::Error::other("read source file"));
+                    return;
+                }
+                Err(e) => {
+                    *fatal_w.lock().unwrap() = Some(anyhow::Error::from(e));
+                    yield Err(std::io::Error::other("read source file"));
+                    return;
+                }
+            };
+            match seal_chunk(&key, idx, total_chunks, &buf) {
                 Ok(ct) => yield Ok::<Vec<u8>, std::io::Error>(ct),
                 Err(e) => {
                     *fatal_w.lock().unwrap() = Some(e);
@@ -246,6 +272,13 @@ pub async fn deposit_offline(
     let status = resp.status();
     if status == reqwest::StatusCode::PAYLOAD_TOO_LARGE {
         return Err(DepositError::TooLarge);
+    }
+    // 507 is the relay saying it is holding all the bytes it is allowed to hold.
+    // Reported as its own case rather than folded into `Unavailable`: "the relay
+    // returned 507 Insufficient Storage" tells the person nothing they can act on,
+    // and on the shared relay this is the one failure they are most likely to meet.
+    if status == reqwest::StatusCode::INSUFFICIENT_STORAGE {
+        return Err(DepositError::Busy);
     }
     if !status.is_success() {
         return Err(DepositError::Unavailable(format!(
@@ -380,14 +413,17 @@ pub async fn claim_status(relay: &str, claim: &str) -> Result<ClaimStatus> {
 /// minted before names were carried has none, and falls back to the claim-derived
 /// name it always had.
 fn mailbox_out(user_out: Option<&Path>, t: &OfflineTicket) -> PathBuf {
+    use super::recv::collision_free;
     let named = safe_download_name(&t.name);
+    // Derived names never overwrite (` (1)`, ` (2)`, …); an explicitly named
+    // file is the caller's decision. Same rule as `single_file_out`.
     match (user_out, named) {
-        (Some(dir), Some(n)) if dir.is_dir() => dir.join(n),
-        (Some(dir), None) if dir.is_dir() => dir.join(default_out(&t.claim)),
+        (Some(dir), Some(n)) if dir.is_dir() => collision_free(dir.join(n)),
+        (Some(dir), None) if dir.is_dir() => collision_free(dir.join(default_out(&t.claim))),
         // Anything else the caller named is the file they asked for.
         (Some(file), _) => file.to_path_buf(),
-        (None, Some(n)) => PathBuf::from(n),
-        (None, None) => default_out(&t.claim),
+        (None, Some(n)) => collision_free(PathBuf::from(n)),
+        (None, None) => collision_free(default_out(&t.claim)),
     }
 }
 
@@ -399,6 +435,19 @@ pub async fn fetch_offline(
     out: Option<PathBuf>,
     me: &Identity,
     password: Option<&str>,
+) -> Result<(PathBuf, usize)> {
+    fetch_offline_with_progress(ticket, out, me, password, |_, _| {}).await
+}
+
+/// Like [`fetch_offline`], reporting `(bytes_on_disk, total_bytes)` after every
+/// decrypted chunk lands. The mailbox fetch used to be silent until the end,
+/// which on a big file is indistinguishable from a hang.
+pub async fn fetch_offline_with_progress(
+    ticket: &str,
+    out: Option<PathBuf>,
+    me: &Identity,
+    password: Option<&str>,
+    on_progress: impl Fn(u64, u64),
 ) -> Result<(PathBuf, usize)> {
     use tokio::io::AsyncWriteExt;
     let t = OfflineTicket::decode(ticket)?;
@@ -493,6 +542,10 @@ pub async fn fetch_offline(
         let ct: Vec<u8> = carry.drain(..ct_len).collect();
         let plain = open_chunk(&key, idx, total_chunks, &ct).context("decrypt chunk")?;
         outfile.write_all(&plain).await.context("write chunk")?;
+        on_progress(
+            (idx as u64 * CHUNK_SIZE as u64).saturating_add(plain_len),
+            total_size,
+        );
     }
     outfile.flush().await.context("flush output")?;
     Ok((out, total_size as usize))

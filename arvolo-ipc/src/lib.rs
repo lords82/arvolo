@@ -25,6 +25,9 @@ pub mod protocol;
 
 pub mod client;
 
+#[cfg(unix)]
+pub mod fdpass;
+
 use std::path::PathBuf;
 
 /// The config directory holding the socket and ledgers. Mirrors the CLI's
@@ -109,6 +112,16 @@ pub fn pid_path() -> PathBuf {
     config_dir().join("daemon.pid")
 }
 
+/// Path to the `daemon stop` marker (honors `ARVOLO_CONFIG_DIR`).
+///
+/// `arvolo daemon stop` writes it before the daemon goes down; `daemon run`
+/// removes it on startup. Every supervisor loop that would respawn a dead daemon
+/// — the GUI's event pump above all — must check it first: a stop the user asked
+/// for has to stay stopped, not come back within seconds.
+pub fn stop_marker_path() -> PathBuf {
+    config_dir().join("daemon.stopped")
+}
+
 /// Path to the daemon's log (honors `ARVOLO_CONFIG_DIR`).
 ///
 /// Here rather than in whoever launches the daemon, because the two must agree:
@@ -129,23 +142,48 @@ pub fn log_path() -> PathBuf {
 /// grow without bound, not that a month of it is archived. Best-effort — a log
 /// that can't be rotated is not a reason to fail to start a daemon.
 pub fn rotate_log(max_bytes: u64) {
-    let path = log_path();
-    let too_big = std::fs::metadata(&path).map(|m| m.len() > max_bytes);
+    rotate_log_at(&log_path(), max_bytes);
+}
+
+/// Path to the desktop app's own log (honors `ARVOLO_CONFIG_DIR`).
+///
+/// Beside the daemon's rather than inside it: they are two processes with two
+/// lifetimes, and a bundled app writes to no terminal anybody can watch, so
+/// without a file of its own the app's errors have nowhere to be. Same directory,
+/// so "where do I look" has one answer.
+pub fn gui_log_path() -> PathBuf {
+    config_dir().join("gui.log")
+}
+
+/// [`rotate_log`] for any of the logs here — the policy written once, since a
+/// second copy of "one generation, best-effort" is a second place for it to drift.
+pub fn rotate_log_at(path: &std::path::Path, max_bytes: u64) {
+    let too_big = std::fs::metadata(path).map(|m| m.len() > max_bytes);
     if matches!(too_big, Ok(true)) {
-        let _ = std::fs::rename(&path, path.with_extension("log.1"));
+        let _ = std::fs::rename(path, path.with_extension("log.1"));
     }
 }
+
+/// One lock for every test in this crate that points `ARVOLO_CONFIG_DIR` at a
+/// tempdir of its own.
+///
+/// The variable is process-global and *everything* here derives its paths from it
+/// — the socket, the fd-passing socket, the log. Two tests setting it at once do
+/// not get a directory each: the last writer wins and the other quietly works
+/// inside a tempdir that is about to be deleted, which is why this suite failed on
+/// a different test each run (`fdpass` one time, log rotation the next) while
+/// every test passed on its own. A per-module lock cannot fix that — the race is
+/// between modules — so the lock has to live here, where all of them can take it.
+#[cfg(test)]
+pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(test)]
 mod log_rotation_tests {
     use super::*;
 
-    /// These read the process-global `ARVOLO_CONFIG_DIR`.
-    static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     #[test]
     fn a_big_log_is_rotated_to_one_generation() {
-        let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("ARVOLO_CONFIG_DIR", dir.path());
 
@@ -175,7 +213,7 @@ mod log_rotation_tests {
     /// the only history there is.
     #[test]
     fn a_small_log_is_left_alone() {
-        let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("ARVOLO_CONFIG_DIR", dir.path());
 
@@ -190,7 +228,7 @@ mod log_rotation_tests {
     /// No log yet is the normal first run, not a failure.
     #[test]
     fn a_missing_log_is_not_an_error() {
-        let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("ARVOLO_CONFIG_DIR", dir.path());
         rotate_log(10);

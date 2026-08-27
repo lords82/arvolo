@@ -34,17 +34,20 @@ comando:
 curl -fsSL https://raw.githubusercontent.com/lords82/arvolo/main/install.sh | sh
 ```
 
-**2. Puntalo a un relay.** Arvolo non ha un server centrale — è proprio il
-punto — quindi serve un relay: quello che la tua azienda o un amico già
-gestisce, oppure il tuo, su in un comando:
+**2. Niente da configurare.** Arvolo esce già puntato a un relay pubblico, quindi
+il passo successivo funziona subito. È una macchina piccola gestita dal progetto
+— file fino a 100 MB, link che vivono 6 ore — e non vede mai le tue chiavi. **Per
+le cose che contano punta Arvolo a un relay tuo**, che è un comando solo. Usare
+quello pubblico vuol dire accettarne i [termini](TERMS.md) *(inglese)*: sono
+brevi, e valgono i due minuti se quello che mandi non è roba tua.
 
 ```sh
 docker run -d --name arvolo-relay -p 6282:6282 -v arvolo-data:/data \
   ghcr.io/lords82/arvolo-relay:latest
 ```
 
-Nell'app lo imposti in **Impostazioni → Rete**; da riga di comando il primo
-avvio te lo chiede e se lo ricorda.
+Nell'app lo imposti in **Impostazioni → Rete**; da riga di comando c'è `--relay`,
+e il primo avvio te lo chiede e se lo ricorda.
 
 **3. Manda qualcosa.** Nell'app: trascina un file nella finestra e condividi il
 codice breve che ti dà — l'altra persona lo incolla nel suo Arvolo e il file
@@ -52,14 +55,18 @@ arriva. Stessa cosa dal terminale:
 
 ```sh
 # tu
-arvolo code ./foto.jpg
+arvolo send --code ./foto.jpg
 #   ->  4821-crater-mango
 
 # l'altra persona
 arvolo recv 4821-crater-mango
 ```
 
-Dall'altra parte non c'è niente di installato? `arvolo link ./report.pdf`
+Un `arvolo send ./foto.jpg` senza flag scrive invece un piccolo file-ticket
+`foto.jpg.arvolo` — condividilo su qualsiasi canale, come un .torrent, e
+dall'altra parte basta `arvolo recv foto.jpg.arvolo`.
+
+Dall'altra parte non c'è niente di installato? `arvolo send --link ./report.pdf`
 stampa un URL che scarica e decifra in qualsiasi browser — senza installare,
 senza account. Ecco cosa vede chi lo apre:
 
@@ -76,6 +83,7 @@ server](docs/assets/arvolo-link-browser.it.png)
 | [Deploy](docs/DEPLOY.md) | Self-hosting in produzione: systemd, Docker, hardening. *(inglese)* |
 | [L'app desktop](gui/README.md) | La GUI in dettaglio, con la tabella di parità con la CLI. *(inglese)* |
 | [Il protocollo](docs/PROTOCOL.md) | Il formato di rete e ogni flusso, per curiosi e auditor. *(inglese)* |
+| [Termini d'uso](TERMS.md) | Le condizioni del relay pubblico: cosa non si può mandare, di chi è la responsabilità, cosa viene loggato e per quanto. *(inglese)* |
 
 ## Licenza
 

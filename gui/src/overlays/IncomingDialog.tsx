@@ -14,31 +14,55 @@
 //
 // An unknown sender therefore gets their fingerprint shown in full, not tucked
 // behind a disclosure: it is the only handle on them that means anything, and
-// deciding without it is deciding blind.
+// deciding without it is deciding blind. It arrives stamped on the offer, so
+// seeing it costs nothing — the dialog used to show a stranger the raw base32 id
+// and invite them to save the person in order to be given words to compare,
+// which is a decision surface asking you to commit before it will inform you.
+//
+// The name field is a *field*, not a form. Nothing is written to the address book
+// until one of the footer buttons is pressed. That is not a nicety: the previous
+// shape had its own Save button, so the address book moved mid-decision, this
+// component re-rendered the sender as known, and the whole panel — the place you
+// had just been reading — vanished from under the pointer.
 
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { api } from "../ipc";
 import type { PickedItem } from "../types";
 import { useStore } from "../store";
-import { fmtBytes } from "../format";
+import { fmtBytes, slugName } from "../format";
 import { useT } from "../i18n";
 import { Icon } from "../ui/Icons";
 import { Badge, Button, Field, TextInput, TrustBadges } from "../ui/Primitives";
-import { Avatar, ExtChip, Fingerprint } from "../ui/Bits";
+import { Avatar, ClaimedName, ExtChip, Fingerprint } from "../ui/Bits";
+import { nameCollision, SaveSenderFields } from "../ui/SaveSenderFields";
 import { Sheet } from "../ui/Sheet";
 import { toast } from "../ui/Toasts";
 
+/** Reads which offer is on screen, and gives the body a fresh mount per offer.
+ *
+ *  This component is mounted for the life of the window and returns `null` when
+ *  nothing is waiting, so every `useState` below it would otherwise outlive the
+ *  offer that filled it — the second arrival would inherit the first one's
+ *  proposed name, chosen folder and typed password. */
 export function IncomingDialog() {
-  const t = useT();
   const offerId = useStore((s) => s.incomingOfferId);
+  if (!offerId) return null;
+  return <IncomingBody key={offerId} offerId={offerId} />;
+}
+
+function IncomingBody({ offerId }: { offerId: string }) {
+  const t = useT();
   const close = useStore((s) => s.closeIncoming);
   const transfers = useStore((s) => s.transfers);
+  const contacts = useStore((s) => s.contacts);
   const contactsById = useStore((s) => s.contactsById);
   const accept = useStore((s) => s.accept);
   const reject = useStore((s) => s.reject);
   const addContact = useStore((s) => s.addContact);
   const blockContact = useStore((s) => s.blockContact);
   const downloadDir = useStore((s) => s.status?.download_dir ?? "");
+
+  const tx = transfers[`o${offerId}`];
 
   const [out, setOut] = useState<PickedItem | null>(null);
   const [password, setPassword] = useState("");
@@ -48,32 +72,54 @@ export function IncomingDialog() {
   // where it would read as "this might need a password" about everything.
   const [needsPassword, setNeedsPassword] = useState(false);
   const [busy, setBusy] = useState<"accept" | "reject" | null>(null);
-  const [saveAs, setSaveAs] = useState("");
-  const [saving, setSaving] = useState(false);
+  const [saveAs, setSaveAs] = useState(() => slugName(tx?.senderName));
+  const [edited, setEdited] = useState(false);
 
-  const tx = offerId ? transfers[`o${offerId}`] : undefined;
   const contact = useMemo(
     () => (tx?.peerId ? contactsById[tx.peerId] : undefined),
     [tx?.peerId, contactsById]
   );
+  // Whether the sender was a stranger when this dialog opened. Read once: the
+  // question "do you want to keep them?" belongs to this decision, and must not
+  // be withdrawn mid-sentence because the book moved.
+  const wasUnknown = useRef(!contact).current;
 
-  if (!tx || !offerId) return null;
+  if (!tx) return null;
 
   const known = !!contact;
   const claimed = tx.senderName?.trim();
   const label =
     contact?.name ?? (claimed ? `“${claimed}”` : t("incoming.unknownSender"));
+  // A stranger has no `ContactDto` to carry words, so the offer brings its own.
+  const fingerprint = contact?.fingerprint ?? tx.fingerprint ?? "";
+  const chosenName = saveAs.trim();
+  const clash = nameCollision(contacts, saveAs, tx.peerId);
+  const willSave = wasUnknown && !known && !!chosenName && !clash;
 
   const doAccept = async () => {
     setBusy("accept");
     try {
+      // Saving first, and only accepting if it worked: a refusal here is the
+      // collision guard, and taking the file anyway would leave the user with
+      // the download they asked for and none of the naming they also asked for,
+      // with nothing on screen still able to explain the difference.
+      if (willSave) await addContact(chosenName, tx.peerId!);
       await accept(offerId, out?.id ?? null, password || null);
       toast.ok(t("incoming.started"), tx.name);
     } catch (e) {
       // The store already reported it. The one refusal worth reacting to here is
       // the missing password: it is recoverable, and the user has nowhere else
       // to supply one.
-      if (/password/i.test(String(e))) setNeedsPassword(true);
+      //
+      // The daemon names it — `needsPassword` — so this no longer depends on the
+      // engine's English keeping the word "password" in it. The old test stays as
+      // the fallback for a daemon too old to send a code: without it, upgrading
+      // the app before the daemon would take the field away.
+      const code = (e as { code?: unknown } | null)?.code;
+      const named = typeof code === "string" && code !== "";
+      if (named ? code === "needsPassword" : /password/i.test(String(e))) {
+        setNeedsPassword(true);
+      }
     } finally {
       setBusy(null);
     }
@@ -94,6 +140,10 @@ export function IncomingDialog() {
     <Sheet
       open
       onClose={close}
+      // The scrim does not dismiss: this panel changes shape as it is used, and a
+      // decision must not be closable by a click that landed where a control was
+      // a moment ago. Escape, "Later" and the × all still close it.
+      dismissOnScrim={false}
       placement="center"
       title={t("incoming.title")}
       subtitle={t("incoming.subtitle")}
@@ -118,10 +168,10 @@ export function IncomingDialog() {
             variant="in"
             onClick={doAccept}
             busy={busy === "accept"}
-            disabled={busy !== null}
+            disabled={busy !== null || !!clash}
           >
             <Icon.Receive size={14} />
-            {t("incoming.accept")}
+            {willSave ? t("incoming.acceptAndSave") : t("incoming.accept")}
           </Button>
         </>
       }
@@ -142,6 +192,7 @@ export function IncomingDialog() {
           <div className="grow">
             <div className="hstack-sm wrap">
               <span className="t-head truncate">{label}</span>
+              {known && <ClaimedName c={contact!} />}
               {known ? (
                 <TrustBadges
                   verified={contact!.verified}
@@ -154,9 +205,26 @@ export function IncomingDialog() {
                 </Badge>
               )}
             </div>
-            {known && claimed && claimed !== contact!.name && (
-              <div className="t-xs t-mut" style={{ marginTop: 2 }}>
-                {t("incoming.claimedName", claimed)}
+            {/* The brackets next to the name carry what the ledger knows. This
+                line is for the gap: a name on *this* offer that the ledger has
+                not recorded yet, which is what an arrival mid-change looks
+                like. When it agrees with the ledger it would just say the same
+                thing twice. */}
+            {known &&
+              claimed &&
+              claimed !== contact!.display_name.trim() &&
+              claimed !== contact!.pending_name.trim() && (
+                <div className="t-xs t-mut" style={{ marginTop: 2 }}>
+                  {t("incoming.claimedName", claimed)}
+                </div>
+              )}
+            {/* And the same gap for somebody you have never saved. Without it a
+                key that introduced itself as one person and came back as another
+                is indistinguishable from a key that has only ever used the second
+                name — which is the whole of what a display name can tell you. */}
+            {!known && claimed && tx.knownName && tx.knownName !== claimed && (
+              <div className="t-xs tone-warn" style={{ marginTop: 2 }}>
+                {t("incoming.wasCalled", tx.knownName)}
               </div>
             )}
           </div>
@@ -168,14 +236,26 @@ export function IncomingDialog() {
           <div className="t-label">
             {known ? t("incoming.keyFingerprint") : t("incoming.senderId")}
           </div>
-          <Fingerprint value={known ? contact!.fingerprint : (tx.peerId ?? "")} />
+          {/* The offer carries no fingerprint against a daemon too old to stamp
+              one. Falling back to the raw id keeps the identity on screen rather
+              than showing an empty space where the evidence should be. */}
+          <Fingerprint value={fingerprint || (tx.peerId ?? "")} />
           <div className="hint">
             {known && contact!.verified
               ? t("incoming.hintVerified")
               : known
                 ? t("incoming.hintKnown")
-                : t("incoming.hintUnknown")}
+                : fingerprint
+                  ? t("incoming.hintStranger")
+                  : t("incoming.hintRawId")}
           </div>
+          {!known && tx.seenCount !== undefined && (
+            <div className={tx.seenCount === 0 ? "hint tone-warn" : "hint"}>
+              {tx.seenCount === 0
+                ? t("incoming.firstTime")
+                : t("incoming.seenBefore", String(tx.seenCount))}
+            </div>
+          )}
         </div>
       </div>
 
@@ -252,44 +332,37 @@ export function IncomingDialog() {
       </Field>
 
       {/* --- act on the sender ----------------------------------------- */}
-      {!known && (
+      {wasUnknown && (
         <div className="card card-pad stack-sm">
           <div className="t-label">{t("incoming.ifYouKnowThem")}</div>
-          <div className="hstack-sm">
-            <TextInput
+          {known ? (
+            // Saved by this dialog's own Accept, or from another window while it
+            // sat open. Kept in place rather than removed: the panel is where the
+            // user was reading, and a card that disappears as it is used reads as
+            // the whole dialog going away.
+            <div className="hstack-sm">
+              <Icon.Check size={13} className="tone-ok" />
+              <span className="t-sm">
+                {t("incoming.savedInline", contact!.name)}
+              </span>
+            </div>
+          ) : (
+            <SaveSenderFields
               value={saveAs}
-              onChange={(e) => setSaveAs(e.currentTarget.value)}
-              placeholder={t("incoming.saveAsPlaceholder")}
-              aria-label={t("incoming.saveAsLabel")}
-            />
-            <Button
-              size="sm"
-              disabled={!saveAs.trim() || saving}
-              busy={saving}
-              onClick={async () => {
-                setSaving(true);
-                try {
-                  await addContact(saveAs.trim(), tx.peerId!);
-                  toast.ok(
-                    t("incoming.savedAs", saveAs.trim()),
-                    t("incoming.savedAsDetail")
-                  );
-                  setSaveAs("");
-                } catch {
-                  // reported by the store
-                } finally {
-                  setSaving(false);
-                }
+              onChange={(v) => {
+                setSaveAs(v);
+                setEdited(true);
               }}
-            >
-              {t("common.save")}
-            </Button>
-          </div>
-          <div className="hint">{t("incoming.saveNote")}</div>
+              contacts={contacts}
+              peerId={tx.peerId}
+              suggested={!edited}
+            />
+          )}
           <div>
             <Button
               size="sm"
               variant="danger"
+              disabled={busy !== null}
               onClick={async () => {
                 await blockContact(tx.peerId!);
                 await reject(offerId);
@@ -304,4 +377,3 @@ export function IncomingDialog() {
     </Sheet>
   );
 }
-

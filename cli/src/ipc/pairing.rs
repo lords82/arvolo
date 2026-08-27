@@ -149,7 +149,7 @@ async fn run(
 }
 
 fn resolve_relay(relay: Option<String>) -> Result<String> {
-    match relay.map(|r| book::normalize_relay(&r, false)) {
+    match relay.map(|r| book::normalize_relay(&r)) {
         Some(r) => Ok(r),
         None => book::default_relay_or_builtin().context(
             "no relay configured — set one in settings, or pass one with the pairing request",
@@ -180,7 +180,7 @@ async fn contact_host(
         );
     }
 
-    let (shown, sender) = code::publish_auto(my_id.as_bytes(), &relay, true)
+    let (shown, sender) = code::publish_auto(my_id.as_bytes(), &relay)
         .await
         .context("start contact pairing")?;
     let _ = events.send(EventDto::PairingCode {
@@ -188,6 +188,7 @@ async fn contact_host(
         code: shown,
     });
 
+    let mut their_relay: Option<String> = None;
     let their_id = match sender {
         // Unreachable: the version check above already refused a v1 relay. Kept as
         // a refusal rather than an `unreachable!` so a future change to
@@ -206,8 +207,12 @@ async fn contact_host(
                 code::HostState::default(),
                 token.clone(),
                 |ev| {
-                    if let code::HostEvent::Paired { reply, .. } = ev {
+                    if let code::HostEvent::Paired { reply, extras, .. } = ev {
                         got = reply;
+                        their_relay = extras
+                            .and_then(|b| String::from_utf8(b).ok())
+                            .map(|r| r.trim().to_string())
+                            .filter(|r| !r.is_empty());
                     }
                 },
                 |_| {},
@@ -224,7 +229,7 @@ async fn contact_host(
         }
         bail!("the other side took your id but never sent theirs — nothing was saved here");
     };
-    save_the_other_side(&String::from_utf8_lossy(&bytes), name)
+    save_the_other_side(&String::from_utf8_lossy(&bytes), name, their_relay)
 }
 
 /// Answer someone's code. Bounded by [`JOIN_WAIT`] and by cancellation, whichever
@@ -239,11 +244,18 @@ async fn contact_join(
     let my_id = crate::encode_id(&me.public());
     let default_relay = book::default_relay_or_builtin();
 
+    // Their relay rides on the code (`N-word-word@relay`); ours goes back in the
+    // exchange's extras. Same trade as the CLI's `pair_join`, and just as optional
+    // — an older peer or relay simply leaves both sides on their own defaults.
+    let (_, _, relay_in_code) = code::parse_code(&code_str).context("contact pairing")?;
+    let their_relay = relay_in_code.map(|r| book::canonical_relay(&r));
+
     let exchange = code::exchange_bytes_with(
         &code_str,
         default_relay.as_deref(),
         JOIN_WAIT,
         Some(my_id.as_bytes()),
+        default_relay.as_deref().map(|r| r.as_bytes()),
     );
     let (their_bytes, replied) = tokio::select! {
         _ = token.cancelled() => bail!("pairing cancelled — nothing was saved"),
@@ -259,15 +271,22 @@ async fn contact_join(
              happened — nothing was saved. That relay needs rendezvous v2."
         );
     }
-    save_the_other_side(&String::from_utf8_lossy(&their_bytes), name)
+    save_the_other_side(&String::from_utf8_lossy(&their_bytes), name, their_relay)
 }
 
 /// Save the id just traded for, and mark it verified — the pairing *is* the
 /// verification, since the SPAKE2 channel only forms between two parties that knew
 /// the same code.
-fn save_the_other_side(their_id: &str, name: Option<String>) -> Result<Done> {
+fn save_the_other_side(
+    their_id: &str,
+    name: Option<String>,
+    their_relay: Option<String>,
+) -> Result<Done> {
     let their_id = their_id.trim();
     book::decode_id(their_id).context("the other side sent something that isn't a public id")?;
+    if let Some(relay) = &their_relay {
+        book::set_relay(their_id, relay)?;
+    }
 
     if let Some(existing) = book::resolve_name(their_id) {
         book::mark_verified(their_id)?;
@@ -351,7 +370,7 @@ async fn device_host(
         );
     }
 
-    let (shown, sender) = code::publish_auto(&bytes, &relay, true)
+    let (shown, sender) = code::publish_auto(&bytes, &relay)
         .await
         .context("start device pairing")?;
     let _ = events.send(EventDto::PairingCode {

@@ -19,7 +19,6 @@ import {
   fmtEta,
   fmtRate,
   isToday,
-  methodMeta,
   metaLine,
   pct,
   sectionsFor,
@@ -27,7 +26,7 @@ import {
   statusMeta,
 } from "../format";
 import { normalizeEvent } from "../events";
-import type { Method, UIStatus, UITransfer } from "../types";
+import type { UIStatus, UITransfer } from "../types";
 
 /** The tones `format.ts` is allowed to return. They are class-name suffixes
  *  resolved by `.tone-*` / `.tint-*` in theme.css — the assertions below check
@@ -45,10 +44,8 @@ const ALL_STATUSES: UIStatus[] = [
   "failed",
   "cancelled",
 ];
-const ALL_METHODS: Method[] = ["p2p", "cloud", "link", "ticket"];
 
 const anyStatus = fc.constantFrom(...ALL_STATUSES);
-const anyMethod = fc.constantFrom(...ALL_METHODS);
 
 /** A transfer with every field generated — the shape the board must survive. */
 const anyTransfer = (over: Partial<UITransfer> = {}) =>
@@ -65,7 +62,6 @@ const anyTransfer = (over: Partial<UITransfer> = {}) =>
       reason: fc.option(fc.string(), { nil: undefined }),
       encrypted: fc.boolean(),
       verified: fc.boolean(),
-      method: anyMethod,
       swarmPeers: fc.nat(),
       downloadPeers: fc.nat(),
       files: fc.nat(),
@@ -138,7 +134,7 @@ describe("pct — over every pair", () => {
   });
 });
 
-describe("statusMeta / methodMeta — exhaustive over their domains", () => {
+describe("statusMeta — exhaustive over its domain", () => {
   it("every status maps to a label and a known tone", () => {
     // Not a sample: this *is* every possible input.
     for (const s of ALL_STATUSES) {
@@ -147,21 +143,7 @@ describe("statusMeta / methodMeta — exhaustive over their domains", () => {
     }
   });
 
-  it("every method maps to a complete chip", () => {
-    for (const m of ALL_METHODS) {
-      const meta = methodMeta(m);
-      expect(meta.label && meta.glyph).toBeTruthy();
-      expect(TONES).toContain(meta.tone);
-    }
-  });
 
-  it("no arbitrary string can make methodMeta return undefined", () => {
-    fc.assert(
-      fc.property(fc.string(), (junk) => {
-        expect(methodMeta(junk as Method)?.label).toBeTruthy();
-      })
-    );
-  });
 
   it("no arbitrary string can make extTint return undefined", () => {
     fc.assert(

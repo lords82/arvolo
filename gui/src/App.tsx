@@ -9,8 +9,11 @@
 import { useEffect, useMemo, useState } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { enable as autostartEnable } from "@tauri-apps/plugin-autostart";
-import { onPickedFiles } from "./ipc";
+import { onArvoloTicket, onPickedFiles } from "./ipc";
+import { api } from "./ipc";
 import { fire, TITLE_KEY, useStore, type Route } from "./store";
+import { isBusy, shouldAnnounce } from "./update";
+import { fmtBytes } from "./format";
 import { useT } from "./i18n";
 import { Icon } from "./ui/Icons";
 import { Button, IconButton, modKey, TextInput } from "./ui/Primitives";
@@ -55,6 +58,13 @@ export function App() {
   const setPaletteOpen = useStore((s) => s.setPaletteOpen);
   const clearFinished = useStore((s) => s.clearFinished);
   const transfers = useStore((s) => s.transfers);
+  const update = useStore((s) => s.update);
+  const startUpdate = useStore((s) => s.startUpdate);
+  const dismissUpdate = useStore((s) => s.dismissUpdate);
+  // Only true once the sync summary has been read, which `checkForUpdate` does
+  // when it finds something. Unknown reads as "not paired": a warning about
+  // other machines shown to somebody who has none is just noise.
+  const paired = useStore((s) => s.sync?.paired ?? false);
 
   const [dragging, setDragging] = useState(false);
 
@@ -79,6 +89,15 @@ export function App() {
   // instead (an old daemon reports version "" here).
   const versionMismatch =
     connected && status !== null && guiVersion !== "" && status.version !== guiVersion;
+
+  // An update is announced only when the board is quiet: the check itself is a
+  // GET and disturbs nobody, but proposing a restart in the middle of a send is
+  // the wrong thing at the worst moment. It comes back on its own.
+  const busy = useMemo(
+    () => isBusy(Object.values(transfers).map((t) => t.status)),
+    [transfers]
+  );
+  const announceUpdate = shouldAnnounce(update.info, update.dismissed, busy);
 
   // Boot the store (snapshot + event subscription) once. `init` is async, so an
   // unmount can land before it resolves — track that and dispose the listeners
@@ -227,14 +246,51 @@ export function App() {
     return () => un?.();
   }, [openSheet]);
 
+  // A `.arvolo` handed to the app is something to RECEIVE: dropped on the
+  // window or double-clicked while running (event), or double-clicked cold
+  // (pending, held Rust-side until this asks). Either way the receive sheet
+  // opens with the ticket already in place.
+  const openReceiveWith = useStore((s) => s.openReceiveWith);
+  useEffect(() => {
+    let un: (() => void) | undefined;
+    onArvoloTicket((ticket) => openReceiveWith(ticket))
+      .then((f) => {
+        un = f;
+      })
+      .catch(() => {});
+    api
+      .takePendingTicket()
+      .then((t) => {
+        if (t) openReceiveWith(t);
+      })
+      .catch(() => {});
+    return () => un?.();
+  }, [openReceiveWith]);
+
   // A refused action is surfaced as a toast rather than left in the store: it is
   // fired from click handlers that cannot await, so without this the button
   // simply looks broken. Errors never auto-dismiss (see Toasts).
+  //
+  // The raw daemon string stays (it is the truth), but the toast leads with what
+  // to DO about it and carries the button that does it — the action affordance
+  // existed in Toasts from the start and no caller ever used it.
   useEffect(() => {
     if (!actionError) return;
-    toast.bad(t("app.actionFailed"), actionError);
+    const low = actionError.toLowerCase();
+    let action: { label: string; run: () => void } | undefined;
+    let hint = "";
+    if (low.includes("no daemon") || low.includes("daemon")) {
+      action = { label: t("app.restart"), run: () => fire(restartDaemon()) };
+      hint = t("app.errHintDaemon");
+    } else if (low.includes("relay")) {
+      action = { label: t("app.errOpenSettings"), run: () => go("settings") };
+      hint = t("app.errHintRelay");
+    } else if (low.includes("password")) {
+      hint = t("app.errHintPassword");
+    }
+    toast.bad(t("app.actionFailed"), hint ? `${hint} — ${actionError}` : actionError, action);
     dismissActionError();
-  }, [actionError, dismissActionError, t]);
+  }, [actionError, dismissActionError, t, go, restartDaemon]);
 
   const View =
     route === "transfers"
@@ -258,7 +314,12 @@ export function App() {
         {!connected && (
           <div className="banner bad" role="status">
             <Icon.Alert size={14} className="tone-bad" />
-            <span className="grow">{t("app.disconnected")}</span>
+            <span className="grow">
+              {t("app.disconnected")}
+              <span className="t-xs t-mut" style={{ display: "block" }}>
+                {t("app.disconnectedDetail")}
+              </span>
+            </span>
             <Button size="sm" onClick={() => fire(reload())}>
               {t("common.retry")}
             </Button>
@@ -283,6 +344,63 @@ export function App() {
           <div className="banner bad" role="status">
             <Icon.Alert size={14} className="tone-bad" />
             <span className="grow">{loadError}</span>
+            <Button size="sm" onClick={() => fire(restartDaemon())}>
+              {t("app.restart")}
+            </Button>
+          </div>
+        )}
+        {/* Downloading takes over the banner rather than adding a second one:
+            it is the same subject, one step further along. There is no cancel —
+            the download is a few tens of megabytes and stopping it would leave
+            nothing behind worth the button. */}
+        {update.phase === "downloading" && (
+          <div className="banner" role="status">
+            <Icon.Refresh size={14} />
+            <span className="grow">
+              {update.progress?.total
+                ? t(
+                    "app.updateDownloading",
+                    fmtBytes(update.progress.downloaded),
+                    fmtBytes(update.progress.total)
+                  )
+                : t("app.updateDownloadingUnknown")}
+            </span>
+          </div>
+        )}
+        {update.phase !== "downloading" && announceUpdate && update.info && (
+          <div className="banner" role="status">
+            <Icon.Refresh size={14} />
+            <span className="grow">
+              {t("app.updateAvailable", update.info.version)}
+              {/* Two second lines, and both are the kind of thing that belongs
+                  next to the button rather than in release notes nobody opens.
+                  The first says why the newest release is not the one on offer;
+                  the second warns that updating one machine of a paired set and
+                  not the others stops them syncing until they catch up. */}
+              {update.info.heldBack && (
+                <span className="t-xs t-mut" style={{ display: "block" }}>
+                  {t(
+                    "app.updateHeldBack",
+                    update.info.heldBack.latest,
+                    update.info.heldBack.relay ?? "?"
+                  )}
+                </span>
+              )}
+              {paired && (
+                <span className="t-xs t-mut" style={{ display: "block" }}>
+                  {t("app.updateDevices")}
+                </span>
+              )}
+            </span>
+            <Button size="sm" variant="in" onClick={() => startUpdate()}>
+              {t("app.updateNow")}
+            </Button>
+            <IconButton
+              label={t("app.updateLater")}
+              onClick={() => dismissUpdate()}
+            >
+              <Icon.Close size={13} />
+            </IconButton>
           </div>
         )}
         {pendingOffers.length > 0 && route !== "transfers" && (

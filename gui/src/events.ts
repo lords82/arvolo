@@ -23,6 +23,13 @@ export type WireEvent =
         size: number;
         note: string;
         sender_name: string;
+        // Stamped by the daemon from the address book, which the engine cannot
+        // see. All four are `serde(default)` on the Rust side, so an older daemon
+        // simply omits them — hence optional here rather than required.
+        auto?: boolean;
+        fingerprint?: string;
+        seen_count?: number;
+        known_name?: string;
       };
     }
   | {
@@ -36,7 +43,18 @@ export type WireEvent =
   | { progress: { id: number; transferred: number; total_size: number } }
   | { completed: { id: number; path: string | null } }
   | { deposited: { id: number } }
-  | { waiting: { id: number; reason: string } }
+  | { preparing: { id: number } }
+  | {
+      waiting: {
+        id: number;
+        reason: string;
+        code?: string;
+        detail?: string;
+        // How far the offer this send holds open has got. Absent from an older
+        // daemon, which is why it is optional rather than "".
+        offer_status?: string;
+      };
+    }
   | { paused: { id: number; reason: string } }
   | { failed: { id: number; error: string } }
   | { cancelled: { id: number } }
@@ -61,6 +79,7 @@ export type WireEvent =
       };
     }
   | "contacts_changed"
+  | { offer_gone: { id: string } }
   | "finished_cleared";
 
 /** Every variant the app knows how to act on. A daemon of a different build may
@@ -71,6 +90,7 @@ const KNOWN = new Set<EngineEvent["type"]>([
   "progress",
   "completed",
   "deposited",
+  "preparing",
   "waiting",
   "paused",
   "failed",
@@ -79,6 +99,7 @@ const KNOWN = new Set<EngineEvent["type"]>([
   "code_paired",
   "code_closed",
   "contacts_changed",
+  "offer_gone",
   "finished_cleared",
   "pairing_code",
   "pairing_done",

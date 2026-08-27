@@ -219,10 +219,57 @@ pub(super) struct SendToRecord {
     pub(super) reason: String,
     #[serde(default)]
     pub(super) note: String,
+    /// The device this send is aimed at, carried across a restart.
+    ///
+    /// Without it a resumed send silently loses its aim and lands on whichever
+    /// machine wakes first — and a send that had to be resumed is exactly the one
+    /// whose target was not around to take it.
+    pub(super) target: Option<crate::sync::DeviceId>,
+    /// The recipient's relay, when they listen somewhere other than where we do.
+    ///
+    /// Without it a restored send goes back to routing through our own relay, and
+    /// a cross-relay recipient becomes unreachable precisely on the retry path
+    /// built to keep reaching them. `None` means "ours", as everywhere else.
+    pub(super) relay: Option<String>,
+}
+
+/// [`SendToRecord`] as written before it carried a relay, and before that a
+/// device target. Read-only, for the one-time migration in [`load_sendtos`]:
+/// newest shape first, because postcard ignores trailing bytes and an older shape
+/// would happily mis-read a newer record as "everything I know plus junk".
+#[derive(serde::Deserialize)]
+#[cfg_attr(test, derive(serde::Serialize))]
+struct SendToRecordV2 {
+    id: u64,
+    recipient: Vec<u8>,
+    payload: String,
+    name: String,
+    archive: bool,
+    paused: bool,
+    reason: String,
+    note: String,
+    target: Option<crate::sync::DeviceId>,
+}
+
+#[derive(serde::Deserialize)]
+struct SendToRecordV1 {
+    id: u64,
+    recipient: Vec<u8>,
+    payload: String,
+    name: String,
+    archive: bool,
+    paused: bool,
+    reason: String,
+    note: String,
 }
 
 pub(super) fn sendto_record_path(dir: &Path, id: u64) -> PathBuf {
-    dir.join(format!("sendto-{id}.pc"))
+    dir.join(format!("sendto2-{id}.pc"))
+}
+
+/// Where the pre-relay records live. Only read, never written.
+fn legacy_sendto_glob() -> &'static str {
+    "sendto-"
 }
 
 pub(super) fn persist_sendto(dir: &Path, rec: &SendToRecord) {
@@ -236,8 +283,124 @@ pub(super) fn remove_sendto(dir: &Path, id: u64) {
     let _ = std::fs::remove_file(sendto_record_path(dir, id));
 }
 
+/// Every held `send --to` on disk, migrating any written under the old prefix.
+///
+/// A held send is the one piece of state that exists *because* delivery has not
+/// happened yet, so dropping it on an upgrade is the worst time to drop it. The
+/// old files are read in the shapes they could have been written in, rewritten
+/// under the new prefix, and unlinked — so this costs one pass, once.
 pub(super) fn load_sendtos(dir: &Path) -> Vec<SendToRecord> {
-    load_records(dir, "sendto-")
+    let mut out: Vec<SendToRecord> = load_records(dir, "sendto2-");
+
+    for path in record_paths(dir, legacy_sendto_glob()) {
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        let Some(rec) = decode_legacy_sendto(&bytes) else {
+            continue;
+        };
+        // A restart between the write and the unlink would otherwise restore the
+        // same send twice, under two ids.
+        if !out.iter().any(|r| r.id == rec.id) {
+            persist_sendto(dir, &rec);
+            out.push(rec);
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+    out
+}
+
+fn decode_legacy_sendto(bytes: &[u8]) -> Option<SendToRecord> {
+    if let Ok(r) = postcard::from_bytes::<SendToRecordV2>(bytes) {
+        return Some(SendToRecord {
+            id: r.id,
+            recipient: r.recipient,
+            payload: r.payload,
+            name: r.name,
+            archive: r.archive,
+            paused: r.paused,
+            reason: r.reason,
+            note: r.note,
+            target: r.target,
+            relay: None,
+        });
+    }
+    let r: SendToRecordV1 = postcard::from_bytes(bytes).ok()?;
+    Some(SendToRecord {
+        id: r.id,
+        recipient: r.recipient,
+        payload: r.payload,
+        name: r.name,
+        archive: r.archive,
+        paused: r.paused,
+        reason: r.reason,
+        note: r.note,
+        target: None,
+        relay: None,
+    })
+}
+
+/// The preparation behind a held `send --to`: the content key, the transport seed,
+/// and the digests taken under that key. **Beside** its [`SendToRecord`], never
+/// inside it — same reason as [`ShareRecord`]: postcard is not self-describing, so a
+/// new field would make every record an older build wrote undecodable, and
+/// `load_records` skips silently what it cannot read.
+///
+/// It is what lets a restarted daemon resume *the same send*. Recomputing the
+/// preparation mints a fresh key and seed, and the recipient is then looking at a
+/// different file under a node id nobody is serving.
+///
+/// The pass that would notice a payload changed under us is exactly the one this
+/// record exists to skip, so it also writes down what the payload looked like when
+/// the digests were taken. See `work::PayloadStamp`.
+///
+/// Holds the content key in the clear: goes through [`write_record_private`], like
+/// every other record that carries one.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(super) struct PrepRecord {
+    pub(super) id: u64,
+    pub(super) key: Vec<u8>,
+    /// Spelled like [`SendRecord::node_seed`]: 32 bytes, the transport secret.
+    pub(super) node_seed: Vec<u8>,
+    pub(super) total_size: u64,
+    /// One 32-byte digest per 16 MiB chunk — 22 KB for a 10 GB payload.
+    pub(super) chunks: Vec<crate::hash::Hash>,
+    /// The payload these digests were taken from, and what it looked like then.
+    pub(super) payload: String,
+    pub(super) len: u64,
+    pub(super) mtime_secs: u64,
+    pub(super) mtime_nanos: u32,
+    /// Device + inode on unix (0 elsewhere): a replaced file is caught outright,
+    /// which length and mtime alone can miss.
+    pub(super) dev: u64,
+    pub(super) ino: u64,
+}
+
+pub(super) fn prep_record_path(dir: &Path, id: u64) -> PathBuf {
+    dir.join(format!("prep-{id}.pc"))
+}
+
+pub(super) fn persist_prep(dir: &Path, rec: &PrepRecord) {
+    if let Ok(bytes) = postcard::to_allocvec(rec) {
+        let _ = std::fs::create_dir_all(dir);
+        let _ = write_record_private(&prep_record_path(dir, rec.id), &bytes);
+    }
+}
+
+pub(super) fn load_prep(dir: &Path, id: u64) -> Option<PrepRecord> {
+    let bytes = std::fs::read(prep_record_path(dir, id)).ok()?;
+    postcard::from_bytes(&bytes).ok()
+}
+
+pub(super) fn remove_prep(dir: &Path, id: u64) {
+    let _ = std::fs::remove_file(prep_record_path(dir, id));
+}
+
+/// Every preparation on disk — for the sweep that drops the ones whose held send
+/// did not come back. Each restore re-keys onto a fresh id, so a record left under
+/// an old one would sit there for ever, holding a content key nobody can use.
+pub(super) fn load_preps(dir: &Path) -> Vec<PrepRecord> {
+    load_records(dir, "prep-")
 }
 
 /// On-disk record of a mailbox **deposit awaiting pickup**, so a daemon restart
@@ -250,6 +413,8 @@ pub(super) struct DepositedRecord {
     pub(super) recipient: Vec<u8>,
     pub(super) name: String,
     pub(super) size: u64,
+    /// Where the blob is — the relay we uploaded to, which is the one named inside
+    /// the `arvm…` the recipient fetches with. Revocation goes here.
     pub(super) relay: String,
     pub(super) claim: String,
     /// Unix seconds when the relay auto-expires the blob (deposit time + TTL).
@@ -261,6 +426,27 @@ pub(super) struct DepositedRecord {
     /// authorizes retracting it (so a cancel also removes their pickup notice).
     pub(super) offer_id: String,
     pub(super) poster_token: String,
+    /// Where the *notice* is — the recipient's relay, which is not always the one
+    /// holding the blob. Retracting the offer goes here, revoking the blob goes to
+    /// `relay`; collapsing the two is what a cross-relay deposit breaks.
+    pub(super) offer_relay: String,
+}
+
+/// [`DepositedRecord`] as written when one relay served both roles. Read-only,
+/// for the migration in [`load_depositeds`].
+#[derive(serde::Deserialize)]
+#[cfg_attr(test, derive(serde::Serialize))]
+struct DepositedRecordV1 {
+    id: u64,
+    recipient: Vec<u8>,
+    name: String,
+    size: u64,
+    relay: String,
+    claim: String,
+    expires: u64,
+    revoke_token: String,
+    offer_id: String,
+    poster_token: String,
 }
 
 // NOTE on evolving these records: postcard is a compact, **non-self-describing**
@@ -270,9 +456,103 @@ pub(super) struct DepositedRecord {
 // the state they tracked is quietly forgotten. If one of these structs ever needs
 // a new field after a release, bump the filename prefix (e.g. `dep2-`) and migrate
 // the old files, rather than editing the struct in place.
+//
+// This is not theoretical, and `#[serde(default)]` is not an escape hatch: it does
+// nothing here, because postcard's `SeqAccess` hands the missing field's decode
+// straight to a buffer that has already ended, and the error propagates before
+// serde ever reaches for a default. `load_sendtos` and `load_depositeds` show the
+// shape of the migration — read the old prefix in every shape it could have been
+// written in (newest first, since postcard ignores trailing bytes), rewrite under
+// the new prefix, unlink. `postcard_ignores_serde_default` pins the behaviour.
 
 pub(super) fn deposited_record_path(dir: &Path, id: u64) -> PathBuf {
-    dir.join(format!("dep-{id}.pc"))
+    dir.join(format!("dep2-{id}.pc"))
+}
+
+/// Awaiting-pickup deposits, migrating any written before the offer's relay was
+/// tracked apart from the blob's. Both roles were one relay then, so that is what
+/// the migrated record says.
+pub(super) fn load_depositeds(dir: &Path) -> Vec<DepositedRecord> {
+    let mut out: Vec<DepositedRecord> = load_records(dir, "dep2-");
+
+    for path in record_paths(dir, "dep-") {
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        let Ok(r) = postcard::from_bytes::<DepositedRecordV1>(&bytes) else {
+            continue;
+        };
+        let rec = DepositedRecord {
+            id: r.id,
+            recipient: r.recipient,
+            name: r.name,
+            size: r.size,
+            offer_relay: r.relay.clone(),
+            relay: r.relay,
+            claim: r.claim,
+            expires: r.expires,
+            revoke_token: r.revoke_token,
+            offer_id: r.offer_id,
+            poster_token: r.poster_token,
+        };
+        if !out.iter().any(|x| x.id == rec.id) {
+            persist_deposited(dir, &rec);
+            out.push(rec);
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+    out
+}
+
+/// A send parked on the relay as **chunks** rather than as a mailbox blob.
+///
+/// The same three promises a deposit makes, which is the whole reason this is
+/// written down: it can be withdrawn (`token`), asked after (`chunks`, against the
+/// relay's `have`), and it has a deadline (`expires`). A parked send that nothing
+/// recorded would be a file on somebody's relay that its sender could neither take
+/// back nor learn the fate of.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(super) struct ParkedRecord {
+    pub(super) id: u64,
+    pub(super) recipient: Vec<u8>,
+    pub(super) name: String,
+    pub(super) size: u64,
+    /// The relay holding the pieces — where a withdrawal and a "have you still
+    /// got these?" both go.
+    pub(super) relay: String,
+    /// Per-transfer token: the capability that authorizes withdrawing them.
+    pub(super) token: String,
+    /// The digests the parked copy is addressed by. Also what the pickup poll asks
+    /// about: a chunk the relay no longer holds is one the recipient released as
+    /// they took it.
+    pub(super) chunks: Vec<crate::hash::Hash>,
+    /// Unix seconds when the relay drops them of its own accord.
+    pub(super) expires: u64,
+    /// The offer in the recipient's inbox that names these pieces, and the token
+    /// that retracts it — so a cancel removes the notice as well as the file.
+    pub(super) offer_id: String,
+    pub(super) poster_token: String,
+    /// Where the notice is, which is not always where the pieces are.
+    pub(super) offer_relay: String,
+}
+
+pub(super) fn parked_path(dir: &Path, id: u64) -> PathBuf {
+    dir.join(format!("park-{id}.pc"))
+}
+
+pub(super) fn load_parkeds(dir: &Path) -> Vec<ParkedRecord> {
+    load_records(dir, "park-")
+}
+
+pub(super) fn persist_parked(dir: &Path, rec: &ParkedRecord) {
+    if let Ok(bytes) = postcard::to_allocvec(rec) {
+        let _ = std::fs::create_dir_all(dir);
+        let _ = write_record_private(&parked_path(dir, rec.id), &bytes);
+    }
+}
+
+pub(super) fn remove_parked(dir: &Path, id: u64) {
+    let _ = std::fs::remove_file(parked_path(dir, id));
 }
 
 pub(super) fn persist_deposited(dir: &Path, rec: &DepositedRecord) {
@@ -286,33 +566,31 @@ pub(super) fn remove_deposited(dir: &Path, id: u64) {
     let _ = std::fs::remove_file(deposited_record_path(dir, id));
 }
 
-pub(super) fn load_depositeds(dir: &Path) -> Vec<DepositedRecord> {
-    load_records(dir, "dep-")
-}
-
 /// Read every postcard record whose filename starts with `prefix` from `dir`.
 pub(super) fn load_records<T: serde::de::DeserializeOwned>(dir: &Path, prefix: &str) -> Vec<T> {
-    let mut out = Vec::new();
+    record_paths(dir, prefix)
+        .into_iter()
+        .filter_map(|p| std::fs::read(&p).ok())
+        .filter_map(|b| postcard::from_bytes::<T>(&b).ok())
+        .collect()
+}
+
+/// Every `<prefix>*.pc` in `dir`. A prefix ending in `-` never catches the next
+/// generation of itself (`dep-` does not match `dep2-`), which is what makes a
+/// prefix bump a clean cut rather than a double read.
+pub(super) fn record_paths(dir: &Path, prefix: &str) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(dir) else {
-        return out;
+        return Vec::new();
     };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let is_match = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .map(|n| n.starts_with(prefix) && n.ends_with(".pc"))
-            .unwrap_or(false);
-        if !is_match {
-            continue;
-        }
-        if let Ok(bytes) = std::fs::read(&path) {
-            if let Ok(rec) = postcard::from_bytes::<T>(&bytes) {
-                out.push(rec);
-            }
-        }
-    }
-    out
+    entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with(prefix) && n.ends_with(".pc"))
+        })
+        .collect()
 }
 
 /// On-disk record of a live short pairing code the daemon is hosting, so it comes
@@ -364,4 +642,128 @@ pub(super) fn remove_code(dir: &Path, id: u64) {
 
 pub(super) fn load_codes(dir: &Path) -> Vec<CodeRecord> {
     load_records(dir, "code-")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The rule the NOTE above states, pinned so it stops being folklore: a struct
+    /// that grew a field cannot read what the shape before it wrote, and
+    /// `#[serde(default)]` does not change that. Every time this was forgotten, the
+    /// cost was silent — `load_records` drops what it cannot parse.
+    #[test]
+    fn postcard_ignores_serde_default() {
+        #[derive(serde::Serialize)]
+        struct Before {
+            a: u32,
+        }
+        #[derive(serde::Deserialize, Debug)]
+        struct After {
+            #[allow(dead_code)]
+            a: u32,
+            #[serde(default)]
+            #[allow(dead_code)]
+            b: String,
+        }
+
+        let bytes = postcard::to_allocvec(&Before { a: 7 }).unwrap();
+        assert!(
+            postcard::from_bytes::<After>(&bytes).is_err(),
+            "if this ever passes, the prefix-bump migrations here are dead weight — \
+             check postcard's SeqAccess and simplify"
+        );
+    }
+
+    /// The other half of why migrations read newest-first: trailing bytes are not
+    /// an error, so the *older* shape reads a newer record without complaint.
+    #[test]
+    fn postcard_accepts_trailing_bytes() {
+        #[derive(serde::Serialize)]
+        struct After {
+            a: u32,
+            b: u32,
+        }
+        #[derive(serde::Deserialize)]
+        struct Before {
+            a: u32,
+        }
+
+        let bytes = postcard::to_allocvec(&After { a: 7, b: 9 }).unwrap();
+        let old: Before = postcard::from_bytes(&bytes).expect("trailing bytes are ignored");
+        assert_eq!(old.a, 7);
+    }
+
+    /// A held send written by the previous build comes back, keeps its id, and is
+    /// rewritten under the new prefix — the upgrade path that would otherwise
+    /// forget exactly the sends that had not been delivered yet.
+    #[test]
+    fn legacy_sendto_records_migrate() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy = SendToRecordV2 {
+            id: 42,
+            recipient: vec![1, 2, 3],
+            payload: "/tmp/a".into(),
+            name: "a".into(),
+            archive: false,
+            paused: true,
+            reason: "waiting".into(),
+            note: "hi".into(),
+            target: None,
+        };
+        let bytes = postcard::to_allocvec(&legacy).unwrap();
+        std::fs::write(dir.path().join("sendto-42.pc"), &bytes).unwrap();
+
+        let loaded = load_sendtos(dir.path());
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].id, 42);
+        assert_eq!(loaded[0].reason, "waiting");
+        assert!(loaded[0].paused);
+        assert_eq!(
+            loaded[0].relay, None,
+            "an old record predates per-contact relays"
+        );
+
+        assert!(dir.path().join("sendto2-42.pc").exists(), "rewritten");
+        assert!(
+            !dir.path().join("sendto-42.pc").exists(),
+            "and the old one unlinked"
+        );
+
+        // Idempotent: a second pass has nothing left to migrate and must not
+        // duplicate the row it already moved.
+        assert_eq!(load_sendtos(dir.path()).len(), 1);
+    }
+
+    /// A deposit awaiting pickup keeps pointing at the relay holding the blob, and
+    /// starts naming that same relay as where the notice sits — which is what it
+    /// was, back when one relay did both jobs.
+    #[test]
+    fn legacy_deposited_records_migrate() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy = DepositedRecordV1 {
+            id: 7,
+            recipient: vec![9],
+            name: "f".into(),
+            size: 10,
+            relay: "https://old.example".into(),
+            claim: "c".into(),
+            expires: 99,
+            revoke_token: "rv".into(),
+            offer_id: "oid".into(),
+            poster_token: "pt".into(),
+        };
+        std::fs::write(
+            dir.path().join("dep-7.pc"),
+            postcard::to_allocvec(&legacy).unwrap(),
+        )
+        .unwrap();
+
+        let loaded = load_depositeds(dir.path());
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].relay, "https://old.example");
+        assert_eq!(loaded[0].offer_relay, "https://old.example");
+        assert!(dir.path().join("dep2-7.pc").exists());
+        assert!(!dir.path().join("dep-7.pc").exists());
+    }
 }

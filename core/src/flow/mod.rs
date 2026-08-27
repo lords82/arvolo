@@ -16,17 +16,20 @@ mod storage;
 
 pub use archive::pack_tar;
 pub use offline::{
-    claim_info, claim_status, deposit_offline, fetch_offline, revoke_offline, ClaimInfo,
-    ClaimStatus, DepositError, Deposited,
+    claim_info, claim_status, deposit_offline, fetch_offline, fetch_offline_with_progress,
+    revoke_offline, ClaimInfo, ClaimStatus, DepositError, Deposited,
 };
 // Shared with the link path, which deposits through its own request but has to read
 // the same granted-TTL answer off it.
 pub(crate) use offline::granted_ttl;
 pub use recv::{
-    default_out, discard_incomplete, recv_chunked, safe_download_name, ChunkSource, RecvEvent,
-    RecvOutcome,
+    default_out, discard_incomplete, recv_chunked, safe_download_name, ChunkSource, RecvCancel,
+    RecvEvent, RecvOutcome,
 };
-pub use send::{prepare_send, resume_send, SendEvent, SendSession};
+pub use send::{
+    prepare_send, prepare_send_in_slot, prepare_send_reusing, resume_send, PrepSlot, ReusablePrep,
+    SendEvent, SendSession, PARK_TTL_SECS,
+};
 pub use sidecar::read_ticket;
 
 pub(crate) use recv::{archive_stage_path, seeding_enabled, spawn_swarm_coordinator};

@@ -4,7 +4,7 @@
 // on a refusal, a click that reported success the daemon never gave).
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { dto, harness, makeIpcMock, resetHarness, pick } from "./mocks";
+import { P2P_TICKET, PEER_ID, dto, harness, makeIpcMock, resetHarness, pick } from "./mocks";
 
 vi.mock("../ipc", () => makeIpcMock());
 
@@ -71,18 +71,30 @@ describe("refreshContacts", () => {
 
 describe("peerLabel / isVerified", () => {
   it("64. a saved contact wins over the sender's self-declared name", async () => {
-    harness.snapshot.contacts = [dto.contact({ name: "proj", id: "peer1" })];
+    harness.snapshot.contacts = [dto.contact({ name: "proj", id: PEER_ID })];
     await boot();
     // The petname inside an offer is a claim, not an identity: never let it
     // override what the user themselves saved for that key.
-    expect(s().peerLabel("peer1", "Mi Chiamo Proj")).toBe("proj");
+    expect(s().peerLabel(PEER_ID, "Mi Chiamo Proj")).toBe("proj");
   });
 
   it("65. an unknown peer falls back to its claimed name, then to a short id", async () => {
     await boot();
     expect(s().peerLabel("unknownkey", "Marta")).toBe("Marta");
-    expect(s().peerLabel("if2xmnescalwohxlex5qylevzs2cypwdnjxe7sxb76wcphc7daha")).toContain("…");
+    expect(s().peerLabel(PEER_ID)).toContain("…");
     expect(s().peerLabel(null)).toBe("unknown");
+  });
+
+  it("65a. our own id is our own devices, not an unknown peer", async () => {
+    await boot();
+    // A send to yourself names the identity every one of your machines shares,
+    // so the id comes back as our own — and a shortened id in that row would
+    // read as a stranger nobody saved.
+    const mine = s().status?.public_id ?? "";
+    expect(mine).not.toBe("");
+    expect(s().peerLabel(mine)).toBe("Your devices");
+    // Even against a name the sender claimed for itself, which is us.
+    expect(s().peerLabel(mine, "Marta")).toBe("Your devices");
   });
 
   it("66. verified is only true for a contact actually marked verified", async () => {
@@ -202,7 +214,7 @@ describe("ticket", () => {
     await boot();
     await expect(s().ticket(["/a.txt"])).resolves.toEqual({
       id: 1,
-      ticket: "arvc-test",
+      ticket: P2P_TICKET,
     });
   });
 
@@ -287,8 +299,8 @@ describe("pause / resume", () => {
 
 describe("markVerified", () => {
   it("86. a refused verify does not stamp a badge the daemon never granted", async () => {
-    harness.snapshot.contacts = [dto.contact({ name: "proj", id: "peer1", verified: false })];
-    harness.snapshot.transfers = [dto.transfer({ id: 1, peer: "peer1" })];
+    harness.snapshot.contacts = [dto.contact({ name: "proj", id: PEER_ID, verified: false })];
+    harness.snapshot.transfers = [dto.transfer({ id: 1, peer: PEER_ID })];
     await boot();
     harness.fail = new Set(["markVerified"]);
     await expect(s().markVerified("proj")).rejects.toThrow();
@@ -437,6 +449,28 @@ describe("pause-all", () => {
   });
 });
 
+// A send spends its first minutes reading and encrypting the payload, with
+// nothing on the wire and the recipient not yet told anything. Shown as "active"
+// it was indistinguishable from a transfer stuck at zero bytes.
+describe("a send that is still preparing", () => {
+  it("says so, instead of reading as an active transfer at 0 B", async () => {
+    await boot();
+    harness.emit({ started: { id: 1, direction: "send", name: "big.ipsw", total_size: 11e9 } });
+    harness.emit({ preparing: { id: 1 } });
+    expect(row("t1").status).toBe("preparing");
+    // And it stays on the board rather than dropping out of every section.
+    expect(row("t1").transferred).toBe(0);
+  });
+
+  it("becomes an ordinary transfer once bytes actually move", async () => {
+    await boot();
+    harness.emit({ started: { id: 1, direction: "send", name: "big.ipsw", total_size: 11e9 } });
+    harness.emit({ preparing: { id: 1 } });
+    harness.emit({ progress: { id: 1, transferred: 1024, total_size: 11e9 } });
+    expect(row("t1").status).toBe("active");
+  });
+});
+
 describe("a failed action is never silent", () => {
   // The bug this closes: every action is fired from an `onClick` that cannot await
   // it, so a rejection vanished into the event loop. The button did nothing, said
@@ -474,6 +508,58 @@ describe("a failed action is never silent", () => {
     harness.fail = new Set([apiName[cmd]]);
     await expect(run()).rejects.toThrow();
     expect(s().actionError, `${cmd} must say why`).toMatch(want);
+  });
+
+  // The report this closes: a send the recipient had already dropped was
+  // cancelled, and the row sat on "Annullamento…" for good. The daemon answered
+  // "ok" to an id its engine no longer had, so the `cancelled` event that would
+  // have ended the row was never coming.
+  it("97a. a cancel the daemon refuses puts the row back, not on 'cancelling'", async () => {
+    await boot();
+    harness.emit({ started: { id: 1, direction: "send", name: "f", total_size: 1 } });
+    harness.fail = new Set(["cancel"]);
+    await expect(s().cancel(1)).rejects.toThrow();
+    expect(row("t1").status).toBe("active");
+  });
+
+  // And when the daemon accepts but the event never lands, the board asks rather
+  // than believing its own optimism for ever.
+  it("97b. a cancel with no event settles from the snapshot", async () => {
+    vi.useFakeTimers();
+    try {
+      await boot();
+      harness.emit({ started: { id: 1, direction: "send", name: "f", total_size: 1 } });
+      // The daemon takes it and says nothing more — but its list already has the
+      // row as cancelled, which is what the re-read finds.
+      harness.snapshot.transfers = [
+        dto.transfer({ id: 1, name: "f", status: "cancelled" }),
+      ];
+      await s().cancel(1);
+      expect(row("t1").status).toBe("cancelling");
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(row("t1").status).toBe("cancelled");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // The case actually caught in the wild: the daemon was gone by the time the
+  // cancel was asked for, so there was no event *and* no snapshot to fall back
+  // on. A row must not keep claiming to be cancelling on nobody's authority.
+  it("97c. a cancel with nothing answering gives the row back", async () => {
+    vi.useFakeTimers();
+    try {
+      await boot();
+      harness.emit({ started: { id: 1, direction: "send", name: "f", total_size: 1 } });
+      await s().cancel(1);
+      expect(row("t1").status).toBe("cancelling");
+      // Nothing answers any more — not the cancel's event, not the re-read.
+      harness.fail = new Set(["listTransfers", "status"]);
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(row("t1").status).toBe("active");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("98. a later success clears the message", async () => {

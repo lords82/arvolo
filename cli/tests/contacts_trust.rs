@@ -9,9 +9,8 @@ use tempfile::TempDir;
 
 /// Run `arvolo <args>` with an isolated config dir, identity and non-interactive stdin.
 ///
-/// The identity needs its own variable: its path doesn't follow `ARVOLO_CONFIG_DIR`,
-/// it falls back to `$HOME/.config/arvolo/identity.key` — so without this a test run
-/// reads, and can create, the identity of whoever ran it.
+/// The identity now follows `ARVOLO_CONFIG_DIR`; `ARVOLO_IDENTITY` is kept as a
+/// belt-and-braces pin so the test can never touch the identity of whoever runs it.
 fn arvolo(cfg: &TempDir, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_arvolo"))
         .args(args)
@@ -61,7 +60,7 @@ fn trust_requires_verification_unless_forced() {
 
     // Untrust, verify out-of-band (--yes skips the interactive prompt), then a
     // plain trust is accepted.
-    assert!(arvolo(&cfg, &["contacts", "untrust", "alice"])
+    assert!(arvolo(&cfg, &["contacts", "trust", "alice", "--undo"])
         .status
         .success());
     let out = arvolo(&cfg, &["contacts", "verify", "alice", "--yes"]);
@@ -197,7 +196,7 @@ fn unverify_does_not_claim_a_change_it_did_not_make() {
     let id = fresh_id();
     arvolo(&cfg, &["contacts", "add", "alice", &id]);
 
-    let out = arvolo(&cfg, &["contacts", "unverify", "alice"]);
+    let out = arvolo(&cfg, &["contacts", "verify", "alice", "--undo"]);
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -208,7 +207,7 @@ fn unverify_does_not_claim_a_change_it_did_not_make() {
 
     // Set it, and the clear is then reported as a real change on stdout.
     arvolo(&cfg, &["contacts", "verify", "alice", "--yes"]);
-    let out = arvolo(&cfg, &["contacts", "unverify", "alice"]);
+    let out = arvolo(&cfg, &["contacts", "verify", "alice", "--undo"]);
     assert!(String::from_utf8_lossy(&out.stdout).contains("Cleared"));
 }
 
@@ -228,7 +227,7 @@ fn sending_to_an_unverified_contact_warns_without_blocking() {
     std::fs::write(&file, b"ciao").unwrap();
 
     let out = Command::new(env!("CARGO_BIN_EXE_arvolo"))
-        .args(["send", "alice", file.to_str().unwrap(), "--deposit"])
+        .args(["send", file.to_str().unwrap(), "--to", "alice", "--mailbox"])
         .env("ARVOLO_CONFIG_DIR", cfg.path())
         .env("ARVOLO_IDENTITY", cfg.path().join("identity.key"))
         .env("ARVOLO_RELAY", "http://127.0.0.1:1")
@@ -249,7 +248,7 @@ fn sending_to_an_unverified_contact_warns_without_blocking() {
     // Verified now, and the warning is gone.
     arvolo(&cfg, &["contacts", "verify", "alice", "--yes"]);
     let out = Command::new(env!("CARGO_BIN_EXE_arvolo"))
-        .args(["send", "alice", file.to_str().unwrap(), "--deposit"])
+        .args(["send", file.to_str().unwrap(), "--to", "alice", "--mailbox"])
         .env("ARVOLO_CONFIG_DIR", cfg.path())
         .env("ARVOLO_IDENTITY", cfg.path().join("identity.key"))
         .env("ARVOLO_RELAY", "http://127.0.0.1:1")

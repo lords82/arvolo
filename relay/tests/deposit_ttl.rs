@@ -51,7 +51,7 @@ async fn a_clamped_deposit_reports_the_ttl_it_actually_got() {
 
     let asked = 7 * 24 * 3600;
     let deposited = deposit_offline(
-        src.path(),
+        &src.path().into(),
         "payload.bin",
         &recipient.public(),
         &sender,
@@ -84,7 +84,7 @@ async fn a_ttl_within_the_cap_comes_back_unchanged() {
     // is what the relay agreed to, and it agreed to what was asked.
     let asked = RELAY_MAX_TTL / 2;
     let deposited = deposit_offline(
-        src.path(),
+        &src.path().into(),
         "payload.bin",
         &recipient.public(),
         &sender,

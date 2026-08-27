@@ -101,9 +101,9 @@ pub(crate) fn human_duration(secs: u64) -> String {
 }
 
 /// Resolve the relay to use for presence, requiring one (offers can't work P2P).
-pub(crate) fn require_relay(relay: Option<String>, use_http: bool) -> Result<String> {
+pub(crate) fn require_relay(relay: Option<String>) -> Result<String> {
     let resolved = relay
-        .map(|r| book::normalize_relay(&r, use_http))
+        .map(|r| book::normalize_relay(&r))
         .or_else(book::default_relay_or_builtin)
         .context(
             "a relay is required: pass --relay <host>, set ARVOLO_RELAY, or configure `relay`",
@@ -121,15 +121,17 @@ pub(crate) fn require_relay(relay: Option<String>, use_http: bool) -> Result<Str
 /// command that never mentioned either. `what` names the thing being refused, e.g.
 /// "a pairing code".
 pub(crate) fn ensure_p2p(what: &str) -> Result<()> {
-    anyhow::ensure!(
-        arvolo_core::transfer::p2p_enabled(),
-        "{what} needs a direct peer-to-peer transfer, and P2P is off \
-         (`p2p = false` in config.toml, or ARVOLO_P2P=off).\n\
-         Go through the relay instead: `arvolo send <who> <paths> --deposit` for a \
-         recipient you have, or `arvolo link <paths>` for a browser link. Both are \
-         plain HTTP, so they also honour `proxy`."
-    );
-    Ok(())
+    if arvolo_core::transfer::p2p_enabled() {
+        return Ok(());
+    }
+    Err(crate::output::refuse(
+        format!(
+            "{what} needs a direct transfer, and P2P is off. Go through the relay:\n\
+             \x20   arvolo send <paths> --to <who> --mailbox   (or --link, for a browser link)"
+        ),
+        "P2P is off in config.toml (`p2p = false`) or in the environment \
+         (ARVOLO_P2P=off). Both relay routes are plain HTTP, so they honour `proxy` too.",
+    ))
 }
 
 /// Parse a download link (`https://<relay>/dl/<claim>[#key]`) into its relay base
@@ -149,16 +151,174 @@ pub(crate) fn identity_path() -> PathBuf {
     if let Ok(p) = std::env::var("ARVOLO_IDENTITY") {
         return PathBuf::from(p);
     }
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join(".config/arvolo/identity.key")
+    crate::book::config_dir().join("identity.key")
 }
 
 pub(crate) fn my_identity() -> Result<Identity> {
     Identity::load_or_create(&identity_path()).context("load identity")
 }
 
+/// The reserved `--to` word for your own devices: `arvolo send file --to me`.
+///
+/// It beats a saved contact of the same name, and that precedence is chosen for
+/// the direction it fails in. Read as the reserved word when a contact was meant,
+/// the file is sealed to you and simply does not reach them — annoying, nothing
+/// leaks. The other way round it would be sealed to *another person* when you
+/// meant yourself, which is a disclosure. So the reserved word wins, and
+/// [`crate::commands::send`] says so on stderr when the collision exists.
+pub(crate) const SELF_RECIPIENT: &str = "me";
+
+/// Resolve a `--to` argument the way `send` does: [`SELF_RECIPIENT`] first, then
+/// the address book.
+///
+/// The precedence lives here rather than in `book` because only this layer knows
+/// the identity, and it lives *at all* because two clients need the same answer.
+/// `arvolo send --to me` resolved the word before the daemon ever saw it
+/// ([`crate::commands::send::send_to`]), so a front-end that talks to the daemon
+/// directly — the desktop app — asked for a contact called "me" and got an error.
+/// One rule, both callers.
+///
+/// `None` means "wherever we listen", which is what every send did before a
+/// contact could carry a relay. Our own devices resolve to `None` by
+/// construction: they share our identity, so they read the inbox we do.
+pub(crate) fn resolve_recipient_or_self_with_relay(
+    arg: &str,
+) -> Result<(PublicId, Option<String>)> {
+    if arg == SELF_RECIPIENT {
+        return Ok((my_identity()?.public(), None));
+    }
+    crate::book::resolve_recipient_with_relay(arg)
+}
+
+/// Is this base32 public id our own identity? Used to decide that an incoming
+/// offer came from another of our devices — the only sender we auto-accept
+/// without being asked to trust them.
+pub(crate) fn is_self(id_b32: &str) -> bool {
+    my_identity()
+        .map(|me| encode_id(&me.public()) == id_b32)
+        .unwrap_or(false)
+}
+
+/// Is an offer from this sender taken without asking?
+///
+/// Two senders qualify: a contact the user marked trusted, and another of our own
+/// devices — the second because there is nobody there to be asked to trust, only
+/// the user on the other side of the same desk.
+///
+/// One predicate rather than two matching expressions, because both ends of the
+/// socket need the same answer: the daemon *decides* with it, and the front-end is
+/// *told* with it (`stamp_offer` fills [`OfferReceived::auto`] from here). While
+/// they were written out separately they disagreed on our own devices, and a
+/// window that asks a question the daemon has already answered is exactly what
+/// that disagreement looks like from a chair.
+///
+/// [`OfferReceived::auto`]: arvolo_ipc::protocol::EventDto
+pub(crate) fn auto_accepts(id_b32: &str) -> bool {
+    crate::book::sender_status(id_b32).trusted || is_self(id_b32)
+}
+
 pub(crate) fn encode_id(p: &PublicId) -> String {
     data_encoding::BASE32_NOPAD
         .encode(&p.to_bytes())
         .to_lowercase()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The question the daemon answers by acting and the front-end is answered by
+    /// being told. It is pinned because the two used to be written out separately
+    /// and disagreed here: our own devices were downloaded automatically *and*
+    /// asked about, so the window offered a button for an offer the daemon had
+    /// already consumed, and pressing it produced an error next to a file that was
+    /// arriving perfectly well.
+    #[test]
+    fn auto_accept_covers_trusted_contacts_and_our_own_devices() {
+        let _guard = crate::testlock::ENV
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("ARVOLO_CONFIG_DIR", dir.path());
+        // Or the identity would be read from whoever is running the test.
+        std::env::remove_var("ARVOLO_IDENTITY");
+
+        let me = encode_id(&my_identity().unwrap().public());
+        assert!(
+            auto_accepts(&me),
+            "another of our own devices is taken without asking"
+        );
+
+        let stranger = encode_id(&Identity::generate().public());
+        assert!(!auto_accepts(&stranger), "a stranger is always a question");
+
+        // Saved is not trusted: knowing a name is not a standing decision to take
+        // whatever it sends.
+        let known = encode_id(&Identity::generate().public());
+        book::contact_add("giulia", &known).unwrap();
+        assert!(!auto_accepts(&known));
+
+        book::mark_verified("giulia").unwrap();
+        book::mark_trusted("giulia").unwrap();
+        assert!(auto_accepts(&known), "trust is what the flag is made of");
+
+        std::env::remove_var("ARVOLO_CONFIG_DIR");
+    }
+
+    /// The rule `send --to` and the daemon's `Push` now share. It is worth a test
+    /// of its own because the failure it prevents is silent: before, the desktop
+    /// app's "your devices" would have resolved against the address book, found
+    /// nothing, and reported a missing contact for a destination that is always
+    /// reachable.
+    #[test]
+    fn the_reserved_word_resolves_to_our_own_identity() {
+        let _guard = crate::testlock::ENV
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("ARVOLO_CONFIG_DIR", dir.path());
+        // Or the identity would be read from whoever is running the test.
+        std::env::remove_var("ARVOLO_IDENTITY");
+
+        let me = my_identity().unwrap().public();
+        assert_eq!(
+            encode_id(
+                &resolve_recipient_or_self_with_relay(SELF_RECIPIENT)
+                    .unwrap()
+                    .0
+            ),
+            encode_id(&me)
+        );
+
+        // An ordinary contact is untouched by the new branch, by name and by id.
+        let other = Identity::generate().public();
+        book::contact_add("proj", &encode_id(&other)).unwrap();
+        assert_eq!(
+            encode_id(&resolve_recipient_or_self_with_relay("proj").unwrap().0),
+            encode_id(&other)
+        );
+        assert_eq!(
+            encode_id(
+                &resolve_recipient_or_self_with_relay(&encode_id(&other))
+                    .unwrap()
+                    .0
+            ),
+            encode_id(&other)
+        );
+
+        // And the word wins over a contact that happens to carry it — the
+        // precedence documented on `SELF_RECIPIENT`, which fails towards sealing
+        // a file to ourselves rather than to somebody else.
+        book::contact_add(SELF_RECIPIENT, &encode_id(&other)).unwrap();
+        assert_eq!(
+            encode_id(
+                &resolve_recipient_or_self_with_relay(SELF_RECIPIENT)
+                    .unwrap()
+                    .0
+            ),
+            encode_id(&me)
+        );
+
+        std::env::remove_var("ARVOLO_CONFIG_DIR");
+    }
 }

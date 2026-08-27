@@ -2,18 +2,25 @@
 // snapshot and then mutated purely by pushed engine events (no polling).
 
 import { create } from "zustand";
-import { api, onConnected, onDaemonError, onEngineEvent } from "./ipc";
+import {
+  api,
+  onConnected,
+  onDaemonError,
+  onEngineEvent,
+  onUpdateProgress,
+} from "./ipc";
 import { shortId } from "./format";
 import { t } from "./i18n";
 import { toast } from "./ui/Toasts";
+import * as updates from "./update";
 import type {
   ConfigDto,
   ConfigPatch,
   ContactDto,
   DepositDto,
+  DeviceDto,
   EngineEvent,
   HistoryDto,
-  Method,
   OfferDto,
   PairKind,
   StatusDto,
@@ -22,6 +29,8 @@ import type {
   UIStatus,
   UITransfer,
   PickedItem,
+  UpdateInfo,
+  UpdateProgress,
 } from "./types";
 
 /** The six places the app can be. One at a time, always — the previous model
@@ -49,9 +58,23 @@ export const TITLE_KEY = {
 
 export type ThemeChoice = "system" | "light" | "dark";
 
-/** The four ways a send can reach someone. Lives here rather than in the send
- *  sheet because callers elsewhere preselect one — see `sheetMode`. */
-export type SendMode = "contact" | "code" | "link" | "ticket";
+/** The five ways a send can reach someone. Lives here rather than in the send
+ *  sheet because callers elsewhere preselect one — see `sheetMode`.
+ *
+ *  `self` is a recipient, not a mechanism: underneath it is the same push as
+ *  `contact`. It earns a place beside the others because the switch answers
+ *  "who is this for?", and your own machines are one of the answers — the one
+ *  nobody has to accept, and the only one that is not a person. */
+export type SendMode = "contact" | "self" | "code" | "link" | "ticket";
+
+/** The reserved recipient standing for this identity's own machines, the way the
+ *  daemon resolves it (`resolve_recipient_or_self`).
+ *
+ *  A *wire* value, never a label. It is the same word `arvolo send --to me`
+ *  takes, so it must reach the daemon spelled exactly like this in every
+ *  language — which is also why nothing user-facing may print it: what a person
+ *  reads comes from `send.selfName`, translated. */
+export const SELF_RECIPIENT = "me";
 
 /** Fire a store action from a click handler and drop its rejection.
  *
@@ -196,18 +219,40 @@ function saveOrder(transfers: Record<string, UITransfer>) {
   }
 }
 
-/** Last progress sample per transfer id, for throughput estimation. Kept outside
- *  the store: it changes on every event and must not trigger renders itself. */
-const progSamples = new Map<number, { t: number; bytes: number }>();
+/** Recent progress samples per transfer id, for throughput estimation. Kept
+ *  outside the store: they change on every event and must not trigger renders. */
+const progSamples = new Map<number, { t: number; bytes: number }[]>();
 
-/** Exponentially-smoothed bytes/sec from consecutive progress events. */
+/** How much history the rate is computed over, and the least of it that must
+ *  exist before a number is shown at all. A receiver's progress advances in
+ *  whole verified chunks (16 MiB at a time): a rate read between two events is
+ *  either zero or a burst — on a slow link it once read "39 MB/s" on a wire
+ *  moving at 2. Only a slope over a window much wider than the gap between
+ *  chunks says something true. */
+const RATE_WINDOW_MS = 30_000;
+const RATE_MIN_SPAN_MS = 3_000;
+
+/** How long a row may say "cancelling…" on the strength of an event that has not
+ *  arrived, before the board asks the daemon what actually happened. Longer than
+ *  the engine's own worst case (it spends up to 10s withdrawing a deposit from the
+ *  relay before ending the row anyway), so a slow-but-working cancel is never
+ *  second-guessed — only a silent one. */
+const CANCEL_SETTLE_MS = 15_000;
+
+/** Bytes/sec as the slope over the last [`RATE_WINDOW_MS`] of samples. */
 function sampleRate(id: number, bytes: number, prevRate?: number): number | undefined {
   const at = now();
-  const last = progSamples.get(id);
-  progSamples.set(id, { t: at, bytes });
-  if (!last || at <= last.t || bytes < last.bytes) return prevRate;
-  const inst = ((bytes - last.bytes) * 1000) / (at - last.t);
-  return prevRate ? 0.7 * prevRate + 0.3 * inst : inst;
+  const samples = progSamples.get(id) ?? [];
+  // A byte count that went backwards is a restart/resume — start history over.
+  if (samples.length > 0 && bytes < samples[samples.length - 1].bytes) {
+    samples.length = 0;
+  }
+  samples.push({ t: at, bytes });
+  while (samples.length > 1 && samples[0].t < at - RATE_WINDOW_MS) samples.shift();
+  progSamples.set(id, samples);
+  const span = at - samples[0].t;
+  if (span < RATE_MIN_SPAN_MS) return prevRate;
+  return ((bytes - samples[0].bytes) * 1000) / span;
 }
 
 /** What a row is doing, from the daemon's status *and* what kind of row it is.
@@ -224,12 +269,19 @@ function statusOf(dto: TransferDto): { status: UIStatus; reason?: string } {
   const base = toUIStatus(dto.status);
   if (base.status === "active" && dto.sharing && dto.download_peers === 0)
     return { status: "sharing" };
+  // A held send whose offer has actually reached them is not stalled — it is
+  // waiting on a person, and that is a different thing to say and a different
+  // thing to be able to act on. `offer_status` is the daemon's own evidence for
+  // it, so the distinction is read rather than guessed.
+  if (base.status === "stalled" && dto.direction === "send" && dto.offer_status)
+    return { status: "offered", reason: base.reason };
   return base;
 }
 
 /** Split a daemon status string into a UI status + optional reason. */
 function toUIStatus(raw: string): { status: UIStatus; reason?: string } {
   if (raw === "active") return { status: "active" };
+  if (raw === "preparing") return { status: "preparing" };
   if (raw === "completed") return { status: "completed" };
   if (raw === "deposited") return { status: "deposited" };
   if (raw === "cancelled") return { status: "cancelled" };
@@ -241,16 +293,40 @@ function toUIStatus(raw: string): { status: UIStatus; reason?: string } {
   return { status: "active" };
 }
 
-function methodFor(dto: TransferDto): Method {
-  if (dto.status.startsWith("deposited")) return "cloud";
-  if (dto.download_peers > 0 || dto.swarm_peers > 0) return "p2p";
-  return "p2p";
+/** Where the update flow is. `error` is only ever shown for a check the user
+ *  asked for — an automatic one that failed says nothing (see `checkForUpdate`). */
+export interface UpdateState {
+  /** `installed` is not a kind of `error`: the new version is on disk and will be
+   *  running the moment the app is opened again. Only the last step — coming back
+   *  up by itself — did not happen, and telling someone their update failed when
+   *  it did not is the wrong end of that. */
+  phase: "idle" | "checking" | "available" | "downloading" | "installed" | "error";
+  info: UpdateInfo | null;
+  progress: UpdateProgress | null;
+  error: string | null;
+  /** True while the last check was the one behind the button in Settings. That
+   *  check is the only one allowed to report "you are up to date" and the only
+   *  one allowed to report a failure. */
+  manual: boolean;
+  /** Mirrors the stored preference, so the toggle can render without reading
+   *  localStorage on every paint. */
+  autoCheck: boolean;
+  /** The version whose banner was closed; kept in state so closing it re-renders. */
+  dismissed: string;
 }
 
 interface State {
   connected: boolean;
   status: StatusDto | null;
   guiVersion: string;
+  update: UpdateState;
+  /** Look for a newer release. `manual` marks the one the user asked for. */
+  checkForUpdate: (manual: boolean) => Promise<void>;
+  /** Close the banner for the offered version; it will not come back. */
+  dismissUpdate: () => void;
+  /** Download and install. Does not resolve on success — the process is replaced. */
+  startUpdate: () => void;
+  setAutoCheck: (on: boolean) => void;
   contacts: ContactDto[];
   contactsById: Record<string, ContactDto>;
   transfers: Record<string, UITransfer>;
@@ -300,6 +376,10 @@ interface State {
   sync: SyncDto | null;
   syncLoading: boolean;
   syncError: string | null;
+  /** The machines sharing this identity. Empty until loaded — and legitimately
+   *  empty on a machine that has never completed a sync round. */
+  devices: DeviceDto[];
+  devicesLoading: boolean;
 
   /** The pairing exchange currently on screen, if any. */
   pairing: PairingState | null;
@@ -326,6 +406,9 @@ interface State {
    *  watch, so its numbers live behind a panel rather than crowding the row. */
   shareOpen: number | null;
   receiveOpen: boolean; // paste-a-ticket sheet
+  /** A ticket handed in from outside the webview — a dropped/double-clicked
+   *  `.arvolo` file, read Rust-side. The sheet consumes it as its initial value. */
+  receivePrefill: string | null;
   /** The person whose detail sheet is open, by contact name. */
   personOpen: string | null;
 
@@ -363,6 +446,7 @@ interface State {
   revokeDeposit: (id: string) => Promise<void>;
 
   openReceive: () => void;
+  openReceiveWith: (ticket: string) => void;
   closeReceive: () => void;
   loadHistory: () => Promise<void>;
   /** Forget the whole daemon-side history log. */
@@ -375,8 +459,11 @@ interface State {
   loadSync: () => Promise<void>;
   /** Run one address-book sync round now. */
   syncNow: () => Promise<void>;
-  /** Drop advertised-name records for contacts that no longer exist. */
-  pruneNames: () => Promise<number>;
+  loadDevices: () => Promise<void>;
+  /** Rename this machine. Only this one — a device row belongs to the device
+   *  that writes it, so the others are renamed on themselves. */
+  renameThisDevice: (name: string) => Promise<void>;
+  forgetDevice: (who: string) => Promise<void>;
 
   /** Begin a pairing exchange and park its state for the sheet to render. */
   startPairing: (kind: PairKind, code?: string, name?: string) => Promise<void>;
@@ -385,7 +472,13 @@ interface State {
   clearPairing: () => void;
 
   // actions (forward to the daemon, then let events reconcile)
-  send: (to: string, items: string[], note: string) => Promise<number>;
+  send: (
+    to: string,
+    items: string[],
+    note: string,
+    /** Aim it at one of our own machines; only with the self recipient. */
+    device?: string | null
+  ) => Promise<number>;
   /** `send --deposit`: skip the live attempt entirely. Returns the `arvm…`
    *  ticket, which is the sender's copy for hand-delivery. */
   deposit: (
@@ -394,7 +487,8 @@ interface State {
     note: string,
     ttl: number | null,
     max: number | null,
-    password: string | null
+    password: string | null,
+    device?: string | null
   ) => Promise<{ id: number; ticket: string }>;
   ticket: (items: string[]) => Promise<{ id: number; ticket: string }>;
   /** Host a short pairing code in the daemon (keep = serve every receiver). */
@@ -413,6 +507,8 @@ interface State {
   reject: (offerId: string) => Promise<void>;
   pause: (id: number) => Promise<void>;
   resume: (id: number) => Promise<void>;
+  /** Stop waiting for the recipient to accept; park the file on the relay now. */
+  depositNow: (id: number) => Promise<void>;
   cancel: (id: number) => Promise<void>;
   /** Per-row "Elimina": drop a finished transfer from daemon + local list. */
   removeRow: (key: string) => Promise<void>;
@@ -426,6 +522,10 @@ interface State {
   unblockContact: (who: string) => Promise<void>;
   acceptName: (who: string) => Promise<void>;
   addContact: (name: string, id: string) => Promise<void>;
+  /** Re-point an existing contact name at a different key, after the user has
+   *  been told what it costs. Resolves to the two fingerprints when a key
+   *  changed, `null` when the name turned out to be free after all. */
+  rebindContact: (name: string, id: string) => Promise<[string, string] | null>;
   removeContact: (name: string) => Promise<void>;
   renameContact: (old: string, newName: string) => Promise<void>;
   /** Set (or clear) the display name advertised inside offers. */
@@ -446,13 +546,24 @@ export const useStore = create<State>((set, get) => {
    *  handlers that cannot await, so without this a rejection is swallowed by the
    *  event loop and the button looks broken rather than blocked. Re-throws so
    *  callers that *do* await (and want to react) still can. */
+  /** The words inside a failure, wherever they are.
+   *
+   *  A Tauri command rejects with a plain string; `acceptOffer` rejects with an
+   *  `Error` that also carries a refusal code, and `String()` on one of those
+   *  reads "Error: …". The user gets the same sentence either way. */
+  const errText = (e: unknown): string => {
+    if (typeof e === "string") return e;
+    const m = (e as { message?: unknown } | null)?.message;
+    return typeof m === "string" ? m : String(e);
+  };
+
   const act = async <T,>(what: string, fn: () => Promise<T>): Promise<T> => {
     try {
       const r = await fn();
       set({ actionError: null });
       return r;
     } catch (e) {
-      set({ actionError: `${what}: ${String(e)}` });
+      set({ actionError: `${what}: ${errText(e)}` });
       throw e;
     }
   };
@@ -485,14 +596,21 @@ export const useStore = create<State>((set, get) => {
       transferred: d.transferred,
       status,
       reason,
+      waitingCode: d.waiting_code ?? undefined,
+      waitingDetail: d.waiting_detail ?? undefined,
+      // A daemon that predates the field says nothing; keep the button, which is
+      // what that daemon has always done.
+      canPause: d.can_pause ?? true,
       peer: get().peerLabel(d.peer, prev?.peer),
       peerId: d.peer ?? prev?.peerId,
-      encrypted: true,
+      // The sender's own claim about their name, kept so "save the sender" can
+      // propose it. `prev` covers a daemon too old to report it, which would
+      // otherwise blank a name a live event had already given us.
+      senderName: d.sender_name || prev?.senderName,
       verified: get().isVerified(d.peer),
-      method: methodFor(d),
+      handle: d.handle || undefined,
       swarmPeers: d.swarm_peers,
       downloadPeers: d.download_peers,
-      files: prev?.files ?? 1,
       // The engine's answer wins: it is the one that survives a restart. Falling
       // back to what we already had keeps a path learned from a live event when
       // talking to a daemon too old to report it.
@@ -525,18 +643,20 @@ export const useStore = create<State>((set, get) => {
     peerId: o.from,
     note: o.note || undefined,
     senderName: o.sender_name || undefined,
-    encrypted: true,
+    fingerprint: o.fingerprint || undefined,
+    seenCount: o.seen_count,
+    knownName: o.known_name || undefined,
     verified: get().isVerified(o.from),
-    method: "cloud",
     swarmPeers: 0,
     downloadPeers: 0,
-    files: 1,
     firstSeen: prev?.firstSeen ?? now(),
     rank: rankFor(`o${o.id}`, prev),
     copiesServed: 0,
     bytesServed: 0,
     lastPickup: 0,
     fromDownload: 0,
+    // An offer is a decision, not a transfer: there is nothing running to hold.
+    canPause: false,
   });
 
   /** Merge a partial change into an existing transfer row (creating a stub if the
@@ -554,14 +674,14 @@ export const useStore = create<State>((set, get) => {
           size: 0,
           transferred: 0,
           status: "active",
-          encrypted: true,
           verified: false,
-          method: "p2p",
           swarmPeers: 0,
           downloadPeers: 0,
-          files: 1,
           firstSeen: now(),
           rank: rankFor(key),
+          // A row built from an event alone, before any snapshot: assume it can
+          // be held, as this window always did, and let the next snapshot say.
+          canPause: true,
         } as UITransfer);
       return { transfers: { ...s.transfers, [key]: fn(existing) } };
     });
@@ -570,6 +690,15 @@ export const useStore = create<State>((set, get) => {
     connected: false,
     status: null,
     guiVersion: "",
+    update: {
+      phase: "idle",
+      info: null,
+      progress: null,
+      error: null,
+      manual: false,
+      autoCheck: updates.autoCheckEnabled(),
+      dismissed: updates.dismissedVersion(),
+    },
     loadError: null,
     actionError: null,
     contacts: [],
@@ -586,6 +715,7 @@ export const useStore = create<State>((set, get) => {
     incomingOfferId: null,
     shareOpen: null,
     receiveOpen: false,
+    receivePrefill: null,
     personOpen: null,
     presence: {},
     presenceLoading: false,
@@ -595,6 +725,8 @@ export const useStore = create<State>((set, get) => {
     sync: null,
     syncLoading: false,
     syncError: null,
+    devices: [],
+    devicesLoading: false,
     pairing: null,
     deposits: [],
     depositsLoading: false,
@@ -606,12 +738,96 @@ export const useStore = create<State>((set, get) => {
 
     peerLabel: (id, fallbackName) => {
       if (!id) return fallbackName || t("store.unknownPeer");
+      // Our own id is not an unknown peer and not a contact: it is the other
+      // machines holding this identity. Answered here, once, so every list that
+      // names a peer — transfers, history, deposits — says the same thing.
+      if (id === get().status?.public_id) return t("store.selfPeer");
       const c = get().contactsById[id];
       if (c) return c.name;
       if (fallbackName) return fallbackName;
       return shortId(id);
     },
     isVerified: (id) => (id ? !!get().contactsById[id]?.verified : false),
+
+    setAutoCheck: (on) => {
+      updates.setAutoCheckEnabled(on);
+      set((s) => ({ update: { ...s.update, autoCheck: on } }));
+    },
+
+    dismissUpdate: () => {
+      const version = get().update.info?.version;
+      if (!version) return;
+      updates.dismissVersion(version);
+      set((s) => ({ update: { ...s.update, dismissed: version } }));
+    },
+
+    checkForUpdate: async (manual) => {
+      // The automatic triggers ask the cadence; the button never does. An
+      // explicit request that silently declines to do anything is worse than a
+      // slow one.
+      if (!manual && !updates.dueForCheck(Date.now())) return;
+      if (get().update.phase === "checking" || get().update.phase === "downloading")
+        return;
+      set((s) => ({
+        update: { ...s.update, phase: "checking", manual, error: null },
+      }));
+      try {
+        const info = await api.checkUpdate();
+        // Only a check that reached the server resets the clock: a failed one
+        // must not buy itself another week of silence.
+        updates.markChecked(Date.now());
+        // Whether this identity has other machines decides whether the banner
+        // carries the "update them together" line. Asked only when there is
+        // something to announce, and only once — the Devices view is otherwise
+        // the only thing that loads this, and it may never have been opened.
+        if (info && get().sync === null) {
+          await get().loadSync().catch(() => {});
+        }
+        set((s) => ({
+          update: {
+            ...s.update,
+            phase: info ? "available" : "idle",
+            info,
+            error: null,
+          },
+        }));
+      } catch (e) {
+        // A laptop that was closed in a tunnel is not something to interrupt
+        // anyone about — so an automatic failure goes back to idle and waits.
+        set((s) => ({
+          update: {
+            ...s.update,
+            phase: manual ? "error" : "idle",
+            error: manual ? String(e) : null,
+          },
+        }));
+      }
+    },
+
+    startUpdate: () => {
+      const info = get().update.info;
+      if (!info) return;
+      set((s) => ({
+        update: { ...s.update, phase: "downloading", progress: null, error: null },
+      }));
+      // Not awaited on purpose: on success this never resolves, because the
+      // process is replaced by the one it just installed.
+      fire(
+        api.installUpdate().catch((e) => {
+          // The backend says which of the two happened with a marker rather than
+          // a sentence, so the wording on either side can be rewritten without
+          // quietly turning one state into the other.
+          const installed = String(e).includes("relaunch-failed");
+          set((s) => ({
+            update: {
+              ...s.update,
+              phase: installed ? "installed" : "error",
+              error: installed ? null : String(e),
+            },
+          }));
+        })
+      );
+    },
 
     init: async () => {
       // Before anything paints: the stored choice has to beat the media query on
@@ -637,6 +853,20 @@ export const useStore = create<State>((set, get) => {
       const unlistenDaemonErr = await onDaemonError((reason) => {
         if (!get().connected) set({ loadError: reason });
       });
+      const unlistenProgress = await onUpdateProgress((p) => {
+        set((s) => ({ update: { ...s.update, progress: p } }));
+      });
+
+      // The two automatic triggers. Both defer to `dueForCheck`, so between them
+      // they still make one request a week: the timer is not a second cadence,
+      // it is what makes the cadence reachable at all for a window that stays in
+      // the tray for months and would otherwise only ever see the launch check.
+      const startupCheck = setTimeout(() => {
+        fire(get().checkForUpdate(false));
+      }, updates.STARTUP_DELAY_MS);
+      const weekly = setInterval(() => {
+        fire(get().checkForUpdate(false));
+      }, updates.CHECK_INTERVAL_MS);
 
       // Seed the snapshot, retrying until it lands. The backend pump emits
       // `engine://connected` only on a state *change*, so a webview that loads
@@ -656,9 +886,12 @@ export const useStore = create<State>((set, get) => {
 
       return () => {
         stopped = true;
+        clearTimeout(startupCheck);
+        clearInterval(weekly);
         unlistenEv();
         unlistenConn();
         unlistenDaemonErr();
+        unlistenProgress();
       };
     },
 
@@ -719,15 +952,38 @@ export const useStore = create<State>((set, get) => {
             // ("no such pending offer"), which is precisely how Accetta came to do
             // nothing at all.
             const kept: Record<string, UITransfer> = {};
+            let dropped = false;
             for (const [k, tx] of Object.entries(s.transfers)) {
               const stale =
                 tx.status === "incoming" &&
                 tx.peerId === ev.from &&
                 tx.name === ev.name &&
                 tx.offerId !== ev.id;
+              if (stale && tx.offerId === s.incomingOfferId) dropped = true;
               if (!stale) kept[k] = tx;
             }
+            // A dialog left open on the offer we just dropped would be a decision
+            // about an id nobody holds any more — and the same dead button by
+            // another route. Close it; the newer offer draws its own.
+            const incomingOfferId = dropped ? null : s.incomingOfferId;
+            // The daemon takes this one by itself — the sender is trusted, or it is
+            // another of our own devices — so there is no decision to put in front
+            // of anybody. Drawing the question anyway is asking the user to choose
+            // something already chosen, and the answer they give lands on an offer
+            // the daemon has already consumed. The download says everything there
+            // is to say, and it arrives on its own as a `started` event.
+            if (ev.auto) {
+              // Including any row this very id already had: whatever the route it
+              // came by, an arrival being taken automatically leaves no question.
+              delete kept[`o${ev.id}`];
+              return {
+                transfers: kept,
+                incomingOfferId:
+                  incomingOfferId === ev.id ? null : incomingOfferId,
+              };
+            }
             return {
+              incomingOfferId,
               transfers: {
                 ...kept,
                 [`o${ev.id}`]: offerToUI(
@@ -738,6 +994,11 @@ export const useStore = create<State>((set, get) => {
                     size: ev.size,
                     note: ev.note,
                     sender_name: ev.sender_name,
+                    // An older daemon sends none of these; the dialog falls back
+                    // to the raw id and says nothing it cannot support.
+                    fingerprint: ev.fingerprint ?? "",
+                    seen_count: ev.seen_count ?? 0,
+                    known_name: ev.known_name ?? "",
                   },
                   s.transfers[`o${ev.id}`]
                 ),
@@ -782,8 +1043,29 @@ export const useStore = create<State>((set, get) => {
         case "deposited":
           patch(ev.id, (tx) => ({ ...tx, status: "deposited" }));
           break;
+        // Reading and encrypting the payload: nothing on the wire, and the
+        // recipient has not been offered anything yet. Its own status because
+        // "active at 0 B" is what a stuck transfer looks like.
+        case "preparing":
+          patch(ev.id, (tx) => ({ ...tx, status: "preparing" }));
+          break;
         case "waiting":
-          patch(ev.id, (tx) => ({ ...tx, status: "stalled", reason: ev.reason }));
+          patch(ev.id, (tx) => {
+            // Same reading as the snapshot path (`statusOf`): a send whose offer
+            // has reached them is waiting on a person, not on the network, and
+            // gets its own word and its own action.
+            const offerStatus = ev.offer_status || tx.offerStatus;
+            return {
+              ...tx,
+              status: tx.dir === "out" && offerStatus ? "offered" : "stalled",
+              offerStatus,
+              reason: ev.reason,
+              // Empty from a daemon that predates the code: store nothing rather
+              // than "", so the renderer's fallback to `reason` still triggers.
+              waitingCode: ev.code || undefined,
+              waitingDetail: ev.detail || undefined,
+            };
+          });
           break;
         case "paused":
           patch(ev.id, (tx) => ({ ...tx, status: "paused", reason: ev.reason }));
@@ -804,6 +1086,19 @@ export const useStore = create<State>((set, get) => {
         case "code_closed":
           patch(ev.id, (tx) => ({ ...tx, code: undefined }));
           break;
+        case "offer_gone": {
+          // Accepted or declined elsewhere — typically `arvolo recv <handle>` /
+          // `arvolo decline` in a terminal. The row is a ghost from here on.
+          set((s) => {
+            const { [`o${ev.id}`]: _drop, ...rest } = s.transfers;
+            return {
+              transfers: rest,
+              incomingOfferId:
+                s.incomingOfferId === ev.id ? null : s.incomingOfferId,
+            };
+          });
+          break;
+        }
         case "contacts_changed":
           // Fired by the daemon whoever wrote the book — typically an
           // `arvolo contacts …` run in another process.
@@ -907,8 +1202,9 @@ export const useStore = create<State>((set, get) => {
     openShare: (id) => set({ shareOpen: id }),
     closeShare: () => set({ shareOpen: null }),
     openPerson: (name) => set({ personOpen: name }),
-    openReceive: () => set({ receiveOpen: true }),
-    closeReceive: () => set({ receiveOpen: false }),
+    openReceive: () => set({ receiveOpen: true, receivePrefill: null }),
+    openReceiveWith: (ticket) => set({ receiveOpen: true, receivePrefill: ticket }),
+    closeReceive: () => set({ receiveOpen: false, receivePrefill: null }),
 
     loadHistory: async () => {
       set({ historyLoading: true });
@@ -1023,11 +1319,33 @@ export const useStore = create<State>((set, get) => {
         });
       }
     },
+    loadDevices: async () => {
+      set({ devicesLoading: true });
+      try {
+        set({ devices: await api.listDevices(), devicesLoading: false });
+      } catch {
+        // The register is a detail of the Devices screen, and its own card
+        // already says when sync is failing. A second error banner for the same
+        // unreachable daemon would be the same news twice.
+        set({ devicesLoading: false });
+      }
+    },
+    renameThisDevice: async (name) => {
+      await act(t("store.renameDevice"), () => api.renameThisDevice(name));
+      await get().loadDevices();
+    },
+    forgetDevice: async (who) => {
+      await act(t("store.forgetDevice"), () => api.forgetDevice(who));
+      await get().loadDevices();
+    },
     syncNow: async () => {
       set({ syncLoading: true });
       try {
         const sync = await api.syncNow();
         set({ sync, syncLoading: false, syncError: null });
+        // A round is exactly when the register moves — a machine that just
+        // announced itself appears here and nowhere else.
+        void get().loadDevices();
         // The round's own failure comes back inside the summary rather than as a
         // rejection — the rest of the state is still worth showing.
         if (sync.last_error) {
@@ -1046,12 +1364,6 @@ export const useStore = create<State>((set, get) => {
         toast.bad(t("store.syncFailed"), String(e));
       }
     },
-    pruneNames: async () => {
-      const n = await act(t("store.errPruneNames"), () => api.pruneNames());
-      await get().refreshContacts();
-      return n;
-    },
-
     startPairing: async (kind, code, name) => {
       // Starting a second exchange must retire the first. The hosting side has
       // no deadline of its own — it waits until cancelled — so an orphaned
@@ -1116,21 +1428,21 @@ export const useStore = create<State>((set, get) => {
     },
     clearPairing: () => set({ pairing: null }),
 
-    send: async (to, items, note) => {
+    send: async (to, items, note, device) => {
       const id = await act(t("store.errSend", to), () =>
-        api.sendTo(to, items, note)
+        api.sendTo(to, items, note, device ?? null)
       );
       set({ sheetPicks: null, sheetTo: null, sheetMode: null });
       return id;
     },
-    deposit: async (to, items, note, ttl, max, password) => {
+    deposit: async (to, items, note, ttl, max, password, device) => {
       // Unlike `send`, this does NOT close the send sheet. A deposit hands back
       // an `arvm…` ticket — the sender's own copy, for when the inbox route is
       // not wanted or is not working — and closing the panel on success would
       // destroy it the instant it was produced. The panel closes when the user
       // says so, exactly as it does for a code, a link or a ticket.
       const r = await act(t("store.errDeposit", to), () =>
-        api.depositTo(to, items, note, ttl, max, password)
+        api.depositTo(to, items, note, ttl, max, password, device ?? null)
       );
       refreshDeposits();
       return r;
@@ -1164,17 +1476,25 @@ export const useStore = create<State>((set, get) => {
       });
     },
     reject: async (offerId) => {
+      // The sender's name, before the row disappears with the offer.
+      const who = get().transfers[`o${offerId}`]?.peer;
       await act(t("store.errReject"), () => api.rejectOffer(offerId));
       set((s) => {
         const { [`o${offerId}`]: _drop, ...rest } = s.transfers;
         return { transfers: rest, incomingOfferId: null };
       });
+      // Declining used to succeed in silence: no toast, no undo, no trace —
+      // rejecting the wrong offer looked exactly like rejecting the right one.
+      toast.ok(t("store.declined", who ?? ""));
     },
     pause: async (id) => {
       await act(t("store.errPause"), () => api.pause(id));
     },
     resume: async (id) => {
       await act(t("store.errResume"), () => api.resume(id));
+    },
+    depositNow: async (id) => {
+      await act(t("store.errDepositNow"), () => api.depositNow(id));
     },
     cancel: async (id) => {
       // Show the click landed. The daemon only flips the row once it has actually
@@ -1198,6 +1518,20 @@ export const useStore = create<State>((set, get) => {
         if (before) setStatus(before);
         throw e;
       }
+      // The `cancelled` event is the fast path, not the only one. If it never
+      // arrives — dropped in transit, or a daemon that died between taking the
+      // request and acting on it — the row would sit on "cancelling…" for ever,
+      // which is a claim about the daemon this side cannot make.
+      setTimeout(async () => {
+        if (get().transfers[key]?.status !== "cancelling") return;
+        // The engine's own list, whatever the events did: a successful re-read
+        // rebuilds every row from it, so "cancelling" cannot survive one.
+        await get().reload();
+        // Still cancelling ⇒ the re-read didn't land either (nothing is
+        // answering). The optimism was ours; take it back rather than let the row
+        // keep saying something is happening.
+        if (get().transfers[key]?.status === "cancelling" && before) setStatus(before);
+      }, CANCEL_SETTLE_MS);
     },
     removeRow: async (key) => {
       const tx = get().transfers[key];
@@ -1248,6 +1582,13 @@ export const useStore = create<State>((set, get) => {
     addContact: async (name, id) => {
       await act(t("store.errAddContact", name), () => api.addContact(name, id));
       await get().refreshContacts();
+    },
+    rebindContact: async (name, id) => {
+      const r = await act(t("store.errAddContact", name), () =>
+        api.rebindContact(name, id)
+      );
+      await get().refreshContacts();
+      return r;
     },
     removeContact: async (name) => {
       await act(t("store.errRemoveContact", name), () => api.removeContact(name));

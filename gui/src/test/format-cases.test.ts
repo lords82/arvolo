@@ -12,14 +12,13 @@ import {
   fmtEta,
   fmtRate,
   isToday,
-  methodMeta,
   metaLine,
   pct,
   shortId,
   statusMeta,
 } from "../format";
 import { normalizeEvent } from "../events";
-import type { Method, UIStatus, UITransfer } from "../types";
+import type { UIStatus, UITransfer } from "../types";
 
 /** The tones `format.ts` is allowed to return. They are class-name suffixes
  *  resolved by `.tone-*` / `.tint-*` in theme.css — the assertions below check
@@ -37,12 +36,10 @@ function t(over: Partial<UITransfer> = {}): UITransfer {
     size: 1000,
     transferred: 0,
     status: "active",
-    encrypted: true,
+    canPause: true,
     verified: false,
-    method: "p2p",
     swarmPeers: 0,
     downloadPeers: 0,
-    files: 1,
     firstSeen: Date.now(),
     rank: 1,
     copiesServed: 0,
@@ -113,6 +110,7 @@ describe("statusMeta", () => {
     "incoming",
     "active",
     "paused",
+    "offered",
     "stalled",
     "cancelling",
     "deposited",
@@ -136,28 +134,6 @@ describe("statusMeta", () => {
   });
 });
 
-describe("methodMeta", () => {
-  it.each<Method>(["p2p", "cloud", "link", "ticket"])(
-    "methodMeta(%s) is complete",
-    (m) => {
-      const meta = methodMeta(m);
-      expect(meta.label.length).toBeGreaterThan(0);
-      expect(meta.glyph.length).toBeGreaterThan(0);
-      expect(TONES).toContain(meta.tone);
-    }
-  );
-
-  it("an unknown method falls back rather than rendering undefined", () => {
-    expect(methodMeta("nonsense" as Method).label).toBe("Mailbox");
-  });
-
-  it("each method reads differently — the chip is the whole signal", () => {
-    const labels = (["p2p", "cloud", "link", "ticket"] as Method[]).map(
-      (m) => methodMeta(m).label
-    );
-    expect(new Set(labels).size).toBe(4);
-  });
-});
 
 describe("extTint", () => {
   it.each(["ZIP", "MOV", "MP4", "MKV", "PDF", "KEY", "WAV", "JPG", "PNG", "TAR"])(
@@ -201,6 +177,7 @@ describe("barClass", () => {
     "a stalled %s bar is marked apart from a running one",
     (dir) => {
       expect(barClass(t({ dir, status: "stalled" }))).toContain("stall");
+      expect(barClass(t({ dir, status: "offered" }))).toContain("stall");
       expect(barClass(t({ dir, status: "active" }))).not.toContain("stall");
     }
   );
@@ -274,6 +251,7 @@ describe("metaLine", () => {
     ["active", /%/],
     ["paused", /paused/i],
     ["stalled", /resume|relay/i],
+    ["offered", /see it/i],
     ["incoming", /details/i],
     ["deposited", /collect/i],
     ["failed", /fallit|boom/i],

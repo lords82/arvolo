@@ -26,6 +26,27 @@ use tokio_util::sync::CancellationToken;
 
 const CHUNK: usize = 16 * 1024 * 1024;
 
+/// Every test sets the SAME seeding env up front and never removes it: these
+/// tests run in parallel in one process, so a `remove_var` in one strips the
+/// variable from another mid-run and changes its seeding behaviour.
+fn seed_env() {
+    std::env::set_var("ARVOLO_SEED_AFTER", "120");
+}
+
+/// The origin's `serve()` ends with an iroh `Endpoint::close().await`, which
+/// waits for peer connections to say goodbye — and this suite kills peers with
+/// `abort()` mid-transfer, so a wedged close would otherwise hang the test
+/// forever instead of failing it. Bound the wait; the assertions that follow
+/// are the substance of the test either way.
+async fn reap_origin(origin: tokio::task::JoinHandle<anyhow::Result<()>>) {
+    if tokio::time::timeout(Duration::from_secs(30), origin)
+        .await
+        .is_err()
+    {
+        eprintln!("origin teardown did not finish within 30s; proceeding");
+    }
+}
+
 async fn spawn_relay() -> String {
     let dir = tempfile::tempdir().unwrap();
     let node = BlobNode::spawn(dir.path(), RelayChoice::Disabled)
@@ -127,7 +148,7 @@ fn spawn_receiver(
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn a_receiver_completes_from_the_origin_after_a_peer_leaves() {
     // Keep a completed peer seeding so B is a real provider before we cut it off.
-    std::env::set_var("ARVOLO_SEED_AFTER", "120");
+    seed_env();
     let relay = spawn_relay().await;
 
     let dir = tempfile::tempdir().unwrap();
@@ -181,9 +202,8 @@ async fn a_receiver_completes_from_the_origin_after_a_peer_leaves() {
     let ok_c = wait_for_file(&out_c, &data, Duration::from_secs(120)).await;
 
     origin_cancel.cancel();
-    let _ = origin.await;
+    reap_origin(origin).await;
     recv_c.abort();
-    std::env::remove_var("ARVOLO_SEED_AFTER");
 
     assert!(
         ok_c,
@@ -199,7 +219,7 @@ async fn a_receiver_completes_from_the_origin_after_a_peer_leaves() {
 /// whole time (so those pieces were a deliberate choice, not a fallback).
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn a_receiver_offloads_the_origin_by_pulling_from_a_peer() {
-    std::env::set_var("ARVOLO_SEED_AFTER", "120");
+    seed_env();
     let relay = spawn_relay().await;
 
     let dir = tempfile::tempdir().unwrap();
@@ -248,11 +268,10 @@ async fn a_receiver_offloads_the_origin_by_pulling_from_a_peer() {
     let ok_c = wait_for_file(&out_c, &data, Duration::from_secs(120)).await;
 
     origin_cancel.cancel();
-    let _ = origin.await;
+    reap_origin(origin).await;
     b_cancel.cancel();
     recv_b.abort();
     recv_c.abort();
-    std::env::remove_var("ARVOLO_SEED_AFTER");
 
     assert!(ok_c, "C must complete");
     assert_eq!(std::fs::read(&out_c).unwrap(), data, "C's file is intact");
@@ -267,6 +286,9 @@ async fn a_receiver_offloads_the_origin_by_pulling_from_a_peer() {
 /// precondition — C could download the whole file from A even if B never existed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn a_lone_receiver_completes_from_the_origin_with_the_swarm_on() {
+    // Not a seeding test, but the env is process-wide and the others set it —
+    // set it here too so this test behaves the same regardless of scheduling.
+    seed_env();
     let relay = spawn_relay().await;
 
     let dir = tempfile::tempdir().unwrap();
@@ -303,7 +325,7 @@ async fn a_lone_receiver_completes_from_the_origin_with_the_swarm_on() {
     let ok = wait_for_file(&out_c, &data, Duration::from_secs(90)).await;
 
     origin_cancel.cancel();
-    let _ = origin.await;
+    reap_origin(origin).await;
     recv_c.abort();
 
     assert!(

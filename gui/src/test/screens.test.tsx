@@ -14,6 +14,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { dto, harness, makeIpcMock, resetHarness, pick } from "./mocks";
+import { en } from "../i18n/en";
 
 vi.mock("../ipc", () => makeIpcMock());
 vi.mock("@tauri-apps/api/webview", () => ({
@@ -26,7 +27,6 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 vi.mock("@tauri-apps/plugin-opener", () => ({
   revealItemInDir: () => Promise.resolve(),
   openUrl: () => Promise.resolve(),
-  openPath: () => Promise.resolve(),
 }));
 
 import { useStore, applyTheme, type Route } from "../store";
@@ -214,7 +214,7 @@ describe("every overlay mounts", () => {
       expect(useStore.getState().contacts).toHaveLength(1)
     );
     useStore.getState().setPaletteOpen(true);
-    const input = await screen.findByLabelText("Search a command or a person…");
+    const input = await screen.findByLabelText(en["palette.placeholder"]);
     fireEvent.change(input, { target: { value: "giulia" } });
     await waitFor(() =>
       expect(screen.getByText("Send to giulia")).toBeTruthy()

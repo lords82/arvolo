@@ -13,9 +13,11 @@
 
 mod attention;
 mod bridge;
+mod compat;
 mod daemon;
 #[cfg(target_os = "macos")]
 mod notify_mac;
+mod update;
 
 use arvolo_ipc::client::DaemonClient;
 use arvolo_ipc::protocol::EventDto;
@@ -31,6 +33,96 @@ const EV_CONNECTED: &str = "engine://connected";
 const EV_DAEMON_ERROR: &str = "engine://daemon-error";
 /// Files just dropped on the window, already registered: `[PickedItemDto]`.
 const EV_FILES_PICKED: &str = "files://picked";
+/// The ticket read out of a `.arvolo` file handed to the app — dropped on the
+/// window, double-clicked (macOS `Opened`), or passed on argv. The webview gets
+/// the ticket string, never the path.
+const EV_ARVOLO_TICKET: &str = "files://arvolo";
+
+/// The UI language, as the webview resolved it ("en"/"it"/"fr"/"de"). The six
+/// native strings (tray menu, arrival notifications) read it; the webview sets
+/// it on boot and on every change. Until it does, the OS locale decides — an
+/// English desktop must not get an Italian tray while the app loads.
+struct UiLang(std::sync::Mutex<String>);
+
+fn os_lang() -> String {
+    let raw = std::env::var("LC_ALL")
+        .or_else(|_| std::env::var("LANG"))
+        .unwrap_or_default()
+        .to_lowercase();
+    for l in ["it", "fr", "de"] {
+        if raw.starts_with(l) {
+            return l.to_string();
+        }
+    }
+    "en".to_string()
+}
+
+/// The native-side dictionary: six strings, four languages, no framework.
+fn tr(lang: &str, key: &str) -> &'static str {
+    match (lang, key) {
+        ("it", "show") => "Mostra Arvolo",
+        ("it", "quit") => "Esci",
+        ("it", "someone") => "Qualcuno",
+        ("it", "arrival_title") => "Arvolo — file in arrivo",
+        ("it", "auto_title") => "Arvolo — sto scaricando",
+        ("fr", "show") => "Afficher Arvolo",
+        ("fr", "quit") => "Quitter",
+        ("fr", "someone") => "Quelqu'un",
+        ("fr", "arrival_title") => "Arvolo — fichier entrant",
+        ("fr", "auto_title") => "Arvolo — téléchargement en cours",
+        ("de", "show") => "Arvolo anzeigen",
+        ("de", "quit") => "Beenden",
+        ("de", "someone") => "Jemand",
+        ("de", "arrival_title") => "Arvolo — eingehende Datei",
+        ("de", "auto_title") => "Arvolo — lade herunter",
+        (_, "show") => "Show Arvolo",
+        (_, "quit") => "Quit",
+        (_, "someone") => "Somebody",
+        (_, "arrival_title") => "Arvolo — incoming file",
+        (_, "auto_title") => "Arvolo — downloading",
+        _ => "",
+    }
+}
+
+fn arrival_body(lang: &str, auto: bool, name: &str, who: &str) -> String {
+    match (lang, auto) {
+        ("it", true) => format!("“{name}” da {who}, che è un contatto fidato"),
+        ("it", false) => format!("{who} vuole inviarti “{name}”"),
+        ("fr", true) => format!("« {name} » de {who}, un contact de confiance"),
+        ("fr", false) => format!("{who} veut vous envoyer « {name} »"),
+        ("de", true) => format!("„{name}“ von {who}, einem vertrauten Kontakt"),
+        ("de", false) => format!("{who} möchte dir „{name}“ senden"),
+        (_, true) => format!("“{name}” from {who}, a trusted contact"),
+        (_, false) => format!("{who} wants to send you “{name}”"),
+    }
+}
+
+/// The webview's language just resolved (boot, or the user switched): keep the
+/// native strings in step — the tray menu is rebuilt in place.
+#[tauri::command]
+fn set_ui_language(app: AppHandle, state: tauri::State<'_, UiLang>, lang: String) {
+    *state.0.lock().unwrap() = lang.clone();
+    if let Some(tray) = app.tray_by_id("main") {
+        let rebuilt = (|| -> tauri::Result<_> {
+            let show = MenuItemBuilder::with_id("show", tr(&lang, "show")).build(&app)?;
+            let quit = MenuItemBuilder::with_id("quit", tr(&lang, "quit")).build(&app)?;
+            MenuBuilder::new(&app)
+                .item(&show)
+                .separator()
+                .item(&quit)
+                .build()
+        })();
+        if let Ok(menu) = rebuilt {
+            let _ = tray.set_menu(Some(menu));
+        }
+    }
+}
+
+fn ui_lang(app: &AppHandle) -> String {
+    app.try_state::<UiLang>()
+        .map(|s| s.0.lock().unwrap().clone())
+        .unwrap_or_else(os_lang)
+}
 
 /// Whether the system tray icon actually got created. Hiding the window on close
 /// is only safe if there is a tray to get back from: on Linux desktops without a
@@ -38,12 +130,55 @@ const EV_FILES_PICKED: &str = "files://picked";
 /// to quit instead of leaving an unreachable process behind.
 struct HasTray(bool);
 
+/// Keep the app's log to one readable file. Same bound and same one-generation
+/// policy the daemon's log uses.
+const GUI_LOG_MAX_BYTES: u64 = 2 * 1024 * 1024;
+
+/// Send this process's diagnostics somewhere a person can read them.
+///
+/// A bundled app writes to no terminal: without this, every `tracing::error!` and
+/// every `log::error!` from Tauri itself went nowhere at all. That is not a
+/// missing nicety — it is why "the update installed and the app never came back"
+/// could only be investigated by reasoning about the source, with the one line
+/// that would have said which step failed being written to a subscriber that did
+/// not exist.
+///
+/// `fmt::init` also installs the `log` bridge, which is the half that matters
+/// here: the updater's own failure paths inside Tauri use `log`, not `tracing`.
+fn init_logging() {
+    arvolo_ipc::rotate_log_at(&arvolo_ipc::gui_log_path(), GUI_LOG_MAX_BYTES);
+    let Ok(file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(arvolo_ipc::gui_log_path())
+    else {
+        // Nowhere to write is not a reason to refuse to start; it only puts us
+        // back where we were before this existed.
+        return;
+    };
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_env("ARVOLO_LOG")
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .with_writer(std::sync::Mutex::new(file))
+        .with_ansi(false)
+        .try_init();
+}
+
 fn main() {
+    init_logging();
     // `--autostart` is what the login entry passes (see the autostart plugin
     // registration below): the app was started by the OS, not by a person, so
     // it should come up hidden in the tray rather than with a window in the
     // face of someone who just signed in.
     let autostarted = std::env::args().any(|a| a == "--autostart");
+    // A `.arvolo` passed on argv: the file-association launch on Windows/Linux
+    // (macOS uses the Opened event instead). Read now, handed to the webview
+    // when it asks (`take_pending_ticket`).
+    let pending_ticket = std::env::args()
+        .skip(1)
+        .find_map(|a| read_arvolo_ticket(std::path::Path::new(&a)));
 
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_autostart::init(
@@ -53,6 +188,7 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             bridge::status,
             bridge::list_transfers,
@@ -67,6 +203,7 @@ fn main() {
             bridge::reject_offer,
             bridge::pause,
             bridge::resume,
+            bridge::deposit_now,
             bridge::cancel,
             bridge::remove,
             bridge::clear_finished,
@@ -78,6 +215,7 @@ fn main() {
             bridge::unblock_contact,
             bridge::accept_name,
             bridge::add_contact,
+            bridge::rebind_contact,
             bridge::remove_contact,
             bridge::rename_contact,
             bridge::list_history,
@@ -89,16 +227,24 @@ fn main() {
             bridge::deposit_to,
             bridge::get_config,
             bridge::set_config,
-            bridge::prune_names,
             bridge::presence,
             bridge::sync_status,
             bridge::sync_now,
+            bridge::list_devices,
+            bridge::rename_this_device,
+            bridge::forget_device,
             bridge::start_pairing,
             bridge::cancel_pairing,
             bridge::import_contacts,
             bridge::export_contacts,
+            bridge::save_ticket,
+            bridge::take_pending_ticket,
+            set_ui_language,
             bridge::pick_files,
             bridge::gui_version,
+            bridge::open_path,
+            update::check_update,
+            update::install_update,
         ])
         .setup(move |app| {
             let has_tray = match setup_tray(app.handle()) {
@@ -121,8 +267,12 @@ fn main() {
             } else {
                 show_main_window(app.handle());
             }
+            app.manage(UiLang(std::sync::Mutex::new(os_lang())));
             app.manage(attention::State::default());
             app.manage(bridge::PickedFiles::new());
+            app.manage(bridge::PendingArvolo(std::sync::Mutex::new(
+                pending_ticket.clone(),
+            )));
             // Ask now, not at the first arrival: a permission prompt that appears
             // the moment somebody sends you a file is in the way of the thing you
             // wanted to see. No-op when there is no bundle to ask for.
@@ -144,6 +294,15 @@ fn main() {
             // path any more, so knowing one buys nothing.
             if let WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
                 let app = window.app_handle();
+                // One `.arvolo` on its own is something to RECEIVE, not to send:
+                // read the ticket here (the path stays Rust-side) and open the
+                // receive flow with it. Mixed drops keep the send semantics.
+                if let [only] = paths.as_slice() {
+                    if let Some(ticket) = read_arvolo_ticket(only) {
+                        let _ = app.emit(EV_ARVOLO_TICKET, ticket);
+                        return;
+                    }
+                }
                 let items = bridge::register_paths(&app.state::<bridge::PickedFiles>(), paths);
                 if !items.is_empty() {
                     let _ = app.emit(EV_FILES_PICKED, items);
@@ -174,15 +333,41 @@ fn main() {
         if let tauri::RunEvent::Reopen { .. } = _event {
             show_main_window(_app);
         }
+        // A `.arvolo` opened from the Finder (double click / "Open with") while
+        // the app runs: macOS hands it over as an Opened event. The ticket goes
+        // to the webview; the path never does.
+        #[cfg(target_os = "macos")]
+        if let tauri::RunEvent::Opened { urls } = _event {
+            for url in urls {
+                if let Ok(path) = url.to_file_path() {
+                    if let Some(ticket) = read_arvolo_ticket(&path) {
+                        show_main_window(_app);
+                        let _ = _app.emit(EV_ARVOLO_TICKET, ticket);
+                    }
+                }
+            }
+        }
     });
+}
+
+/// The ticket inside a `.arvolo` file, if `path` is one. The extension is what
+/// makes a path eligible; the content is trimmed and must be non-empty.
+fn read_arvolo_ticket(path: &std::path::Path) -> Option<String> {
+    if path.extension().and_then(|e| e.to_str()) != Some("arvolo") {
+        return None;
+    }
+    let text = std::fs::read_to_string(path).ok()?;
+    let t = text.trim();
+    (!t.is_empty()).then(|| t.to_string())
 }
 
 /// System-tray icon with a minimal menu (Mostra / Esci) — the way back to a
 /// window closed to the tray, and the only one once the Dock/taskbar entry is
 /// gone.
 fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
-    let show = MenuItemBuilder::with_id("show", "Mostra Arvolo").build(app)?;
-    let quit = MenuItemBuilder::with_id("quit", "Esci").build(app)?;
+    let lang = os_lang();
+    let show = MenuItemBuilder::with_id("show", tr(&lang, "show")).build(app)?;
+    let quit = MenuItemBuilder::with_id("quit", tr(&lang, "quit")).build(app)?;
     let menu = MenuBuilder::new(app)
         .item(&show)
         .separator()
@@ -215,9 +400,9 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
 
     // The menu bar wants the monochrome template icon, which macOS tints for the
     // light or dark bar; elsewhere the tray shows the regular app icon. Either way
-    // this is the resting state; `attention::apply` drops the wedge into the box
-    // once the pump knows something is waiting. `icons/attention/tray-0.png` is this
-    // very file, so switching between them never resizes the mark.
+    // this is the resting state; `attention::apply` sets the mark breathing once
+    // the pump knows something is waiting. `icons/attention/tray-0.png` is this very
+    // file, so switching between them never resizes the mark.
     #[cfg(target_os = "macos")]
     {
         let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/tray.png"))?;
@@ -276,6 +461,29 @@ fn restore_dock_icon(app: &AppHandle) {
 /// UI recovers on its own after a daemon restart.
 async fn event_pump(app: AppHandle) {
     loop {
+        // An install is in flight and the daemon was stopped on purpose, so that
+        // the installer can replace the binary it runs from. Say nothing and wait:
+        // this is not a fault to report, and the app is on its way to restarting
+        // into the new build anyway.
+        if daemon::held_for_update() {
+            let _ = app.emit(EV_CONNECTED, false);
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            continue;
+        }
+        // `arvolo daemon stop` leaves a marker: the user asked for it to be down,
+        // and this loop must not win the argument by respawning it every two
+        // seconds. Report disconnected and wait for the marker to go (a `daemon
+        // start`/`run` removes it; so does the in-app restart below).
+        if arvolo_ipc::stop_marker_path().exists() && !daemon::is_running().await {
+            let _ = app.emit(
+                EV_DAEMON_ERROR,
+                "fermato con `arvolo daemon stop` — riavvialo da qui o con `arvolo daemon start`"
+                    .to_string(),
+            );
+            let _ = app.emit(EV_CONNECTED, false);
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            continue;
+        }
         // Make sure a daemon exists; if we can't bring one up, report disconnected
         // and retry shortly.
         if let Err(e) = daemon::ensure_running().await {
@@ -355,7 +563,7 @@ fn moves_the_count(ev: &EventDto) -> bool {
 /// to us, so this has to cover both kinds of arrival. `auto` separates them: a
 /// trusted sender's file is already downloading, and asking the user to approve it
 /// would be offering a choice that has already been made. Only the other kind is a
-/// question, and only that kind drops the wedge in the tray.
+/// question, and only that kind sets the tray breathing.
 ///
 /// On macOS this goes through [`notify_mac`] rather than the plugin, whose backend
 /// no longer delivers anything at all on current macOS; see that module. It needs a
@@ -363,22 +571,18 @@ fn moves_the_count(ev: &EventDto) -> bool {
 /// we fall through to the plugin, which will also show nothing. A dev run being
 /// silent on macOS is expected and not worth chasing.
 fn notify_arrival(app: &AppHandle, name: &str, sender_name: &str, auto: bool) {
+    let lang = ui_lang(app);
     let who = if sender_name.trim().is_empty() {
-        "Qualcuno".to_string()
+        tr(&lang, "someone").to_string()
     } else {
         sender_name.to_string()
     };
-    let (title, body) = if auto {
-        (
-            "Arvolo — sto scaricando",
-            format!("“{name}” da {who}, che è un contatto fidato"),
-        )
+    let title = if auto {
+        tr(&lang, "auto_title")
     } else {
-        (
-            "Arvolo — file in arrivo",
-            format!("{who} vuole inviarti “{name}”"),
-        )
+        tr(&lang, "arrival_title")
     };
+    let body = arrival_body(&lang, auto, name, &who);
     #[cfg(target_os = "macos")]
     if notify_mac::available() {
         // One identifier per file name, so a re-offer of the same file replaces its

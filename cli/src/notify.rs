@@ -45,6 +45,31 @@ pub fn auto_downloading(name: &str, who: &str, size: &str) {
     );
 }
 
+/// The same, for a file sent by another device of the user's own identity. A
+/// separate line rather than a `who` passed into the one above: "da <id>, che è un
+/// contatto fidato" is not what happened, and the id would mean nothing to read.
+pub fn auto_downloading_own_device(name: &str, size: &str) {
+    show(
+        "Arvolo — sto scaricando",
+        format!("“{name}” ({size}) da un altro dei tuoi dispositivi."),
+    );
+}
+
+/// An automatic download that did not start, and cannot be offered as a question
+/// either: the offer was spent in the attempt, so there is nothing left to accept.
+///
+/// Raised even when a front-end is attached — the exception to the rule the other
+/// three follow. Those are announcements a window makes better in its own words;
+/// this one it cannot make at all, because an offer being taken automatically is
+/// deliberately not drawn as a row. Without this, a failed automatic download is
+/// the one event in the app that happens entirely in silence.
+pub fn auto_download_failed(name: &str, who: &str, why: &str) {
+    show(
+        "Arvolo — non sono riuscito a scaricare",
+        format!("“{name}” da {who} non è stato scaricato: {why}. Chiedi di rimandarlo."),
+    );
+}
+
 /// The installed app bundle. macOS attributes a notification to a bundle, not to
 /// a process, and a bare CLI binary has none — so without this the daemon's
 /// notifications are posted by whatever `mac-notification-sys` falls back to,

@@ -1,15 +1,21 @@
 // Wire types — 1:1 with `arvolo_ipc::protocol` DTOs, and the derived UI model.
 
 export type Direction = "out" | "in";
-export type Method = "p2p" | "cloud" | "link" | "ticket";
 
 /** UI lifecycle state. These are internal identifiers, never rendered: the words
  *  the user reads come from `statusMeta` in format.ts, in their own language. */
 export type UIStatus =
   | "incoming" // a parked offer awaiting accept/reject
   | "active" // actively transferring
+  | "preparing" // reading + encrypting the payload; nothing on the wire yet
   | "sharing" // made available and waiting to be fetched — not progress
   | "paused" // manually paused
+  /** An outgoing send holding a direct offer open, waiting for the recipient to
+   *  accept. Split out from `stalled` because it is not the same situation: the
+   *  file is one click away from moving, and the app is holding the door open for
+   *  a while before parking it on the relay instead — so there is something the
+   *  user can usefully decide, which `stalled` (muted, "nothing to do") denies. */
+  | "offered"
   | "stalled" // auto-held, retrying when possible (daemon "waiting")
   | "deposited" // handed to the relay mailbox
   | "completed"
@@ -21,6 +27,9 @@ export type UIStatus =
 
 export interface TransferDto {
   id: number;
+  // The 8-hex handle the CLI shows and takes (`arvolo cancel <handle>`).
+  // Restart-stable, unlike `id`. Optional: absent from an older daemon.
+  handle?: string;
   direction: "send" | "recv";
   peer: string | null;
   name: string;
@@ -42,6 +51,22 @@ export interface TransferDto {
   /** How far the inbox offer for a deposited send has got. Same vocabulary as a
    *  deposit's `offer_status`; null when there is nothing to say. */
   offer_status?: string | null;
+  /** Why a waiting send is waiting, as a stable code: "offered" | "tooLarge" |
+   *  "relayRetry". `status` says the same thing in the daemon's English and keeps
+   *  saying it — this is what we translate. Null for a row that is not waiting,
+   *  absent from a daemon that predates the field. */
+  waiting_code?: string | null;
+  /** The relay's own message quoted inside a "relayRetry" reason. */
+  waiting_detail?: string | null;
+  /** Whether pausing this row would do anything. A mailbox pickup and a share
+   *  cannot be held — only the engine knows which is which. Absent from a daemon
+   *  that predates the field, where the fallback is to keep offering the button:
+   *  the worst case is that daemon's own behaviour. */
+  can_pause?: boolean | null;
+  /** What the sender of an incoming transfer calls themselves, carried over from
+   *  the offer. Absent from a send, a pasted ticket, and an older daemon — and a
+   *  claim either way, never evidence. */
+  sender_name?: string;
   copies_served?: number;
   bytes_served?: number;
   last_pickup?: number;
@@ -60,6 +85,19 @@ export interface OfferDto {
   size: number;
   note: string;
   sender_name: string;
+  /** `from`'s word fingerprint, stamped by the daemon. A pure function of the
+   *  key, so it is there for a stranger too — which is the point: it is the one
+   *  handle on them that means anything, and it must not cost a save to see.
+   *
+   *  Optional because an older daemon does not stamp it (`serde(default)` on the
+   *  Rust side means absent, not empty) — as are the two below. */
+  fingerprint?: string;
+  /** Transfers already taken from this key. `0` is a first arrival. */
+  seen_count?: number;
+  /** The name this key was already on record as claiming ("" when none). Shown
+   *  against `sender_name`: a key that used to introduce itself differently is
+   *  what impersonation looks like from this side. */
+  known_name?: string;
 }
 
 export interface ContactDto {
@@ -75,6 +113,12 @@ export interface ContactDto {
   display_name: string;
   /** An advertised name awaiting approval ("" when none). */
   pending_name: string;
+  /** The relay this contact listens on. "" means "wherever you do", which is the
+   *  ordinary case and worth no UI. Routing, never identity. */
+  relay?: string;
+  /** Unix seconds of the last completed transfer either way; 0 = never, or older
+   *  than the stamp. Synced between your devices, so every one answers the same. */
+  last_exchange?: number;
 }
 
 /** One finished transfer from the daemon's history log (read-only). */
@@ -137,6 +181,11 @@ export interface DepositDto {
 export interface StatusDto {
   version: string;
   public_id: string;
+  /** The identity in the form you give to somebody: `<id>@<relay>`. Assembled by
+   *  the daemon, which is also what `arvolo me` prints. Empty against a daemon
+   *  that predates it — fall back to `public_id`, which is the half that at least
+   *  works when both sides default to the same relay. */
+  shareable_id?: string;
   fingerprint: string;
   relay: string | null;
   transfers: number;
@@ -144,6 +193,11 @@ export interface StatusDto {
   download_dir: string;
   /** The display name advertised in offers ("" when none is set). */
   display_name: string;
+  /** The daemon's process id and the binary it runs. Absent from a daemon that
+   *  predates them — everything else here describes the identity, which every
+   *  build shares; only these say which process is answering. */
+  pid?: number;
+  exe?: string;
 }
 
 /** The settings screen: what is in force, and what `config.toml` says. The two
@@ -207,6 +261,32 @@ export interface SyncDto {
   last_sync: number;
   last_merged: number;
   last_error: string;
+  /** Does another machine share this identity, as far as this device can tell?
+   *  Evidence, never bookkeeping: nothing enumerates the machines holding an
+   *  identity, so a pairing that has not synced yet still reads false. Used only
+   *  to warn that a file sent to yourself has nowhere to land yet. */
+  paired: boolean;
+}
+
+/** One machine holding this identity, as it describes itself.
+ *
+ *  Self-reported and unverifiable from outside: each machine writes its own row
+ *  on its sync round, so a machine that has never synced is absent and one that
+ *  stopped syncing stays until it is forgotten. */
+export interface DeviceDto {
+  id: string;
+  name: string;
+  /** `macos`, `linux`, `windows`… — for an icon, never for a decision. */
+  platform: string;
+  /** Unix seconds of that machine's last sync round, by *its* clock.
+   *
+   *  Never a presence light: it moves once per round (five minutes), it can sit
+   *  in the future if two clocks disagree, and a machine asleep for a minute
+   *  looks exactly like one still awake. Shown as elapsed time, which carries
+   *  its own uncertainty. */
+  last_seen: number;
+  /** The one row that can be renamed here, and the one not to offer to forget. */
+  is_this_device: boolean;
 }
 
 /** Which pairing. `contact_*` trades public ids between two people; `device_*`
@@ -229,6 +309,16 @@ export type EngineEvent =
       size: number;
       note: string;
       sender_name: string;
+      /** The daemon is already downloading this one — the sender is trusted, or
+       *  is another of our own devices — so there is no question to ask, and the
+       *  board draws no offer row for it. Absent against an older daemon, where
+       *  false is the safe way to be wrong: at worst a prompt for something that
+       *  is already arriving. */
+      auto?: boolean;
+      /** See `OfferDto` — the same three stamps, on the pushed event. */
+      fingerprint?: string;
+      seen_count?: number;
+      known_name?: string;
     }
   | {
       type: "started";
@@ -240,7 +330,26 @@ export type EngineEvent =
   | { type: "progress"; id: number; transferred: number; total_size: number }
   | { type: "completed"; id: number; path: string | null }
   | { type: "deposited"; id: number }
-  | { type: "waiting"; id: number; reason: string }
+  /** Reading and encrypting the payload: nothing on the wire yet, and the
+   *  recipient has not been offered anything. */
+  | { type: "preparing"; id: number }
+  | {
+      type: "waiting";
+      id: number;
+      reason: string;
+      /** Stable code for `reason` ("offered" | "tooLarge" | "relayRetry" |
+       *  "parked" | "relayCapped" | "offloadFailed"), so the window can say it in
+       *  the user's language. Absent from an older daemon, which sends only the
+       *  English sentence. */
+      code?: string;
+      /** Words that came from elsewhere and are quoted inside the reason — the
+       *  relay's own message, or the cap it named. Not ours to translate. */
+      detail?: string;
+      /** How far the offer this send holds open has got. Orthogonal to `code`:
+       *  that says why it waits, this says how far the thing it waits on has come.
+       *  Absent from an older daemon. */
+      offer_status?: string;
+    }
   | { type: "paused"; id: number; reason: string }
   | { type: "failed"; id: number; error: string }
   | { type: "cancelled"; id: number }
@@ -253,6 +362,9 @@ export type EngineEvent =
   /** The address book moved (from this GUI, the CLI, or a sync). Carries nothing:
    *  refetch the contacts. */
   | { type: "contacts_changed" }
+  // A waiting offer left the daemon by another client's hand (CLI recv/decline
+  // while this window is open) — drop its row instead of showing a ghost.
+  | { type: "offer_gone"; id: string }
   /** Finished rows were cleared from the daemon's list by somebody else — an
    *  `arvolo status clear`, or another window. Carries nothing: drop the ones
    *  this window considers finished. */
@@ -285,6 +397,9 @@ export interface UITransfer {
   key: string;
   /** Numeric daemon transfer id (0 for a not-yet-accepted offer). */
   id: number;
+  /** The 8-hex handle the CLI shows and takes (`arvolo cancel <handle>`).
+   *  Empty for offers and against an older daemon. */
+  handle?: string;
   /** Offer id, when this row is a parked incoming offer. */
   offerId?: string;
   dir: Direction;
@@ -298,14 +413,30 @@ export interface UITransfer {
   senderName?: string;
   /** Base32 id of the peer, when known (for verify/name lookups). */
   peerId?: string;
-  encrypted: boolean;
+  /** The peer's word fingerprint, when the daemon stamped one on the offer. On
+   *  an offer row it is the only identity worth reading, and it arrives whether
+   *  or not the sender is saved. */
+  fingerprint?: string;
+  /** Transfers already taken from this key, on an offer row. `0` is a first
+   *  arrival; `undefined` against a daemon too old to say. */
+  seenCount?: number;
+  /** What this key was already on record as calling itself, on an offer row. */
+  knownName?: string;
   verified: boolean;
-  method: Method;
   swarmPeers: number;
   downloadPeers: number;
-  files: number;
-  /** Short reason for waiting/paused/failed states. */
+  /** Short reason for waiting/paused/failed states, in the daemon's English. */
   reason?: string;
+  /** For a waiting send: the daemon's stable code for `reason`, which is what
+   *  gets translated. `reason` stays as the fallback for a daemon too old to
+   *  send one. */
+  waitingCode?: string;
+  /** The relay's own message quoted inside a "relayRetry" reason. Shown as it
+   *  arrived: it is another machine's diagnostic, not our prose. */
+  waitingDetail?: string;
+  /** Whether this row can be held. False for a mailbox pickup and a share, where
+   *  the button would ask for something the daemon refuses. */
+  canPause: boolean;
   /** Completed-receive path (for "open folder"). */
   path?: string;
   /** When the transfer began (ms). Comes from the engine's `created`; only a row
@@ -338,4 +469,34 @@ export interface PickedItem {
   name: string;
   size: number;
   isDir: boolean;
+}
+
+/** A release on offer, as `check_update` reports it. */
+export interface UpdateInfo {
+  /** The version to install: normally the newest, or the newest this machine's
+   *  relay can carry when those differ. */
+  version: string;
+  /** What this app is running now, so a banner can name both. */
+  current: string;
+  /** Release notes as the manifest carries them; often empty. */
+  notes: string;
+  /** Present only when a newer release exists but was passed over. */
+  heldBack?: HeldBack;
+}
+
+/** Why the newest release is not the one being offered. */
+export interface HeldBack {
+  /** The newest release — the one not on offer. */
+  latest: string;
+  /** Which relay is in the way, and what it says it is. Both are shown: "update
+   *  your relay" is not an instruction anyone can act on without knowing which. */
+  relay: string | null;
+  relayVersion: string | null;
+}
+
+/** Download progress of an update. `total` is null when the server did not say
+ *  how big the file is. */
+export interface UpdateProgress {
+  downloaded: number;
+  total: number | null;
 }

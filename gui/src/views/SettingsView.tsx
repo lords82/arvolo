@@ -12,15 +12,16 @@
 // through a dialog. The screen links to `config.toml` instead of half-exposing
 // them.
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   disable as autostartDisable,
   enable as autostartEnable,
   isEnabled as autostartIsEnabled,
 } from "@tauri-apps/plugin-autostart";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { openPath } from "@tauri-apps/plugin-opener";
+import { api } from "../ipc";
 import { fire, useStore, type ThemeChoice } from "../store";
+import { isBusy } from "../update";
 import {
   langNames,
   setLangChoice,
@@ -62,12 +63,40 @@ export function SettingsView() {
   const theme = useStore((s) => s.theme);
   const setTheme = useStore((s) => s.setTheme);
   const restartDaemon = useStore((s) => s.restartDaemon);
+  const update = useStore((s) => s.update);
+  const checkForUpdate = useStore((s) => s.checkForUpdate);
+  const setAutoCheck = useStore((s) => s.setAutoCheck);
+  const startUpdate = useStore((s) => s.startUpdate);
+  const transfers = useStore((s) => s.transfers);
+  const busyBoard = useMemo(
+    () => isBusy(Object.values(transfers).map((tx) => tx.status)),
+    [transfers]
+  );
+
+  // One line that says where the update flow stands. "Up to date" is only ever
+  // claimed after a check that actually completed — before that it says when the
+  // last one was, which is the honest answer and also the useful one.
+  const updateLine =
+    update.phase === "checking"
+      ? t("settings.updateChecking")
+      : update.phase === "installed"
+        ? t("settings.updateReopen")
+        : update.phase === "error"
+          ? t("settings.updateFailed", update.error ?? "")
+          : update.phase === "downloading"
+            ? t("settings.updateInstalling")
+            : update.info
+              ? t("settings.updateFound", update.info.version)
+              : update.manual
+                ? t("settings.updateNone")
+                : t("settings.updateIdle");
 
   const [name, setName] = useState("");
   const [relay, setRelay] = useState("");
   const [dirty, setDirty] = useState<{ name?: boolean; relay?: boolean }>({});
   const [busy, setBusy] = useState(false);
   const [confirmRestart, setConfirmRestart] = useState(false);
+  const [confirmUpdate, setConfirmUpdate] = useState(false);
 
   // Asked of the OS, not of our config: the login entry lives in the platform's
   // own registry (Login Items, the Run key, ~/.config/autostart), so the OS is
@@ -89,7 +118,7 @@ export function SettingsView() {
 
   if (error && !config) {
     return (
-      <div className="card card-pad t-sm" style={{ borderColor: "var(--red)" }}>
+      <div className="card card-pad card-err t-sm">
         {error}
         <div style={{ marginTop: 10 }}>
           <Button size="sm" onClick={() => void reload()}>
@@ -189,8 +218,19 @@ export function SettingsView() {
           )}
         </Field>
 
+        {/* The form to hand somebody — id *and* relay. The id on its own says who
+            you are and not where you listen, so a friend given only that reaches
+            you if their client happens to default to your relay, and silently not
+            otherwise. Shown as one field rather than two: nobody needs the half
+            that cannot be acted on, and it is readable in front of the `@` anyway.
+            The bare id remains for a daemon too old to assemble the pair. */}
         <Field label={t("settings.publicIdLabel")}>
-          {() => <CopyField value={status?.public_id ?? ""} wrap />}
+          {() => (
+            <CopyField
+              value={status?.shareable_id || status?.public_id || ""}
+              wrap
+            />
+          )}
         </Field>
       </div>
 
@@ -339,7 +379,7 @@ export function SettingsView() {
                   await save({ download_dir: { set: picked } });
                   toast.info(
                     t("settings.dirUpdated"),
-                    t("settings.dirUpdatedDetail")
+                    t("common.afterRestart")
                   );
                 }}
               >
@@ -348,7 +388,7 @@ export function SettingsView() {
               <Button
                 size="sm"
                 onClick={() =>
-                  openPath(config.download_dir).catch((e: unknown) =>
+                  api.openPath(config.download_dir).catch((e: unknown) =>
                     toast.bad(t("settings.cannotOpen"), String(e))
                   )
                 }
@@ -367,7 +407,7 @@ export function SettingsView() {
           checked={config.seed ?? true}
           onChange={async (v) => {
             await save({ seed: { set: v } });
-            toast.info(t("settings.saved"), t("settings.savedDetail"));
+            toast.info(t("settings.saved"), t("common.afterRestart"));
           }}
         />
       </div>
@@ -386,7 +426,7 @@ export function SettingsView() {
               <Button
                 size="sm"
                 onClick={() =>
-                  openPath(config.config_path).catch((e: unknown) =>
+                  api.openPath(config.config_path).catch((e: unknown) =>
                     toast.bad(t("settings.cannotOpen"), String(e))
                   )
                 }
@@ -409,14 +449,86 @@ export function SettingsView() {
         <div className="divider" />
 
         <div className="hstack wrap">
-          <span className="t-sm t-sec grow">
-            {t("settings.versions", status?.version || "?", guiVersion || "?")}
-          </span>
+          <div className="grow">
+            <div className="t-sm t-sec">
+              {t("settings.versions", status?.version || "?", guiVersion || "?")}
+            </div>
+            {/* Which daemon this window is actually talking to. A released
+                install, a build from a checkout and one this app spawned can all
+                exist on the same machine, and everything else on this screen
+                describes the identity — which they share. It sits here, directly
+                above the button that restarts it, because that is the moment the
+                question gets asked. */}
+            {!!status?.pid && (
+              <div
+                className="t-xs t-mut mono truncate"
+                title={status.exe || undefined}
+              >
+                {t("settings.daemonProcess", status.pid, status.exe || "?")}
+              </div>
+            )}
+          </div>
           <Button size="sm" onClick={() => setConfirmRestart(true)}>
             <Icon.Refresh size={13} /> {t("settings.restartDaemon")}
           </Button>
         </div>
+
+        <div className="divider" />
+
+        {/* Updates sit directly under the versions, because that is the moment
+            the question gets asked. The button ignores the weekly cadence and
+            always answers — including when the answer is "nothing new", which
+            the automatic check never says out loud. */}
+        <div className="hstack wrap">
+          <div className="grow">
+            <div style={{ fontWeight: 570 }}>{t("settings.updatesTitle")}</div>
+            <div className="t-xs t-mut">{updateLine}</div>
+          </div>
+          {update.info ? (
+            // The banner is hidden while a transfer runs, so without this the
+            // only way to reach the install would be to wait for the board to go
+            // quiet — with no hint that that was what was needed.
+            <Button
+              size="sm"
+              variant="in"
+              disabled={update.phase === "downloading"}
+              onClick={() => (busyBoard ? setConfirmUpdate(true) : startUpdate())}
+            >
+              {t("app.updateNow")}
+            </Button>
+          ) : (
+            <Button
+              size="sm"
+              disabled={update.phase === "checking"}
+              onClick={() => fire(checkForUpdate(true))}
+            >
+              <Icon.Refresh size={13} /> {t("settings.checkUpdates")}
+            </Button>
+          )}
+        </div>
+
+        <SwitchRow
+          title={t("settings.autoUpdateTitle")}
+          desc={t("settings.autoUpdateDesc")}
+          checked={update.autoCheck}
+          onChange={(v) => setAutoCheck(v)}
+        />
       </div>
+
+      {/* Nothing is lost either way — the daemon writes its resumable records as
+          it goes, not at shutdown — but interrupting a running transfer is not
+          something to do to someone without asking. */}
+      <Confirm
+        open={confirmUpdate}
+        title={t("settings.confirmUpdateTitle")}
+        body={t("settings.confirmUpdateBody")}
+        confirmLabel={t("app.updateNow")}
+        onCancel={() => setConfirmUpdate(false)}
+        onConfirm={() => {
+          setConfirmUpdate(false);
+          startUpdate();
+        }}
+      />
 
       <Confirm
         open={confirmRestart}

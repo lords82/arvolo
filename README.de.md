@@ -34,9 +34,13 @@ Kommandozeilen-Client:
 curl -fsSL https://raw.githubusercontent.com/lords82/arvolo/main/install.sh | sh
 ```
 
-**2. Zeig ihm ein Relay.** Arvolo hat keinen zentralen Server — das ist gerade
-der Punkt — also braucht es ein Relay: das, das deine Firma oder ein Freund
-schon betreibt, oder dein eigenes, aufgesetzt mit einem Befehl:
+**2. Nichts einzurichten.** Arvolo kommt auf ein öffentliches Relay eingestellt,
+der nächste Schritt funktioniert also sofort. Es ist eine kleine Maschine, die das
+Projekt betreibt — Dateien bis 100 MB, Links leben 6 Stunden — und sie sieht deine
+Schlüssel nie. **Für alles, worauf es ankommt, zeig Arvolo dein eigenes Relay**,
+aufgesetzt mit einem Befehl. Wer das öffentliche nutzt, akzeptiert dessen
+[Nutzungsbedingungen](TERMS.md) *(Englisch)* — kurz, und die zwei Minuten wert,
+wenn das Verschickte nicht dir gehört.
 
 ```sh
 docker run -d --name arvolo-relay -p 6282:6282 -v arvolo-data:/data \
@@ -44,7 +48,8 @@ docker run -d --name arvolo-relay -p 6282:6282 -v arvolo-data:/data \
 ```
 
 In der App stellst du es unter **Einstellungen → Netzwerk** ein; auf der
-Kommandozeile fragt der erste Start danach und merkt es sich.
+Kommandozeile gibt es `--relay`, und der erste Start fragt danach und merkt es
+sich.
 
 **3. Schick etwas.** In der App: zieh eine Datei ins Fenster und teile den
 kurzen Code, den sie dir gibt — die andere Person fügt ihn in ihr Arvolo ein,
@@ -52,14 +57,18 @@ und die Datei kommt an. Dasselbe im Terminal:
 
 ```sh
 # du
-arvolo code ./foto.jpg
+arvolo send --code ./foto.jpg
 #   ->  4821-crater-mango
 
 # die andere Person
 arvolo recv 4821-crater-mango
 ```
 
-Drüben ist nichts installiert? `arvolo link ./bericht.pdf` druckt eine URL,
+Ein `arvolo send ./foto.jpg` ohne Flags schreibt stattdessen eine kleine
+Ticket-Datei `foto.jpg.arvolo` — teile sie über einen beliebigen Kanal, wie
+eine .torrent-Datei; drüben genügt `arvolo recv foto.jpg.arvolo`.
+
+Drüben ist nichts installiert? `arvolo send --link ./bericht.pdf` druckt eine URL,
 die in jedem Browser herunterlädt und entschlüsselt — ohne Installation, ohne
 Konto. Das sieht, wer sie öffnet:
 
@@ -76,6 +85,7 @@ schicken](docs/assets/arvolo-link-browser.png)
 | [Deployment](docs/DEPLOY.md) | Self-Hosting in Produktion: systemd, Docker, Härtung. *(Englisch)* |
 | [Die Desktop-App](gui/README.md) | Die GUI im Detail, mit ihrer CLI-Paritätstabelle. *(Englisch)* |
 | [Das Protokoll](docs/PROTOCOL.md) | Das Wire-Format und jeder Ablauf, für Neugierige und Auditoren. *(Englisch)* |
+| [Nutzungsbedingungen](TERMS.md) | Die Bedingungen des öffentlichen Relays: was nicht verschickt werden darf, wer dafür einsteht, was protokolliert wird und wie lange. *(Englisch)* |
 
 ## Lizenz
 

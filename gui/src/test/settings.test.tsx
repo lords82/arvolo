@@ -16,7 +16,6 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({ open: () => Promise.resolve(null) 
 vi.mock("@tauri-apps/plugin-opener", () => ({
   revealItemInDir: () => Promise.resolve(),
   openUrl: () => Promise.resolve(),
-  openPath: () => Promise.resolve(),
 }));
 
 import { App } from "../App";
@@ -96,6 +95,33 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   setLangChoice("en");
+});
+
+describe("the id you hand to somebody", () => {
+  // The field exists to be copied and given away, and an id with no relay in it
+  // is half a destination: it reaches you only if the other side happens to
+  // default to your relay, and says nothing when it doesn't. One of these went
+  // to a real person before this test existed.
+  it("carries where you listen, not just who you are", async () => {
+    await openSettings();
+    const id = await screen.findByText(
+      "if2xmnescalwohxlex5qylevzs2cypwdnjxe7sxb76wcphc7daha@relay.test"
+    );
+    expect(id).toBeTruthy();
+  });
+
+  it("falls back to the bare id against a daemon that sends no pair", async () => {
+    harness.snapshot.status = {
+      ...harness.snapshot.status,
+      shareable_id: undefined,
+    } as typeof harness.snapshot.status;
+    await openSettings();
+    expect(
+      await screen.findByText(
+        "if2xmnescalwohxlex5qylevzs2cypwdnjxe7sxb76wcphc7daha"
+      )
+    ).toBeTruthy();
+  });
 });
 
 describe("saving who you are", () => {
@@ -249,5 +275,29 @@ describe("restarting the daemon", () => {
     expect(screen.queryByText(/restarting/i)).toBeNull();
     expect(watch.seen).toEqual([]);
     watch.stop();
+  });
+});
+
+// Which daemon this window is talking to. It sits beside the restart button
+// because that is where the question comes up, and it was the missing half of a
+// real morning's confusion: three builds of the same daemon can exist on one
+// machine, and every other line on this screen describes the identity they share.
+describe("which daemon is answering", () => {
+  it("names the process and the binary it runs", async () => {
+    harness.snapshot.status = {
+      ...harness.snapshot.status!,
+      pid: 4242,
+      exe: "/opt/arvolo/bin/arvolo",
+    };
+    await openSettings();
+    const line = await screen.findByText(/pid 4242/);
+    expect(line.textContent).toContain("/opt/arvolo/bin/arvolo");
+  });
+
+  it("says nothing at all against a daemon too old to report it", async () => {
+    // Not "pid 0", and not an empty line where a fact should be: the field is
+    // absent on the wire, and absent is not zero.
+    await openSettings();
+    expect(screen.queryByText(/pid/i)).toBeNull();
   });
 });

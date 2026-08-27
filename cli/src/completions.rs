@@ -4,8 +4,8 @@
 //! Completion here is **computed by arvolo at the moment you press TAB**, not
 //! baked into a script at install time. That is the whole point: a static script
 //! can only ever offer the command names, while this one offers the things you
-//! actually type — your contact names after `arvolo send`, and the live ids from
-//! `arvolo status` after `cancel`, `resume`, `pause`, `accept` and `reject`.
+//! actually type — your contact names after `arvolo send --to`, and the live ids
+//! from `arvolo status` after `cancel`, `resume`, `pause`, `recv` and `decline`.
 //!
 //! The price is that every candidate function runs *inside your shell's TAB*, so
 //! two rules are absolute:
@@ -53,7 +53,7 @@ pub(crate) fn completions_cmd(shell: CompletionShell) -> anyhow::Result<()> {
 // Candidates
 // ---------------------------------------------------------------------------
 
-/// Saved contact names, for `arvolo send <WHO>` and the `contacts` subcommands.
+/// Saved contact names, for `arvolo send --to <WHO>` and the `contacts` subcommands.
 ///
 /// Read straight from the address book: no relay, no presence probe.
 pub(crate) fn contact_candidates() -> Vec<CompletionCandidate> {
@@ -72,6 +72,26 @@ pub(crate) fn contact_candidates() -> Vec<CompletionCandidate> {
                 "unverified"
             };
             CompletionCandidate::new(name).help(Some(mark.into()))
+        })
+        .collect()
+}
+
+/// Names for `arvolo send --device` and `arvolo device forget`: the machines
+/// this identity knows about, read from the projected register.
+pub(crate) fn device_candidates() -> Vec<CompletionCandidate> {
+    let mine = arvolo_core::sync::device_key(&book::load_or_init_device());
+    book::load_devices()
+        .devices
+        .into_iter()
+        .map(|(id, row)| {
+            let help = if id == mine {
+                "this device".to_string()
+            } else if row.platform.is_empty() {
+                id[..8.min(id.len())].to_string()
+            } else {
+                format!("{} · {}", row.platform, &id[..8.min(id.len())])
+            };
+            CompletionCandidate::new(row.name).help(Some(help.into()))
         })
         .collect()
 }
@@ -97,9 +117,8 @@ pub(crate) fn transfer_candidates() -> Vec<CompletionCandidate> {
     live_transfer_candidates(|status| status == "active")
 }
 
-/// Offer ids for `arvolo accept` / `arvolo reject`. Both are daemon-only verbs —
-/// which, since the control channel gained a Windows transport, no longer means
-/// unix-only.
+/// Waiting-offer handles for `arvolo recv` / `arvolo decline` — the 8-hex form,
+/// which is also what `arvolo status` prints next to each offer.
 pub(crate) fn offer_candidates() -> Vec<CompletionCandidate> {
     let Some(offers) = with_daemon(|mut c| async move { c.list_pending().await }) else {
         return Vec::new();
@@ -112,7 +131,8 @@ pub(crate) fn offer_candidates() -> Vec<CompletionCandidate> {
             } else {
                 o.sender_name
             };
-            CompletionCandidate::new(o.id).help(Some(format!("{} from {who}", o.name).into()))
+            CompletionCandidate::new(crate::handles::short(&o.id))
+                .help(Some(format!("{} from {who}", o.name).into()))
         })
         .collect()
 }
@@ -156,7 +176,14 @@ fn live_transfer_candidates(wanted: fn(&str) -> bool) -> Vec<CompletionCandidate
         .filter(|t| wanted(&t.status))
         .map(|t| {
             let arrow = if t.direction == "send" { "→" } else { "←" };
-            CompletionCandidate::new(t.id.to_string())
+            // The handle, i.e. what `status` prints; numeric only against a
+            // daemon too old to send one.
+            let shown = if t.handle.is_empty() {
+                t.id.to_string()
+            } else {
+                t.handle.clone()
+            };
+            CompletionCandidate::new(shown)
                 .help(Some(format!("{arrow} {} ({})", t.name, t.status).into()))
         })
         .collect()

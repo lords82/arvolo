@@ -27,6 +27,18 @@ use super::socket_path;
 /// Stand up a daemon on a temp socket; returns the shutdown token and a guard
 /// dir kept alive for the test's duration.
 async fn spawn_test_daemon() -> (CancellationToken, tempfile::TempDir) {
+    let (shutdown, dir, _side) = spawn_test_daemon_with_side_events().await;
+    (shutdown, dir)
+}
+
+/// The same daemon, handing back the side-event sender the real daemon command
+/// owns. Tests that care what a *subscriber* sees when the daemon disposes of an
+/// offer by itself need to be able to raise one.
+async fn spawn_test_daemon_with_side_events() -> (
+    CancellationToken,
+    tempfile::TempDir,
+    tokio::sync::broadcast::Sender<super::protocol::EventDto>,
+) {
     let dir = tempfile::tempdir().unwrap();
     std::env::set_var("ARVOLO_CONFIG_DIR", dir.path());
 
@@ -37,18 +49,21 @@ async fn spawn_test_daemon() -> (CancellationToken, tempfile::TempDir) {
     );
     let listener = tokio::net::UnixListener::bind(socket_path()).unwrap();
     let shutdown = CancellationToken::new();
+    let side_events = tokio::sync::broadcast::channel(64).0;
     let daemon = Daemon::new(
         manager,
         Some("https://relay.test".into()),
         dir.path().join("downloads"),
         Arc::new(Mutex::new(HashMap::new())),
         Arc::new(AtomicUsize::new(0)),
+        side_events.clone(),
+        shutdown.clone(),
     );
     let stop = shutdown.clone();
     tokio::spawn(async move {
         let _ = server::run(daemon, listener, stop).await;
     });
-    (shutdown, dir)
+    (shutdown, dir, side_events)
 }
 
 #[tokio::test]
@@ -67,6 +82,15 @@ async fn rpc_roundtrips_over_the_socket() {
     let st = client.status().await.expect("status");
     assert!(!st.public_id.is_empty());
     assert_eq!(st.relay.as_deref(), Some("https://relay.test"));
+    // The form a person is given. Assembled by the daemon precisely so a window
+    // does not have to pair the two fields itself — which is how the desktop app
+    // came to hand out an id with no relay in it, reachable only by someone whose
+    // client happened to default to the same one.
+    assert_eq!(
+        st.shareable_id,
+        format!("{}@relay.test", st.public_id),
+        "status must carry the id *and* where it listens"
+    );
     assert_eq!(st.transfers, 0);
     assert_eq!(st.pending, 0);
 
@@ -74,17 +98,83 @@ async fn rpc_roundtrips_over_the_socket() {
     assert!(client.list().await.expect("list").is_empty());
     assert!(client.list_pending().await.expect("pending").is_empty());
 
-    // Rejecting an unknown offer is idempotent (Ok); accepting one errors.
+    // Rejecting an unknown offer is idempotent (Ok); accepting one is refused —
+    // and the refusal survives the round trip as itself. Server, wire, client: the
+    // whole chain, because the value of a typed refusal is that it still has a
+    // type when it comes out the other end, where the window reads it.
     client
         .reject("nope".into())
         .await
         .expect("reject unknown ok");
-    assert!(client.accept("nope".into(), None).await.is_err());
+    let e = client
+        .accept("nope".into(), None)
+        .await
+        .expect_err("accepting an offer nobody holds");
+    assert_eq!(
+        arvolo_core::manager::AcceptRefusal::of(&e),
+        Some(arvolo_core::manager::AcceptRefusal::NoLongerWaiting),
+        "the refusal arrived as a sentence, not as a reason: {e:#}"
+    );
+
+    // Holding something that cannot be held says so, rather than answering Ok to
+    // a control that did nothing. Same for resuming what is not paused: that is
+    // what the play button on a stalled row was asking for, in silence.
+    assert!(
+        client.pause(999).await.is_err(),
+        "pausing a transfer nobody has must not report success"
+    );
+    assert!(client.resume(999).await.is_err());
 
     // A second client can connect concurrently and subscribe (handshake returns
     // an event stream without error).
     let client2 = DaemonClient::connect().await.expect("connect 2");
     let _stream = client2.subscribe().await.expect("subscribe handshake");
+
+    shutdown.cancel();
+    std::env::remove_var("ARVOLO_CONFIG_DIR");
+}
+
+/// An offer the daemon disposes of by itself must reach the windows.
+///
+/// The daemon takes offers out of the pending map on its own account — a trusted
+/// sender's file is accepted the moment it arrives, a re-post supersedes the offer
+/// it replaces, a blocked sender's is dropped — and a front-end cannot see that map.
+/// Until the intake task was given this channel it had no way to say so, and a
+/// window kept a row, and a button, for an offer that was already spent.
+///
+/// The channel is now made by the daemon command and handed to the server, so what
+/// this pins is that plumbing: an event raised where the intake task raises them
+/// comes out on a subscribed connection.
+#[tokio::test]
+async fn an_offer_the_daemon_disposes_of_reaches_a_subscriber() {
+    let _guard = crate::testlock::ENV
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (shutdown, _dir, side_events) = spawn_test_daemon_with_side_events().await;
+
+    let client = DaemonClient::connect().await.expect("connect");
+    let mut stream = client.subscribe().await.expect("subscribe");
+
+    // Re-sent on a beat rather than once: `Subscribe` is answered before the
+    // handler reaches its own `side_events.subscribe()`, and a broadcast sent into
+    // that window reaches nobody. Which is fine for the real thing — offers keep
+    // arriving — and would be a flake here.
+    let ticker = tokio::spawn(async move {
+        loop {
+            let _ = side_events.send(super::protocol::EventDto::OfferGone { id: "off1".into() });
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    });
+
+    let ev = tokio::time::timeout(std::time::Duration::from_secs(5), stream.next())
+        .await
+        .expect("an event within 5s")
+        .expect("stream stays open");
+    ticker.abort();
+    assert!(
+        matches!(ev, Some(super::protocol::EventDto::OfferGone { id }) if id == "off1"),
+        "the subscriber is told the offer is gone"
+    );
 
     shutdown.cancel();
     std::env::remove_var("ARVOLO_CONFIG_DIR");
@@ -283,6 +373,7 @@ async fn revoking_a_deposit_the_engine_made_goes_through_the_engine() {
         crate::util::now_unix() + 3600,
         Some(tid),
         None,
+        None,
     )
     .unwrap();
     assert!(!rec.expired(), "an expired record skips the relay anyway");
@@ -295,6 +386,8 @@ async fn revoking_a_deposit_the_engine_made_goes_through_the_engine() {
         dir.path().join("downloads"),
         Arc::new(Mutex::new(HashMap::new())),
         Arc::new(AtomicUsize::new(0)),
+        tokio::sync::broadcast::channel(64).0,
+        shutdown.clone(),
     );
     let stop = shutdown.clone();
     tokio::spawn(async move {
@@ -407,6 +500,60 @@ async fn second_bind_on_the_same_socket_fails() {
     // The single-instance guard relies on bind() refusing an in-use path.
     let err = tokio::net::UnixListener::bind(socket_path());
     assert!(err.is_err(), "binding an in-use socket path must fail");
+
+    shutdown.cancel();
+    std::env::remove_var("ARVOLO_CONFIG_DIR");
+}
+
+#[tokio::test]
+async fn the_reserved_word_names_our_own_devices_over_the_socket() {
+    let _guard = crate::testlock::ENV
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (shutdown, _dir) = spawn_test_daemon().await;
+    let mut client = DaemonClient::connect().await.expect("connect");
+
+    // The recipient is resolved before the payload is even looked at, so a path
+    // that does not exist is enough to tell the two failures apart — and needs
+    // no relay, no file and no send.
+    let missing = vec!["/nonexistent/arvolo-test-file".to_string()];
+    let err = client
+        .push(
+            "me".into(),
+            missing.clone(),
+            String::new(),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect_err("nothing to send")
+        .to_string();
+    assert!(
+        !err.contains("known contact"),
+        "`me` must resolve against our own identity, not the address book: {err}"
+    );
+
+    // The other half of the claim: an ordinary unknown name still fails at the
+    // address book, so the branch above is doing something and not swallowing
+    // every recipient.
+    let err = client
+        .push(
+            "nobody".into(),
+            missing,
+            String::new(),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect_err("unknown recipient")
+        .to_string();
+    assert!(err.contains("known contact"), "unexpected error: {err}");
 
     shutdown.cancel();
     std::env::remove_var("ARVOLO_CONFIG_DIR");

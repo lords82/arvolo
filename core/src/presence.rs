@@ -207,13 +207,98 @@ pub struct Offer {
     /// sender-authenticated exactly like the ticket — the relay never sees it.
     #[serde(default)]
     pub note: String,
-    /// The sender's self-chosen display name (`arvolo name "…"`), or empty when
+    /// The sender's self-chosen display name (`arvolo me name "…"`), or empty when
     /// unset. A *petname claim*: it rides inside the sealed, sender-authenticated
     /// offer (so it's bound to the sender's key and the relay never sees it), but it
     /// is attacker-controllable text — the receiver treats it as unverified and it
     /// never substitutes the fingerprint in any trust decision.
     #[serde(default)]
     pub sender_name: String,
+    /// Which **device** posted this offer, when it knows its own id.
+    ///
+    /// Devices paired with `device pair` share one identity, so they also share a
+    /// public key, an inbox slot, and therefore a [`Envelope::sender`]: nothing in
+    /// an offer distinguishes "I posted this" from "my other device posted this".
+    /// That is fine between two people and fatal between two of your own machines
+    /// — the sender would find its own offer waiting in its own inbox and, since
+    /// an offer from your own identity is auto-accepted, download the file over
+    /// itself. This is the one field that tells them apart.
+    ///
+    /// A local tiebreak, not an identity: it is the same random
+    /// [`DeviceId`](crate::sync::DeviceId) the CRDT clock uses, it never leaves
+    /// the HPKE seal (so the relay cannot correlate devices by it), and it is
+    /// never shown to anyone. `None` from a client that predates it, which simply
+    /// means the filter cannot help there.
+    #[serde(default)]
+    pub origin: Option<crate::sync::DeviceId>,
+    /// Which **device** this offer is meant for, when the sender aimed it at one
+    /// (`arvolo send --to me --device laptop`).
+    ///
+    /// The mirror of [`Self::origin`], and it exists because an identity's inbox
+    /// is shared: without it, every machine of yours that polls before the offer
+    /// is acked off the slot auto-accepts it — and they even co-swarm the same
+    /// download, since they all unseal the same content key — so "put this on the
+    /// desktop" was a race rather than an instruction.
+    ///
+    /// A device that knows its own id and is not the target skips the offer and,
+    /// this being the part that matters, does **not** ack it: the machine it was
+    /// meant for still finds it waiting. `None` means "any of them", which is
+    /// also what a client too old to know the field sees — it takes the offer as
+    /// it always did. So targeting is an instruction your own devices honour,
+    /// never one the relay enforces, and it is only as good as the oldest client
+    /// holding the identity.
+    #[serde(default)]
+    pub target: Option<crate::sync::DeviceId>,
+    /// Where the **sender** listens, so a reply can find them. Empty when they
+    /// have no relay to name.
+    ///
+    /// Without it, two people on different relays can only ever talk in the
+    /// direction someone configured by hand: you can reach me because you typed my
+    /// `<id>@<relay>`, and I still cannot reach you. This closes that loop — the
+    /// first thing you send me tells my client where to answer.
+    ///
+    /// Routing, not identity, and it rides inside the HPKE seal like the note: the
+    /// relay never sees it, and it is sender-authenticated, so it is exactly as
+    /// trustworthy as the key it came from. Believing a wrong one costs a delivery
+    /// that goes nowhere, never a disclosure — the file is sealed to the recipient's
+    /// key before any relay is chosen.
+    #[serde(default)]
+    pub relay: String,
+}
+
+/// [`Offer`] as it was before it carried the sender's relay.
+///
+/// Postcard decodes positionally, so an offer written by an older client stops
+/// where this struct stops and reading it as an [`Offer`] runs off the end. An
+/// offer can sit in an inbox for up to its TTL, so upgrading without this would
+/// silently drop everything already in flight — the same reason
+/// [`crate::offline::OfflineTicket`] keeps its own earlier shape.
+#[derive(Deserialize)]
+struct OfferV1 {
+    name: String,
+    size: u64,
+    chunks: u64,
+    ticket: String,
+    note: String,
+    sender_name: String,
+    origin: Option<crate::sync::DeviceId>,
+    target: Option<crate::sync::DeviceId>,
+}
+
+impl From<OfferV1> for Offer {
+    fn from(o: OfferV1) -> Self {
+        Offer {
+            name: o.name,
+            size: o.size,
+            chunks: o.chunks,
+            ticket: o.ticket,
+            note: o.note,
+            sender_name: o.sender_name,
+            origin: o.origin,
+            target: o.target,
+            relay: String::new(),
+        }
+    }
 }
 
 /// The authenticated **inner** envelope: the sender's public key plus the
@@ -542,13 +627,95 @@ pub async fn offer_status(
     id: &str,
     poster_token: &str,
 ) -> Result<OfferStatus> {
+    offer_status_once(client, relay, recipient, id, poster_token, 0, None).await
+}
+
+/// How long a client may ask the relay to hold the status GET open. Matches the
+/// relay's own cap (`INBOX_MAX_WAIT_SECS`); asking for more is silently clamped
+/// there, so this only keeps us honest about what we expect.
+pub const OFFER_STATUS_MAX_WAIT_SECS: u64 = 30;
+
+/// [`offer_status`], holding the connection open for up to `wait_secs` until the
+/// status becomes something other than `since` — what the caller last saw.
+///
+/// This is how a `send --to` learns that its recipient has shown up: the sender is
+/// otherwise asleep between delivery attempts, on a backoff that grows to minutes,
+/// and the whole point of a held send is that the file can only move while both
+/// ends are awake at once. Waiting on the change collapses that window to a round
+/// trip — and it catches both kinds of recipient, the daemon that acks on accept
+/// and the bare `arvolo recv` that only lists its inbox before dialling (see the
+/// relay's `inbox_status_handler`).
+///
+/// **Never returns before `wait_secs` unless there is news.** A relay that does
+/// not know `wait` answers instantly, and a caller looping on this to pace itself
+/// would then hammer it — the failure this same client already paid for once, on
+/// the inbox poll (`MIN_ROUND` in [`InboxSubscription::run`]). So the floor lives
+/// here, in the one place every caller inherits it, and an unaware relay simply
+/// degrades to the polling interval the caller asked for.
+pub async fn offer_status_waiting(
+    client: &reqwest::Client,
+    relay: &str,
+    recipient: &PublicId,
+    id: &str,
+    poster_token: &str,
+    since: OfferStatus,
+    wait_secs: u64,
+) -> Result<OfferStatus> {
+    let started = std::time::Instant::now();
+    let out = offer_status_once(
+        client,
+        relay,
+        recipient,
+        id,
+        poster_token,
+        wait_secs,
+        Some(since),
+    )
+    .await;
+    let news = matches!(&out, Ok(st) if *st != since);
+    if !news {
+        let floor = std::time::Duration::from_secs(wait_secs);
+        if let Some(rest) = floor.checked_sub(started.elapsed()) {
+            tokio::time::sleep(rest).await;
+        }
+    }
+    out
+}
+
+/// The wire spelling of a status, for `?since=`. Deliberately not
+/// [`OfferStatus::as_str`]: that one is the vocabulary a UI shows, and the two
+/// disagree on `Arrived`/`fetched` — the relay speaks the older word.
+fn wire_word(s: OfferStatus) -> &'static str {
+    match s {
+        OfferStatus::Pending => "pending",
+        OfferStatus::Arrived => "fetched",
+        OfferStatus::Taken => "taken",
+        OfferStatus::Gone => "gone",
+    }
+}
+
+async fn offer_status_once(
+    client: &reqwest::Client,
+    relay: &str,
+    recipient: &PublicId,
+    id: &str,
+    poster_token: &str,
+    wait_secs: u64,
+    since: Option<OfferStatus>,
+) -> Result<OfferStatus> {
+    let wait = wait_secs.min(OFFER_STATUS_MAX_WAIT_SECS);
+    let since = since.map(wire_word).unwrap_or_default();
     // Like `retract_offer`, the offer may be in the previous epoch's slot. The relay
     // answers `gone` for a row it doesn't have, which is exactly what a wrong slot
     // looks like — so keep asking while the answer is `gone`, and only conclude the
-    // offer is gone once every slot in the window says so.
+    // offer is gone once every slot in the window says so. A wrong slot costs
+    // nothing even when waiting: `gone` is answered at once, never held.
     let mut first_err = None;
     for slot in inbox_slots_at(recipient, now_unix()) {
-        let url = format!("{}/{id}/status", inbox_url(relay, &slot));
+        let url = format!(
+            "{}/{id}/status?wait={wait}&since={since}",
+            inbox_url(relay, &slot)
+        );
         let sent = client
             .get(url)
             .header(POSTER_TOKEN_HEADER, poster_token)
@@ -643,9 +810,21 @@ pub struct InboxSubscription {
     /// nothing (the relay marks by `(slot, id)`), so this cannot be probed for —
     /// it has to be remembered.
     row_slots: std::sync::Mutex<HashMap<String, String>>,
+    /// Rows that failed to decode in THIS subscription's lifetime — skipped (and
+    /// not re-logged) on later rounds, but never acked: see `poll_wait` on why an
+    /// undecodable row must survive us.
+    undecodable: std::sync::Mutex<std::collections::HashSet<String>>,
     /// When the older slots were last drained, so the steady-state poll loop doesn't
     /// pay for them every round.
     last_backfill: std::sync::Mutex<u64>,
+    /// This device's id, once its owner has said what it is
+    /// ([`Self::set_origin`]). Offers stamped with it are ours and are skipped —
+    /// see `poll_wait`. `None` leaves the poll exactly as it was.
+    origin: std::sync::Mutex<Option<crate::sync::DeviceId>>,
+    /// The ids the last read of the current slot returned — what this subscription
+    /// already has, told to the relay on the next long-poll so it holds instead of
+    /// handing the same rows straight back. See [`Self::have_header`].
+    held: std::sync::Mutex<std::collections::HashSet<String>>,
 }
 
 #[derive(Clone)]
@@ -656,6 +835,11 @@ struct CachedSession {
 
 /// Seconds the relay may hold a GET open waiting for an offer (long-poll).
 const LONG_POLL_SECS: u64 = 25;
+
+/// Header carrying the row ids this subscription already holds, so the relay's hold
+/// ends on a row we do not have rather than on the slot merely being non-empty. A
+/// relay that predates it ignores it and answers as it always did.
+const HAVE_HEADER: &str = "x-arvolo-have";
 
 /// How often the previous epoch's slot is drained during a long-poll loop.
 ///
@@ -690,7 +874,44 @@ impl InboxSubscription {
             me_secret: me.secret_bytes(),
             sessions: std::sync::Mutex::new(HashMap::new()),
             row_slots: std::sync::Mutex::new(HashMap::new()),
+            undecodable: std::sync::Mutex::new(std::collections::HashSet::new()),
             last_backfill: std::sync::Mutex::new(0),
+            origin: std::sync::Mutex::new(None),
+            held: std::sync::Mutex::new(std::collections::HashSet::new()),
+        }
+    }
+
+    /// Tell this subscription which device it is polling for, so it can recognise
+    /// the offers this same device posted. Call it before polling; see
+    /// [`Offer::origin`].
+    pub fn set_origin(&self, device: crate::sync::DeviceId) {
+        *self.origin.lock().unwrap() = Some(device);
+    }
+
+    /// Did *this* device post this offer? False whenever either side is unknown —
+    /// an offer from a client that predates [`Offer::origin`], or a subscription
+    /// nobody told which device it is. Unknown must mean "not ours": mistaking
+    /// someone else's offer for our own would drop a real delivery on the floor,
+    /// while the reverse merely restores the behaviour that came before.
+    fn is_ours(&self, offer: &Offer) -> bool {
+        match (*self.origin.lock().unwrap(), offer.origin) {
+            (Some(mine), Some(theirs)) => mine == theirs,
+            _ => false,
+        }
+    }
+
+    /// Is this offer aimed at a *different* device of ours?
+    ///
+    /// False whenever there is no aim (`target: None` — any of them, and what
+    /// every offer from another person carries) and false whenever we do not know
+    /// our own id, for the same reason as [`Self::is_ours`]: not knowing must
+    /// never turn into declining a delivery. So an aim is honoured by the
+    /// machines that can honour it and ignored by the ones that cannot, which is
+    /// also what an old client does with a field it has never heard of.
+    fn aimed_elsewhere(&self, offer: &Offer) -> bool {
+        match (*self.origin.lock().unwrap(), offer.target) {
+            (Some(mine), Some(theirs)) => mine != theirs,
+            _ => false,
         }
     }
 
@@ -721,6 +942,24 @@ impl InboxSubscription {
         for id in ids {
             map.insert(id, slot.to_string());
         }
+    }
+
+    /// What to send as `x-arvolo-have`: the rows this subscription already holds, so
+    /// the relay ends its hold on a row we do *not* have rather than on any row at
+    /// all. `None` when there is nothing to say (the header is then simply absent,
+    /// which is also how an older relay reads it).
+    ///
+    /// The distinction matters because of what shares the inbox slot: the contact
+    /// sync cell is a durable row that is never acked, so "the slot is non-empty" is
+    /// permanently true for anyone with sync on, and without this the long-poll
+    /// returns instantly forever — the GET storm `run`'s `MIN_ROUND` floor exists to
+    /// contain.
+    fn have_header(&self) -> Option<String> {
+        let held = self.held.lock().unwrap();
+        if held.is_empty() {
+            return None;
+        }
+        Some(held.iter().cloned().collect::<Vec<_>>().join(","))
     }
 
     /// Whether the older slots are due a drain, stamping the clock if so.
@@ -825,15 +1064,40 @@ impl InboxSubscription {
                 continue;
             }
             match decode_offer(&item.blob, &me) {
+                // An offer this very device posted. Our paired devices share an
+                // identity, so it decodes and authenticates perfectly — it is
+                // addressed to us, by us. Skip it and, like a sync note, do NOT
+                // ack: our *other* devices still have to see it. Leaving it on
+                // the slot costs nothing, since the poll loop dedupes by row id
+                // and already holds a floor on how often a round may complete.
+                Some((_, offer)) if self.is_ours(&offer) => continue,
+                // Meant for another of our machines. Skipped for the same reason
+                // and, crucially, with the same restraint: no ack. Acking marks
+                // the row taken and deletes it, so the machine it was actually
+                // aimed at — which may be asleep for another day — would never
+                // see it. Leaving it costs a row on the slot until its TTL.
+                Some((_, offer)) if self.aimed_elsewhere(&offer) => continue,
                 Some((sender, offer)) => out.push(ReceivedOffer {
                     id: item.id,
                     sender,
                     offer,
                 }),
-                // Junk or an offer we can't authenticate: drop it from our view and
-                // ack it so it stops coming back.
+                // A row we can't decode is NOT acked. Acking marks it "taken" for
+                // the sender and destroys it — and a decode failure is not proof
+                // of junk: a daemon mid-restart with its identity half-loaded
+                // fails this same match on a perfectly good offer, and an ack
+                // here buried it forever (measured, not hypothesized). Skipping
+                // costs nothing: the in-run dedupe stops it from hammering, a
+                // restart retries the decode with fresh state, and true junk
+                // expires with its slot under the relay's row cap anyway.
                 None => {
-                    let _ = self.ack(&item.id).await;
+                    if self.undecodable.lock().unwrap().insert(item.id.clone()) {
+                        tracing::warn!(
+                            "inbox row {} does not decode as an offer for this identity — \
+                             leaving it on the relay (it may be readable after a restart)",
+                            item.id
+                        );
+                    }
                 }
             }
         }
@@ -872,7 +1136,18 @@ impl InboxSubscription {
             }
             let wait = if first { wait_secs } else { 0 };
             let url = format!("{}?wait={}", inbox_url(&self.relay, slot), wait);
-            let bytes = match self.authed(reqwest::Method::GET, slot, &url).await {
+            // Only the held poll on the current slot says what it has. An older slot
+            // is read with `wait=0`, where the relay ignores the header anyway, and
+            // `held` describes the current slot's rows in any case.
+            let have = if first && wait > 0 {
+                self.have_header()
+            } else {
+                None
+            };
+            let bytes = match self
+                .authed(reqwest::Method::GET, slot, &url, have.as_deref())
+                .await
+            {
                 Ok(b) => b,
                 // A failure on the *current* slot is the caller's to see — it is the
                 // live inbox. An older slot failing is not worth losing the round
@@ -881,11 +1156,20 @@ impl InboxSubscription {
                 Err(_) => continue,
             };
             if bytes.is_empty() {
+                // A hold that ended on its own timer, or an empty slot. Either way
+                // nothing has changed, so `held` still describes what we have — the
+                // relay was told that and answered "nothing you don't".
                 continue;
             }
             let items: Vec<InboxItem> =
                 postcard::from_bytes(&bytes).context("decode inbox items")?;
             self.remember_rows(slot, items.iter().map(|row| row.id.clone()));
+            if first {
+                // Replaced wholesale, not merged: a row that has left the slot must
+                // leave `held` with it, or a re-post under a new id would be the only
+                // thing that could ever end a hold again.
+                *self.held.lock().unwrap() = items.iter().map(|row| row.id.clone()).collect();
+            }
             out.extend(items);
         }
         Ok(out)
@@ -934,25 +1218,34 @@ impl InboxSubscription {
             .cloned()
             .unwrap_or_else(|| self.current_slot());
         let url = format!("{}/{id}", inbox_url(&self.relay, &slot));
-        self.authed(reqwest::Method::DELETE, &slot, &url).await?;
+        self.authed(reqwest::Method::DELETE, &slot, &url, None)
+            .await?;
         self.row_slots.lock().unwrap().remove(id);
         Ok(())
     }
 
     /// Perform an authenticated inbox request against `slot`, attaching its bearer
     /// token and re-authenticating once on a 401 (e.g. the relay restarted with a new
-    /// session secret). Returns the response body bytes.
-    async fn authed(&self, method: reqwest::Method, slot: &str, url: &str) -> Result<Vec<u8>> {
+    /// session secret). `have` is the optional `x-arvolo-have` value (see
+    /// [`Self::have_header`]). Returns the response body bytes.
+    async fn authed(
+        &self,
+        method: reqwest::Method,
+        slot: &str,
+        url: &str,
+        have: Option<&str>,
+    ) -> Result<Vec<u8>> {
         let mut forced = false;
         loop {
             let bearer = self.ensure_session(slot, forced).await?;
-            let resp = self
+            let mut req = self
                 .client
                 .request(method.clone(), url)
-                .bearer_auth(&bearer)
-                .send()
-                .await
-                .context("inbox request")?;
+                .bearer_auth(&bearer);
+            if let Some(have) = have {
+                req = req.header(HAVE_HEADER, have);
+            }
+            let resp = req.send().await.context("inbox request")?;
             if resp.status() == reqwest::StatusCode::UNAUTHORIZED && !forced {
                 // Stale token — drop it and retry the handshake once.
                 self.sessions.lock().unwrap().remove(slot);
@@ -976,13 +1269,18 @@ impl InboxSubscription {
         // a polled-yet-unacked offer would be returned again on the next round —
         // dedupe by id so each offer is surfaced to the caller exactly once.
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-        // Floor on how often a round may complete. The relay's long-poll returns
-        // *immediately* whenever the slot is non-empty — and a slot holding a
-        // durable non-offer blob (the contact-sync cell) is non-empty forever, so
-        // without this floor the loop degenerates into a zero-delay GET storm
-        // (observed: >700 req/s per client, pegging the relay and its access
-        // logs). A quiet inbox still long-polls the full hold time and never
-        // waits here.
+        // Floor on how often a round may complete, and now only a backstop.
+        //
+        // The relay's long-poll used to return *immediately* whenever the slot was
+        // non-empty — and a slot holding a durable non-offer blob (the contact-sync
+        // cell) is non-empty forever, so without this floor the loop degenerated into
+        // a zero-delay GET storm (observed: >700 req/s per client, pegging the relay
+        // and its access logs). Telling the relay what we already hold
+        // (`have_header`) is what actually fixed that: a steady-state round now takes
+        // the full hold time and never reaches this line. It stays for the two cases
+        // that still could — an older relay that ignores the header, and any future
+        // shape of "returns at once, repeatedly" — because the cost of being wrong
+        // here is measured in requests per second.
         const MIN_ROUND: std::time::Duration = std::time::Duration::from_secs(2);
         loop {
             if cancel.is_cancelled() {
@@ -1071,7 +1369,13 @@ fn decode_offer(blob: &[u8], me: &Identity) -> Option<(PublicId, Offer)> {
         ciphertext: env.ciphertext,
     };
     let plaintext = open(&sealed, me, &sender, OFFER_AAD).ok()?;
-    let offer: Offer = postcard::from_bytes(&plaintext).ok()?;
+    // Newest shape first: postcard ignores trailing bytes, so trying the older one
+    // first would read a current offer as "everything I know, plus junk" and throw
+    // the relay away silently.
+    let offer = match postcard::from_bytes::<Offer>(&plaintext) {
+        Ok(o) => o,
+        Err(_) => postcard::from_bytes::<OfferV1>(&plaintext).ok()?.into(),
+    };
     Some((sender, offer))
 }
 
@@ -1290,6 +1594,9 @@ mod tests {
             ticket: "arvc-fake".into(),
             note: "see page 4".into(),
             sender_name: "Lorenzo".into(),
+            origin: None,
+            target: None,
+            relay: "https://relay.example".into(),
         }
     }
 
@@ -1345,5 +1652,81 @@ mod tests {
         let (got_sender, got_offer) = decode_offer(&blob, &recipient).expect("legacy decode");
         assert_eq!(got_sender.to_bytes(), sender.public().to_bytes());
         assert_eq!(got_offer, offer);
+    }
+
+    /// An offer written before [`Offer::relay`] existed must still open. Postcard
+    /// decodes positionally, so without the [`OfferV1`] fallback this one runs off
+    /// the end of the buffer and `decode_offer` drops it — and an offer can sit in
+    /// an inbox for its whole TTL, so an upgrade would quietly swallow everything
+    /// already in flight.
+    #[test]
+    fn an_offer_from_before_the_relay_field_still_opens() {
+        /// Exactly the shape [`Offer`] had then. Written out longhand rather than
+        /// reusing `OfferV1` so that shrinking `OfferV1` by mistake fails here.
+        #[derive(Serialize)]
+        struct OldOffer {
+            name: String,
+            size: u64,
+            chunks: u64,
+            ticket: String,
+            note: String,
+            sender_name: String,
+            origin: Option<crate::sync::DeviceId>,
+            target: Option<crate::sync::DeviceId>,
+        }
+
+        let sender = Identity::generate();
+        let recipient = Identity::generate();
+        let old = OldOffer {
+            name: "photo.jpg".into(),
+            size: 1234,
+            chunks: 1,
+            ticket: "arvc-fake".into(),
+            note: "see page 4".into(),
+            sender_name: "Lorenzo".into(),
+            origin: None,
+            target: None,
+        };
+        let plaintext = postcard::to_allocvec(&old).unwrap();
+        let sealed = seal(&plaintext, &recipient.public(), &sender, OFFER_AAD).unwrap();
+        let env = Envelope {
+            sender: sender.public().to_bytes(),
+            encapped_key: sealed.encapped_key,
+            ciphertext: sealed.ciphertext,
+        };
+        let outer = seal_anon(
+            &postcard::to_allocvec(&env).unwrap(),
+            &recipient.public(),
+            ENVELOPE_AAD,
+        )
+        .unwrap();
+        let blob = postcard::to_allocvec(&SealedEnvelope {
+            encapped_key: outer.encapped_key,
+            ciphertext: outer.ciphertext,
+        })
+        .unwrap();
+
+        let (got_sender, got) = decode_offer(&blob, &recipient).expect("an old offer still opens");
+        assert_eq!(got_sender.to_bytes(), sender.public().to_bytes());
+        assert_eq!(got.name, "photo.jpg");
+        assert_eq!(got.note, "see page 4");
+        // No relay to learn from a client that had none to name — and crucially
+        // this is empty rather than garbage read out of the next field.
+        assert_eq!(got.relay, "");
+    }
+
+    /// And the other direction: a current offer must not be mistaken for an old
+    /// one. Postcard ignores trailing bytes, so trying `OfferV1` first would parse
+    /// happily and throw the relay away without a word.
+    #[test]
+    fn a_current_offer_is_not_read_as_the_old_shape() {
+        let sender = Identity::generate();
+        let recipient = Identity::generate();
+        let offer = test_offer();
+        let blob = encode_offer_blob(&offer, &recipient.public(), &sender).unwrap();
+
+        let (_, got) = decode_offer(&blob, &recipient).expect("decode");
+        assert_eq!(got.relay, "https://relay.example");
+        assert_eq!(got, offer);
     }
 }

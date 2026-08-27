@@ -15,8 +15,10 @@ agree that your contribution may be distributed under **both** the AGPL-3.0 and
 the Arvolo commercial license. Sign your commits with `git commit -s` (adds a
 `Signed-off-by` line).
 
-> Note: until the project formalizes a Contributor License Agreement, non-trivial
-> external contributions may be deferred so the dual-licensing rights stay clean.
+> The sign-off is all that is asked for. For anything larger than a fix, open an
+> issue first and let's agree on the shape before you write it — that is worth
+> doing on any project, and here it also gives us a chance to talk through the
+> dual-licensing side before, rather than after, you have spent your evening on it.
 
 ## Development
 
@@ -28,6 +30,16 @@ cargo fmt --all
 ```
 
 Requires a recent Rust toolchain (>= 1.88; CI uses stable).
+
+## Copy
+
+Anything the user reads — a label, an error, a line of `--help` — follows
+[docs/COPY.md](docs/COPY.md). In one line: say what happened, say what they can
+do about it, and put the reason on the second level (a hint line in the GUI,
+`-v` in the CLI) instead of in front of them every time.
+
+`gui/src/test/copy.test.ts` enforces the length caps and the voice, and lists
+what is still over. Commit messages, release notes and PR titles are in English.
 
 ## Trademark
 

@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use arvolo_core::backfill::BlobNode;
+use tokio::sync::Notify;
 
 use crate::limits::{RzLimiter, WriteLimiter};
 use crate::mailbox::Mailbox;
@@ -32,6 +33,51 @@ pub struct AppState {
     /// seed, inbox-post, swarm-announce, presence). Bounds cheap disk/peer-list
     /// abuse from a single source; see the write rate-limiting section.
     pub write_limiter: Arc<WriteLimiter>,
+    /// Wake-ups for inbox long-polls, keyed by slot — see [`AppState::inbox_wait_on`].
+    pub inbox_waiters: InboxWaiters,
+}
+
+/// The clients currently holding an inbox long-poll open, keyed by the slot each
+/// is watching.
+///
+/// A held poll used to cost a store scan twice a second, so the relay's steady-state
+/// work grew with the number of *connected* clients rather than with the number of
+/// deposits: ten thousand idle inboxes meant twenty thousand queries a second, all
+/// of them answering "still nothing". With this, a deposit wakes exactly the slot it
+/// landed in and an idle poll is an idle task.
+pub type InboxWaiters = Arc<Mutex<HashMap<String, Arc<Notify>>>>;
+
+/// A registered interest in one slot's inbox, held for as long as a poll is waiting.
+///
+/// Dropping it removes the slot's entry once the last waiter has gone, so the map is
+/// bounded by the polls open right now rather than by every slot the relay has ever
+/// been asked about.
+pub struct InboxWaiterGuard {
+    waiters: InboxWaiters,
+    slot: String,
+    notify: Arc<Notify>,
+}
+
+impl InboxWaiterGuard {
+    /// A future that resolves when a deposit lands in this slot.
+    ///
+    /// Call [`tokio::sync::futures::Notified::enable`] on it *before* reading the
+    /// store: that registers the waiter, so a deposit arriving between the read and
+    /// the await still wakes this poll instead of being missed until the timeout.
+    pub fn notified(&self) -> tokio::sync::futures::Notified<'_> {
+        self.notify.notified()
+    }
+}
+
+impl Drop for InboxWaiterGuard {
+    fn drop(&mut self) {
+        let mut map = self.waiters.lock().unwrap();
+        // The map's reference plus this guard's is two. Any more and another poll is
+        // still holding on the same slot, so the entry has to stay.
+        if Arc::strong_count(&self.notify) <= 2 {
+            map.remove(&self.slot);
+        }
+    }
 }
 
 /// One tracked peer of a swarm (in-memory tracker row).
@@ -76,6 +122,38 @@ impl AppState {
             swarm: Arc::new(Mutex::new(HashMap::new())),
             rz_limiter: Arc::new(Mutex::new(HashMap::new())),
             write_limiter: Arc::new(Mutex::new(HashMap::new())),
+            inbox_waiters: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Register interest in `slot`'s inbox and return the handle a deposit there
+    /// will notify. See [`InboxWaiterGuard::notified`] for the ordering that keeps
+    /// a deposit from slipping between the read and the wait.
+    pub fn inbox_wait_on(&self, slot: &str) -> InboxWaiterGuard {
+        let notify = self
+            .inbox_waiters
+            .lock()
+            .unwrap()
+            .entry(slot.to_string())
+            .or_insert_with(|| Arc::new(Notify::new()))
+            .clone();
+        InboxWaiterGuard {
+            waiters: self.inbox_waiters.clone(),
+            slot: slot.to_string(),
+            notify,
+        }
+    }
+
+    /// Wake every poll currently holding on `slot`. Called once a deposit is
+    /// visible to a reader, never before.
+    ///
+    /// The notify is used through the map rather than cloned out from under the
+    /// lock: releasing the lock while holding the only other reference would let the
+    /// last waiter's guard see a count that says "someone else is here" and leave a
+    /// dead entry behind for good.
+    pub fn notify_inbox(&self, slot: &str) {
+        if let Some(notify) = self.inbox_waiters.lock().unwrap().get(slot) {
+            notify.notify_waiters();
         }
     }
 }
@@ -105,6 +183,14 @@ pub(crate) const CONTROL_PLANE_BODY_LIMIT: usize = 16 * 1024 * 1024; // 16 MiB
 pub const DEFAULT_MAX_ENTRIES: i64 = 100_000;
 /// Cap on chunks a single seed request may ask the relay to fetch+store.
 pub const MAX_SEED_CHUNKS_PER_REQ: usize = 4096;
+/// Cap on hashes a single `/v1/have` question may ask about.
+///
+/// The question itself leaks nothing new — the chunk protocol already answers it
+/// for anyone holding the hashes — but it is a *read* on a relay whose read paths
+/// have no limiter of their own, and a batched one. Bounding the list (and
+/// spending the write budget on it, as the swarm tracker does for the same
+/// reason) is what keeps it from being the cheapest way to make the box work.
+pub const MAX_HAVE_CHUNKS_PER_REQ: usize = 4096;
 /// Default cap on the total number of pending seeded chunk rows (each backs one
 /// ≤16 MiB chunk file on disk), bounding the unauthenticated seed path's disk
 /// footprint. Override with `ARVOLO_MAX_SEEDED_ROWS`.

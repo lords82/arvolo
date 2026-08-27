@@ -140,8 +140,20 @@ pub fn load(id: &str) -> Result<SendRecord> {
     toml::from_str(&s).with_context(|| format!("parse session {}", path.display()))
 }
 
-/// All saved sessions, newest first.
+/// How long a resumable-send record is kept before the sweep reaps it. A month:
+/// a ticket someone still means to redeem is long dead by then, and a record
+/// nobody ever cleans (the historical norm — only `cancel` removed them) stops
+/// accumulating forever.
+const SWEEP_AFTER_SECS: u64 = 30 * 24 * 3600;
+
+/// All saved sessions, newest first. Records older than [`SWEEP_AFTER_SECS`]
+/// are deleted on the way through — every reader sweeps, so no daemon or timer
+/// has to.
 pub fn list() -> Vec<SendRecord> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     let mut out: Vec<SendRecord> = std::fs::read_dir(sessions_dir())
         .into_iter()
         .flatten()
@@ -149,9 +161,22 @@ pub fn list() -> Vec<SendRecord> {
         .filter(|e| e.path().extension().is_some_and(|x| x == "toml"))
         .filter_map(|e| std::fs::read_to_string(e.path()).ok())
         .filter_map(|s| toml::from_str::<SendRecord>(&s).ok())
+        .filter(|r| {
+            let expired = now.saturating_sub(r.created) > SWEEP_AFTER_SECS;
+            if expired {
+                let _ = std::fs::remove_file(record_path(&r.id));
+            }
+            !expired
+        })
         .collect();
     out.sort_by_key(|r| std::cmp::Reverse(r.created));
     out
+}
+
+/// Delete a session record if it exists — for the delivered path, where "there
+/// was nothing to delete" is not an error worth surfacing.
+pub fn remove_if_present(id: &str) {
+    let _ = std::fs::remove_file(record_path(id));
 }
 
 /// Delete a session record by id.

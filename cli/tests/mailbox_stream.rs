@@ -52,7 +52,7 @@ async fn a_streamed_multichunk_deposit_round_trips_byte_for_byte() {
     std::fs::write(&src, &data).unwrap();
 
     let deposited = deposit_offline(
-        &src,
+        &src.as_path().into(),
         "big.bin",
         &recipient.public(),
         &sender,

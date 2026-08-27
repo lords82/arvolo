@@ -9,8 +9,8 @@ use std::path::PathBuf;
 
 use arvolo_ipc::client::DaemonClient;
 use arvolo_ipc::protocol::{
-    ConfigDto, ConfigPatch, ContactDto, DepositDto, HistoryDto, OfferDto, PairKind, PresenceDto,
-    StatusDto, SyncDto, TransferDto,
+    ConfigDto, ConfigPatch, ContactDto, DepositDto, DeviceDto, HistoryDto, OfferDto, PairKind,
+    PresenceDto, StatusDto, SyncDto, TransferDto,
 };
 use serde::Serialize;
 
@@ -26,6 +26,40 @@ pub struct ServedDto {
 pub struct CodeDto {
     pub id: u64,
     pub code: String,
+}
+
+/// An accept that did not happen, as a window needs it.
+///
+/// `code` is the daemon's own word for a *refusal* — `needsPassword`, `p2pOff`,
+/// `noLongerWaiting` — and empty for everything else. It exists because the dialog
+/// has to act on one of those (put the password field up) and used to work it out
+/// by testing the message for the word "password": rewording an English sentence
+/// in the engine would then have quietly removed the only place a password can be
+/// typed. `message` is what to show, exactly as before.
+#[derive(Debug, Clone, Serialize)]
+pub struct AcceptFailed {
+    pub code: String,
+    pub message: String,
+}
+
+impl From<anyhow::Error> for AcceptFailed {
+    fn from(e: anyhow::Error) -> Self {
+        AcceptFailed {
+            code: arvolo_core::manager::AcceptRefusal::of(&e)
+                .map(|r| r.code().to_string())
+                .unwrap_or_default(),
+            message: format!("{e:#}"),
+        }
+    }
+}
+
+impl From<String> for AcceptFailed {
+    fn from(message: String) -> Self {
+        AcceptFailed {
+            code: String::new(),
+            message,
+        }
+    }
 }
 
 /// Connect to the daemon, mapping the "no daemon" error to a UI-friendly string.
@@ -192,16 +226,24 @@ pub async fn send_to(
     to: String,
     items: Vec<String>,
     note: String,
+    device: Option<String>,
 ) -> Result<u64, String> {
     let paths = state.resolve(&items)?;
     let mut c = client().await?;
-    c.push(to, paths, note).await.or_else(err)
+    // The GUI's live send carries no mailbox options: its mailbox mode goes
+    // through `deposit` below, which has always carried them.
+    // No descriptor hand-off from the GUI: its daemon is a child of the app
+    // and inherits the app's own file-access grants.
+    c.push(to, paths, note, None, None, None, device, None)
+        .await
+        .or_else(err)
 }
 
 /// `send --deposit`: straight to the recipient's mailbox, with the options that
 /// only mean anything there. Returns the `arvm…` ticket so the sender can also
 /// hand it over themselves.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn deposit_to(
     state: tauri::State<'_, PickedFiles>,
     to: String,
@@ -210,13 +252,39 @@ pub async fn deposit_to(
     ttl: Option<u64>,
     max: Option<u32>,
     password: Option<String>,
+    device: Option<String>,
 ) -> Result<ServedDto, String> {
     let paths = state.resolve(&items)?;
     let mut c = client().await?;
-    match c.deposit(to, paths, note, ttl, max, password).await {
+    match c
+        .deposit(to, paths, note, ttl, max, password, device, None)
+        .await
+    {
         Ok((id, ticket)) => Ok(ServedDto { id, ticket }),
         Err(e) => err(e),
     }
+}
+
+/// The machines sharing this identity — see `Request::ListDevices` for what this
+/// list is and, more to the point, what it is not.
+#[tauri::command]
+pub async fn list_devices() -> Result<Vec<DeviceDto>, String> {
+    let mut c = client().await?;
+    c.list_devices().await.or_else(err)
+}
+
+/// Rename the machine the daemon runs on. Only that one: a row belongs to the
+/// device that wrote it, so the UI offers this on its own row and nowhere else.
+#[tauri::command]
+pub async fn rename_this_device(name: String) -> Result<(), String> {
+    let mut c = client().await?;
+    c.rename_this_device(name).await.or_else(err)
+}
+
+#[tauri::command]
+pub async fn forget_device(who: String) -> Result<(), String> {
+    let mut c = client().await?;
+    c.forget_device(who).await.or_else(err)
 }
 
 #[tauri::command]
@@ -237,12 +305,6 @@ pub async fn set_config(patch: ConfigPatch) -> Result<ConfigDto, String> {
 pub async fn presence(ids: Vec<String>) -> Result<Vec<PresenceDto>, String> {
     let mut c = client().await?;
     c.presence(ids).await.or_else(err)
-}
-
-#[tauri::command]
-pub async fn prune_names() -> Result<usize, String> {
-    let mut c = client().await?;
-    c.prune_names().await.or_else(err)
 }
 
 #[tauri::command]
@@ -284,7 +346,7 @@ pub async fn serve_ticket(
 ) -> Result<ServedDto, String> {
     let paths = state.resolve(&items)?;
     let mut c = client().await?;
-    match c.serve_ticket(paths, seed_relay).await {
+    match c.serve_ticket(paths, seed_relay, None).await {
         Ok((id, ticket)) => Ok(ServedDto { id, ticket }),
         Err(e) => err(e),
     }
@@ -299,7 +361,7 @@ pub async fn create_link(
 ) -> Result<String, String> {
     let path = state.resolve(std::slice::from_ref(&item))?.remove(0);
     let mut c = client().await?;
-    c.create_link(path, ttl, max).await.or_else(err)
+    c.create_link(path, ttl, max, None).await.or_else(err)
 }
 
 #[tauri::command]
@@ -308,7 +370,7 @@ pub async fn accept_offer(
     offer_id: String,
     out_item: Option<String>,
     password: Option<String>,
-) -> Result<u64, String> {
+) -> Result<u64, AcceptFailed> {
     let out = match out_item {
         Some(id) => Some(state.resolve(std::slice::from_ref(&id))?.remove(0)),
         None => None,
@@ -316,7 +378,7 @@ pub async fn accept_offer(
     let mut c = client().await?;
     c.accept_with_password(offer_id, out.map(PathBuf::from), password)
         .await
-        .or_else(err)
+        .map_err(AcceptFailed::from)
 }
 
 #[tauri::command]
@@ -324,7 +386,7 @@ pub async fn reject_offer(app: tauri::AppHandle, offer_id: String) -> Result<(),
     let mut c = client().await?;
     let done = c.reject(offer_id).await.or_else(err);
     // Rejecting emits no engine event, so the pump never hears about it and the
-    // wedge would stay down over an offer that is gone. Accepting needs no such
+    // mark would keep breathing over an offer that is gone. Accepting needs no such
     // nudge: it turns into a `Started`, which the pump already watches.
     crate::attention::refresh(&app).await;
     done
@@ -340,6 +402,16 @@ pub async fn pause(id: u64) -> Result<(), String> {
 pub async fn resume(id: u64) -> Result<(), String> {
     let mut c = client().await?;
     c.resume(id).await.or_else(err)
+}
+
+/// Park a waiting send on the relay instead of waiting longer for an accept.
+/// Errors when the send is not waiting: the daemon refuses, and the refusal is
+/// the point — a bare `Ok` would tell the user their file is on its way by a
+/// route it never took.
+#[tauri::command]
+pub async fn deposit_now(id: u64) -> Result<(), String> {
+    let mut c = client().await?;
+    c.deposit_now(id).await.or_else(err)
 }
 
 #[tauri::command]
@@ -363,7 +435,7 @@ pub async fn serve_code(
 ) -> Result<CodeDto, String> {
     let paths = state.resolve(&items)?;
     let mut c = client().await?;
-    match c.serve_code(paths, relay, keep).await {
+    match c.serve_code(paths, relay, keep, None).await {
         Ok((id, code)) => Ok(CodeDto { id, code }),
         Err(e) => err(e),
     }
@@ -393,6 +465,17 @@ pub async fn recv(
 pub async fn add_contact(name: String, id: String) -> Result<(), String> {
     let mut c = client().await?;
     c.add_contact(name, id).await.or_else(err)
+}
+
+/// Point an existing contact name at a different key. Separate from
+/// [`add_contact`] on purpose: that one is refused on a name collision, and this
+/// is the only way past it — so nothing can re-key a contact, and drop the marks
+/// that go with it, without having asked first. Returns the old and new
+/// fingerprints when a key really did change.
+#[tauri::command]
+pub async fn rebind_contact(name: String, id: String) -> Result<Option<(String, String)>, String> {
+    let mut c = client().await?;
+    c.rebind_contact(name, id).await.or_else(err)
 }
 
 #[tauri::command]
@@ -471,50 +554,14 @@ pub async fn set_my_name(name: String) -> Result<(), String> {
     c.set_my_name(name).await.or_else(err)
 }
 
-/// Stop a (stale) daemon by its pid file. The event pump's `ensure_running` then
-/// brings a fresh one up — which is the whole point: the pair is a restart the
-/// user doesn't have to open a terminal for.
+/// Stop the daemon so the event pump's `ensure_running` brings a fresh one up —
+/// which is the whole point: the pair is a restart the user doesn't have to open
+/// a terminal for. A leftover `daemon stop` marker is cleared first: an in-app
+/// restart is the user asking for it to be up again.
 #[tauri::command]
 pub async fn restart_daemon() -> Result<(), String> {
-    let pid = std::fs::read_to_string(arvolo_ipc::pid_path())
-        .map_err(|e| format!("pid file: {e}"))?
-        .trim()
-        .parse::<i32>()
-        .map_err(|e| format!("pid file: {e}"))?;
-    #[cfg(unix)]
-    {
-        // SIGTERM — the daemon shuts down cleanly (it persists resumable state).
-        let rc = unsafe { libc::kill(pid, libc::SIGTERM) };
-        if rc != 0 {
-            return Err(format!(
-                "could not stop daemon (pid {pid}): {}",
-                std::io::Error::last_os_error()
-            ));
-        }
-        Ok(())
-    }
-    #[cfg(windows)]
-    {
-        // No SIGTERM here, and no polite equivalent that reaches a process with no
-        // console: `taskkill` without /F asks a window to close, and the daemon has
-        // none. So this is the abrupt one — which the daemon is built to survive,
-        // since a machine can lose power mid-transfer just as easily: records for
-        // resumable downloads and sends are written as it goes, not at shutdown.
-        // What is lost is the tidy removal of the pid file, which the next start
-        // overwrites anyway.
-        let out = std::process::Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/T", "/F"])
-            .output()
-            .map_err(|e| format!("could not run taskkill: {e}"))?;
-        if out.status.success() {
-            Ok(())
-        } else {
-            Err(format!(
-                "could not stop daemon (pid {pid}): {}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            ))
-        }
-    }
+    let _ = std::fs::remove_file(arvolo_ipc::stop_marker_path());
+    crate::daemon::stop().await.map_err(|e| format!("{e:#}"))
 }
 
 #[tauri::command]
@@ -574,6 +621,53 @@ pub async fn import_contacts(app: tauri::AppHandle) -> Result<Option<String>, St
 ///
 /// `default_name` is only a *suggestion* shown in the dialog; path separators are
 /// stripped so it can never smuggle directories into the suggestion.
+/// A ticket from a `.arvolo` file passed on the command line (double click on
+/// Windows/Linux launches a fresh instance with the path as argv). Held here
+/// until the webview is up and asks for it — an event emitted before the
+/// frontend subscribes would just be lost.
+pub struct PendingArvolo(pub std::sync::Mutex<Option<String>>);
+
+#[tauri::command]
+pub fn take_pending_ticket(state: tauri::State<'_, PendingArvolo>) -> Option<String> {
+    state.0.lock().unwrap().take()
+}
+
+/// Save an `arvc…` ticket as a `.arvolo` file — the CLI's default send artefact,
+/// shareable like a .torrent. Same shape as `export_contacts`: native save
+/// dialog, path stays Rust-side, the webview only learns the chosen file name.
+#[tauri::command]
+pub async fn save_ticket(
+    app: tauri::AppHandle,
+    default_name: String,
+    ticket: String,
+) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let default_name: String = default_name
+        .chars()
+        .map(|c| if matches!(c, '/' | '\\') { '_' } else { c })
+        .collect();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .add_filter("Arvolo ticket", &["arvolo"])
+        .set_file_name(&default_name)
+        .save_file(move |p| {
+            let _ = tx.send(p);
+        });
+    let Some(picked) = rx.await.map_err(|e| e.to_string())? else {
+        return Ok(None);
+    };
+    let path = picked.into_path().map_err(|e| e.to_string())?;
+    tokio::fs::write(&path, format!("{ticket}\n"))
+        .await
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(Some(
+        path.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+    ))
+}
+
 #[tauri::command]
 pub async fn export_contacts(
     app: tauri::AppHandle,
@@ -612,6 +706,38 @@ pub async fn export_contacts(
 #[tauri::command]
 pub fn gui_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
+}
+
+/// Hand a path to the system opener (`open` on macOS, `xdg-open` on Linux).
+///
+/// The opener plugin's own `open_path` command is not used: its ACL wants a
+/// *static* scope in `capabilities/`, and none of the three paths this app opens
+/// is knowable at build time — the download folder is configurable, a receive can
+/// be saved anywhere the accept dialog pointed, and `config.toml` follows the
+/// platform's config dir. `reveal_item_in_dir` (the "open folder" action) has no
+/// scope at all, which is why only "open file" was failing.
+///
+/// So the check happens here instead, against the daemon rather than against a
+/// glob: the path must be one the daemon itself reports — a completed receive's
+/// resting place, the download folder, or `config.toml`. Same stance as
+/// `PickedFiles`: the webview never gets to name a path of its own choosing.
+#[tauri::command]
+pub async fn open_path(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    let mut c = client().await?;
+    let cfg = c.get_config().await.or_else(err)?;
+    let known = path == cfg.download_dir
+        || path == cfg.config_path
+        || c.list()
+            .await
+            .or_else(err)?
+            .iter()
+            .any(|t| t.path.as_deref() == Some(path.as_str()));
+    if !known {
+        return Err(format!("path not open-able from here: {path}"));
+    }
+    tauri_plugin_opener::OpenerExt::opener(&app)
+        .open_path(&path, None::<&str>)
+        .map_err(|e| format!("{path}: {e}"))
 }
 
 #[cfg(test)]

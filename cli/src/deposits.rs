@@ -128,6 +128,15 @@ pub struct DepositRecord {
     pub offer_id: String,
     #[serde(default)]
     pub poster_token: String,
+    /// The relay the *offer* was left on, when it isn't the one holding the blob —
+    /// a recipient who listens elsewhere. Empty means "same as `relay`", which is
+    /// what every record written before cross-relay sends meant.
+    ///
+    /// Unlike the engine's postcard records, this file is TOML and genuinely
+    /// self-describing, so `#[serde(default)]` does here what it only looks like it
+    /// does there.
+    #[serde(default)]
+    pub offer_relay: String,
 }
 
 impl DepositRecord {
@@ -214,6 +223,8 @@ pub fn save(
     expires: u64,
     transfer_id: Option<u64>,
     offer: Option<&PostedOffer>,
+    // Where the offer was posted, when that is not `relay`.
+    offer_relay: Option<&str>,
 ) -> Result<DepositRecord> {
     let id = id_for(claim);
     let ticket = if ticket.is_empty() {
@@ -238,6 +249,10 @@ pub fn save(
         transfer_id,
         offer_id: offer.map(|o| o.id.clone()).unwrap_or_default(),
         poster_token: offer.map(|o| o.poster_token.clone()).unwrap_or_default(),
+        offer_relay: offer_relay
+            .filter(|r| *r != relay)
+            .unwrap_or_default()
+            .to_string(),
     };
     let dir = deposits_dir();
     std::fs::create_dir_all(&dir).context("create deposits dir")?;
@@ -284,6 +299,9 @@ pub fn record_from_event(transfer_id: Option<u64>, info: &arvolo_core::manager::
             id: info.offer_id.clone(),
             poster_token: info.poster_token.clone(),
         }),
+        // The engine's receipt does not carry it; a same-relay deposit is the only
+        // shape this path could have made before, and that is what empty means.
+        None,
     ) {
         tracing::warn!("could not record deposit '{}': {e:#}", info.name);
     }
@@ -325,9 +343,15 @@ async fn retract_offer(rec: &DepositRecord) {
     let Some(Ok(recipient)) = rec.recipient.as_deref().map(crate::book::decode_id) else {
         return;
     };
+    // Their relay when they listen elsewhere; empty means it was ours all along.
+    let offer_relay = if rec.offer_relay.is_empty() {
+        &rec.relay
+    } else {
+        &rec.offer_relay
+    };
     if let Err(e) = arvolo_core::presence::retract_offer(
         &arvolo_core::http::client(),
-        &rec.relay,
+        offer_relay,
         &recipient,
         &rec.offer_id,
         &rec.poster_token,
@@ -540,6 +564,7 @@ mod tests {
             expires,
             None,
             None,
+            None,
         )
         .unwrap();
         assert_eq!(rec.kind, KIND_LINK);
@@ -629,6 +654,7 @@ expires = 1700003600
                 now_secs() + 3600,
                 Some(7),
                 None,
+                None,
             )
         };
         let rec = args("arvmKEEPME").unwrap();
@@ -676,6 +702,7 @@ expires = 1700003600
                 id: "offer-1".into(),
                 poster_token: "poster-1".into(),
             }),
+            None,
         )
         .unwrap();
 
@@ -717,6 +744,7 @@ expires = 1700003600
             now_secs().saturating_sub(REAP_GRACE_SECS + 60),
             None,
             None,
+            None,
         )
         .unwrap();
         assert!(rec.reapable());
@@ -751,6 +779,7 @@ expires = 1700003600
             "",
             None,
             now_secs().saturating_sub(60),
+            None,
             None,
             None,
         )
@@ -791,6 +820,7 @@ expires = 1700003600
             "",
             None,
             now_secs().saturating_sub(60),
+            None,
             None,
             None,
         )

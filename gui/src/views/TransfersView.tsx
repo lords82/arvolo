@@ -12,22 +12,25 @@
 
 import { useCallback, useMemo, useState } from "react";
 import type { CSSProperties } from "react";
-import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { api } from "../ipc";
 import { fire, useStore } from "../store";
 import {
   fmtBytes,
   metaLine,
   sectionsFor,
+  slugName,
   statusMeta,
   type Section,
 } from "../format";
 import { useT } from "../i18n";
 import type { UITransfer } from "../types";
 import { Icon } from "../ui/Icons";
-import { Button, Empty, IconButton } from "../ui/Primitives";
-import { ExtChip, Progress } from "../ui/Bits";
+import { Button, Empty, Field, IconButton } from "../ui/Primitives";
+import { ExtChip, Fingerprint, Progress } from "../ui/Bits";
+import { nameCollision, SaveSenderFields } from "../ui/SaveSenderFields";
 import { MenuButton, type MenuItem } from "../ui/Menu";
-import { Confirm } from "../ui/Sheet";
+import { Confirm, Sheet } from "../ui/Sheet";
 import { toast } from "../ui/Toasts";
 import { useReorder, type ReorderBits } from "./reorder";
 
@@ -49,11 +52,14 @@ function Row({
   const t = useT();
   const pause = useStore((s) => s.pause);
   const resume = useStore((s) => s.resume);
+  const depositNow = useStore((s) => s.depositNow);
   const cancel = useStore((s) => s.cancel);
   const removeRow = useStore((s) => s.removeRow);
   const openIncoming = useStore((s) => s.openIncoming);
   const openShare = useStore((s) => s.openShare);
+  const contactsById = useStore((s) => s.contactsById);
   const [confirmCancel, setConfirmCancel] = useState(false);
+  const [saveSender, setSaveSender] = useState(false);
 
   const st = statusMeta(tx.status);
   const meta = metaLine(tx);
@@ -66,9 +72,11 @@ function Row({
   // back at all.
   const live =
     tx.status === "active" ||
+    tx.status === "preparing" ||
     tx.status === "sharing" ||
     tx.status === "paused" ||
     tx.status === "stalled" ||
+    tx.status === "offered" ||
     tx.status === "deposited" ||
     tx.status === "cancelling";
   const done =
@@ -101,6 +109,19 @@ function Row({
       onSelect: () => fire(resume(tx.id)),
     });
   }
+  // The way out of the wait. A send holds a direct offer open for a while before
+  // parking the file on the relay, because their app having the offer is not the
+  // same as a person having answered it — this is for when you already know the
+  // answer is not coming, and would rather spend the relay than the afternoon.
+  if (tx.status === "offered") {
+    items.push({
+      key: "depositnow",
+      label: t("transfers.depositNow"),
+      desc: t("transfers.depositNowDesc"),
+      icon: <Icon.Mailbox size={13} />,
+      onSelect: () => fire(depositNow(tx.id)),
+    });
+  }
   if (tx.path) {
     // Opening the file comes first: after a download, the thing you want is the
     // thing, and the folder is how you go looking for it when you want something
@@ -123,6 +144,24 @@ function Row({
           toast.bad(t("transfers.openFolderFailed"), String(e))
         );
       },
+    });
+  }
+  // Someone is sending you a file and you have no name for them. This is the
+  // moment you know who they are — the offer dialog asks the same question, but
+  // only if you went through it: an auto-accepted arrival, or one you waved past,
+  // otherwise leaves the sender nameless with their id only in the tooltip.
+  //
+  // Parked offers are in too. The dialog no longer has a save of its own — it
+  // saves as part of accepting — so this is the way to keep somebody *without*
+  // deciding about their file yet.
+  const unknownSender =
+    tx.dir === "in" && !!tx.peerId && !contactsById[tx.peerId];
+  if (unknownSender) {
+    items.push({
+      key: "savesender",
+      label: t("transfers.saveSender"),
+      icon: <Icon.People size={13} />,
+      onSelect: () => setSaveSender(true),
     });
   }
   if (live) {
@@ -154,7 +193,7 @@ function Row({
   /** Open the received file with whatever the system uses for it. */
   const openFile = () => {
     if (!tx.path) return;
-    openPath(tx.path).catch((e: unknown) =>
+    api.openPath(tx.path).catch((e: unknown) =>
       toast.bad(t("transfers.openFileFailed"), String(e))
     );
   };
@@ -219,6 +258,16 @@ function Row({
             <span className={`tone-${st.tone}`} style={{ fontWeight: 600 }}>
               {st.text}
             </span>
+            {tx.handle && (
+              <>
+                <span className="sep" />
+                {/* The same 8-hex handle `arvolo status` prints: with it on the
+                    row, "arvolo cancel <this>" works from either surface. */}
+                <span className="mono" style={{ fontSize: 10.5 }} title="arvolo cancel/pause/resume">
+                  {tx.handle}
+                </span>
+              </>
+            )}
             {tx.peer && (
               <>
                 <span className="sep" />
@@ -277,7 +326,11 @@ function Row({
             </Button>
           ) : (
             <>
-              {tx.status === "active" && (
+              {/* Only where holding it means something. A mailbox pickup is one
+                  fetch that would start over, and a share is not a delivery to
+                  hold: the daemon refuses both, and a button that asks anyway is
+                  a button that does nothing. */}
+              {tx.status === "active" && tx.canPause && (
                 <IconButton
                   label={t("transfers.pause")}
                   onClick={() => fire(pause(tx.id))}
@@ -285,7 +338,11 @@ function Row({
                   <Icon.Pause size={14} />
                 </IconButton>
               )}
-              {(tx.status === "paused" || tx.status === "stalled") && (
+              {/* Paused, and nothing else. A stalled row is *already* trying —
+                  it is waiting on the relay or on the recipient — so play asked
+                  the daemon to resume something that was never paused, and got a
+                  silent no. */}
+              {tx.status === "paused" && (
                 <IconButton
                   label={t("transfers.resume")}
                   onClick={() => fire(resume(tx.id))}
@@ -332,7 +389,101 @@ function Row({
           fire(cancel(tx.id));
         }}
       />
+
+      {/* Mounted only while open, so the suggested name is read from the row as
+          it stands now — a sheet kept mounted behind the board would have seeded
+          its field before the sender's claimed name ever arrived. */}
+      {unknownSender && saveSender && (
+        <SaveSenderSheet open tx={tx} onClose={() => setSaveSender(false)} />
+      )}
     </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+
+/** Save the person on the other end of an incoming transfer, without leaving the
+ *  board. Deliberately the same three facts as the offer dialog — the name you
+ *  choose, the fingerprint to compare, and that saving is not verifying. */
+function SaveSenderSheet({
+  open,
+  tx,
+  onClose,
+}: {
+  open: boolean;
+  tx: UITransfer;
+  onClose: () => void;
+}) {
+  const t = useT();
+  const contacts = useStore((s) => s.contacts);
+  const addContact = useStore((s) => s.addContact);
+  const [name, setName] = useState(() => slugName(tx.senderName));
+  const [edited, setEdited] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const clash = nameCollision(contacts, name, tx.peerId);
+
+  const submit = async () => {
+    const chosen = name.trim();
+    if (!chosen || clash || !tx.peerId) return;
+    setBusy(true);
+    try {
+      await addContact(chosen, tx.peerId);
+      toast.ok(t("incoming.savedAs", chosen), t("incoming.savedAsDetail"));
+      onClose();
+    } catch {
+      // reported by the store
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Sheet
+      open={open}
+      onClose={onClose}
+      placement="center"
+      title={t("transfers.saveSenderTitle")}
+      subtitle={t("transfers.saveSenderSub", tx.name)}
+      footer={
+        <>
+          <div className="spacer" />
+          <Button onClick={onClose} disabled={busy}>
+            {t("common.cancel")}
+          </Button>
+          <Button
+            variant="primary"
+            onClick={submit}
+            disabled={!name.trim() || !!clash || busy}
+            busy={busy}
+          >
+            {t("common.save")}
+          </Button>
+        </>
+      }
+    >
+      <SaveSenderFields
+        value={name}
+        onChange={(v) => {
+          setName(v);
+          setEdited(true);
+        }}
+        contacts={contacts}
+        peerId={tx.peerId}
+        suggested={!edited}
+        onSubmit={submit}
+        autoFocus
+      />
+      {/* The only handle on them that means anything, so it is shown in full
+          rather than behind a disclosure — same rule as the offer dialog. */}
+      <Field
+        label={t("incoming.senderId")}
+        hint={
+          tx.fingerprint ? t("incoming.hintStranger") : t("incoming.hintRawId")
+        }
+      >
+        {() => <Fingerprint value={tx.fingerprint || (tx.peerId ?? "")} />}
+      </Field>
+    </Sheet>
   );
 }
 

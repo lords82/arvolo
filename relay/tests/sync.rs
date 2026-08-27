@@ -49,6 +49,8 @@ fn sample_snapshot() -> SyncSnapshot {
         blocked: vec![],
         seen: vec![],
         names: vec![],
+        devices: vec![],
+        relays: vec![],
     }
 }
 

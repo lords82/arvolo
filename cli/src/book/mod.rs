@@ -3,9 +3,11 @@
 mod blocked;
 mod config;
 mod contacts;
+mod devices;
 mod marks;
 mod names;
 mod paths;
+mod relays;
 mod seen;
 mod sync_bridge;
 mod trusted;
@@ -14,9 +16,11 @@ mod verified;
 pub(crate) use blocked::*;
 pub(crate) use config::*;
 pub(crate) use contacts::*;
+pub(crate) use devices::*;
 pub(crate) use marks::*;
 pub(crate) use names::*;
 pub(crate) use paths::*;
+pub(crate) use relays::*;
 pub(crate) use seen::*;
 pub(crate) use sync_bridge::*;
 pub(crate) use trusted::*;
@@ -32,26 +36,16 @@ mod tests {
 
     #[test]
     fn relay_scheme_defaults_to_https() {
-        // Bare host → https, unless --use-http is asked for.
+        // Bare host → https; a plaintext relay is written with its scheme.
         assert_eq!(
-            normalize_relay("relay.example.com", false),
+            normalize_relay("relay.example.com"),
             "https://relay.example.com"
         );
+        assert_eq!(normalize_relay("  relay:8787 "), "https://relay:8787");
+        // An explicit scheme is never rewritten.
+        assert_eq!(normalize_relay("http://relay.local"), "http://relay.local");
         assert_eq!(
-            normalize_relay("relay.example.com", true),
-            "http://relay.example.com"
-        );
-        assert_eq!(
-            normalize_relay("  relay:8787 ", false),
-            "https://relay:8787"
-        );
-        // An explicit scheme always wins over the flag.
-        assert_eq!(
-            normalize_relay("http://relay.local", false),
-            "http://relay.local"
-        );
-        assert_eq!(
-            normalize_relay("https://relay.example.com", true),
+            normalize_relay("https://relay.example.com"),
             "https://relay.example.com"
         );
     }
@@ -558,14 +552,15 @@ mod tests {
         assert!(accept_name("nobody").is_err());
         assert!(accept_name("not-valid-base32!!").is_err());
 
-        // Two pending names → accept_all approves both at once.
+        // Two pending names → each is approved by its own accept.
         observe_advertised_name(&id1, "Alice");
         observe_advertised_name(&id2, "Bob");
-        assert_eq!(accept_all_names().unwrap(), 2);
+        assert_eq!(accept_name(&id1).unwrap(), "Alice");
+        assert_eq!(accept_name(&id2).unwrap(), "Bob");
         assert_eq!(display_name_of(&id1).as_deref(), Some("Alice"));
         assert_eq!(display_name_of(&id2).as_deref(), Some("Bob"));
-        // Nothing left pending → accept_all is a no-op returning 0.
-        assert_eq!(accept_all_names().unwrap(), 0);
+        // Nothing left pending → another accept has nothing to approve.
+        assert!(accept_name(&id1).is_err());
 
         std::env::remove_var("ARVOLO_CONFIG_DIR");
     }
@@ -704,6 +699,160 @@ mod tests {
             .count();
         assert_eq!(occurrences, 1, "exactly one display_name line: {text:?}");
         assert_eq!(my_display_name(), "Three");
+
+        std::env::remove_var("ARVOLO_CONFIG_DIR");
+    }
+
+    #[test]
+    fn this_device_announces_itself_and_stays_announced() {
+        let _guard = crate::testlock::ENV
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("ARVOLO_CONFIG_DIR", dir.path());
+
+        let me = load_or_init_device();
+        let key = arvolo_core::sync::device_key(&me);
+
+        // Nobody adds a device: a round is all it takes.
+        let snap = build_local_snapshot().unwrap();
+        let row = snap
+            .devices
+            .iter()
+            .find(|d| d.id == key)
+            .expect("this machine announced itself");
+        assert!(!row.name.is_empty(), "a machine arrives with a name");
+        assert_eq!(row.platform, std::env::consts::OS);
+        assert_eq!(row.clock.device, me, "and it is the author of its own row");
+        // And in the ledger every reader actually uses, not only in the sidecar:
+        // a machine on its own never merges anything, so waiting for a merge to
+        // project it would leave it absent from its own device list.
+        assert_eq!(
+            load_devices().devices.get(&key).map(|r| r.name.clone()),
+            Some(row.name.clone())
+        );
+
+        // Running again inside the same minute must not churn the clock: the
+        // register would otherwise tick for ever on every machine with nothing
+        // behind it (see LAST_SEEN_GRANULARITY).
+        let before = build_local_snapshot().unwrap().lamport;
+        let after = build_local_snapshot().unwrap().lamport;
+        assert_eq!(before, after, "an unchanged register does not advance");
+
+        std::env::remove_var("ARVOLO_CONFIG_DIR");
+    }
+
+    #[test]
+    fn a_forgotten_device_does_not_re_announce_itself() {
+        // The half of `device forget` that makes it mean anything. A tombstone
+        // travels, but the forgotten machine still holds the seed and still
+        // syncs — so without this it would find its row deleted, write a fresh
+        // one, and be back within five minutes of being removed.
+        let _guard = crate::testlock::ENV
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("ARVOLO_CONFIG_DIR", dir.path());
+
+        let me = load_or_init_device();
+        let key = arvolo_core::sync::device_key(&me);
+        build_local_snapshot().unwrap();
+
+        // Somebody else retires this machine; the tombstone reaches us.
+        forget_device(&me).unwrap();
+
+        let snap = build_local_snapshot().unwrap();
+        let row = snap.devices.iter().find(|d| d.id == key).unwrap();
+        assert!(
+            row.deleted,
+            "a machine that has been retired stays retired instead of arguing"
+        );
+        // And it is gone from what the screen reads, too.
+        assert!(!load_devices().devices.contains_key(&key));
+
+        std::env::remove_var("ARVOLO_CONFIG_DIR");
+    }
+
+    /// How a key introduced itself, kept for as long as the key is remembered.
+    ///
+    /// `pending` is overwritten by every fresh claim and `pinned` needs somebody
+    /// to approve one, so without a first-claim record a stranger who arrives as
+    /// "Giulia" and comes back as "Marco" is indistinguishable from a stranger who
+    /// has only ever been Marco. Three things used to erase it and each is checked
+    /// here: nothing at all (a second observation), the orphan sweep the daemon
+    /// runs at every start, and removing the contact.
+    #[test]
+    fn a_strangers_first_claim_survives_what_would_erase_it() {
+        let _guard = crate::testlock::ENV
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("ARVOLO_CONFIG_DIR", dir.path());
+
+        let id = Identity::generate().public();
+        let id_b32 = data_encoding::BASE32_NOPAD
+            .encode(&id.to_bytes())
+            .to_lowercase();
+
+        observe_advertised_name(&id_b32, "Giulia");
+        assert_eq!(known_name_of(&id_b32).as_deref(), Some("Giulia"));
+
+        // A second, different claim moves `pending` and leaves the first alone.
+        observe_advertised_name(&id_b32, "Marco");
+        assert_eq!(pending_name_of(&id_b32).as_deref(), Some("Marco"));
+        assert_eq!(
+            known_name_of(&id_b32).as_deref(),
+            Some("Giulia"),
+            "the claim to compare against is the first one, not the newest"
+        );
+
+        // The daemon's start-up sweep drops rows nobody points at. This one is
+        // pointed at by the observation itself.
+        prune_orphan_names().unwrap();
+        assert_eq!(known_name_of(&id_b32).as_deref(), Some("Giulia"));
+
+        // Once approved, the approved name is what a new claim is read against.
+        accept_name(&id_b32).unwrap();
+        assert_eq!(known_name_of(&id_b32).as_deref(), Some("Marco"));
+
+        // Saving then removing them clears the approval but not the observation:
+        // same reasoning as the `seen` counter, which `contact_remove` also keeps.
+        contact_add("marco", &id_b32).unwrap();
+        contact_remove("marco").unwrap();
+        assert_eq!(
+            display_name_of(&id_b32),
+            None,
+            "the approval went with them"
+        );
+        assert_eq!(
+            known_name_of(&id_b32).as_deref(),
+            Some("Giulia"),
+            "a key you have already met must not look brand new again"
+        );
+
+        std::env::remove_var("ARVOLO_CONFIG_DIR");
+    }
+
+    /// The TOFU ledger counts receipts, and the count is what the offer dialog
+    /// shows. `seen_before` only ever answered yes/no.
+    #[test]
+    fn seen_count_counts_receipts() {
+        let _guard = crate::testlock::ENV
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("ARVOLO_CONFIG_DIR", dir.path());
+
+        let id = Identity::generate().public();
+        let id_b32 = data_encoding::BASE32_NOPAD
+            .encode(&id.to_bytes())
+            .to_lowercase();
+
+        assert_eq!(seen_count(&id_b32), 0);
+        record_seen(&id_b32);
+        record_seen(&id_b32);
+        assert_eq!(seen_count(&id_b32), 2);
+        assert!(sender_status(&id_b32).seen_before);
 
         std::env::remove_var("ARVOLO_CONFIG_DIR");
     }

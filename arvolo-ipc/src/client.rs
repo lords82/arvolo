@@ -7,10 +7,12 @@ use std::path::PathBuf;
 use anyhow::{bail, Context, Result};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 
+use arvolo_core::manager::AcceptRefusal;
+
 use crate::protocol::{
     ConfigDto, ConfigPatch, ContactDto, DepositDto, EventDto, HistoryDto, OfferDto, PairKind,
-    PresenceDto, Request, RequestEnvelope, Response, ServerMessage, StatusDto, SyncDto,
-    TransferDto,
+    PresenceDto, RelayInfoDto, Request, RequestEnvelope, Response, ServerMessage, StatusDto,
+    SyncDto, TransferDto,
 };
 
 /// The read half of a connection, whatever carried it.
@@ -23,6 +25,21 @@ use crate::protocol::{
 /// call per line of JSON is not a cost anyone will measure on a local socket.
 type Read = BufReader<Box<dyn AsyncRead + Unpin + Send>>;
 type Write = Box<dyn AsyncWrite + Unpin + Send>;
+
+/// How long one request may wait for its reply before the caller is told the
+/// daemon is not answering.
+///
+/// Every handler on the other end returns promptly *by design*: the slow work —
+/// uploads, relay round trips, pairing — runs detached and reports through
+/// events. So a reply that never comes means the daemon is wedged, not busy, and
+/// a caller standing in front of a person has to be able to say so. Without this
+/// there was no way out at all: a window that asked to cancel a transfer and
+/// never heard back kept the row on "cancelling…" until the app was restarted,
+/// with nothing on screen admitting that nobody had answered.
+///
+/// Long enough for the slowest legitimate answer (the deposits listing asks every
+/// relay it knows, in turn), short enough to be a bounded wait.
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// An RPC connection to the running daemon.
 pub struct DaemonClient {
@@ -58,6 +75,22 @@ async fn open() -> Result<(Read, Write)> {
     }
 }
 
+/// Where a request's source descriptors are being served — the client-side pair
+/// for [`crate::fdpass`] (`offer_files` yields both). Plain strings so callers
+/// on every platform compile; only unix daemons ever collect.
+#[derive(Clone, Debug)]
+pub struct FdHandoff {
+    pub socket: String,
+    pub token: String,
+}
+
+fn split(fds: Option<FdHandoff>) -> (Option<String>, Option<String>) {
+    match fds {
+        Some(f) => (Some(f.socket), Some(f.token)),
+        None => (None, None),
+    }
+}
+
 impl DaemonClient {
     /// Connect to the daemon control socket. Returns `Err` if it's absent or
     /// refuses (no daemon running) — the signal for callers to fall back.
@@ -75,23 +108,41 @@ impl DaemonClient {
         self.next_id = self.next_id.wrapping_add(1);
         let mut line = serde_json::to_string(&RequestEnvelope { id, cmd })?;
         line.push('\n');
-        self.writer.write_all(line.as_bytes()).await?;
-        self.writer.flush().await?;
-        loop {
-            let mut resp = String::new();
-            let n = self.reader.read_line(&mut resp).await?;
-            if n == 0 {
-                bail!("daemon closed the connection");
+        let exchange = async {
+            // The write is inside the deadline too: a daemon that has stopped
+            // reading fills the socket buffer, and then it is the *send* that
+            // never returns.
+            self.writer.write_all(line.as_bytes()).await?;
+            self.writer.flush().await?;
+            loop {
+                let mut resp = String::new();
+                let n = self.reader.read_line(&mut resp).await?;
+                if n == 0 {
+                    bail!("daemon closed the connection");
+                }
+                if resp.trim().is_empty() {
+                    continue;
+                }
+                match serde_json::from_str::<ServerMessage>(resp.trim())? {
+                    ServerMessage::Reply { id: rid, result } if rid == id => return Ok(result),
+                    // An RPC connection never subscribes, so events/other replies
+                    // shouldn't appear; skip defensively rather than error.
+                    _ => continue,
+                }
             }
-            if resp.trim().is_empty() {
-                continue;
-            }
-            match serde_json::from_str::<ServerMessage>(resp.trim())? {
-                ServerMessage::Reply { id: rid, result } if rid == id => return Ok(result),
-                // An RPC connection never subscribes, so events/other replies
-                // shouldn't appear; skip defensively rather than error.
-                _ => continue,
-            }
+        };
+        // On timeout this connection is left mid-exchange (a reply may still be
+        // in flight for a request nobody is waiting on any more), so it must not
+        // be reused: every caller opens one per command, and the error is the
+        // signal to drop this one.
+        match tokio::time::timeout(REQUEST_TIMEOUT, exchange).await {
+            Ok(result) => result,
+            Err(_) => bail!(
+                "the daemon accepted the connection but did not answer within {}s — \
+                 it may be stuck. Check `arvolo daemon status`, and restart it with \
+                 `arvolo daemon stop && arvolo daemon start` if it stays silent.",
+                REQUEST_TIMEOUT.as_secs()
+            ),
         }
     }
 
@@ -105,6 +156,16 @@ impl DaemonClient {
     pub async fn status(&mut self) -> Result<StatusDto> {
         match self.request(Request::Status).await? {
             Response::Status(s) => Ok(s),
+            other => unexpected(other),
+        }
+    }
+
+    /// Ask the daemon to exit cleanly. The daemon answers before it goes; an
+    /// older daemon that predates the request answers with an error instead,
+    /// which the caller treats as "fall back to the pidfile".
+    pub async fn shutdown(&mut self) -> Result<()> {
+        match self.request(Request::Shutdown).await? {
+            Response::Ok => Ok(()),
             other => unexpected(other),
         }
     }
@@ -130,16 +191,35 @@ impl DaemonClient {
         }
     }
 
-    pub async fn push(&mut self, to: String, paths: Vec<String>, note: String) -> Result<u64> {
+    /// A live-first send. The mailbox options ride along because the *daemon*
+    /// re-probes presence: a recipient who drops offline between the caller's
+    /// probe and the daemon's would otherwise be deposited to with the defaults,
+    /// silently ignoring the ttl/max/password the user asked for.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn push(
+        &mut self,
+        to: String,
+        paths: Vec<String>,
+        note: String,
+        ttl: Option<u64>,
+        max: Option<u32>,
+        password: Option<String>,
+        device: Option<String>,
+        fds: Option<FdHandoff>,
+    ) -> Result<u64> {
+        let (fd_socket, fd_token) = split(fds);
         match self
             .request(Request::Push {
                 to,
                 paths,
                 note,
                 deposit: false,
-                ttl: None,
-                max: None,
-                password: None,
+                ttl,
+                max,
+                password,
+                device,
+                fd_socket,
+                fd_token,
             })
             .await?
         {
@@ -150,6 +230,7 @@ impl DaemonClient {
 
     /// Deposit straight to the recipient's mailbox — `arvolo send --deposit`.
     /// Returns the transfer id and the `arvm…` ticket for hand-delivery.
+    #[allow(clippy::too_many_arguments)]
     pub async fn deposit(
         &mut self,
         to: String,
@@ -158,7 +239,10 @@ impl DaemonClient {
         ttl: Option<u64>,
         max: Option<u32>,
         password: Option<String>,
+        device: Option<String>,
+        fds: Option<FdHandoff>,
     ) -> Result<(u64, String)> {
+        let (fd_socket, fd_token) = split(fds);
         match self
             .request(Request::Push {
                 to,
@@ -168,10 +252,37 @@ impl DaemonClient {
                 ttl,
                 max,
                 password,
+                device,
+                fd_socket,
+                fd_token,
             })
             .await?
         {
             Response::Served { id, ticket } => Ok((id, ticket)),
+            other => unexpected(other),
+        }
+    }
+
+    /// The machines sharing this identity, as they describe themselves.
+    pub async fn list_devices(&mut self) -> Result<Vec<crate::protocol::DeviceDto>> {
+        match self.request(Request::ListDevices).await? {
+            Response::Devices(d) => Ok(d),
+            other => unexpected(other),
+        }
+    }
+
+    /// Rename the machine this daemon runs on. Only that one — see the request.
+    pub async fn rename_this_device(&mut self, name: String) -> Result<()> {
+        match self.request(Request::RenameThisDevice { name }).await? {
+            Response::Ok => Ok(()),
+            other => unexpected(other),
+        }
+    }
+
+    /// Retire a machine from the register.
+    pub async fn forget_device(&mut self, who: String) -> Result<()> {
+        match self.request(Request::ForgetDevice { who }).await? {
+            Response::Ok => Ok(()),
             other => unexpected(other),
         }
     }
@@ -181,9 +292,16 @@ impl DaemonClient {
         &mut self,
         paths: Vec<String>,
         seed_relay: Option<String>,
+        fds: Option<FdHandoff>,
     ) -> Result<(u64, String)> {
+        let (fd_socket, fd_token) = split(fds);
         match self
-            .request(Request::ServeTicket { paths, seed_relay })
+            .request(Request::ServeTicket {
+                paths,
+                seed_relay,
+                fd_socket,
+                fd_token,
+            })
             .await?
         {
             Response::Served { id, ticket } => Ok((id, ticket)),
@@ -197,9 +315,17 @@ impl DaemonClient {
         paths: Vec<String>,
         relay: Option<String>,
         keep: bool,
+        fds: Option<FdHandoff>,
     ) -> Result<(u64, String)> {
+        let (fd_socket, fd_token) = split(fds);
         match self
-            .request(Request::ServeCode { paths, relay, keep })
+            .request(Request::ServeCode {
+                paths,
+                relay,
+                keep,
+                fd_socket,
+                fd_token,
+            })
             .await?
         {
             Response::CodeServed { id, code } => Ok((id, code)),
@@ -214,8 +340,19 @@ impl DaemonClient {
         path: String,
         ttl: Option<u64>,
         max: Option<u32>,
+        fds: Option<FdHandoff>,
     ) -> Result<String> {
-        match self.request(Request::CreateLink { path, ttl, max }).await? {
+        let (fd_socket, fd_token) = split(fds);
+        match self
+            .request(Request::CreateLink {
+                path,
+                ttl,
+                max,
+                fd_socket,
+                fd_token,
+            })
+            .await?
+        {
             Response::Link(url) => Ok(url),
             other => unexpected(other),
         }
@@ -265,6 +402,11 @@ impl DaemonClient {
         expect_ok(self.request(Request::Resume { id }).await?)
     }
 
+    /// Park a waiting send on the relay instead of waiting longer for an accept.
+    pub async fn deposit_now(&mut self, id: u64) -> Result<()> {
+        expect_ok(self.request(Request::DepositNow { id }).await?)
+    }
+
     pub async fn accept(&mut self, offer_id: String, out: Option<PathBuf>) -> Result<u64> {
         self.accept_with_password(offer_id, out, None).await
     }
@@ -286,10 +428,21 @@ impl DaemonClient {
                 offer_id,
                 out,
                 password,
+                typed_refusal: true,
             })
             .await?
         {
             Response::TransferId(id) => Ok(id),
+            // Hand the refusal back as itself, not as its sentence: a caller that
+            // has something to do about one — put the question back in front of the
+            // user, show the password field — can then ask what it is instead of
+            // reading English. `{e:#}` still prints the same words for everyone
+            // else. An unknown code (a daemon newer than this client) keeps the
+            // message and loses only the ability to act on it.
+            Response::Refused { code, message } => Err(match AcceptRefusal::from_code(&code) {
+                Some(r) => anyhow::Error::new(r),
+                None => anyhow::anyhow!(message),
+            }),
             other => unexpected(other),
         }
     }
@@ -322,8 +475,42 @@ impl DaemonClient {
 
     /// Save (or re-key) a contact. Re-keying clears verified/trusted marks —
     /// warn the user first.
+    /// Save a contact. Refused if the name already belongs to another key —
+    /// see [`Self::rebind_contact`] for the deliberate version of that.
     pub async fn add_contact(&mut self, name: String, id: String) -> Result<()> {
-        expect_ok(self.request(Request::AddContact { name, id }).await?)
+        expect_ok(
+            self.request(Request::AddContact {
+                name,
+                id,
+                rebind: false,
+            })
+            .await?,
+        )
+    }
+
+    /// Point an existing contact name at a different key, dropping its verified
+    /// and trusted marks. Returns the two fingerprints, so the caller can show
+    /// what changed. Also succeeds (with `None`) when the name was free.
+    pub async fn rebind_contact(
+        &mut self,
+        name: String,
+        id: String,
+    ) -> Result<Option<(String, String)>> {
+        match self
+            .request(Request::AddContact {
+                name,
+                id,
+                rebind: true,
+            })
+            .await?
+        {
+            Response::KeyChanged {
+                old_fingerprint,
+                new_fingerprint,
+            } => Ok(Some((old_fingerprint, new_fingerprint))),
+            Response::Ok => Ok(None),
+            other => unexpected(other),
+        }
     }
 
     pub async fn remove_contact(&mut self, name: String) -> Result<()> {
@@ -400,19 +587,19 @@ impl DaemonClient {
         }
     }
 
-    /// Drop advertised-name records for contacts that no longer exist.
-    pub async fn prune_names(&mut self) -> Result<usize> {
-        match self.request(Request::PruneNames).await? {
-            Response::Cleared(n) => Ok(n),
-            other => unexpected(other),
-        }
-    }
-
     /// Ask the relay who is reachable right now. `None` in a row means the relay
     /// could not be asked — never "offline".
     pub async fn presence(&mut self, ids: Vec<String>) -> Result<Vec<PresenceDto>> {
         match self.request(Request::Presence { ids }).await? {
             Response::Presence(v) => Ok(v),
+            other => unexpected(other),
+        }
+    }
+
+    /// What the configured relay is, and what version it reports.
+    pub async fn relay_info(&mut self) -> Result<RelayInfoDto> {
+        match self.request(Request::RelayInfo).await? {
+            Response::RelayInfo(info) => Ok(info),
             other => unexpected(other),
         }
     }

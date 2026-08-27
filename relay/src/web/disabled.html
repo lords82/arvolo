@@ -96,17 +96,19 @@
       <!-- The application icon, redrawn: gui/src-tauri/icons ships PNGs, and
            this page may not fetch anything, so the mark is the same geometry
            its sources carry — gui/src-tauri/icons/source/arvolo-icon-square.svg,
-           full bleed, glyph inset 200/1024 of the box. Its orange is the icon's
-           own — deliberately not `--out-fill`, which the app moved to vermilion
-           without regenerating the icon. Whoever opens this link should see the
-           same mark that sits in the sender's dock. -->
+           full bleed, glyph inset 200/1024 of the box, and the 10.5 stroke the
+           boxed icons use rather than the 12 the bare template does. Its orange
+           is the icon's own — deliberately not `--out-fill`, which is darkened
+           to carry white ink and reads brown at this size. Whoever opens this
+           link should see the same mark that sits in the sender's dock. -->
       <span class="mark" aria-hidden="true">
         <svg width="30" height="30" viewBox="0 0 32 32">
           <rect width="32" height="32" rx="6.4" fill="#f97316"/>
-          <g transform="translate(6.25 6.25) scale(.195)">
-            <path d="M18 46 V64 a16 16 0 0 0 16 16 h32 a16 16 0 0 0 16 -16 V46"
-                  fill="none" stroke="#faf8f6" stroke-width="12" stroke-linecap="round"/>
-            <path d="M50 40 L38 12 H62 Z" fill="#faf8f6"/>
+          <g transform="translate(6.25 6.25) scale(.195)"
+             fill="none" stroke="#faf8f6" stroke-width="10.5"
+             stroke-linecap="round" stroke-linejoin="round">
+            <path d="M36 8 L50 30 L64 8"/>
+            <path d="M18 42 L50 80 L82 42"/>
           </g>
         </svg>
       </span>

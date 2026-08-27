@@ -1,0 +1,32 @@
+#!/bin/sh
+# Register the *user* unit the package ships, the way dh_installsystemduser does.
+#
+# cargo-deb's `systemd-units` table cannot be used here: it handles system units,
+# and would install this one into /usr/lib/systemd/system and start it as root —
+# the wrong identity, in the wrong home, reading the wrong config. So the two
+# lines it would generate are written out instead.
+#
+# `enable` and not `start`, and that difference is the whole point: a user
+# service cannot be started from here, because this script runs as root and not
+# inside anybody's session. Enabling links it into default.target.wants for every
+# user, so it comes up at their next login (or at boot, for a user with
+# `loginctl enable-linger`).
+set -e
+
+case "$1" in
+configure)
+    if [ -d /run/systemd/system ] && command -v deb-systemd-helper >/dev/null; then
+        deb-systemd-helper --user unmask arvolo.service >/dev/null || true
+        deb-systemd-helper --user enable arvolo.service >/dev/null || true
+    fi
+    # An upgrade replaced the binary under a daemon that is already running, and
+    # nothing here can reach into a user's session to restart it. Say so, rather
+    # than let them wonder why `arvolo --version` and the running daemon disagree.
+    if [ -n "$2" ]; then
+        echo "arvolo: a daemon already running in your session keeps the previous binary."
+        echo "arvolo: pick up this version with:  systemctl --user restart arvolo"
+    fi
+    ;;
+esac
+
+exit 0

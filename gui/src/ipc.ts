@@ -16,8 +16,26 @@ import type {
   PresenceDto,
   StatusDto,
   SyncDto,
+  DeviceDto,
   TransferDto,
+  UpdateInfo,
+  UpdateProgress,
 } from "./types";
+
+/** An accept that did not happen, carrying the daemon's word for why.
+ *
+ *  `code` is one of the engine's refusal codes (`needsPassword`, `p2pOff`,
+ *  `noLongerWaiting`) and empty for anything else — including a daemon too old to
+ *  send one, where the only thing left to read is the sentence. */
+export type AcceptError = Error & { code: string };
+
+export function asAcceptError(e: unknown): AcceptError {
+  const raw = e as { code?: unknown; message?: unknown } | null;
+  const message =
+    typeof raw?.message === "string" ? raw.message : String(e ?? "");
+  const code = typeof raw?.code === "string" ? raw.code : "";
+  return Object.assign(new Error(message), { code });
+}
 
 export const api = {
   status: () => invoke<StatusDto>("status"),
@@ -27,8 +45,14 @@ export const api = {
   /** Open the native picker; resolves to registered items (empty = cancelled). */
   pickFiles: (directory: boolean) =>
     invoke<PickedItem[]>("pick_files", { directory }),
-  sendTo: (to: string, items: string[], note: string) =>
-    invoke<number>("send_to", { to, items, note }),
+  /** `device` aims it at one of our own machines; only meaningful when `to` is
+   *  the reserved self recipient, and refused by the daemon otherwise. */
+  sendTo: (
+    to: string,
+    items: string[],
+    note: string,
+    device: string | null = null
+  ) => invoke<number>("send_to", { to, items, note, device }),
   /** `send --deposit`: skip the live attempt, leave it in their mailbox. Returns
    *  the `arvm…` ticket too, so it can also be handed over by other means. */
   depositTo: (
@@ -37,7 +61,8 @@ export const api = {
     note: string,
     ttl: number | null,
     max: number | null,
-    password: string | null
+    password: string | null,
+    device: string | null = null
   ) =>
     invoke<{ id: number; ticket: string }>("deposit_to", {
       to,
@@ -46,6 +71,7 @@ export const api = {
       ttl,
       max,
       password,
+      device,
     }),
   serveTicket: (items: string[], seedRelay: string | null) =>
     invoke<{ id: number; ticket: string }>("serve_ticket", {
@@ -58,8 +84,25 @@ export const api = {
     invoke<string>("create_link", { item, ttl, max }),
   recv: (ticket: string, outItem: string | null, password: string | null) =>
     invoke<number>("recv", { ticket, outItem, password }),
-  acceptOffer: (offerId: string, outItem: string | null, password?: string | null) =>
-    invoke<number>("accept_offer", { offerId, outItem, password: password ?? null }),
+  acceptOffer: async (
+    offerId: string,
+    outItem: string | null,
+    password?: string | null
+  ) => {
+    try {
+      return await invoke<number>("accept_offer", {
+        offerId,
+        outItem,
+        password: password ?? null,
+      });
+    } catch (e) {
+      // This one command rejects with `{code, message}` rather than a bare
+      // string: a refusal carries the daemon's own word for itself, and the
+      // dialog acts on it. Re-thrown as an Error so `message` reads the same as
+      // every other failure, with the code riding along for whoever wants it.
+      throw asAcceptError(e);
+    }
+  },
   rejectOffer: (offerId: string) =>
     invoke<void>("reject_offer", { offerId }),
   pause: (id: number) => invoke<void>("pause", { id }),
@@ -75,8 +118,18 @@ export const api = {
   blockContact: (who: string) => invoke<void>("block_contact", { who }),
   unblockContact: (who: string) => invoke<void>("unblock_contact", { who }),
   acceptName: (who: string) => invoke<void>("accept_name", { who }),
+  /** Stop waiting for the recipient to accept and park the file on the relay.
+   *  Rejects when the send is not waiting — the daemon says so rather than
+   *  reporting a success that did nothing. */
+  depositNow: (id: number) => invoke<void>("deposit_now", { id }),
   addContact: (name: string, id: string) =>
     invoke<void>("add_contact", { name, id }),
+  /** Point an existing contact name at a different key. `addContact` refuses that
+   *  collision — re-pointing a name drops its verified and trusted marks — so
+   *  this is the only way past it, and the caller must have asked first. Resolves
+   *  to the old and new fingerprints when a key really did change. */
+  rebindContact: (name: string, id: string) =>
+    invoke<[string, string] | null>("rebind_contact", { name, id }),
   removeContact: (name: string) => invoke<void>("remove_contact", { name }),
   renameContact: (old: string, newName: string) =>
     invoke<void>("rename_contact", { old, new: newName }),
@@ -88,12 +141,17 @@ export const api = {
   revokeDeposit: (id: string) => invoke<void>("revoke_deposit", { id }),
   getConfig: () => invoke<ConfigDto>("get_config"),
   setConfig: (patch: ConfigPatch) => invoke<ConfigDto>("set_config", { patch }),
-  pruneNames: () => invoke<number>("prune_names"),
   /** Who is reachable right now. Separate from `listContacts` because the book
    *  is read from disk and is instant, while this is a relay round trip. */
   presence: (ids: string[]) => invoke<PresenceDto[]>("presence", { ids }),
   syncStatus: () => invoke<SyncDto>("sync_status"),
   syncNow: () => invoke<SyncDto>("sync_now"),
+  listDevices: () => invoke<DeviceDto[]>("list_devices"),
+  /** Rename *this* machine. The others are renamed on themselves — a device row
+   *  may only be written by the device it describes. */
+  renameThisDevice: (name: string) =>
+    invoke<void>("rename_this_device", { name }),
+  forgetDevice: (who: string) => invoke<void>("forget_device", { who }),
   /** Begin a pairing exchange; returns the session handle. The code to read out
    *  and the outcome arrive as `pairing_*` engine events, not as a return value —
    *  pairing waits on a human at another machine. */
@@ -114,8 +172,38 @@ export const api = {
   /** Native save dialog + write. Resolves to the chosen file name, or null. */
   exportContacts: (defaultName: string, contents: string) =>
     invoke<string | null>("export_contacts", { defaultName, contents }),
+  // Save an arvc… ticket as a shareable .arvolo file (native dialog, Rust-side
+  // path). Resolves to the chosen file name, or null if cancelled.
+  saveTicket: (defaultName: string, ticket: string) =>
+    invoke<string | null>("save_ticket", { defaultName, ticket }),
   guiVersion: () => invoke<string>("gui_version"),
+  /** Whether a newer release exists; null when there is nothing on offer.
+   *  `pinned` asks one specific release's manifest instead of `latest.json` —
+   *  used to look up a version the relay can still talk to. */
+  checkUpdate: (pinned: string | null = null) =>
+    invoke<UpdateInfo | null>("check_update", { pinned }),
+  /** Download, stop the daemon, install, restart. Never resolves on success —
+   *  the process is replaced — so callers must not await it expecting a return. */
+  installUpdate: (version: string | null = null) =>
+    invoke<void>("install_update", { version }),
+  // Open a file (or folder) with whatever the system uses for it. Goes through
+  // the bridge, not `@tauri-apps/plugin-opener`: the plugin's `openPath` is behind
+  // an ACL scope that has to be written out at build time, and the paths here —
+  // download folder, a received file, `config.toml` — are only known at runtime.
+  // The Rust side checks the path against the daemon before opening it.
+  openPath: (path: string) => invoke<void>("open_path", { path }),
+  // The ticket of a .arvolo the app was LAUNCHED with (double click before the
+  // window existed). One-shot: the backend hands it over once.
+  takePendingTicket: () => invoke<string | null>("take_pending_ticket"),
+  // Keep the native side (tray menu, arrival notifications) in the webview's
+  // language — they used to be hardcoded Italian in a four-language app.
+  setUiLanguage: (lang: string) => invoke<void>("set_ui_language", { lang }),
 };
+
+/** A .arvolo handed to the running app (drop on the window, macOS Opened). */
+export function onArvoloTicket(cb: (ticket: string) => void): Promise<UnlistenFn> {
+  return listen<string>("files://arvolo", (e) => cb(e.payload));
+}
 
 /** Subscribe to the pushed engine event stream, flattening each event out of its
  *  wire form (see `events.ts` — the daemon sends serde's externally tagged shape,
@@ -140,4 +228,12 @@ export function onDaemonError(cb: (reason: string) => void): Promise<UnlistenFn>
 /** Subscribe to the connected/disconnected heartbeat. */
 export function onConnected(cb: (connected: boolean) => void): Promise<UnlistenFn> {
   return listen<boolean>("engine://connected", (e) => cb(e.payload));
+}
+
+/** Bytes of an update downloaded so far. `total` is absent when the server did
+ *  not say how big the file is, which is why the bar has an indeterminate form. */
+export function onUpdateProgress(
+  cb: (p: UpdateProgress) => void
+): Promise<UnlistenFn> {
+  return listen<UpdateProgress>("update://progress", (e) => cb(e.payload));
 }

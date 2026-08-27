@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Arvolo",
-  "version": "0.10.1",
+  "version": "0.14.1",
   "identifier": "it.termox.arvolo",
   "build": {
     "frontendDist": "../dist",
@@ -28,9 +28,28 @@
       "devCsp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src ipc: http://ipc.localhost ws://localhost:1420 http://localhost:1420; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
     }
   },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDVBMzg4RTg0ODczQjE2QjIKUldTeUZqdUhoSTQ0V21TNnBkTm1ncVNnU1RXb1NiLy9relVRb2xab1dqc0EwYkpyS2JXd2ZaMVIK",
+      "endpoints": [
+        "https://github.com/lords82/arvolo/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  },
   "bundle": {
     "active": true,
     "targets": "all",
+    "fileAssociations": [
+      {
+        "ext": ["arvolo"],
+        "name": "Arvolo ticket",
+        "description": "Arvolo transfer ticket",
+        "role": "Viewer"
+      }
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

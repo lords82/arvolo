@@ -159,10 +159,32 @@ Produced by `arvolo send` (mailbox path). A base32 postcard of
 HPKE-sealed **directly** to the recipient (no separate content key); the relay
 stores that ciphertext under `claim`.
 
-### 4.3 Pairing code — `N-word-word[@relay]`
-A leading digit plus two words from a fixed wordlist, optionally `@relay` so the
+### 4.3 Pairing code — `N-word-word@relay`
+A leading digit plus two words from a fixed wordlist, followed by `@relay` so the
 receiver needs no configuration. It is **not** the ticket; it is the SPAKE2
 password used to fetch the ticket from a relay rendezvous (§7.2).
+
+The relay is always present now. It used to be appended only when `--relay` was
+passed explicitly, which made the same command self-contained or not depending on
+whether a daemon happened to be hosting it. A bare `N-word-word` is still
+*accepted* — codes minted by older builds, and anything typed by hand — and falls
+back to the receiver's own default relay.
+
+### 4.3.1 Shareable id — `<id>@<relay>`
+What `arvolo me` prints and `arvolo contacts add` reads back: the base32 public id
+and the relay that identity listens on. `@` cannot occur in base32, so the split is
+unambiguous.
+
+The relay half is **routing, not identity**. The id half is what proves who
+somebody is and what `verified`/`trusted` key off; a wrong relay costs a delivery
+that goes nowhere and nothing else, because a file is sealed to the recipient's
+key before any relay is chosen. A contact stored without one routes through your
+own relay, which is what every send did before this existed.
+
+Recipients learn it three ways, all optional: pasted in by hand, carried in the
+`@relay` of a pairing code (host → joiner), or sealed inside an offer
+([`Offer::relay`](../core/src/presence.rs), sender → recipient). Between two of
+your own devices it rides the address-book CRDT (§8).
 
 ### 4.4 Download link — `https://<relay>/dl/<claim>#<key>`
 Produced by `arvolo link`. The `claim` addresses a relay blob (a
@@ -219,6 +241,7 @@ swarm announce) additionally share a per-IP write-rate limit
 | GET | `/v1/entry/{claim}/status` | none | `pending` (present) / 404 `gone`. The claim is already a secret capability, so existence leaks nothing. |
 | GET | `/v1/addr` | none | The relay blob node's iroh address + a seed token (for backfill). |
 | POST | `/v1/seed` | seed token | Seed (backfill) a sender's chunks into the relay's blob store so a transfer finishes even if the sender goes offline. Capped per request and in total. |
+| POST | `/v1/have` | none (see below) | Body an `arvh…` list of chunk hashes; answers a base32 bitfield, one bit per hash in the order asked, saying which the relay holds. Asked by **both** ends: a receiver whose sender is away has no other way to learn the relay can serve it, and a sender uses it to seed only what is missing. Capped per request and charged against the write budget. It discloses nothing new — the chunk protocol already serves any held chunk to whoever names its hash, and the hashes are of ciphertext under a per-transfer random key, so holding the file does not yield them. |
 | POST | `/v1/release/{token}/{hash}` | release token | Release a seeded chunk. |
 | POST / GET / DELETE | `/v1/rz/{slot}/{key}` | per-key (below) | **Rendezvous** for short-code pairing (§7.2). Keys match `^[a-z0-9][a-z0-9._-]{0,63}$`; values are size-capped; a slot holds at most 32 rows and TTLs out. Every key is first-writer-wins. Per-IP rate limits (POSTs/min, *distinct slots* touched by GET/min — polling one slot is never throttled, and new v2 claims/hour) blunt nameplate sweeps and pairing griefing. |
 
@@ -482,6 +505,21 @@ provider**. The receiver fetches from whichever provider answers (chunk protocol
 over iroh); if the sender drops, the relay finishes the transfer. Seeded chunks
 are released/reaped afterwards.
 
+Which pieces the relay holds is discoverable by asking it (`/v1/have`), not only
+by being told over the control channel. That matters in the case the backfill
+exists for: with the sender gone there is nobody to send `RelayHas`, so a receiver
+that could only be told would sit with no provider for any piece while the relay
+held the whole tail. The sender asks the same question before seeding, so a
+transfer whose receiver connects and drops repeatedly cannot burn its own offload
+budget re-offering pieces the relay already has.
+
+Seeding is done in batches and only for what is missing, so it can stop cleanly on
+the relay's per-session cap (`402`, surfaced to the user) or on a cancel. Once
+everything the recipient still lacks is on the relay, a sealed 1:1 send stops
+serving and **does not fall back to the mailbox**: the payload is already parked,
+in a form that keeps the recipient's partial and can resume — a deposit would
+upload it a second time and start their download from zero.
+
 ### 7.4 Offline mailbox (recipient away)
 ```
 sender:  arvolo send R file --deposit
@@ -549,7 +587,8 @@ for freshness; the part that named you is gone, and with it the relay's need to
 agree with anyone about what time it is.
 
 **Offers (sealed sender).** A sender posts an **offer** to the recipient's
-`inbox_slot`: a record of `{ name, size, chunks, ticket, note, sender_name }`
+`inbox_slot`: a record of
+`{ name, size, chunks, ticket, note, sender_name, origin, target }`
 sealed in **two layers** —
 
 1. an **inner auth-mode HPKE seal** to the recipient (AAD `arvolo/offer/v1`),
@@ -590,6 +629,33 @@ So no name here may imply one — which is also why the middle state is not call
 `Seen` (it claims a person) or `Received` (in a tool whose verb for taking a file
 is `recv`, it is the one word certain to be read as the state it isn't). `gone` now means only: retracted, or lapsed without being
 taken (as it also does for an offer taken on a relay that predates `taken`).
+
+**Two device fields, and why an inbox needs them.** `origin` and `target` are
+both a 16-byte *device id* — a random per-machine value, minted locally, stored
+in the encrypted address-book snapshot (§ multi-device below) and **never** seen
+by the relay: both fields live inside the HPKE seal, so nothing outside can use
+them to correlate an identity's machines.
+
+They exist because devices paired with `device pair` share the identity, and
+therefore the slot. Everything that distinguishes two people fails between two of
+your own machines: an offer you posted decodes and authenticates perfectly *for
+you*.
+
+- `origin` is which machine posted it. Its one job is negative: the poster skips
+  its own offer, which would otherwise be an auto-accepted arrival that downloads
+  a file over itself.
+- `target` is which machine it is *for* (`send --to me --device laptop`). A
+  machine that knows its own id and is not the target skips the offer **without
+  acking it**, so the machine it names still finds it waiting. Absent, or on a
+  client too old to know the field, the offer is taken as it always was: by
+  whichever machine reads the slot first — which is a race, and can be more than
+  one, since your devices all unseal the same content key and will happily
+  co-swarm the same download.
+
+So targeting is an instruction your own devices honour, never one the relay
+enforces, and it is only as good as the oldest client holding the identity. It is
+a routing convenience, not a security boundary — anything holding the seed can
+ignore it, and anything holding the seed could read the file anyway.
 
 **Two-phase watchdog (`arvolo send`).** `arvolo send` decides live-vs-mailbox on a real
 signal rather than a blind timer:
@@ -698,6 +764,16 @@ A blob is deleted when the **first** of these happens:
    the link. A deposit the engine made is withdrawn *through* the engine, which
    also retracts the offer it left in the recipient's inbox — otherwise they'd be
    pointed at a blob that is no longer there.
+
+All three delete a file by naming it from its metadata row, which leaves one gap:
+a file whose row never landed — the process died between the streaming deposit's
+write and the insert, or between a backfill chunk being pulled and its `seeded`
+row being recorded — is invisible to every one of them and would hold its bytes
+for ever. So the reaper also runs an hourly **reconciliation sweep** that starts
+from what is on disk instead: any blob or seeded chunk with no row backing it,
+untouched for six hours (long enough that nothing mid-write is ever judged), is
+deleted. It is a backstop, not the mechanism — a seed that fails part-way already
+removes the chunks it wrote.
 
 The **local record** is swept an hour after its TTL, when the list is next built.
 Expiry is the only trigger: the record exists to hold the revoke token, so it dies

@@ -55,6 +55,9 @@ pub struct MailboxOpts {
     /// End-to-end password: the blob cannot be opened without it, and the relay
     /// never learns it. `None` = sealed to the recipient's key alone.
     pub password: Option<String>,
+    /// Which of our own devices the offer is aimed at — see [`Offer::target`].
+    /// `None` = any of them, which is what every send to somebody else is.
+    pub target: Option<crate::sync::DeviceId>,
 }
 
 /// Direction of a transfer, from this client's point of view.
@@ -71,6 +74,17 @@ pub enum Direction {
 pub enum TransferStatus {
     /// In progress (or, for a send, serving and awaiting the receiver).
     Active,
+    /// A send that is being *prepared*: the payload is being read and encrypted
+    /// chunk by chunk to compute its hashes, and nothing has left this machine —
+    /// the recipient has not even been offered the file yet, because the offer
+    /// carries a ticket that does not exist until this pass ends.
+    ///
+    /// Its own state because the alternative was a lie by omission: the row read
+    /// "active, 0 B" throughout, which is exactly what a transfer stuck at zero
+    /// bytes per second looks like. On a 10 GB file that is minutes of a screen
+    /// saying something is under way to someone who has not been told anything.
+    /// Measured at ~127 MiB/s on an SSD, so the wait is real and worth naming.
+    Preparing,
     /// Finished successfully (for a send: the recipient received it).
     Completed,
     /// An offline send: handed to the relay mailbox, delivery not yet confirmed.
@@ -90,6 +104,206 @@ pub enum TransferStatus {
     /// Ended with an error.
     Failed(String),
 }
+
+/// Why a send is waiting: a stable code, and the English sentence that goes with
+/// it.
+///
+/// Both, because the two readers want different things. The CLI wants the
+/// sentence and is English by design. A GUI wants to say it in the user's own
+/// language, and cannot: prose arriving over a socket is not translatable, so
+/// "offered — waiting for them to accept" sat in English on an otherwise
+/// localized window. The code is what a client looks up; the sentence is what it
+/// falls back to, and what an older client — which knows nothing of the code —
+/// still shows.
+///
+/// Closed on purpose. Every reason a transfer can wait for is a variant here, so
+/// the set a client must translate is greppable in one place rather than spread
+/// across the call sites that happen to construct one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WaitingReason {
+    /// The offer is in the recipient's inbox and nothing else will happen until
+    /// they accept it.
+    Offered,
+    /// The relay refused the file as larger than its per-file cap, so this one
+    /// will never go through the mailbox: it waits for the recipient to come
+    /// online for a direct transfer.
+    TooLarge,
+    /// The relay could not take it *right now* — full, unreachable, or erroring.
+    /// Carries the relay's own words, which are not ours to translate: they are
+    /// a diagnostic from another machine, and inventing a translation for them
+    /// would be inventing their content.
+    RelayRetry(String),
+    /// Everything the recipient still lacks is on the relay: the send is parked
+    /// there, they can finish without this daemon running, and it stays open only
+    /// in case they turn up for a direct transfer, which is faster and free.
+    Parked,
+    /// The relay will hold no more *of this transfer* — its per-session offload
+    /// cap, not its disk. Carries the cap already written for people ("128 MiB"),
+    /// because a client that translates the sentence still has to interpolate the
+    /// figure rather than invent it.
+    RelayCapped(String),
+    /// Parking on the relay did not work. Carries the relay's own words for the
+    /// same reason [`Self::RelayRetry`] does: they are a diagnostic from another
+    /// machine, and translating them would be inventing their content.
+    OffloadFailed(String),
+    /// Neither route out of this network is open: no relay would make us
+    /// reachable to a peer elsewhere, and the mailbox relay cannot be reached
+    /// either. What is left works on this network alone — a recipient in the same
+    /// building still gets the file — and the wait is for a better connection
+    /// rather than for the recipient.
+    ///
+    /// Its own reason rather than a [`Self::RelayRetry`] carrying an HTTP error,
+    /// because the two ask different things of the reader: one is "the relay is
+    /// having a moment", this one is "you are on a network that lets nothing
+    /// through".
+    NoRoute,
+}
+
+impl WaitingReason {
+    /// The stable identifier a client keys its own wording off. Never
+    /// user-visible, so it never changes when the English sentence is reworded.
+    pub fn code(&self) -> &'static str {
+        match self {
+            WaitingReason::Offered => "offered",
+            WaitingReason::TooLarge => "tooLarge",
+            WaitingReason::RelayRetry(_) => "relayRetry",
+            WaitingReason::Parked => "parked",
+            WaitingReason::RelayCapped(_) => "relayCapped",
+            WaitingReason::OffloadFailed(_) => "offloadFailed",
+            WaitingReason::NoRoute => "noRoute",
+        }
+    }
+
+    /// What a client with no translation shows, and what the CLI prints.
+    pub fn text(&self) -> String {
+        match self {
+            WaitingReason::Offered => "offered — waiting for them to accept".into(),
+            WaitingReason::TooLarge => "file too large for this relay — waiting for the \
+                 recipient to come online for a direct transfer"
+                .into(),
+            WaitingReason::RelayRetry(why) => format!(
+                "{why} — retrying later, and delivering P2P as soon as the recipient is online"
+            ),
+            WaitingReason::Parked => {
+                "parked on the relay — they can finish it without you online".into()
+            }
+            WaitingReason::RelayCapped(cap) => format!(
+                "the relay won't hold more of this transfer (cap {cap}) — \
+                 delivering direct as soon as they're online"
+            ),
+            WaitingReason::OffloadFailed(why) => {
+                format!("couldn't park it on the relay: {why}")
+            }
+            WaitingReason::NoRoute => "this network reaches no relay — sending on the \
+                 local network only, and waiting for a better connection"
+                .into(),
+        }
+    }
+
+    /// The part of [`text`](Self::text) that came from somewhere else, for a
+    /// client that translates the frame around it. `None` when the whole sentence
+    /// is ours.
+    pub fn detail(&self) -> Option<&str> {
+        match self {
+            WaitingReason::RelayRetry(why)
+            | WaitingReason::RelayCapped(why)
+            | WaitingReason::OffloadFailed(why) => Some(why),
+            _ => None,
+        }
+    }
+}
+
+/// Why an accept did not happen, when the answer is a **refusal** rather than a
+/// failure.
+///
+/// The distinction is the whole point. A refusal is decided before the offer is
+/// taken, so nothing has moved: the offer is still parked and can be accepted
+/// again once whatever is missing is supplied. A failure happens after, when the
+/// offer has been consumed and acked off the relay, and there is nothing left to
+/// retry against.
+///
+/// Typed, like [`WaitingReason`], because two different programs act on it: the
+/// daemon falls back to asking the user, and a window shows the field where the
+/// answer goes. Both used to read the engine's English — the desktop app decided
+/// whether a deposit was password-protected by testing the error text for the word
+/// "password" — which makes rewording a sentence a behaviour change nothing would
+/// catch. Carried inside `anyhow::Error`, so the ordinary `Result<u64>` still says
+/// everything and callers that only want the sentence keep working unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AcceptRefusal {
+    /// The deposit is sealed with a password and none was supplied.
+    NeedsPassword,
+    /// A live (direct) offer, and P2P is switched off: there is no route to take
+    /// it by. The sender can be asked to deposit it instead.
+    P2pOff,
+    /// No offer is parked under that id: it was taken already — a trusted
+    /// sender's file downloads by itself — or the sender replaced it with a newer
+    /// one and this id is spent.
+    NoLongerWaiting,
+}
+
+impl AcceptRefusal {
+    /// The stable word a front-end matches on, in place of reading the sentence.
+    pub fn code(self) -> &'static str {
+        match self {
+            AcceptRefusal::NeedsPassword => "needsPassword",
+            AcceptRefusal::P2pOff => "p2pOff",
+            AcceptRefusal::NoLongerWaiting => "noLongerWaiting",
+        }
+    }
+
+    /// Read a code back — for a client that received one over the wire.
+    pub fn from_code(code: &str) -> Option<Self> {
+        match code {
+            "needsPassword" => Some(AcceptRefusal::NeedsPassword),
+            "p2pOff" => Some(AcceptRefusal::P2pOff),
+            "noLongerWaiting" => Some(AcceptRefusal::NoLongerWaiting),
+            _ => None,
+        }
+    }
+
+    /// What a client with no translation shows, and what the CLI prints.
+    pub fn text(self) -> &'static str {
+        match self {
+            AcceptRefusal::NeedsPassword => {
+                "this deposit is password-protected — supply the password"
+            }
+            AcceptRefusal::P2pOff => {
+                "this offer is a direct transfer and P2P is off. The offer stays \
+                 where it is — ask the sender to use `--mailbox` instead."
+            }
+            AcceptRefusal::NoLongerWaiting => {
+                "that offer is no longer waiting for an answer — it was already \
+                 taken, or the sender replaced it with a newer one"
+            }
+        }
+    }
+
+    /// Is the offer still parked, so accepting again can work?
+    ///
+    /// True for everything that is refused *before* the offer is taken. The
+    /// daemon reads this to decide between putting the question back in front of
+    /// the user and reporting a download that will not happen.
+    pub fn offer_survives(self) -> bool {
+        match self {
+            AcceptRefusal::NeedsPassword | AcceptRefusal::P2pOff => true,
+            AcceptRefusal::NoLongerWaiting => false,
+        }
+    }
+
+    /// The refusal inside an error, if that is what it is.
+    pub fn of(e: &anyhow::Error) -> Option<Self> {
+        e.downcast_ref::<AcceptRefusal>().copied()
+    }
+}
+
+impl std::fmt::Display for AcceptRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.text())
+    }
+}
+
+impl std::error::Error for AcceptRefusal {}
 
 /// A snapshot of one transfer, for a UI list.
 #[derive(Clone, Debug)]
@@ -140,6 +354,17 @@ pub struct Transfer {
     /// that says "waiting to be picked up" for a week and one that says whether it
     /// ever reached them.
     pub offer_status: String,
+    /// For a receive: the name the sender typed about *themselves*, carried over
+    /// from the offer this download came from. Empty for a send, for a download
+    /// nobody offered (a pasted ticket), and for a sender who advertises nothing.
+    ///
+    /// A claim, never evidence — the same untrusted string as
+    /// [`Offer::sender_name`](crate::presence::Offer::sender_name), kept here only
+    /// so a client can propose it as the name to file them under. It stays on the
+    /// transfer because the offer it came from is consumed by accepting: a UI that
+    /// asks "who was that?" once the download is under way has nowhere else to
+    /// look.
+    pub sender_name: String,
     /// Where a completed receive landed on disk.
     ///
     /// Kept on the transfer, not only announced in [`ManagerEvent::Completed`],
@@ -149,6 +374,28 @@ pub struct Transfer {
     /// it. "Downloaded, and now find it yourself" is a strange thing for the
     /// window that downloaded it to say.
     pub path: Option<PathBuf>,
+    /// [`WaitingReason::code`] while the status is
+    /// [`Waiting`](TransferStatus::Waiting); empty otherwise.
+    ///
+    /// Beside the status rather than inside it because the status string is the
+    /// wire's and the CLI's, and both want the sentence. A client that wants to
+    /// say it in another language reads this instead. Cleared whenever the
+    /// transfer stops waiting, so nothing reads a code that no longer describes
+    /// the row.
+    pub waiting_code: String,
+    /// The relay's own words inside a [`WaitingReason::RelayRetry`], for a client
+    /// translating the sentence around them. Empty when there are none.
+    pub waiting_detail: String,
+    /// Whether [`TransferManager::pause`] would actually do something.
+    ///
+    /// Not every transfer can be held: a pickup from the mailbox is one fetch that
+    /// re-fetches rather than resuming, and a share is not a delivery to anybody in
+    /// particular. Only the engine can tell — it depends on a resume record on disk
+    /// and on whether the send is held — so a window that draws a pause button by
+    /// looking at the status alone draws one that does nothing, and the daemon
+    /// answers it "Ok". Read from the same predicate `pause` obeys, so the button
+    /// and the outcome cannot disagree.
+    pub can_pause: bool,
 }
 
 /// What an offline send actually left on the relay, carried by
@@ -230,6 +477,10 @@ pub enum ManagerEvent {
         /// The sender's self-advertised display name (empty if none). A petname
         /// claim carried inside the sealed offer — never an authenticated identity.
         sender_name: String,
+        /// Where the sender said they listen, so a reply can reach them without
+        /// being configured by hand. Empty when they named none. Routing only —
+        /// see [`crate::presence::Offer::relay`].
+        relay: String,
     },
     /// A transfer started.
     Started {
@@ -251,11 +502,33 @@ pub enum ManagerEvent {
     /// recipient fetches it (within the confirmation window). `info` describes what
     /// was left on the relay, so a front-end can record a withdrawable receipt.
     Deposited { id: u64, info: DepositInfo },
+    /// A send has started reading and encrypting its payload to compute the chunk
+    /// hashes. Nothing is on the wire yet and the recipient has not been offered
+    /// anything — see [`TransferStatus::Preparing`]. Announced rather than left to
+    /// the next snapshot because a front end that only listens to events would
+    /// otherwise show the row as active-at-zero for the whole pass.
+    Preparing { id: u64 },
     /// A send is being held for later delivery because the relay couldn't take it
     /// (refused / unreachable / errored). The daemon keeps trying: live P2P when
     /// the recipient appears, and the relay again on a slow interval. `reason` is
-    /// a short human explanation.
-    Waiting { id: u64, reason: String },
+    /// a short human explanation; `code` is the same thing as
+    /// [`WaitingReason::code`], for a subscriber that says it in its own words,
+    /// and `detail` the part of it that came from another machine.
+    ///
+    /// `offer_status` is how far the offer this send is holding open has got —
+    /// the same `pending`/`arrived`/`taken` ladder a deposited send reports, empty
+    /// when no offer stands. It rides on the event because nothing else announces
+    /// it: a front end fed only by events would otherwise have to guess whether a
+    /// waiting send is waiting on the network or on a person, and those two do not
+    /// deserve the same word on screen. Orthogonal to `code`, which says *why* it
+    /// waits — this says *how far* the one thing it is waiting on has come.
+    Waiting {
+        id: u64,
+        reason: String,
+        code: String,
+        detail: String,
+        offer_status: String,
+    },
     /// A send was paused (by the user, or automatically after a long failure to
     /// deliver). It stays put until `resume`d or `cancel`led. `reason` explains why.
     Paused { id: u64, reason: String },
@@ -325,7 +598,9 @@ impl TransferManager {
                 next_id: AtomicU64::new(1),
                 transfers: Mutex::new(HashMap::new()),
                 cancels: Mutex::new(HashMap::new()),
+                recv_aborts: Mutex::new(HashMap::new()),
                 held: Mutex::new(HashMap::new()),
+                download_content: Mutex::new(HashMap::new()),
                 pending: Mutex::new(HashMap::new()),
                 events,
                 me,
@@ -335,6 +610,7 @@ impl TransferManager {
                 state_dir,
                 inbox,
                 display_name: Mutex::new(String::new()),
+                device_id: Mutex::new(None),
             }),
         }
     }
@@ -345,6 +621,24 @@ impl TransferManager {
     /// [`Offer::sender_name`](crate::presence::Offer::sender_name).
     pub fn set_display_name(&self, name: String) {
         *self.inner.display_name.lock().unwrap() = name;
+    }
+
+    /// Tell the engine which device it is running on. Call once at startup, before
+    /// [`spawn_inbox`](Self::spawn_inbox) or any send.
+    ///
+    /// It does two things, and the second is the one that matters: every offer we
+    /// post is stamped with it, and the inbox drops offers carrying it back out of
+    /// our own poll. Devices paired with `device pair` share an identity and
+    /// therefore an inbox — without this, a send to your own identity is an offer
+    /// the sender finds in its own inbox and, being from itself, auto-accepts.
+    ///
+    /// Never leaves the HPKE seal; see
+    /// [`Offer::origin`](crate::presence::Offer::origin).
+    pub fn set_device_id(&self, device: crate::sync::DeviceId) {
+        *self.inner.device_id.lock().unwrap() = Some(device);
+        if let Some(inbox) = &self.inner.inbox {
+            inbox.set_origin(device);
+        }
     }
 
     /// Subscribe to the manager's event stream.
@@ -374,6 +668,13 @@ impl TransferManager {
             .values()
             .cloned()
             .collect();
+        // Stamped here rather than stored: what can be held changes underneath a
+        // row — a send becomes held, a download writes its resume record — and a
+        // window that draws a pause button from a stale yes offers a control that
+        // does nothing.
+        for t in &mut out {
+            t.can_pause = self.pausable(t.id, t.direction, &t.status);
+        }
         // Newest first: the id is a monotonic counter, so higher = more recent.
         out.sort_by_key(|t| std::cmp::Reverse(t.id));
         out
@@ -473,7 +774,14 @@ impl TransferManager {
                     from_download: 0,
                     share_started: 0,
                     offer_status: String::new(),
+                    sender_name: String::new(),
                     path: None,
+                    waiting_code: String::new(),
+                    waiting_detail: String::new(),
+                    // Answered per snapshot in `list`, where the record on disk and
+                    // the held sends can be read; the stored row never carries a
+                    // stale yes.
+                    can_pause: false,
                 },
             );
             // Keep the map from growing without bound over a long session: once
@@ -494,41 +802,82 @@ impl TransferManager {
         (id, cancel)
     }
 
-    /// Cancel a transfer by id (no-op if it already finished).
-    pub fn cancel(&self, id: u64) {
-        let status = self
+    /// Cancel a transfer by id. `false` only when there is no such transfer.
+    ///
+    /// **Total on purpose.** Every live row this is called on either reaches a
+    /// terminal state here or has a running task that will announce one — because
+    /// the caller in front of a user cannot tell the difference between "working on
+    /// it" and "nothing happened". This used to end with "cancel the token if there
+    /// is one", and a row with no token (nothing removes a *live* row's token today,
+    /// but every future state that ends a task and leaves the row alive would) got
+    /// silence: no status change, no event, and a UI stuck on "cancelling…" for
+    /// ever, waiting for something nobody was going to send.
+    pub fn cancel(&self, id: u64) -> bool {
+        let Some(status) = self
             .inner
             .transfers
             .lock()
             .unwrap()
             .get(&id)
-            .map(|t| t.status.clone());
+            .map(|t| t.status.clone())
+        else {
+            return false;
+        };
         match status {
+            // Already over. Saying so is not the same as doing nothing: the caller
+            // asked for it to be stopped, and it is stopped.
+            TransferStatus::Completed | TransferStatus::Cancelled | TransferStatus::Failed(_) => {
+                return true
+            }
             // A paused send has no running loop to cancel — end it directly.
-            Some(TransferStatus::Paused(_)) => {
+            TransferStatus::Paused(_) => {
                 finish(&self.inner, id, true, Ok(None));
-                return;
+                return true;
             }
             // An awaiting-pickup deposit has no running loop either, and the file
             // is sitting on the relay: withdraw it there before ending the row,
             // or "cancel" would only hide it while the recipient could still fetch.
-            Some(TransferStatus::Deposited) => {
-                cancel_deposited(self.inner.clone(), id);
-                return;
+            // Both routes park a file on a relay and both must really withdraw
+            // it; which one this was is a fact about the record on disk, not about
+            // the status, so ask there rather than making the caller know.
+            TransferStatus::Deposited => {
+                let parked = self
+                    .inner
+                    .state_dir
+                    .as_ref()
+                    .is_some_and(|dir| load_parkeds(dir).iter().any(|r| r.id == id));
+                if parked {
+                    cancel_parked(self.inner.clone(), id);
+                } else {
+                    cancel_deposited(self.inner.clone(), id);
+                }
+                return true;
             }
-            _ => {}
+            TransferStatus::Active | TransferStatus::Preparing | TransferStatus::Waiting(_) => {}
         }
-        if let Some(c) = self.inner.cancels.lock().unwrap().get(&id) {
-            c.cancel();
+        let token = self.inner.cancels.lock().unwrap().get(&id).cloned();
+        match token {
+            // A running task owns the ending: it has to unwind (a serve to close,
+            // a deposit to stop mid-upload) before the row can honestly say it is
+            // over, and it emits `Cancelled` when it does.
+            Some(c) => c.cancel(),
+            // Live status, no task: nothing exists that could ever end this row.
+            None => finish(&self.inner, id, true, Ok(None)),
         }
+        true
     }
 
     // ---- presence ---------------------------------------------------------
 
     /// Is `contact` currently online (a live presence beacon on the relay)? Any
     /// error or missing relay reads as offline.
-    pub async fn is_online(&self, contact: &PublicId) -> bool {
-        let Some(relay) = &self.inner.relay else {
+    ///
+    /// `relay` is where *they* listen, when that is known and is not where we do.
+    /// A beacon lives only on the relay its owner publishes it to, so asking ours
+    /// about someone else's relay does not report them offline so much as report
+    /// that we looked in the wrong place.
+    pub async fn is_online(&self, contact: &PublicId, relay: Option<&str>) -> bool {
+        let Some(relay) = relay.or(self.inner.relay.as_deref()) else {
             return false;
         };
         presence::check_online(&self.inner.client, relay, contact)
@@ -543,18 +892,33 @@ impl TransferManager {
     /// live P2P whenever the recipient is online, else the relay mailbox. If the
     /// relay can't take it (too large / unreachable / error) the send is *held*
     /// (`Waiting`) and keeps retrying rather than failing.
+    ///
+    /// `relay` is the recipient's, when they listen somewhere other than we do.
+    /// Everything it routes — the presence probe, the offer, the mailbox notice —
+    /// has to reach *them*; the payload itself is P2P and never goes through it.
+    #[allow(clippy::too_many_arguments)]
     pub async fn send_to(
         &self,
         recipient: &PublicId,
-        payload: PathBuf,
+        payload: impl Into<crate::source::SendSource>,
         name: String,
         archive: bool,
         note: String,
+        target: Option<crate::sync::DeviceId>,
+        relay: Option<String>,
     ) -> Result<u64> {
-        let relay = self.inner.relay.clone().context(
-            "a relay is required to send to a contact (set ARVOLO_RELAY or config `relay`)",
-        )?;
-        let size = std::fs::metadata(&payload).map(|m| m.len()).unwrap_or(0);
+        let source = payload.into();
+        // Keep the override itself, not the relay it resolved to: a held send that
+        // comes back after the user moved their own relay should follow them, and
+        // only a recipient's relay is theirs to remember.
+        let theirs = relay;
+        let relay = theirs
+            .clone()
+            .or_else(|| self.inner.relay.clone())
+            .context(
+                "a relay is required to send to a contact (set ARVOLO_RELAY or config `relay`)",
+            )?;
+        let size = source.len().unwrap_or(0);
         let (id, cancel) =
             self.register(Direction::Send, Some(recipient.clone()), name.clone(), size);
         let pause_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -562,11 +926,16 @@ impl TransferManager {
             id,
             Held {
                 recipient: recipient.clone(),
-                payload: payload.clone(),
+                source: source.clone(),
                 name: name.clone(),
                 archive,
                 note: note.clone(),
+                target,
+                relay: theirs,
                 pause_flag: pause_flag.clone(),
+                deposit_now: Default::default(),
+                attempt: Default::default(),
+                prep: Default::default(),
             },
         );
         persist_held_record(&self.inner, id, false, "");
@@ -576,7 +945,7 @@ impl TransferManager {
             cancel,
             relay,
             recipient.clone(),
-            payload,
+            source,
             name,
             archive,
             note,
@@ -588,27 +957,36 @@ impl TransferManager {
     /// Deposit `payload` in `recipient`'s relay mailbox now, without trying a live
     /// delivery first. Returns the transfer id and the `arvm…` ticket for the blob.
     ///
-    /// This is `send --deposit`: send-and-forget. It differs from
+    /// This is `send --mailbox`: send-and-forget. It differs from
     /// [`send_to`](Self::send_to) in more than the presence check — there is no
     /// held record and no retry loop, so the attempt either lands or fails, once.
     /// That is deliberate. A held send is restored from disk after a restart, and
     /// restoring one carrying a password would mean writing that password into the
     /// state directory; retrying without it would silently deposit unprotected.
     /// Neither is acceptable, so an explicit deposit simply doesn't become held.
+    ///
+    /// With a cross-relay recipient the two halves come apart: the blob goes to
+    /// **our** relay (we pay for that storage, and the `arvm…` names it, so they
+    /// can fetch it from anywhere) while the notice goes to **theirs**, which is
+    /// the only inbox they read. If we have no relay of our own, both fall back to
+    /// theirs — an inbox POST is unauthenticated by design, so that works.
     pub async fn deposit_to(
         &self,
         recipient: &PublicId,
-        payload: PathBuf,
+        payload: impl Into<crate::source::SendSource>,
         name: String,
         note: String,
         opts: MailboxOpts,
+        relay: Option<String>,
     ) -> Result<(u64, String)> {
-        let relay = self
-            .inner
-            .relay
+        let payload = payload.into();
+        let mine = self.inner.relay.clone();
+        let deposit_relay = mine
             .clone()
+            .or_else(|| relay.clone())
             .context("a relay is required to deposit to a contact's mailbox")?;
-        let size = std::fs::metadata(&payload).map(|m| m.len()).unwrap_or(0);
+        let offer_relay = relay.or(mine).unwrap_or_else(|| deposit_relay.clone());
+        let size = payload.len().unwrap_or(0);
         let (id, cancel) =
             self.register(Direction::Send, Some(recipient.clone()), name.clone(), size);
 
@@ -621,7 +999,8 @@ impl TransferManager {
         // inbox — after the user had been shown "annullamento in corso".
         let deposit = deposit_offline_and_offer(
             &self.inner,
-            &relay,
+            &deposit_relay,
+            &offer_relay,
             recipient,
             &payload,
             &name,
@@ -642,7 +1021,7 @@ impl TransferManager {
                 // its own maximum, and a record deadlined off the request would keep
                 // watching (and keep telling the user about) a blob already reaped.
                 let expires = unix_now().saturating_add(out.ttl_secs);
-                spawn_offline_confirm(&self.inner, id, relay, out, expires);
+                spawn_offline_confirm(&self.inner, id, deposit_relay, offer_relay, out, expires);
                 Ok((id, ticket))
             }
             Err(e) => {
@@ -653,6 +1032,79 @@ impl TransferManager {
         }
     }
 
+    /// Stop waiting for the recipient to accept and park the file on the relay now.
+    ///
+    /// The escape hatch for the grace period a `send --to` spends holding a live
+    /// offer open (see `deposit_after_secs`): waiting half an hour for somebody to
+    /// click is right by default and wrong when you already know they will not, and
+    /// this is how you say so without cancelling and sending again.
+    ///
+    /// Only a send that is actually waiting can take it — one under way is already
+    /// being delivered by the route the user wanted, and one that has already been
+    /// deposited has nowhere further to go. Returns `false` in those cases rather
+    /// than pretending, so a caller can say what happened.
+    pub fn deposit_now(&self, id: u64) -> bool {
+        let waiting = self
+            .inner
+            .transfers
+            .lock()
+            .unwrap()
+            .get(&id)
+            .is_some_and(|t| {
+                t.direction == Direction::Send
+                    && matches!(
+                        t.status,
+                        TransferStatus::Waiting(_) | TransferStatus::Preparing
+                    )
+            });
+        if !waiting {
+            return false;
+        }
+        let Some(h) = self.inner.held.lock().unwrap().get(&id).cloned() else {
+            return false;
+        };
+        h.deposit_now.store(true, Ordering::Relaxed);
+        // End the attempt in flight, if one is serving, so the loop comes back round
+        // now rather than when the watchdog next gives up. Deliberately the
+        // *attempt* token and not the send's own: cancelling that one would pause
+        // the send, which is the opposite of what was asked for.
+        if let Some(c) = h.attempt.lock().unwrap().as_ref() {
+            c.cancel();
+        }
+        true
+    }
+
+    /// Can this transfer be held at all?
+    ///
+    /// Two things have to be true: it is running (or waiting to), and there is
+    /// something to pick up again afterwards — a held send, or a download with a
+    /// resume record. A one-shot mailbox pickup has neither: it is a single fetch
+    /// that would simply start over, which is why it is not given a record in the
+    /// first place ([`Self::spawn_receive`]'s caller).
+    ///
+    /// It exists as its own function because two callers need the same answer:
+    /// [`Self::pause`], which acts on it, and [`Self::list`], which stamps it on
+    /// every row so a window can draw the button only where it does something.
+    /// Written out twice, they would drift, and the drift shows up as a control
+    /// that answers "Ok" and changes nothing.
+    fn pausable(&self, id: u64, direction: Direction, status: &TransferStatus) -> bool {
+        if !matches!(
+            status,
+            TransferStatus::Active | TransferStatus::Preparing | TransferStatus::Waiting(_)
+        ) {
+            return false;
+        }
+        if self.inner.held.lock().unwrap().contains_key(&id) {
+            return true;
+        }
+        direction == Direction::Recv
+            && self
+                .inner
+                .state_dir
+                .as_ref()
+                .is_some_and(|dir| download_record_path(dir, id).exists())
+    }
+
     /// Pause an in-progress transfer (Active or Waiting): stop working on it and hold
     /// it as `Paused` until `resume`d or `cancel`led. Returns whether it was paused.
     ///
@@ -661,25 +1113,20 @@ impl TransferManager {
     /// state on disk. No-op for anything else — an anonymous ticket serve, a one-shot
     /// mailbox fetch, an awaiting-pickup deposit.
     pub fn pause(&self, id: u64) -> bool {
-        let (can, is_recv) = self
+        let Some((direction, status)) = self
             .inner
             .transfers
             .lock()
             .unwrap()
             .get(&id)
-            .map(|t| {
-                (
-                    matches!(
-                        t.status,
-                        TransferStatus::Active | TransferStatus::Waiting(_)
-                    ),
-                    t.direction == Direction::Recv,
-                )
-            })
-            .unwrap_or((false, false));
-        if !can {
+            .map(|t| (t.direction, t.status.clone()))
+        else {
+            return false;
+        };
+        if !self.pausable(id, direction, &status) {
             return false;
         }
+        let is_recv = direction == Direction::Recv;
 
         // A held send: flag it and wake its delivery loop, which parks it as Paused.
         if let Some(h) = self.inner.held.lock().unwrap().get(&id).cloned() {
@@ -698,6 +1145,12 @@ impl TransferManager {
             if let Some(dir) = &self.inner.state_dir {
                 if download_record_path(dir, id).exists() {
                     mark_paused(dir, id);
+                    // Intent BEFORE mechanism: a pause must slip away like a
+                    // network drop (the sender keeps the tail warm for the
+                    // resume), not tell the sender to stop for good.
+                    if let Some(flag) = self.inner.recv_aborts.lock().unwrap().get(&id) {
+                        flag.store(false, Ordering::Relaxed);
+                    }
                     if let Some(c) = self.inner.cancels.lock().unwrap().get(&id) {
                         c.cancel();
                     }
@@ -726,7 +1179,11 @@ impl TransferManager {
 
         // A held send: re-arm its cancel token and re-spawn the delivery loop.
         let held = self.inner.held.lock().unwrap().get(&id).cloned();
-        if let (Some(h), Some(relay)) = (held, self.inner.relay.clone()) {
+        let route = held
+            .as_ref()
+            .and_then(|h| h.relay.clone())
+            .or_else(|| self.inner.relay.clone());
+        if let (Some(h), Some(relay)) = (held, route) {
             h.pause_flag.store(false, Ordering::Relaxed);
             let cancel = CancellationToken::new();
             self.inner
@@ -743,7 +1200,7 @@ impl TransferManager {
                 cancel,
                 relay,
                 h.recipient,
-                h.payload,
+                h.source,
                 h.name,
                 h.archive,
                 h.note,
@@ -824,10 +1281,12 @@ impl TransferManager {
         // fresh id, and resumes the pickup-confirmation poll. The revoke/retract
         // tokens ride along so a restored deposit stays cancellable.
         let relay = rec.relay.clone();
+        let offer_relay = rec.offer_relay.clone();
         spawn_offline_confirm(
             &self.inner,
             id,
             relay,
+            offer_relay,
             DepositOutcome {
                 size: rec.size,
                 claim: rec.claim,
@@ -859,15 +1318,24 @@ impl TransferManager {
         );
     }
 
-    fn restore_sendto(&self, rec: SendToRecord) {
+    /// `prep` is the preparation this send had already paid for, if one was written
+    /// down and the payload still matches it: restoring with it means the recipient
+    /// keeps the send they were given, under the same node id, and nothing is
+    /// re-encrypted. Without it the send simply prepares again, as every restart did.
+    fn restore_sendto(&self, rec: SendToRecord, prep: Option<PrepRecord>) {
         let Ok(recipient) = PublicId::from_bytes(&rec.recipient) else {
             return;
         };
-        let Some(relay) = self.inner.relay.clone() else {
+        // Theirs first: a send held for a recipient on another relay has to go back
+        // to that relay, and it is also the one case where our own may be absent.
+        let Some(relay) = rec.relay.clone().or_else(|| self.inner.relay.clone()) else {
             return; // can't deliver without a relay; drop the stale record
         };
-        let payload = PathBuf::from(&rec.payload);
-        let size = std::fs::metadata(&payload).map(|m| m.len()).unwrap_or(0);
+        // Records only ever hold a path (a handed-off descriptor died with the
+        // process that held it): the restart retries by name and, if the daemon
+        // may not open it, fails with the reason on the transfer.
+        let source = crate::source::SendSource::Path(PathBuf::from(&rec.payload));
+        let size = source.len().unwrap_or(0);
         let (id, cancel) = self.register(
             Direction::Send,
             Some(recipient.clone()),
@@ -875,17 +1343,49 @@ impl TransferManager {
             size,
         );
         let pause_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let slot: crate::flow::PrepSlot = Default::default();
+        if let Some(rec) = &prep {
+            *slot.lock().unwrap() = work::rebuild_prep(rec, &source);
+        }
         self.inner.held.lock().unwrap().insert(
             id,
             Held {
                 recipient: recipient.clone(),
-                payload: payload.clone(),
+                source: source.clone(),
                 name: rec.name.clone(),
                 archive: rec.archive,
                 note: rec.note.clone(),
+                target: rec.target,
+                relay: rec.relay.clone(),
                 pause_flag: pause_flag.clone(),
+                deposit_now: Default::default(),
+                attempt: Default::default(),
+                prep: slot.clone(),
             },
         );
+        // Re-key the preparation onto the id it now belongs to, or the next restart
+        // finds an orphan and sweeps it — losing across two restarts what survived
+        // one. Only when it actually survived the guard.
+        if let (Some(dir), Some(rec)) = (&self.inner.state_dir, &prep) {
+            if slot.lock().unwrap().is_some() {
+                persist_prep(
+                    dir,
+                    &PrepRecord {
+                        id,
+                        key: rec.key.clone(),
+                        node_seed: rec.node_seed.clone(),
+                        total_size: rec.total_size,
+                        chunks: rec.chunks.clone(),
+                        payload: rec.payload.clone(),
+                        len: rec.len,
+                        mtime_secs: rec.mtime_secs,
+                        mtime_nanos: rec.mtime_nanos,
+                        dev: rec.dev,
+                        ino: rec.ino,
+                    },
+                );
+            }
+        }
         if rec.paused {
             // Restore paused: don't run; drop the fresh token, mark Paused.
             self.inner.cancels.lock().unwrap().remove(&id);
@@ -904,7 +1404,7 @@ impl TransferManager {
                 cancel,
                 relay,
                 recipient,
-                payload,
+                source,
                 rec.name,
                 rec.archive,
                 rec.note,
@@ -921,6 +1421,9 @@ impl TransferManager {
         let (id, _cancel) = self.register(Direction::Recv, None, rec.name.clone(), rec.size);
         // No running task to cancel for a paused download.
         self.inner.cancels.lock().unwrap().remove(&id);
+        // Paused, but still the download this content belongs to: an offer arriving
+        // for it must find it rather than ask again.
+        self.inner.note_download_content(id, &rec.ticket);
         if let Some(dir) = &self.inner.state_dir {
             persist_download(
                 dir,
@@ -934,11 +1437,13 @@ impl TransferManager {
             );
             mark_paused(dir, id);
         }
+        // English, like every other reason the engine produces: this one is
+        // printed by the CLI (`⏸ paused: …`) and it had been left in Italian.
         self.inner
-            .set_status(id, TransferStatus::Paused("in pausa".to_string()));
+            .set_status(id, TransferStatus::Paused("paused by hand".to_string()));
         self.inner.emit(ManagerEvent::Paused {
             id,
-            reason: "in pausa".to_string(),
+            reason: "paused by hand".to_string(),
         });
     }
 
@@ -950,13 +1455,14 @@ impl TransferManager {
     /// there's no recipient, no offer, and no mailbox fallback.
     pub async fn serve_ticket(
         &self,
-        payload: PathBuf,
+        payload: impl Into<crate::source::SendSource>,
         name: String,
         archive: bool,
         seed_relay: Option<String>,
     ) -> Result<(u64, String)> {
+        let payload = payload.into();
         let session = flow::prepare_send(
-            &payload,
+            payload.clone(),
             &name,
             archive,
             None,
@@ -986,7 +1492,7 @@ impl TransferManager {
                 dir,
                 &SendRecord {
                     id,
-                    path: payload.to_string_lossy().into_owned(),
+                    path: payload.label(),
                     node_seed: node_seed.to_vec(),
                     ticket: ticket.clone(),
                     owned_stage: None,
@@ -1008,21 +1514,21 @@ impl TransferManager {
     /// the process that claimed it, which is the whole point here.
     pub async fn serve_code(
         &self,
-        payload: PathBuf,
+        payload: impl Into<crate::source::SendSource>,
         name: String,
         archive: bool,
         relay: String,
-        embed: bool,
         max_sessions: Option<u32>,
     ) -> Result<(u64, String)> {
+        let payload = payload.into();
         anyhow::ensure!(
             code::relay_rz_version(&relay).await == code::RzVersion::V2,
-            "relay {relay} is too old to host a background code (needs rendezvous v2) — \
-             run `arvolo code --foreground`, which serves it in this terminal instead"
+            "relay {relay} is too old to host a background code (needs rendezvous v2):\n\
+             \x20   arvolo send <paths> --code --foreground"
         );
         // Claim before serving: a code that can't be minted should leave no
         // half-started transfer behind.
-        let (shown, host) = code::claim_code(&relay, embed)
+        let (shown, host) = code::claim_code(&relay)
             .await
             .context("claim a pairing code")?;
 
@@ -1264,8 +1770,42 @@ impl TransferManager {
         {
             let inner = self.inner.clone();
             let stop = cancel.clone();
+            let ack_sub = sub.clone();
             tokio::spawn(async move {
                 sub.run(stop, move |offer| {
+                    // An offer about something already coming down is not a decision
+                    // to put in front of anybody: the user said yes to this send once,
+                    // and the sender is simply telling us where to find it now. Take
+                    // the copies already parked for it out with it — a withdrawal on
+                    // the relay never reaches those.
+                    if let Some(on) =
+                        inner.download_of_same_content(&offer.offer.ticket, Some(&offer.sender))
+                    {
+                        let paused = matches!(
+                            inner.transfers.lock().unwrap().get(&on).map(|t| &t.status),
+                            Some(TransferStatus::Paused(_))
+                        );
+                        tracing::info!(
+                            "offer {} is for transfer {on}, already downloading — not asking again",
+                            offer.id
+                        );
+                        let mut ids = inner.take_offers_for_same_content(&offer.offer.ticket);
+                        ids.push(offer.id.clone());
+                        // Ack only for a download that can act on the news. An ack
+                        // reads on the relay as *taken*, which wakes the sender and
+                        // starts an attempt at once — right for a fetch in flight,
+                        // wasted on one the user deliberately paused, which nothing
+                        // here is going to un-pause on their behalf.
+                        if !paused {
+                            let sub = ack_sub.clone();
+                            tokio::spawn(async move {
+                                for id in ids {
+                                    let _ = sub.ack(&id).await;
+                                }
+                            });
+                        }
+                        return;
+                    }
                     inner
                         .pending
                         .lock()
@@ -1278,6 +1818,7 @@ impl TransferManager {
                         size: offer.offer.size,
                         note: offer.offer.note.clone(),
                         sender_name: offer.offer.sender_name.clone(),
+                        relay: offer.offer.relay.clone(),
                     });
                 })
                 .await;
@@ -1310,6 +1851,25 @@ impl TransferManager {
         Ok(cancel)
     }
 
+    /// The download already fetching what `ticket` offers, if there is one: a fetch
+    /// in flight, or one the user paused. Terminal rows never match.
+    ///
+    /// The key is the ticket's [`content_id`](crate::chunked::ChunkTicket::content_id),
+    /// not its text — the text changes on every attempt (fresh provider address, and
+    /// HPKE re-seals the key blob), while the content id is the same for two tickets
+    /// that serve the same send and different for everything else. Because the
+    /// digests are of ciphertext under a random content key, producing the same id
+    /// means holding that key: a match says "this is that send", not merely "this is
+    /// a file with the same bytes".
+    ///
+    /// `from` is the authenticated sender of the offer that carried the ticket, when
+    /// there is one. A download that knows who it is talking to only matches an offer
+    /// from *them* — a stranger naming content we hold should be impossible, and if
+    /// the impossible happens it deserves to be seen, not swallowed.
+    pub fn download_of_same_content(&self, ticket: &str, from: Option<&PublicId>) -> Option<u64> {
+        self.inner.download_of_same_content(ticket, from)
+    }
+
     /// Accept a pending offer by its handle: fetch it into `out` (or the default
     /// download dir, using the offer's name) transparently and ack it. Returns the
     /// receive transfer id.
@@ -1319,7 +1879,7 @@ impl TransferManager {
 
     /// Accept a parked offer, supplying the password it was sealed with.
     ///
-    /// A mailbox deposit can carry an end-to-end password (`send --deposit
+    /// A mailbox deposit can carry an end-to-end password (`send --mailbox
     /// --password`), and the inbox offer that points at it looks exactly like any
     /// other. Without a way to pass one, accepting such an offer could only ever
     /// fail — the recipient would watch it land as
@@ -1348,7 +1908,7 @@ impl TransferManager {
                 .and_then(|t| crate::offline::OfflineTicket::decode(&t).ok())
                 .is_some_and(|t| t.has_password());
             if needs {
-                anyhow::bail!("this deposit is password-protected — supply the password");
+                return Err(anyhow::Error::new(AcceptRefusal::NeedsPassword));
             }
         }
 
@@ -1367,21 +1927,23 @@ impl TransferManager {
                 .map(|o| crate::chunked::ChunkTicket::looks_like(&o.offer.ticket))
                 .unwrap_or(false);
             if live {
-                anyhow::bail!(
-                    "this offer is a direct transfer and P2P is off — ask the sender to \
-                     deposit it instead (`arvolo send <you> <file> --deposit`). The offer \
-                     is left where it is."
-                );
+                return Err(anyhow::Error::new(AcceptRefusal::P2pOff));
             }
         }
 
+        // Not "no such offer": the id was real, and whoever is asking was shown it.
+        // It stops being pending for two ordinary reasons — it was taken already
+        // (a trusted sender's file downloads by itself), or the sender re-posted
+        // and the newer offer replaced it — and both are things that happened *for*
+        // the user, not to them. Say which, so the sentence reaching a window is one
+        // a person can act on rather than the name of a map lookup.
         let offer = self
             .inner
             .pending
             .lock()
             .unwrap()
             .remove(offer_id)
-            .context("no such pending offer")?;
+            .ok_or_else(|| anyhow::Error::new(AcceptRefusal::NoLongerWaiting))?;
 
         // The offer name is sender-supplied and untrusted (even a "trusted"
         // contact is auto-downloaded via this path): reduce it to a single safe
@@ -1408,14 +1970,48 @@ impl TransferManager {
             let _ = sub.ack(offer_id).await;
         }
 
-        Ok(self.start_download_with_password(
+        // Already fetching this very send? Then this offer is the sender saying where
+        // to find it now, not a second file. Hand back the download that exists rather
+        // than starting another onto the same path — two fetches writing one partial is
+        // not a thing that ends well. Covers the offer that was parked *before* the
+        // download started, which the inbox poll could not have matched.
+        //
+        // Paused, and accepted by hand: that is the user saying yes to it now, which is
+        // exactly the intent the passive path deliberately does not infer.
+        if let Some(on) = self.download_of_same_content(&offer.offer.ticket, Some(&offer.sender)) {
+            let paused = matches!(
+                self.get(on).map(|t| t.status),
+                Some(TransferStatus::Paused(_))
+            );
+            if paused {
+                self.resume(on);
+            }
+            if !offer.offer.sender_name.is_empty() {
+                if let Some(t) = self.inner.transfers.lock().unwrap().get_mut(&on) {
+                    if t.sender_name.is_empty() {
+                        t.sender_name = offer.offer.sender_name.clone();
+                    }
+                }
+            }
+            return Ok(on);
+        }
+
+        let id = self.start_download_with_password(
             offer.offer.ticket.clone(),
             out_path,
             Some(offer.sender.clone()),
             offer.offer.name.clone(),
             offer.offer.size,
             password,
-        ))
+        );
+        // Carry the sender's claim about themselves onto the transfer: accepting
+        // consumes the offer, and this is the last moment it exists to be copied.
+        if !offer.offer.sender_name.is_empty() {
+            if let Some(t) = self.inner.transfers.lock().unwrap().get_mut(&id) {
+                t.sender_name = offer.offer.sender_name.clone();
+            }
+        }
+        Ok(id)
     }
 
     /// Start (or resume) a background download of `ticket` into `out_path`. A
@@ -1451,6 +2047,7 @@ impl TransferManager {
         // Persist a resume record for chunked downloads (offline one-shots aren't
         // worth resuming — they just re-fetch from the mailbox).
         if crate::chunked::ChunkTicket::looks_like(&ticket) {
+            self.inner.note_download_content(id, &ticket);
             if let Some(dir) = &self.inner.state_dir {
                 persist_download(
                     dir,
@@ -1518,12 +2115,23 @@ impl TransferManager {
             let transferred = Arc::new(AtomicU64::new(0));
             let inner_cb = inner.clone();
             let t_cb = transferred.clone();
+            // Registered so `pause` can flip the intent to "not an abort"
+            // before it cancels — see `RecvCancel`.
+            let abort_intent = Arc::new(std::sync::atomic::AtomicBool::new(true));
+            inner
+                .recv_aborts
+                .lock()
+                .unwrap()
+                .insert(id, abort_intent.clone());
             let result = flow::recv_chunked(
                 &ticket,
                 Some(out_path.clone()),
                 Some(&me),
                 RelayChoice::from_env(),
-                cancel,
+                flow::RecvCancel {
+                    token: cancel,
+                    abort: abort_intent,
+                },
                 move |ev| match ev {
                     RecvEvent::Sender { id: Some(bytes) } => {
                         if let Ok(pk) = PublicId::from_bytes(&bytes) {
@@ -1662,10 +2270,23 @@ impl TransferManager {
             remove_deposited(&dir, rec.id);
             self.restore_deposited(rec);
         }
+        // A preparation whose held send is not coming back has nothing to belong to,
+        // and holds a content key: drop it before anything re-keys. (Every restore
+        // allocates a fresh id — the same reason the pairing-code sweep below exists.)
+        {
+            let live: std::collections::HashSet<u64> = sendtos.iter().map(|r| r.id).collect();
+            for p in load_preps(&dir) {
+                if !live.contains(&p.id) {
+                    remove_prep(&dir, p.id);
+                }
+            }
+        }
         for rec in sendtos {
-            // Re-registers under a fresh id; drop the stale record either way.
+            // Re-registers under a fresh id; drop the stale records either way.
+            let prep = load_prep(&dir, rec.id);
+            remove_prep(&dir, rec.id);
             remove_sendto(&dir, rec.id);
-            self.restore_sendto(rec);
+            self.restore_sendto(rec, prep);
         }
         for rec in downloads {
             // A download the user paused comes back Paused (awaiting them); an active
@@ -1713,6 +2334,22 @@ impl TransferManager {
             );
         }
         n
+    }
+
+    /// Is an offer still parked under this id?
+    ///
+    /// The engine's map is the only authority on this, and the daemon keeps a map
+    /// of its own that can differ: it does not park what it is about to take
+    /// automatically. So after an auto-accept comes back with an error, "can this
+    /// still be offered to the user?" is a question only the engine can answer —
+    /// and answering it wrong means either a question about a file nobody can
+    /// deliver, or a file quietly dropped.
+    ///
+    /// [`AcceptRefusal::offer_survives`] says the same thing from the error's
+    /// side; this is the fact rather than the inference, and an unexpected error
+    /// (one carrying no refusal at all) can only be judged here.
+    pub fn is_pending(&self, offer_id: &str) -> bool {
+        self.inner.pending.lock().unwrap().contains_key(offer_id)
     }
 
     /// Reject a pending offer: drop it and ack it so it stops coming back.
@@ -1787,7 +2424,14 @@ mod clear_finished_tests {
         let mk = |status: TransferStatus| {
             let (id, _c) = m.register(Direction::Send, None, "f.bin".into(), 1);
             m.inner.cancels.lock().unwrap().remove(&id);
-            m.inner.set_status(id, status);
+            // Each status through the setter that owns it: `set_status` is for the
+            // ones that mean the task has ended, and says so with an assertion.
+            match status {
+                TransferStatus::Active | TransferStatus::Preparing | TransferStatus::Waiting(_) => {
+                    m.inner.set_status_live(id, status)
+                }
+                _ => m.inner.set_status(id, status),
+            }
             id
         };
         let completed = mk(TransferStatus::Completed);
@@ -1852,6 +2496,317 @@ mod clear_finished_tests {
         assert!(
             events.try_recv().is_err(),
             "an empty clear must not wake every subscriber"
+        );
+    }
+}
+
+#[cfg(test)]
+mod held_prep_tests {
+    use super::*;
+
+    /// Looks tautological, and is the one line that keeps the fix: the delivery loop
+    /// must read its preparation from the held send, because the loop is what a
+    /// pause destroys and `Held` is what survives it. Tidy this back into a task
+    /// local and every resume re-encrypts the payload — and hands the recipient a
+    /// different send.
+    #[tokio::test]
+    async fn the_delivery_loop_reads_its_preparation_from_the_held_send() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = TransferManager::with_state_dir(
+            Identity::generate(),
+            None,
+            dir.path().to_path_buf(),
+            Some(dir.path().to_path_buf()),
+        );
+        let (id, _c) = m.register(Direction::Send, None, "f.bin".into(), 1);
+        let slot = crate::flow::PrepSlot::default();
+        m.inner.held.lock().unwrap().insert(
+            id,
+            Held {
+                recipient: Identity::generate().public(),
+                source: crate::source::SendSource::Path(PathBuf::from("f.bin")),
+                name: "f.bin".into(),
+                archive: false,
+                note: String::new(),
+                target: None,
+                relay: None,
+                pause_flag: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                deposit_now: Default::default(),
+                attempt: Default::default(),
+                prep: slot.clone(),
+            },
+        );
+
+        assert!(
+            Arc::ptr_eq(&work::held_prep(&m.inner, id), &slot),
+            "the loop must share the held send's slot, not a copy of it"
+        );
+        // Cloning `Held` — which pause and resume both do — must not fork the slot.
+        let cloned = m.inner.held.lock().unwrap().get(&id).cloned().unwrap();
+        assert!(Arc::ptr_eq(&cloned.prep, &slot));
+
+        // No held entry: a private slot, so reuse within one task still works.
+        let (other, _c) = m.register(Direction::Send, None, "g.bin".into(), 1);
+        assert!(work::held_prep(&m.inner, other).lock().unwrap().is_none());
+    }
+
+    /// Every restore re-keys onto a fresh id, so a preparation whose held send did
+    /// not come back would sit in the state dir for ever — holding a content key
+    /// nobody can use. It is swept on the way in.
+    #[tokio::test]
+    async fn a_preparation_whose_send_did_not_come_back_is_swept() {
+        let dir = tempfile::tempdir().unwrap();
+        persist_prep(
+            dir.path(),
+            &PrepRecord {
+                id: 99,
+                key: vec![1u8; crate::crypto::CHUNK_KEY_LEN],
+                node_seed: vec![2u8; 32],
+                total_size: 10,
+                chunks: vec![crate::hash::Hash::new(b"x")],
+                payload: "/gone.bin".into(),
+                len: 10,
+                mtime_secs: 1,
+                mtime_nanos: 0,
+                dev: 0,
+                ino: 0,
+            },
+        );
+        let m = TransferManager::with_state_dir(
+            Identity::generate(),
+            None,
+            dir.path().to_path_buf(),
+            Some(dir.path().to_path_buf()),
+        );
+        m.resume_incomplete();
+        assert!(
+            load_prep(dir.path(), 99).is_none(),
+            "an orphan preparation must not outlive the restart it was found on"
+        );
+    }
+}
+
+#[cfg(test)]
+mod accept_refusal_tests {
+    use super::*;
+
+    /// A refusal is not a failure, and the difference is a fact about the offer:
+    /// after one, it is still there to be accepted again. The daemon leans on
+    /// exactly this when an automatic download comes back refused — it puts the
+    /// question in front of the user instead — so if a refusal ever started
+    /// consuming the offer, that fallback would offer a file nobody can deliver.
+    #[tokio::test]
+    async fn a_password_refusal_keeps_the_offer_where_it_was() {
+        let dl = tempfile::tempdir().unwrap();
+        let sender = Identity::generate();
+        let m = TransferManager::new(Identity::generate(), None, dl.path().to_path_buf());
+
+        // A deposit sealed with a password: a salt in the ticket is what says so.
+        let ticket = crate::offline::OfflineTicket {
+            relay: "https://relay.test".into(),
+            claim: "claim".into(),
+            sender: sender.public().to_bytes().to_vec(),
+            salt: vec![7; 16],
+            wrapped_key: vec![],
+            total_size: 4096,
+            name: "segreto.pdf".into(),
+        }
+        .encode();
+        m.inner.pending.lock().unwrap().insert(
+            "o1".to_string(),
+            crate::presence::ReceivedOffer {
+                id: "o1".to_string(),
+                sender: sender.public(),
+                offer: crate::presence::Offer {
+                    name: "segreto.pdf".into(),
+                    size: 4096,
+                    chunks: 1,
+                    ticket,
+                    note: String::new(),
+                    sender_name: String::new(),
+                    origin: None,
+                    target: None,
+                    relay: String::new(),
+                },
+            },
+        );
+
+        let err = m
+            .accept_offer("o1", None)
+            .await
+            .expect_err("no password was supplied");
+        assert_eq!(
+            AcceptRefusal::of(&err),
+            Some(AcceptRefusal::NeedsPassword),
+            "the reason travels as itself, not as a sentence to be re-read"
+        );
+        assert!(m.is_pending("o1"), "a refusal leaves the offer parked");
+        assert!(AcceptRefusal::NeedsPassword.offer_survives());
+    }
+
+    /// The other half: an id nobody holds. It reads as a refusal too — there is
+    /// nothing to take — but one the offer does *not* survive, which is what stops
+    /// the daemon from re-offering a file it can no longer deliver.
+    #[tokio::test]
+    async fn an_id_nobody_holds_is_refused_and_does_not_come_back() {
+        let dl = tempfile::tempdir().unwrap();
+        let m = TransferManager::new(Identity::generate(), None, dl.path().to_path_buf());
+
+        let err = m
+            .accept_offer("nope", None)
+            .await
+            .expect_err("no such offer");
+        assert_eq!(
+            AcceptRefusal::of(&err),
+            Some(AcceptRefusal::NoLongerWaiting)
+        );
+        assert!(!m.is_pending("nope"));
+        assert!(!AcceptRefusal::NoLongerWaiting.offer_survives());
+    }
+
+    /// The codes are the contract with every front-end: they are matched on, and
+    /// they travel over the wire, so a rename is a breaking change and belongs in
+    /// a diff somebody reads.
+    #[test]
+    fn every_refusal_has_a_stable_word_that_reads_back() {
+        for r in [
+            AcceptRefusal::NeedsPassword,
+            AcceptRefusal::P2pOff,
+            AcceptRefusal::NoLongerWaiting,
+        ] {
+            assert_eq!(AcceptRefusal::from_code(r.code()), Some(r));
+            assert!(!r.text().is_empty());
+        }
+        assert_eq!(AcceptRefusal::NeedsPassword.code(), "needsPassword");
+        assert_eq!(AcceptRefusal::P2pOff.code(), "p2pOff");
+        assert_eq!(AcceptRefusal::NoLongerWaiting.code(), "noLongerWaiting");
+        assert_eq!(AcceptRefusal::from_code("whatever"), None);
+    }
+}
+
+#[cfg(test)]
+mod pausable_tests {
+    use super::*;
+
+    /// The button and the outcome, from one answer.
+    ///
+    /// Holding a transfer only means something when there is something to come
+    /// back to: a download with a resume record keeps its partial, while a pickup
+    /// from the mailbox is a single fetch that would start over — which is why it
+    /// is given no record. The window used to decide from the status alone, so it
+    /// drew a pause on the second one too; the daemon answered `Ok` and nothing
+    /// happened. What this pins is that the row's `can_pause` and what `pause`
+    /// actually does are the same fact, not two opinions.
+    #[tokio::test]
+    async fn only_a_transfer_with_something_to_come_back_to_can_be_held() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = TransferManager::with_state_dir(
+            Identity::generate(),
+            None,
+            dir.path().to_path_buf(),
+            Some(dir.path().to_path_buf()),
+        );
+
+        let (resumable, _c1) = m.register(Direction::Recv, None, "big.bin".into(), 1_000);
+        persist_download(
+            dir.path(),
+            &DownloadRecord {
+                id: resumable,
+                ticket: "arvcSOMETHING".into(),
+                out_path: dir.path().join("big.bin").to_string_lossy().into_owned(),
+                name: "big.bin".into(),
+                size: 1_000,
+            },
+        );
+        // A mailbox pickup: same shape of row, no record behind it.
+        let (one_shot, _c2) = m.register(Direction::Recv, None, "note.txt".into(), 5);
+
+        let rows = m.list();
+        let can = |id: u64| rows.iter().find(|t| t.id == id).expect("row").can_pause;
+        assert!(can(resumable), "a download that can resume can be held");
+        assert!(!can(one_shot), "a pickup that would start over cannot");
+
+        // And the action agrees with the row, which is the whole point.
+        assert!(!m.pause(one_shot));
+        assert!(m.pause(resumable));
+        // Resuming is refused for anything that is not paused — the answer the
+        // play button on a stalled row was getting in silence.
+        assert!(!m.resume(one_shot));
+    }
+}
+
+#[cfg(test)]
+mod offer_dedup_tests {
+    use super::*;
+
+    /// The copies a sender left in the inbox before it learned to keep one offer
+    /// standing. A withdrawal on the relay never reaches the ones already parked
+    /// here, so a swallowed offer takes its own ghosts with it — and leaves
+    /// everything else exactly where it is, which is the half worth pinning.
+    #[tokio::test]
+    async fn a_swallowed_offer_sweeps_its_own_ghosts_and_nothing_else() {
+        let dir = tempfile::tempdir().unwrap();
+        let dl = tempfile::tempdir().unwrap();
+        let me = Identity::generate();
+        let my_id = me.public();
+        let sender = Identity::generate();
+        let m = TransferManager::new(me, None, dl.path().to_path_buf());
+
+        let prepare = |name: &'static str, fill: u8| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, vec![fill; 4096]).unwrap();
+            let sender = &sender;
+            let my_id = &my_id;
+            async move {
+                crate::flow::prepare_send(
+                    path.as_path(),
+                    name,
+                    false,
+                    Some((sender, my_id)),
+                    None,
+                    RelayChoice::Disabled,
+                )
+                .await
+                .unwrap()
+                .ticket
+                .clone()
+            }
+        };
+        let one = prepare("one.bin", 1).await;
+        let two = prepare("two.bin", 2).await;
+
+        let park = |id: &str, ticket: &str| {
+            m.inner.pending.lock().unwrap().insert(
+                id.to_string(),
+                crate::presence::ReceivedOffer {
+                    id: id.to_string(),
+                    sender: sender.public(),
+                    offer: crate::presence::Offer {
+                        name: "f.bin".into(),
+                        size: 4096,
+                        chunks: 1,
+                        ticket: ticket.to_string(),
+                        note: String::new(),
+                        sender_name: String::new(),
+                        origin: None,
+                        target: None,
+                        relay: String::new(),
+                    },
+                },
+            );
+        };
+        park("ghost-a", &one);
+        park("ghost-b", &one);
+        park("other", &two);
+
+        let mut swept = m.inner.take_offers_for_same_content(&one);
+        swept.sort();
+        assert_eq!(swept, vec!["ghost-a".to_string(), "ghost-b".to_string()]);
+        let left: Vec<String> = m.inner.pending.lock().unwrap().keys().cloned().collect();
+        assert_eq!(
+            left,
+            vec!["other".to_string()],
+            "another send's offer is another decision, and stays parked"
         );
     }
 }
@@ -2075,6 +3030,7 @@ mod deposit_event_tests {
                 revoke_token: "revoke-me".into(),
                 offer_id: "offer-1".into(),
                 poster_token: "poster-1".into(),
+                offer_relay: "https://relay.example".into(),
             },
         );
 
@@ -2116,5 +3072,71 @@ mod deposit_event_tests {
         // The relay's original deadline, not a fresh hour from now: a restart loop
         // must not keep a blob alive past the TTL its recipient was promised.
         assert_eq!(info.expires, expires);
+    }
+}
+
+#[cfg(test)]
+mod waiting_reason_tests {
+    use super::*;
+
+    /// The code is a promise to every client that translates: it names the reason
+    /// and it does not change when the English is reworded. Pinning the pairs here
+    /// makes a rename of a variant a visible decision rather than a silent break
+    /// in somebody's language.
+    ///
+    /// `gui/src/test/waiting.test.ts` reads the same list out of this file and
+    /// checks the window knows all of it — the other half of a contract no
+    /// compiler can see, because it runs across two languages.
+    #[test]
+    fn every_reason_has_a_stable_code_and_a_sentence() {
+        let cases = [
+            (WaitingReason::Offered, "offered"),
+            (WaitingReason::TooLarge, "tooLarge"),
+            (
+                WaitingReason::RelayRetry("mailbox full".into()),
+                "relayRetry",
+            ),
+        ];
+        for (reason, code) in cases {
+            assert_eq!(reason.code(), code);
+            assert!(
+                !reason.text().is_empty(),
+                "{code} must still say something to a client that cannot translate it"
+            );
+        }
+    }
+
+    /// The relay's own words are passed through, not paraphrased: they are a
+    /// diagnostic from another machine, and the sentence has to carry them or the
+    /// reason stops being actionable ("could not deposit" tells nobody anything).
+    #[test]
+    fn a_relay_retry_quotes_the_relay() {
+        let r = WaitingReason::RelayRetry("mailbox full".into());
+        assert_eq!(r.detail(), Some("mailbox full"));
+        assert!(r.text().starts_with("mailbox full"), "{}", r.text());
+        // The other two have nothing quoted, so a client has nothing to splice in.
+        assert_eq!(WaitingReason::Offered.detail(), None);
+        assert_eq!(WaitingReason::TooLarge.detail(), None);
+    }
+
+    /// A code must not outlive the wait it explains. The row goes active, the
+    /// status says so, and a client reading the code without re-checking the
+    /// status would otherwise still be told the file is "offered".
+    #[tokio::test]
+    async fn the_code_is_dropped_when_the_row_stops_waiting() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = TransferManager::new(Identity::generate(), None, dir.path().to_path_buf());
+        let (id, _cancel) = m.register(Direction::Send, None, "f.bin".into(), 10);
+
+        crate::manager::work::set_waiting(&m.inner, id, WaitingReason::Offered);
+        let waiting = m.list().into_iter().find(|t| t.id == id).unwrap();
+        assert_eq!(waiting.waiting_code, "offered");
+
+        m.inner.set_status_live(id, TransferStatus::Active);
+        let active = m.list().into_iter().find(|t| t.id == id).unwrap();
+        assert_eq!(
+            active.waiting_code, "",
+            "an active row must not still explain why it was waiting"
+        );
     }
 }

@@ -1,6 +1,6 @@
 //! The axum HTTP layer: route handlers and the [`router`] assembly.
 
-use arvolo_core::chunked::{SeedRequest, CHUNK_SIZE};
+use arvolo_core::chunked::{encode_have_bitfield, HaveRequest, SeedRequest, CHUNK_SIZE};
 use arvolo_core::swarm::{AnnounceReq, AnnounceResp, PeerInfo};
 use axum::{
     body::Bytes,
@@ -19,10 +19,10 @@ use crate::limits::{
 use crate::mailbox::{InboxStatus, MailboxError};
 use crate::state::{
     max_blob_bytes, max_inbox_rows, max_presence_rows, max_rz_rows, max_seeded_rows,
-    max_session_relay_bytes, max_total_blob_bytes, AppState, SwarmPeer, CONTROL_PLANE_BODY_LIMIT,
-    INBOX_MAX_TTL_SECS, INBOX_TTL_SECS, MAX_INBOX_PER_SLOT, MAX_INBOX_VALUE_BYTES,
-    MAX_RZ_VALUE_BYTES, MAX_SEED_CHUNKS_PER_REQ, MAX_SWARMS, MAX_SWARM_CHUNKS, MAX_SWARM_PEERS,
-    PRESENCE_TTL_SECS, SWARM_PEER_TTL_SECS,
+    max_session_relay_bytes, max_total_blob_bytes, max_ttl_secs, AppState, SwarmPeer,
+    CONTROL_PLANE_BODY_LIMIT, INBOX_MAX_TTL_SECS, INBOX_TTL_SECS, MAX_HAVE_CHUNKS_PER_REQ,
+    MAX_INBOX_PER_SLOT, MAX_INBOX_VALUE_BYTES, MAX_RZ_VALUE_BYTES, MAX_SEED_CHUNKS_PER_REQ,
+    MAX_SWARMS, MAX_SWARM_CHUNKS, MAX_SWARM_PEERS, PRESENCE_TTL_SECS, SWARM_PEER_TTL_SECS,
 };
 use crate::util::{constant_time_eq, now_unix, random_claim};
 
@@ -35,6 +35,10 @@ const REVOKE_TOKEN_HEADER: &str = "x-arvolo-revoke-token";
 const INBOX_POSTER_HASH_HEADER: &str = "x-arvolo-poster-hash";
 /// The inbox offer's retract token, sent on a DELETE to retract one's own offer.
 const INBOX_POSTER_TOKEN_HEADER: &str = "x-arvolo-poster-token";
+/// Comma-separated ids a long-polling reader already holds — see
+/// [`inbox_get_handler`]. A header rather than a query parameter so row ids stay
+/// out of access logs.
+const INBOX_HAVE_HEADER: &str = "x-arvolo-have";
 /// Seconds the relay actually granted a deposit, answered on the deposit response.
 ///
 /// The request's `?ttl=` is a wish: [`Mailbox::commit_deposit`] clamps it to this
@@ -62,19 +66,11 @@ fn default_max() -> u32 {
 }
 
 /// The browser secure-download page, its script, and the streaming service
-/// worker. Decryption happens entirely client-side; the relay only serves
+/// worker — assembled by `build.rs` from `web/decryptor/src` and shared with
+/// `--print-decryptor`, so this relay and the canonical published page are the
+/// same bytes. Decryption happens entirely client-side; the relay only serves
 /// ciphertext.
-const DL_HTML: &str = include_str!("web/dl.html");
-const DL_JS: &str = include_str!("web/dl.js");
-const DL_SW: &str = include_str!("web/arvolo-sw.js");
-
-/// A strict Content-Security-Policy for the download page: no external
-/// resources at all, only same-origin script/worker/frame and same-origin fetch
-/// (to `/v1/fetch/{claim}`). `worker-src`/`frame-src` are for the streaming
-/// service worker and the hidden download iframe it drives. No inline script.
-const DL_CSP: &str = "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; \
-     connect-src 'self'; img-src 'self' data:; worker-src 'self'; frame-src 'self'; \
-     frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
+use crate::decryptor::{CSP as DL_CSP, PAGE as DL_HTML, SCRIPT as DL_JS, SERVICE_WORKER as DL_SW};
 
 /// Shown (with 403) when the administrator has disabled download links. Its own
 /// file rather than a string literal here, so it can carry the same styling as
@@ -165,8 +161,15 @@ async fn dl_js_handler(State(state): State<AppState>) -> Response {
         .into_response()
 }
 
-/// The streaming download service worker. Served from the root path so its
-/// default scope (`/`) covers the `/dl/stream/{id}` requests it must intercept.
+/// The streaming download service worker.
+///
+/// Served at two paths on purpose. The page resolves `arvolo-sw.js` against its
+/// own directory so that one bundle works wherever it is deployed (a static
+/// origin's `/`, a subdirectory, or this relay's `/dl/{claim}`) — and from
+/// `/dl/{claim}` that resolves to `/dl/arvolo-sw.js`. The root path stays for a
+/// page cached before 0.14. `Service-Worker-Allowed: /` widens the scope of the
+/// `/dl/` copy, whose default scope would otherwise not cover a stream URL the
+/// page asks for from elsewhere.
 async fn dl_sw_handler(State(state): State<AppState>) -> Response {
     if !state.links_enabled {
         return (StatusCode::FORBIDDEN, LINKS_DISABLED_MSG).into_response();
@@ -188,18 +191,65 @@ async fn dl_sw_handler(State(state): State<AppState>) -> Response {
         .into_response()
 }
 
-/// Advertise this relay's optional features so a client can fail fast: `links`
-/// (public browser download links) and `rz2` (long-lived, multi-session pairing
-/// slots — [`RZ_OWN_KEY`] and friends).
+/// SHA-256 of the decryptor bundle this binary serves, in `sha256sum` format.
 ///
-/// The two are read with opposite defaults on purpose. A client that can't reach
+/// Not gated on `links_enabled`: it describes the build, not the service, and a
+/// relay with links switched off should still be able to answer "which page
+/// would you serve". Plain text so `sha256sum -c` and a human reading it in a
+/// browser see the same thing.
+async fn dl_manifest_handler() -> impl IntoResponse {
+    (
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                "text/plain; charset=utf-8",
+            ),
+            (axum::http::header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        ],
+        crate::decryptor::MANIFEST,
+    )
+}
+
+/// Advertise this relay's optional features so a client can fail fast: `links`
+/// (public browser download links), `rz2` (long-lived, multi-session pairing
+/// slots — [`RZ_OWN_KEY`] and friends), and `cors` (this relay serves ciphertext
+/// to a page on another origin, so a link can point at a decryptor that is not
+/// the relay).
+///
+/// They are read with different defaults on purpose. A client that can't reach
 /// this endpoint assumes links are allowed (worst case: a deposit is refused
 /// later), but assumes `rz2` is absent — announcing a v2 code no relay can host
-/// would strand a receiver, so the missing field must mean "no".
+/// would strand a receiver, so the missing field must mean "no". `cors` fails
+/// closed for the same reason and a sharper one: minting a split-origin link
+/// against a relay that will not serve it cross-origin produces a link that
+/// looks fine and downloads nothing.
+///
+/// `cors` is unconditionally true — the relay either has the code or it does
+/// not, and there is nothing here for an operator to configure. Deriving it from
+/// `version` instead would mean comparing versions inside a client that
+/// deliberately carries no JSON parser.
+///
+/// `version` is what this relay is, and it answers a different question from the
+/// two flags: not "can you do X" but "how far along are you". The desktop app
+/// asks it before offering an update, because a client newer than the relay it
+/// depends on is the one upgrade order this project asks people not to do (see
+/// `docs/DEPLOY.md`). A relay too old to carry the field is simply older than the
+/// release that added it, which is all the caller needs to know.
+///
+/// Kept as hand-written JSON like the rest of this document, because that is how
+/// it is *read*: the client-side probes match on substrings rather than parsing
+/// (`core::code::relay_rz_version`, `core::link::relay_link_support`), so the
+/// shape here is load-bearing. Adding a field is safe for all of them;
+/// reordering or reformatting the existing ones is not — which is why `cors` is
+/// appended after `version` rather than slotted in beside the other two flags.
 async fn features_handler(State(state): State<AppState>) -> impl IntoResponse {
     (
         [(axum::http::header::CONTENT_TYPE, "application/json")],
-        format!("{{\"links\":{},\"rz2\":true}}", state.links_enabled),
+        format!(
+            "{{\"links\":{},\"rz2\":true,\"have\":true,\"version\":\"{}\",\"cors\":true}}",
+            state.links_enabled,
+            arvolo_core::VERSION
+        ),
     )
 }
 
@@ -298,11 +348,19 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/v1/deposit", post(deposit_handler))
         .route("/v1/features", get(features_handler))
-        .route("/v1/fetch/{claim}", get(fetch_handler))
+        .route(
+            "/v1/fetch/{claim}",
+            get(fetch_handler).options(fetch_options_handler),
+        )
         .route("/v1/entry/{claim}", axum::routing::delete(revoke_handler))
         .route("/v1/entry/{claim}/status", get(entry_status_handler))
         .route("/v1/addr", get(addr_handler))
         .route("/v1/seed", post(seed_handler))
+        .route("/v1/have", post(have_handler))
+        .route(
+            "/v1/seeded/{token}",
+            axum::routing::delete(seeded_delete_handler),
+        )
         .route("/v1/release/{token}/{hash}", post(release_handler))
         .route(
             "/v1/rz/{slot}/{key}",
@@ -334,6 +392,10 @@ pub fn router(state: AppState) -> Router {
         .route("/dl/{claim}", get(dl_page_handler))
         .route("/dl.js", get(dl_js_handler))
         .route("/arvolo-sw.js", get(dl_sw_handler))
+        .route("/dl/arvolo-sw.js", get(dl_sw_handler))
+        // The published bundle's checksums, so `arvolo verify-page` can be
+        // pointed at a self-hosted relay and not only at the canonical origin.
+        .route("/manifest.txt", get(dl_manifest_handler))
         .route("/healthz", get(|| async { "ok" }))
         // Applied after the routes so it wraps them all: bounds the small
         // control-plane bodies. `/v1/deposit` reads a raw `Body` (not a
@@ -393,6 +455,18 @@ const RZ_P_TKT: &str = "t.";
 /// from the completed PAKE, so only a party that proved it knew the code can
 /// produce one the sender will open — and the relay itself never sees inside.
 const RZ_P_BACK: &str = "b.";
+/// The receiver's routing extras, receiver → sender (public write, owner read).
+///
+/// Same shape and same guarantees as `b.`, and separate from it because it is
+/// optional in a way `b.` is not: a client that has nothing to add never writes
+/// one, and a *sender* too old to know the key simply never looks. Splitting it
+/// off keeps the reply — which a mutual pairing depends on — from having to grow a
+/// format, which is the thing that would break the two ends against each other.
+///
+/// Sealed under a key derived from the completed PAKE, like `b.`, so the relay
+/// sees only ciphertext and only a party that proved it knew the code can write
+/// something the sender will open.
+const RZ_P_XTRA: &str = "x.";
 /// Body a v2 `own` GET returns. A fixed marker: the stored hash is a verifier and
 /// must never be echoed, or holding it would be as good as holding the token.
 const RZ_V2_MARKER: &[u8] = b"2";
@@ -473,9 +547,11 @@ struct RzWait {
 
 /// Whether `key` belongs to a v2 sub-session, and which side may write it.
 fn rz_session_prefix(key: &str) -> Option<&'static str> {
-    [RZ_P_RECV, RZ_P_SEND, RZ_P_CONF, RZ_P_TKT, RZ_P_BACK]
-        .into_iter()
-        .find(|p| key.starts_with(p) && key.len() > p.len())
+    [
+        RZ_P_RECV, RZ_P_SEND, RZ_P_CONF, RZ_P_TKT, RZ_P_BACK, RZ_P_XTRA,
+    ]
+    .into_iter()
+    .find(|p| key.starts_with(p) && key.len() > p.len())
 }
 
 /// Whether `k` is an acceptable rendezvous key: `^[a-z0-9][a-z0-9._-]{0,63}$`.
@@ -664,7 +740,8 @@ async fn rz_get_handler(
         // The receiver's half is addressed to the owner alone: leaking the list of
         // live session ids would undo the point of an unguessable one. `b.` is the
         // receiver's reply, so it belongs to the owner for the same reason.
-        if prefix == RZ_P_RECV || prefix == RZ_P_CONF || prefix == RZ_P_BACK {
+        if prefix == RZ_P_RECV || prefix == RZ_P_CONF || prefix == RZ_P_BACK || prefix == RZ_P_XTRA
+        {
             rz_owner(&state, &headers, &slot)?;
         }
         let Some(v) = state.mailbox.rz_get(&slot, &key, now_unix()) else {
@@ -682,7 +759,7 @@ async fn rz_get_handler(
                 .collect();
             state.mailbox.rz_delete_keys(&slot, &keys);
         }
-        if prefix == RZ_P_BACK {
+        if prefix == RZ_P_BACK || prefix == RZ_P_XTRA {
             // Reading the reply burns it, mirroring `t.`: it has reached the one
             // party entitled to it, and leaving it behind would keep a row alive
             // for the rest of the slot's lease for nobody's benefit.
@@ -786,10 +863,21 @@ async fn rz_sessions(
     }
 }
 
-/// How long a client may ask the relay to hold a GET open (long-poll), and the
-/// poll granularity while it waits.
+/// How long a client may ask the relay to hold a GET open (long-poll).
 const INBOX_MAX_WAIT_SECS: u64 = 30;
-const INBOX_POLL_MS: u64 = 500;
+/// How often a held poll re-reads the store on its own, having heard nothing.
+///
+/// A deposit wakes its slot directly (see [`AppState::inbox_wait_on`]), and
+/// `inbox_put` is the only thing that can make a row visible, so this should never
+/// be what finds one. It stays as a safety net for the cases the notification can't
+/// cross — a second relay process sharing the database, or a wake-up lost to a bug
+/// here — where it turns "never" into "within fifteen seconds". At a 30s cap that is
+/// at most one extra look per held poll, against the sixty the old 500ms loop paid.
+const INBOX_IDLE_RECHECK_SECS: u64 = 15;
+/// Cap on ids accepted in [`INBOX_HAVE_HEADER`]. A slot holds at most
+/// [`MAX_INBOX_PER_SLOT`] rows, so a longer list is either stale or junk; ignoring
+/// the tail merely costs the sender an early return it did not need.
+const MAX_HAVE_IDS: usize = MAX_INBOX_PER_SLOT as usize * 2;
 /// Lifetime of an inbox read/delete session token.
 const INBOX_SESSION_TTL: u64 = 3600;
 /// Length of the proof-of-possession nonce.
@@ -799,6 +887,18 @@ const INBOX_NONCE_LEN: usize = 16;
 struct InboxWait {
     #[serde(default)]
     wait: u64,
+}
+
+/// [`InboxWait`] plus the status the caller last saw, for the poster's own
+/// long-poll on one offer — see [`inbox_status_handler`].
+#[derive(Deserialize)]
+struct StatusWait {
+    #[serde(default)]
+    wait: u64,
+    /// The wire word (`pending` / `fetched` / `taken`) this caller already has.
+    /// Empty means "I have no reading yet; hold out for `taken`".
+    #[serde(default)]
+    since: String,
 }
 
 /// MAC binding a session nonce to its slot and expiry, keyed by the relay's
@@ -940,6 +1040,10 @@ async fn inbox_post_handler(
         .mailbox
         .inbox_put(&slot, &id, &body, exp, &poster_hash)
         .map_err(err_response)?;
+    // Only now: the row is visible to a reader, so anyone woken by this will find
+    // it. Waking before the write would be a wake-up that lands on nothing and a
+    // recipient waiting out the rest of their hold for an offer already there.
+    state.notify_inbox(&slot);
     Ok(id)
 }
 
@@ -976,9 +1080,46 @@ async fn presence_get_handler(
     }
 }
 
-/// Long-poll a recipient's inbox. Returns immediately with any queued offers;
-/// otherwise holds the connection up to `?wait=<secs>` (capped) before returning
-/// an empty body. Reading does **not** burn — the recipient acks with DELETE.
+/// The row ids a long-polling reader says it already holds, from
+/// [`INBOX_HAVE_HEADER`]. Empty (⇒ "I have nothing") for any reader that does not
+/// send it, which is what keeps an older client on the previous behaviour.
+fn inbox_have(headers: &HeaderMap) -> std::collections::HashSet<String> {
+    headers
+        .get(INBOX_HAVE_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| {
+            s.split(',')
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .take(MAX_HAVE_IDS)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Long-poll a recipient's inbox. Returns with the slot's queued offers as soon as
+/// one of them is a row the caller does not already hold; otherwise holds the
+/// connection up to `?wait=<secs>` (capped) before returning an empty body. Reading
+/// does **not** burn — the recipient acks with DELETE.
+///
+/// The "does not already hold" part is [`INBOX_HAVE_HEADER`], and it is what makes
+/// the long-poll a long-poll again. The hold used to end the moment the slot was
+/// non-empty, which sounds right until you notice what else lives in an inbox slot:
+/// the contact-sync cell, a durable row that never expires and is never acked. For
+/// every client with sync on, the slot was non-empty forever, every poll returned
+/// instantly, and the loop became a request every two seconds — 30 a minute per
+/// client, held down only by a floor on the client side (`MIN_ROUND` in
+/// `core/src/presence.rs`, added after this pegged a relay at >700 req/s). Told what
+/// the reader has, the relay can tell "there is a row" from "there is a row *for
+/// you*", and a quiet inbox costs one request per 25 seconds again.
+///
+/// The header only suppresses the *early* return: the body is unchanged — the whole
+/// slot on a return, empty on a timeout — so a reader that hears nothing keeps
+/// exactly what it had, and one that hears something gets everything, as before.
+/// `wait=0` ignores the header outright: a one-shot read is somebody asking what is
+/// in the slot right now (`arvolo status`, the receive listing, the sync engine),
+/// and answering that with "nothing new" would be answering a different question.
 async fn inbox_get_handler(
     State(state): State<AppState>,
     AxumPath(slot): AxumPath<String>,
@@ -991,10 +1132,23 @@ async fn inbox_get_handler(
             "inbox read requires a session".into(),
         ));
     }
-    let deadline = now_unix().saturating_add(q.wait.min(INBOX_MAX_WAIT_SECS));
+    let wait = q.wait.min(INBOX_MAX_WAIT_SECS);
+    let deadline = now_unix().saturating_add(wait);
+    let have = if wait == 0 {
+        std::collections::HashSet::new()
+    } else {
+        inbox_have(&headers)
+    };
+    // Registered before the first look at the store, and re-armed before each one:
+    // a deposit landing between a read and the wait that follows it still wakes us.
+    let waiter = state.inbox_wait_on(&slot);
     loop {
+        let notified = waiter.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+
         let rows = state.mailbox.inbox_list(&slot, now_unix());
-        if !rows.is_empty() {
+        if rows.iter().any(|(id, _)| !have.contains(id)) {
             // A recipient client is reading: mark these offers arrived, so their
             // posters can tell a client that is really there from stale presence.
             // Arrival only — a listing lands here exactly as a daemon poll does,
@@ -1002,6 +1156,13 @@ async fn inbox_get_handler(
             // comes later, on the ack, if the file is actually taken.
             let ids: Vec<String> = rows.iter().map(|(id, _)| id.clone()).collect();
             state.mailbox.inbox_mark_arrived(&slot, &ids, now_unix());
+            // Tell the posters, who may be holding on exactly this transition. For a
+            // recipient with no daemon, listing the inbox is the *only* thing they do
+            // before dialling — they ack once the file is saved, far too late to be a
+            // starting gun — so this is what gets the sender serving in time. Cannot
+            // ping-pong with other readers of the slot: a poll woken here re-reads,
+            // finds nothing it doesn't already hold, and stamps nothing.
+            state.notify_inbox(&slot);
             let items: Vec<arvolo_core::presence::InboxItem> = rows
                 .into_iter()
                 .map(|(id, blob)| arvolo_core::presence::InboxItem { id, blob })
@@ -1010,10 +1171,15 @@ async fn inbox_get_handler(
                 .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
             return Ok(Bytes::from(bytes));
         }
-        if now_unix() >= deadline {
+        let now = now_unix();
+        if now >= deadline {
             return Ok(Bytes::new());
         }
-        tokio::time::sleep(std::time::Duration::from_millis(INBOX_POLL_MS)).await;
+        let step = std::time::Duration::from_secs((deadline - now).min(INBOX_IDLE_RECHECK_SECS));
+        tokio::select! {
+            _ = notified => {}
+            _ = tokio::time::sleep(step) => {}
+        }
     }
 }
 
@@ -1044,37 +1210,99 @@ async fn inbox_delete_handler(
         return StatusCode::UNAUTHORIZED;
     }
     state.mailbox.inbox_mark_taken(&slot, &id, now_unix());
+    // Wake whoever is holding on this offer's status. The ack is the one event in
+    // an inbox that reports a *person* — the recipient just said yes — and the
+    // sender is on the other side of it, waiting to know whether to start serving.
+    // Without this the transition is only ever found by a later poll, which is how
+    // accepting a held send used to cost minutes of silence on both ends.
+    state.notify_inbox(&slot);
     StatusCode::NO_CONTENT
 }
 
 /// Poster-only status of one offer: has a live recipient seen it? Authorized by
 /// the retract token (only the poster holds it). Body is a plain word:
-/// `pending` / `fetched` / `gone`; a wrong/missing token is 401.
+/// `pending` / `fetched` / `taken` / `gone`; a wrong/missing token is 401.
+///
+/// With `?wait=<secs>` (capped at [`INBOX_MAX_WAIT_SECS`]) the answer is held back
+/// until the status *changes*: `&since=<word>` names what the caller last saw, and
+/// the hold lasts as long as the answer is still that word. `gone` returns at once
+/// whatever was asked — nothing further can happen to a row that is no longer
+/// there. `wait=0` (the default) is the plain one-shot read this endpoint has
+/// always been; `wait` without `since` holds out for `taken`.
+///
+/// Waiting on the *change* rather than on `taken` is what makes this work for both
+/// kinds of recipient. One running a daemon acks the moment they accept, so `taken`
+/// is their signal. One running a bare `arvolo recv` acks only once the file is
+/// saved — deliberately, so a fetch that fails doesn't consume the offer — which is
+/// far too late to be a starting gun. What that recipient *does* do first is list
+/// their inbox, and a listing stamps `fetched`. Told what the sender last saw, the
+/// relay can report that step too, and the sender is serving by the time the human
+/// on the other end has finished reading the prompt.
+///
+/// The hold is what makes a `send --to` that the relay refused as too large start
+/// the moment the recipient shows up, instead of on the delivery loop's next look.
+/// A caller must still floor its own retry interval: a relay that does not know
+/// `wait` answers instantly, and a loop that trusts the hold to pace it would turn
+/// into a request storm — see `MIN_ROUND` in `core/src/presence.rs` for the last
+/// time that happened.
+///
+/// The wake-up is the slot's, not the offer's: every sender holding here, and the
+/// recipient's own inbox poll, are woken by anything that happens in that slot.
+/// The extra wake-ups cost one re-read and a return to waiting, which is cheaper
+/// than a notify per row would be to keep.
 async fn inbox_status_handler(
     State(state): State<AppState>,
     AxumPath((slot, id)): AxumPath<(String, String)>,
+    Query(q): Query<StatusWait>,
     headers: HeaderMap,
 ) -> Result<&'static str, StatusCode> {
     let token = headers
         .get(INBOX_POSTER_TOKEN_HEADER)
         .and_then(|v| v.to_str().ok())
-        .ok_or(StatusCode::UNAUTHORIZED)?;
-    match state
-        .mailbox
-        .inbox_status_by_poster(&slot, &id, token.trim())
-    {
-        InboxStatus::BadToken => Err(StatusCode::UNAUTHORIZED),
-        InboxStatus::Gone => Ok("gone"),
-        InboxStatus::Pending => Ok("pending"),
-        // Still spelled `fetched` on the wire, though the state is now called what
-        // it always meant. A client older than this relay maps the word it knows to
-        // "a live client has it" and keeps working; renaming it would have made
-        // every such client read an unknown word, fall through to `pending`, and
-        // abandon live sends to recipients who were right there. `taken` is purely
-        // additive — an old client falls through to `pending` for it, which costs
-        // nothing: by then the recipient has the file.
-        InboxStatus::Arrived => Ok("fetched"),
-        InboxStatus::Taken => Ok("taken"),
+        .ok_or(StatusCode::UNAUTHORIZED)?
+        .trim()
+        .to_string();
+    // No `since` means "hold out for `taken`" — spelled as "you last saw pending or
+    // fetched", since holding while the answer is either of those is the same rule.
+    let since = q.since.trim();
+    let deadline = now_unix().saturating_add(q.wait.min(INBOX_MAX_WAIT_SECS));
+    // Registered before the first look, and re-armed before each one — same
+    // ordering as [`inbox_get_handler`], for the same reason: an ack landing
+    // between a read and the wait that follows it still wakes us.
+    let waiter = state.inbox_wait_on(&slot);
+    loop {
+        let notified = waiter.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+
+        let word = match state.mailbox.inbox_status_by_poster(&slot, &id, &token) {
+            InboxStatus::BadToken => return Err(StatusCode::UNAUTHORIZED),
+            InboxStatus::Gone => return Ok("gone"),
+            InboxStatus::Pending => "pending",
+            // Still spelled `fetched` on the wire, though the state is now called what
+            // it always meant. A client older than this relay maps the word it knows to
+            // "a live client has it" and keeps working; renaming it would have made
+            // every such client read an unknown word, fall through to `pending`, and
+            // abandon live sends to recipients who were right there. `taken` is purely
+            // additive — an old client falls through to `pending` for it, which costs
+            // nothing: by then the recipient has the file.
+            InboxStatus::Arrived => "fetched",
+            InboxStatus::Taken => "taken",
+        };
+        let unchanged = if since.is_empty() {
+            word != "taken"
+        } else {
+            word == since
+        };
+        let now = now_unix();
+        if !unchanged || now >= deadline {
+            return Ok(word);
+        }
+        let step = std::time::Duration::from_secs((deadline - now).min(INBOX_IDLE_RECHECK_SECS));
+        tokio::select! {
+            _ = notified => {}
+            _ = tokio::time::sleep(step) => {}
+        }
     }
 }
 
@@ -1178,10 +1406,11 @@ async fn deposit_handler(
 
     // Aggregate disk-budget guard: refuse when the store is already over budget,
     // and bound this deposit to the remaining budget while it streams (so one
-    // in-flight deposit can't blow past the total either).
+    // in-flight deposit can't blow past the total either). Measured over the whole
+    // disk — seeded chunks included — because that is what fills up.
     let total_cap = max_total_blob_bytes();
     let remaining_total = if total_cap != 0 {
-        let stored = mb.stored_bytes();
+        let stored = mb.disk_bytes();
         if stored >= total_cap {
             return Err((
                 StatusCode::INSUFFICIENT_STORAGE,
@@ -1296,6 +1525,76 @@ async fn revoke_handler(
     Ok("revoked".into())
 }
 
+/// Headers that let a page on *another* origin read this ciphertext.
+///
+/// This is what makes a relay safe for a stranger to run. With them, the
+/// decryptor page can live on an origin that stores no ciphertext, so the
+/// operator never runs code in a context holding the key — see
+/// `docs/PROTOCOL.md` §7.6. Without them the page must come from the relay
+/// itself, and then the operator can serve one that steals the key.
+///
+/// `*`, and not an allow-list, because the header transfers no authority the
+/// URL did not already carry: the blob is authenticated ciphertext under a key
+/// this relay does not have, and the claim *is* the capability — anyone holding
+/// it can already `curl` the bytes. CORS does not grant the right to *trigger* a
+/// fetch (a cross-origin `<img src>` already burns a burn-after-read claim
+/// today, no CORS involved); it grants only the right to *read the response*.
+///
+/// No `Access-Control-Allow-Credentials`: with `*` a browser would reject it,
+/// and there are no cookies on this path. No `Vary: Origin`: the answer is a
+/// literal `*` and does not depend on the request.
+///
+/// One deployment note that belongs next to the code, because getting it wrong
+/// looks like a browser bug: a reverse proxy must **not** add these itself. Two
+/// identical `Access-Control-Allow-Origin` headers are not a stricter policy,
+/// they are an invalid one, and the browser refuses the response. Leave it to
+/// the relay — `docs/DEPLOY.md` says so for the nginx examples.
+fn cross_origin_headers(resp: &mut Response) {
+    use axum::http::header::HeaderValue;
+    for (name, value) in [
+        ("access-control-allow-origin", "*"),
+        (
+            "access-control-expose-headers",
+            "content-length, x-arvolo-encapped-key",
+        ),
+        // So a future COEP-isolated decryptor page is not blocked from reading it.
+        ("cross-origin-resource-policy", "cross-origin"),
+    ] {
+        resp.headers_mut().insert(
+            axum::http::HeaderName::from_static(name),
+            HeaderValue::from_static(value),
+        );
+    }
+}
+
+/// Answer a preflight for `/v1/fetch/{claim}` **without touching the mailbox**.
+///
+/// Nothing in the current design triggers one: the page issues a plain `GET`
+/// with no custom headers and `credentials: "omit"`, which is a CORS-simple
+/// request. This exists so that some corporate middlebox preflighting anyway
+/// degrades to an extra round trip instead of a download that mysteriously does
+/// not work behind one company's proxy — and so that adding a request header
+/// later is a preflight, not an outage.
+///
+/// It must never consume the claim. A burn-after-read entry plus a preflight
+/// that counted as a download is the sharpest foot-gun on this path, which is
+/// why this is its own handler and not a branch inside `fetch_handler`.
+async fn fetch_options_handler() -> Response {
+    let mut resp = Response::new(axum::body::Body::empty());
+    *resp.status_mut() = StatusCode::NO_CONTENT;
+    cross_origin_headers(&mut resp);
+    for (name, value) in [
+        ("access-control-allow-methods", "GET, HEAD, OPTIONS"),
+        ("access-control-max-age", "86400"),
+    ] {
+        resp.headers_mut().insert(
+            axum::http::HeaderName::from_static(name),
+            axum::http::header::HeaderValue::from_static(value),
+        );
+    }
+    resp
+}
+
 async fn fetch_handler(
     State(state): State<AppState>,
     AxumPath(claim): AxumPath<String>,
@@ -1334,17 +1633,37 @@ async fn fetch_handler(
                 .insert(axum::http::header::CONTENT_LENGTH, val);
         }
     }
+    // Opaque bytes, said out loud: the relay cannot know what this decrypts to,
+    // and nothing downstream should guess.
+    resp.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::header::HeaderValue::from_static("application/octet-stream"),
+    );
+    resp.headers_mut().insert(
+        axum::http::header::X_CONTENT_TYPE_OPTIONS,
+        axum::http::header::HeaderValue::from_static("nosniff"),
+    );
+    cross_origin_headers(&mut resp);
     Ok(resp)
 }
 
 /// Seed (backfill) a P2P blob into the relay's store. Body = the sender's blob
 /// ticket; returns the relay's provider address (base32) so the sender can
 /// advertise the relay as a fallback provider.
+#[derive(serde::Deserialize)]
+struct SeedQuery {
+    /// How long the relay should keep these chunks if nobody takes them. A wish,
+    /// clamped below — the same shape a deposit's TTL has, and for the same reason.
+    #[serde(default)]
+    ttl: u64,
+}
+
 async fn seed_handler(
     State(state): State<AppState>,
+    Query(q): Query<SeedQuery>,
     ip: ClientIp,
     body: String,
-) -> Result<String, (StatusCode, String)> {
+) -> Result<Response, (StatusCode, String)> {
     write_rate_limit(&state.write_limiter, ip.0, now_unix(), writes_per_min())?;
     let req = SeedRequest::decode(body.trim())
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("bad seed request: {e}")))?;
@@ -1367,6 +1686,19 @@ async fn seed_handler(
             "relay at seed capacity".into(),
         ));
     }
+    let add_bytes = (req.chunks.len() as u64).saturating_mul(CHUNK_SIZE as u64);
+    // The same aggregate disk budget the mailbox answers to. Until this, seeding
+    // was bounded only by a *row* count — 50k rows, which at the nominal chunk size
+    // stands for roughly 800 GB — so on any ordinary relay the real limit was the
+    // filesystem, reached as ENOSPC rather than as a refusal. Two paths, one disk,
+    // one budget.
+    let total_cap = max_total_blob_bytes();
+    if total_cap != 0 && state.mailbox.disk_bytes().saturating_add(add_bytes) > total_cap {
+        return Err((
+            StatusCode::INSUFFICIENT_STORAGE,
+            "relay at storage capacity".into(),
+        ));
+    }
     // Free-tier per-session offload cap: bound how many bytes any one transfer may
     // lean on this relay (keyed on the content-derived swarm id, so it is durable
     // across the sender suspending/resuming/restarting). `0` = unlimited. Meter by
@@ -1374,7 +1706,6 @@ async fn seed_handler(
     // over-counts, which only makes the cap marginally stricter. On PAYMENT_REQUIRED
     // the sender falls back to direct P2P (or a private, uncapped relay).
     let cap = max_session_relay_bytes();
-    let add_bytes = (req.chunks.len() as u64).saturating_mul(CHUNK_SIZE as u64);
     if cap > 0
         && state
             .mailbox
@@ -1389,7 +1720,17 @@ async fn seed_handler(
         .seed_chunks(req.sender, &req.chunks)
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, format!("seed failed: {e}")))?;
-    let exp = now_unix().saturating_add(seed_ttl());
+    // The caller's wish, clamped to what this relay is prepared to hold — never
+    // longer than a mailbox blob may live, and never shorter than the default when
+    // nothing was asked. A parked send needs its pieces to outlive the offer that
+    // names them, or the recipient finds an arrival pointing at nothing; a bare
+    // backfill asks for nothing and keeps the old day.
+    let granted = if q.ttl == 0 {
+        seed_ttl()
+    } else {
+        q.ttl.min(max_ttl_secs())
+    };
+    let exp = now_unix().saturating_add(granted);
     for hash in &req.chunks {
         state
             .mailbox
@@ -1401,7 +1742,76 @@ async fn seed_handler(
             .mailbox
             .add_session_bytes(&req.swarm_id, add_bytes, exp);
     }
-    Ok("ok".into())
+    // The granted TTL rides back in a header, as a deposit's does: a sender that
+    // asked for a week and got a day has to know, or it will promise the recipient
+    // a deadline the relay never agreed to.
+    Ok(([(GRANTED_TTL_HEADER, granted.to_string())], "ok").into_response())
+}
+
+/// Withdraw a parked send: forget every chunk seeded under `token` and delete the
+/// files. `DELETE /v1/seeded/{token}`. Idempotent — a token with nothing left is a
+/// success, because the caller's goal (nothing of theirs on this relay) holds.
+///
+/// Authorized by the token alone. That is not a new capability: the same token
+/// already authorizes releasing these chunks one at a time through
+/// `/v1/release/{token}/{hash}`, so this is the existing power spelled once. It
+/// travels in the ticket, so a recipient holds it too — they can drop pieces meant
+/// for them, which costs them their own download and nobody else's.
+async fn seeded_delete_handler(
+    State(state): State<AppState>,
+    AxumPath(token): AxumPath<String>,
+    ip: ClientIp,
+) -> Result<String, (StatusCode, String)> {
+    write_rate_limit(&state.write_limiter, ip.0, now_unix(), writes_per_min())?;
+    let hashes = state.mailbox.take_seeds_by_token(&token);
+    for hash in &hashes {
+        let _ = state.blobs.release_hex(hash).await;
+    }
+    Ok(hashes.len().to_string())
+}
+
+/// Which of the asked-about chunks this relay currently holds. `POST /v1/have`,
+/// body an `arvh…` [`HaveRequest`], answer a bitfield in the order asked.
+///
+/// Both ends need this and neither could ask before: the backfilled set used to
+/// travel only from sender to receiver over the control channel, so it was
+/// unknowable exactly when the sender was away — the case the relay's copy is
+/// *for*. A receiver resuming alone learns where to pull from; a sender learns
+/// what it need not upload again.
+///
+/// Three deliberate properties:
+///
+/// - **A read that spends the write budget.** Reads here have no limiter of their
+///   own, and this one is batched, so it would otherwise be the cheapest way to
+///   load the box. The swarm tracker rate-limits itself for the same reason.
+/// - **Capped list.** Bounded work per request, and the client splits longer
+///   questions rather than needing to know the limit.
+/// - **No new disclosure.** The chunk protocol already serves any held chunk to
+///   whoever names its hash, with no token, so this answers a question that was
+///   already answerable — only cheaply. The hashes are of ciphertext under a
+///   per-transfer random key, so they cannot be derived from the file itself.
+async fn have_handler(
+    State(state): State<AppState>,
+    ip: ClientIp,
+    body: String,
+) -> Result<String, (StatusCode, String)> {
+    write_rate_limit(&state.write_limiter, ip.0, now_unix(), writes_per_min())?;
+    let req = HaveRequest::decode(body.trim())
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("bad have request: {e}")))?;
+    if req.chunks.len() > MAX_HAVE_CHUNKS_PER_REQ {
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!("too many chunks (max {MAX_HAVE_CHUNKS_PER_REQ})"),
+        ));
+    }
+    let held = state.blobs.has_chunks(&req.chunks);
+    let mut bitfield = arvolo_core::swarm::bitfield_new(req.chunks.len());
+    for (i, has) in held.iter().enumerate() {
+        if *has {
+            arvolo_core::swarm::bitfield_set(&mut bitfield, i);
+        }
+    }
+    Ok(encode_have_bitfield(&bitfield))
 }
 
 /// The relay's iroh blob-node address plus a fresh transfer token, so the sender
@@ -1480,6 +1890,7 @@ mod rz_v2_tests {
         assert_eq!(rz_session_prefix("s.abc"), Some(RZ_P_SEND));
         assert_eq!(rz_session_prefix("c.abc"), Some(RZ_P_CONF));
         assert_eq!(rz_session_prefix("t.abc"), Some(RZ_P_TKT));
+        assert_eq!(rz_session_prefix("x.abc"), Some(RZ_P_XTRA));
         // A bare prefix is not a session, and neither is anything else.
         for not in ["r.", "s.", "own", "sessions", "ms", "mr", "tkt", "rabc"] {
             assert_eq!(rz_session_prefix(not), None, "{not:?}");

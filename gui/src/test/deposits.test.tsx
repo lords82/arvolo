@@ -11,7 +11,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { harness, makeIpcMock, resetHarness } from "./mocks";
+import { PEER_ID, harness, makeIpcMock, resetHarness } from "./mocks";
 
 vi.mock("../ipc", () => makeIpcMock());
 vi.mock("@tauri-apps/api/webview", () => ({
@@ -21,7 +21,6 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({ open: () => Promise.resolve(null) 
 vi.mock("@tauri-apps/plugin-opener", () => ({
   revealItemInDir: () => Promise.resolve(),
   openUrl: () => Promise.resolve(),
-  openPath: () => Promise.resolve(),
 }));
 
 import { useStore } from "../store";
@@ -275,7 +274,7 @@ describe("the panel", () => {
     await s().go("deposits");
     render(<DepositsView />);
     expect(screen.queryByText("Link", { selector: ".row button" })).toBeNull();
-    fireEvent.click(await screen.findByText("Ticket", { selector: ".row button" }));
+    fireEvent.click(await screen.findByText("Pickup code", { selector: ".row button" }));
     const dialog = await screen.findByRole("dialog");
     fireEvent.click(within(dialog).getByText("Copy"));
     expect(writeText).toHaveBeenCalledWith("arvmSEALED");
@@ -293,7 +292,7 @@ describe("the panel", () => {
     await s().go("deposits");
     render(<DepositsView />);
     expect(await screen.findByText("relazione.pdf")).toBeDefined();
-    expect(screen.queryByText("Ticket", { selector: ".row button" })).toBeNull();
+    expect(screen.queryByText("Pickup code", { selector: ".row button" })).toBeNull();
     expect(screen.queryByText("Link", { selector: ".row button" })).toBeNull();
     expect(screen.getByText("Withdraw", { selector: ".row button" })).toBeDefined();
   });
@@ -304,7 +303,7 @@ describe("the panel", () => {
     ];
     await s().go("deposits");
     render(<DepositsView />);
-    fireEvent.click(await screen.findByText("Ticket", { selector: ".row button" }));
+    fireEvent.click(await screen.findByText("Pickup code", { selector: ".row button" }));
     const dialog = await screen.findByRole("dialog");
     expect(within(dialog).getByText("arvmSEALED")).toBeDefined();
   });
@@ -320,7 +319,7 @@ describe("the panel", () => {
 
   it("152. a sealed deposit shows its recipient, and has no URL to copy", async () => {
     harness.snapshot.deposits = [
-      deposit({ kind: "offline", link: "", recipient: "peer1", max_label: "1 download" }),
+      deposit({ kind: "offline", link: "", recipient: PEER_ID, max_label: "1 download" }),
     ];
     await s().go("deposits");
     render(<DepositsView />);
@@ -368,7 +367,7 @@ describe("the panel", () => {
       deposit({
         kind: "offline",
         link: "",
-        recipient: "peer1",
+        recipient: PEER_ID,
         present: false,
         offer_status: "taken",
       }),
@@ -391,7 +390,7 @@ describe("the panel", () => {
     // "taken" here would turn a glance at a list into a confirmed handover, and
     // even "seen" would claim someone looked, which nothing here can know.
     harness.snapshot.deposits = [
-      deposit({ kind: "offline", link: "", recipient: "peer1", offer_status: "arrived" }),
+      deposit({ kind: "offline", link: "", recipient: PEER_ID, offer_status: "arrived" }),
     ];
     await s().go("deposits");
     render(<DepositsView />);
@@ -401,7 +400,7 @@ describe("the panel", () => {
 
   it("152f. one nobody has looked at says so", async () => {
     harness.snapshot.deposits = [
-      deposit({ kind: "offline", link: "", recipient: "peer1", offer_status: "pending" }),
+      deposit({ kind: "offline", link: "", recipient: PEER_ID, offer_status: "pending" }),
     ];
     await s().go("deposits");
     render(<DepositsView />);
@@ -413,7 +412,7 @@ describe("the panel", () => {
     // or a relay that could not be asked, must not render as "not taken yet" —
     // that is a claim about the recipient that nobody made.
     harness.snapshot.deposits = [
-      deposit({ kind: "offline", link: "", recipient: "peer1", offer_status: null }),
+      deposit({ kind: "offline", link: "", recipient: PEER_ID, offer_status: null }),
     ];
     await s().go("deposits");
     render(<DepositsView />);

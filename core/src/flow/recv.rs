@@ -23,6 +23,30 @@ pub enum ChunkSource {
     Relay,
 }
 
+/// A receive's cancellation, with its INTENT attached. The token stops the
+/// work either way; `abort` decides what the sender is told as we leave:
+///
+/// - `true` (the default — what a bare [`CancellationToken`] converts to): the
+///   user is cancelling for good. The control channel says so ([`Ctrl` abort])
+///   and the sender ends its side — no relay backfill, no re-offer.
+/// - `false`: a pause. We disappear silently, exactly like a network drop, so
+///   the sender keeps the tail warm (backfilling it to the relay) and the
+///   resume finds it there.
+#[derive(Debug, Clone)]
+pub struct RecvCancel {
+    pub token: CancellationToken,
+    pub abort: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl From<CancellationToken> for RecvCancel {
+    fn from(token: CancellationToken) -> Self {
+        RecvCancel {
+            token,
+            abort: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        }
+    }
+}
+
 /// Progress events emitted while receiving a file.
 #[derive(Debug, Clone)]
 pub enum RecvEvent {
@@ -409,12 +433,19 @@ pub async fn recv_chunked(
     out: Option<PathBuf>,
     identity: Option<&Identity>,
     relay: RelayChoice,
-    cancel: CancellationToken,
+    cancel: impl Into<RecvCancel>,
     on: impl Fn(RecvEvent) + Send + Sync,
 ) -> Result<RecvOutcome> {
     use std::collections::{HashMap, HashSet};
     use std::io::{Read, Seek, SeekFrom, Write};
     use tokio::task::JoinSet;
+
+    // Split intent from mechanism: the token stops the work either way; `abort`
+    // decides what the control channel tells the sender on the way out.
+    let RecvCancel {
+        token: cancel,
+        abort: abort_intent,
+    } = cancel.into();
 
     let t = ChunkTicket::decode(ticket).context("invalid ticket")?;
     let user_out = out;
@@ -549,8 +580,8 @@ pub async fn recv_chunked(
             // the user decides: resume (re-fetch from scratch — the sidecar is now
             // empty) or remove the transfer. Mirrors the disk-full pause below, and
             // reuses the same Paused outcome the manager/GUI already surface.
-            let reason = "il file del download non è più su disco (rimosso o spostato): \
-                 riprendi per riscaricarlo da capo, oppure elimina il trasferimento"
+            let reason = "the partial download is no longer on disk (moved or deleted); \
+                 resume to fetch it again from scratch, or remove the transfer"
                 .to_string();
             on(RecvEvent::Paused {
                 reason: reason.clone(),
@@ -607,13 +638,80 @@ pub async fn recv_chunked(
     // a one-shot open whose verdict is frozen for the whole transfer. A child of
     // `cancel` so it stops on cancel; we also cancel it explicitly on completion.
     let ctrl_cancel = cancel.child_token();
+    // Built before the control channel, because the channel needs it: what we
+    // already hold is the first thing the sender has to be told (see the replay in
+    // `spawn_control_supervisor`).
+    let have_bf: crate::chunked::HaveBitfield = Arc::new(Mutex::new(have_bits));
     let ctrl = sender_addr.clone().map(|s| {
-        spawn_control_supervisor(receiver.clone(), s, on_relay.clone(), ctrl_cancel.clone())
+        spawn_control_supervisor(
+            receiver.clone(),
+            s,
+            on_relay.clone(),
+            have_bf.clone(),
+            ctrl_cancel.clone(),
+            abort_intent.clone(),
+        )
     });
     let sender_live = ctrl.as_ref().map(|h| h.sender_live.clone());
     let ack_tx = ctrl.as_ref().map(|h| h.ack_tx.clone());
     on(RecvEvent::Control {
         connected: sender_addr.is_some(),
+    });
+
+    // Ask the relay directly what it holds, rather than only being told.
+    //
+    // `RelayHas` arrives on the control channel and nowhere else, so before this
+    // the backfilled pieces were undiscoverable exactly when the sender was gone —
+    // the one situation they exist for. A resume with the origin down would sit
+    // with an empty provider set for every piece, backing off against a relay that
+    // was holding the whole tail.
+    //
+    // Additive only. A piece the relay has since dropped is one *we* released after
+    // committing it, so forgetting it here would be forgetting our own progress;
+    // and an answer that is too optimistic costs a failed fetch and a cooldown,
+    // never a wrong byte — every chunk is verified against the ticket's hash
+    // whatever served it.
+    let have_probe = t.relay.as_ref().map(|r| {
+        let (http, chunks) = (r.http.clone(), t.chunks.clone());
+        let (on_relay, client) = (on_relay.clone(), client.clone());
+        let live = sender_live.clone();
+        let cancel = ctrl_cancel.clone();
+        tokio::spawn(async move {
+            // How often to ask, by whether the origin is there to answer instead:
+            // rarely while it is serving (it announces its own seeding over the
+            // control channel anyway), promptly once it is not — that is when the
+            // question becomes the only way to find a source at all.
+            const WHILE_SERVED: u64 = 120;
+            const WHILE_ALONE: u64 = 15;
+            // Ticked in small slices rather than slept through in one go. Deciding
+            // the whole wait up front reads the origin's state at the *start* of a
+            // two-minute nap: an origin that leaves a second later would not be
+            // noticed for the rest of it, which is exactly the moment the relay
+            // needs looking at. The cost of the slices is a wakeup that does
+            // nothing; the cost of getting it wrong is a stalled download.
+            const SLICE: u64 = 5;
+            let mut waited = u64::MAX; // ask immediately on the first pass
+            loop {
+                let served = live
+                    .as_ref()
+                    .map(|b| b.load(std::sync::atomic::Ordering::Relaxed))
+                    .unwrap_or(false);
+                let due = if served { WHILE_SERVED } else { WHILE_ALONE };
+                if waited >= due {
+                    if let Ok(held) = crate::backfill::relay_have(&client, &http, &chunks).await {
+                        let mut set = on_relay.lock().unwrap();
+                        set.extend(held);
+                    }
+                    waited = 0;
+                }
+                tokio::select! {
+                    _ = cancel.cancelled() => break,
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(SLICE)) => {
+                        waited = waited.saturating_add(SLICE);
+                    }
+                }
+            }
+        })
     });
 
     // Swarm (multi-peer) coordination. A piece is addressed by BLAKE3 of its
@@ -630,7 +728,6 @@ pub async fn recv_chunked(
     // other peers through the relay tracker. `have_bf` is a **bitfield of verified
     // pieces** (arbitrary/disjoint, not a prefix) — the seeder serves any set bit
     // and the announce advertises the whole bitfield; the commit path sets bits.
-    let have_bf: crate::chunked::HaveBitfield = Arc::new(Mutex::new(have_bits));
     let peers: SwarmPeers = Arc::new(Mutex::new(Vec::new()));
     // Peers (by endpoint id) that served corrupt bytes; filtered out of future
     // provider lists. Populated by `fetch_to_file` on an integrity failure.
@@ -1097,6 +1194,11 @@ pub async fn recv_chunked(
     // not hold up our completion, and a lost ack then costs a redundant offer, not
     // the file. The bound clears the graceful-close wait inside `Control::finish`.
     drop(ack_tx);
+    // The relay probe has nothing to flush: stop it outright rather than letting it
+    // outlive the download it was answering for.
+    if let Some(p) = have_probe {
+        p.abort();
+    }
     match ctrl {
         Some(h) => {
             // Both senders must go for the channel to close: this one and the clone
@@ -1232,16 +1334,53 @@ fn default_from_name(name: &str, chunks: &[crate::reexport::Hash]) -> PathBuf {
 ///   folder picker and the CLI's `--out <dir>` hand over; taking it literally as the
 ///   output file opens the folder itself and fails with EISDIR ("Is a directory").
 /// - any other path → the caller named the file; use it as-is.
+///
+/// Derived names (the first two arms) never overwrite: an existing `report.pdf`
+/// makes this one `report (1).pdf`. An explicitly named file is the caller's
+/// decision and is honoured as given.
 fn single_file_out(
     user_out: Option<&std::path::Path>,
     name: &str,
     chunks: &[crate::reexport::Hash],
 ) -> PathBuf {
     match user_out {
-        Some(dir) if dir.is_dir() => dir.join(default_from_name(name, chunks)),
+        Some(dir) if dir.is_dir() => collision_free(dir.join(default_from_name(name, chunks))),
         Some(file) => file.to_path_buf(),
-        None => default_from_name(name, chunks),
+        None => collision_free(default_from_name(name, chunks)),
     }
+}
+
+/// Never silently overwrite a finished file: an occupied derived name gets
+/// ` (1)`, ` (2)`, … before the extension — the rule every desktop uses.
+///
+/// A path whose `.arvhave` resume sidecar exists is kept as-is: that file is a
+/// *partial* this very download owns, and renaming away from it would orphan
+/// the resume state it exists to continue.
+pub(crate) fn collision_free(path: PathBuf) -> PathBuf {
+    let sidecar_of = |p: &std::path::Path| PathBuf::from(format!("{}.arvhave", p.display()));
+    if !path.exists() || sidecar_of(&path).exists() {
+        return path;
+    }
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let ext = path
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+    let parent = path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+    for n in 1u32.. {
+        let candidate = parent.join(format!("{stem} ({n}){ext}"));
+        if sidecar_of(&candidate).exists() {
+            // A partial of ours already lives under this name: resume it.
+            return candidate;
+        }
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    unreachable!("u32 exhausted finding a free name")
 }
 
 #[cfg(test)]

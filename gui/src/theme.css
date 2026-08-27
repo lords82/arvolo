@@ -291,9 +291,18 @@ textarea,
   user-select: text;
 }
 
+/* `overflow-wrap: anywhere` is the safety net for what this class is *for*: ids,
+   tickets, links, hashes — long runs with no space in them, which have no break
+   opportunity and so leave their container rather than wrap. `anywhere` only
+   applies when there is no alternative, so anything that does have spaces still
+   breaks on those. It also shrinks min-content, which is what lets a flex or grid
+   child actually narrow instead of forcing the row wider than its track.
+   Callers that deliberately keep one line — `.truncate`, `.copyfield code` — set
+   `white-space: nowrap` and win on specificity. */
 .mono {
   font-family: var(--mono);
   font-variant-ligatures: none;
+  overflow-wrap: anywhere;
 }
 
 /* Sizes, counts, percentages and clocks: proportional digits make a progress
@@ -867,6 +876,18 @@ select {
   display: flex;
   width: 100%;
 }
+/* Five destinations, in four languages, in a 480px sheet that can be at 92vw:
+   the labels are words and there is a width at which they do not fit on one
+   line. Wrapping puts the overflow on a second row; `nowrap` on the buttons
+   drew it out past the border instead, where it was unreachable. Each button
+   still claims an equal share of its own row, so a wrapped row stays even. */
+.segmented-wrap {
+  flex-wrap: wrap;
+  row-gap: 2px;
+}
+.segmented-wrap button {
+  flex: 1 1 auto;
+}
 
 /* -- Badges & chips -------------------------------------------------------- */
 
@@ -976,6 +997,15 @@ select {
 }
 .card-pad {
   padding: 16px;
+}
+/* A card holding an error the daemon reported, verbatim. Those strings routinely
+   quote a ticket or a public id — hundreds of characters with no space in them —
+   so the wrap belongs to the card rather than to each of the five screens that
+   show one. Without it the text runs past the red border and gets sheared off at
+   the edge of `.view`, which sets `overflow-x: hidden`. */
+.card-err {
+  border-color: var(--red);
+  overflow-wrap: anywhere;
 }
 .card + .card {
   margin-top: 14px;
@@ -1255,6 +1285,13 @@ select {
 .sheet-head .spacer {
   flex: 1;
 }
+/* A sheet title is whatever the caller put there, and several put a file name or
+   a petname in it — neither is guaranteed to contain a space. `.grow` already
+   lets the column narrow; this is what stops the text from running on under the
+   close button instead of wrapping above it. */
+.sheet-head .grow > * {
+  overflow-wrap: anywhere;
+}
 .sheet-body {
   flex: 1;
   overflow-y: auto;
@@ -1368,9 +1405,16 @@ select {
   border-color: var(--green);
   background: var(--green-soft);
 }
+/* A toast floats: nothing upstream clips it, so a long unbreakable run does not
+   get cut off at some container's edge — it is drawn outside the card, over the
+   window. `min-width: 0` alone only lets the box narrow; the wrap is what keeps
+   the text inside it. Both the title and the detail need it: the title carries
+   file paths and names (`send.arvoloSaved`), the detail carries the daemon's raw
+   error, which routinely quotes a ticket. */
 .toast .grow {
   flex: 1;
   min-width: 0;
+  overflow-wrap: anywhere;
 }
 @keyframes toast-in {
   from {
@@ -1496,13 +1540,31 @@ select {
   line-height: 0;
 }
 
+/* A fingerprint is words with spaces, so it wraps on its own. The wrap rule is
+   here for the call sites that hand this a *public id* instead — an unknown
+   sender has no fingerprint to show, so the raw 52-character base32 id is what
+   goes on screen (IncomingDialog, and the save-as-contact sheet). That is one
+   token about 380px wide, against roughly 410px of usable width in a side sheet:
+   without this it leaves the card. Never truncate here — every value shown in
+   this class is one somebody reads out or compares character by character. */
 .fingerprint {
   font-family: var(--mono);
   font-size: 12px;
   letter-spacing: 0.01em;
   color: var(--ink-sec);
+  overflow-wrap: anywhere;
   -webkit-user-select: text;
   user-select: text;
+}
+
+/* The name a peer advertises for itself, in brackets after the name the user
+   gave them. Shrinks twice as readily as its neighbour on a narrow row: both
+   names ellipsise, but the one the user chose is the one they navigate by, so
+   the sender's own text is what gives up the width first. */
+.claimed {
+  flex: 0 2 auto;
+  min-width: 0;
+  font-weight: 400;
 }
 
 .kbd {
@@ -1737,14 +1799,25 @@ select {
   flex-direction: column;
   gap: 7px;
 }
-.hstack {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-}
+/* A flex item refuses to shrink below its own min-content width unless told to,
+   so one child holding an unbreakable run pushes the whole row wider than its
+   track instead of wrapping inside it. Every place that hit this got its own
+   `min-width: 0` (`.row-main`, `.grow`, `.copyfield code`, `.claimed`); setting
+   it on the generic rows stops the next one from having to. Children that must
+   keep their size declare `flex: none` and are unaffected. */
+.hstack,
 .hstack-sm {
   display: flex;
   align-items: center;
+}
+.hstack > *,
+.hstack-sm > * {
+  min-width: 0;
+}
+.hstack {
+  gap: 9px;
+}
+.hstack-sm {
   gap: 6px;
 }
 /* The share panel's numbers. A grid rather than a row: four figures of very

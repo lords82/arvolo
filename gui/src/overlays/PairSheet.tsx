@@ -212,10 +212,7 @@ export function PairSheet() {
       {joining && phase !== "done" && phase !== "failed" && (
         <div className="stack">
           {kind === "device_join" && (
-            <div
-              className="card card-pad t-sm"
-              style={{ borderColor: "var(--red)" }}
-            >
+            <div className="card card-pad card-err t-sm">
               <strong>{t("pair.joinWarnLead")}</strong>{" "}
               {t("pair.joinWarnRest")}
             </div>

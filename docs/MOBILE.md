@@ -118,7 +118,7 @@ fetch + notification, browse/save/share received files, send via share sheet
 or in-app to a contact (live if both foreground, else deposit), **hosting
 codes from the phone while the app is in the foreground** (backgrounding
 pauses, reopening resumes), **deposits and links management** (create, list,
-revoke), scan/show pairing and transfer QR codes, open `arvolo link` URLs
+revoke), scan/show pairing and transfer QR codes, open `arvolo send --link` URLs
 in-app.
 
 Out, deliberately: swarm seeding from the phone, UnifiedPush, the Android

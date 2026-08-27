@@ -35,9 +35,13 @@ de commande :
 curl -fsSL https://raw.githubusercontent.com/lords82/arvolo/main/install.sh | sh
 ```
 
-**2. Pointez-le vers un relais.** Arvolo n'a pas de serveur central — c'est
-justement le principe — il lui faut donc un relais : celui que votre entreprise
-ou un ami fait déjà tourner, ou le vôtre, monté en une commande :
+**2. Rien à configurer.** Arvolo est livré pointé vers un relais public : l'étape
+suivante fonctionne tout de suite. C'est une petite machine tenue par le projet —
+fichiers jusqu'à 100 Mo, liens valables 6 heures — et elle ne voit jamais vos
+clés. **Pour ce qui compte, pointez Arvolo vers un relais à vous**, monté en une
+commande. Utiliser le relais public, c'est en accepter les
+[conditions](TERMS.md) *(anglais)* : elles sont courtes, et valent les deux
+minutes si ce que vous envoyez n'est pas à vous.
 
 ```sh
 docker run -d --name arvolo-relay -p 6282:6282 -v arvolo-data:/data \
@@ -45,7 +49,7 @@ docker run -d --name arvolo-relay -p 6282:6282 -v arvolo-data:/data \
 ```
 
 Dans l'application, réglez-le sous **Paramètres → Réseau** ; en ligne de
-commande, le premier lancement le demande et s'en souvient.
+commande il y a `--relay`, et le premier lancement le demande et s'en souvient.
 
 **3. Envoyez quelque chose.** Dans l'application : glissez un fichier dans la
 fenêtre et partagez le code court qu'elle vous donne — l'autre personne le
@@ -53,14 +57,18 @@ colle dans son Arvolo et le fichier arrive. Pareil depuis le terminal :
 
 ```sh
 # vous
-arvolo code ./photo.jpg
+arvolo send --code ./photo.jpg
 #   ->  4821-crater-mango
 
 # l'autre personne
 arvolo recv 4821-crater-mango
 ```
 
-Rien d'installé en face ? `arvolo link ./rapport.pdf` imprime une URL qui
+Un `arvolo send ./photo.jpg` sans drapeau écrit plutôt un petit fichier-ticket
+`photo.jpg.arvolo` — partagez-le par n'importe quel canal, comme un .torrent,
+et en face il suffit de `arvolo recv photo.jpg.arvolo`.
+
+Rien d'installé en face ? `arvolo send --link ./rapport.pdf` imprime une URL qui
 télécharge et déchiffre dans n'importe quel navigateur — sans installation,
 sans compte. Voici ce que voit celui qui l'ouvre :
 
@@ -77,6 +85,7 @@ jamais au serveur](docs/assets/arvolo-link-browser.png)
 | [Déploiement](docs/DEPLOY.md) | Auto-hébergement en production : systemd, Docker, durcissement. *(anglais)* |
 | [L'application de bureau](gui/README.md) | La GUI en détail, avec sa table de parité CLI. *(anglais)* |
 | [Le protocole](docs/PROTOCOL.md) | Le format réseau et chaque flux, pour les curieux et les auditeurs. *(anglais)* |
+| [Conditions d'utilisation](TERMS.md) | Les conditions du relais public : ce qui ne peut pas être envoyé, qui en répond, ce qui est journalisé et pour combien de temps. *(anglais)* |
 
 ## Licence
 

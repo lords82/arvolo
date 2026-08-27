@@ -11,6 +11,15 @@ use arvolo_core::backfill::BlobNode;
 use arvolo_core::transfer::RelayChoice;
 use arvolo_relay::{now_unix, router, AppState, Mailbox};
 
+/// How often the reaper runs the on-disk reconciliation sweep, in 60s ticks.
+const SWEEP_EVERY_TICKS: u64 = 60;
+
+/// How long a file with no row backing it is left alone before the sweep treats
+/// it as an orphan. Comfortably longer than any single write: a streaming
+/// deposit's row lands when the body ends, and a seed batch's rows land when the
+/// batch does — this only has to outlast the slowest of those, not the TTL.
+const ORPHAN_GRACE_SECS: u64 = 6 * 3600;
+
 /// Build the tracing filter from `-v` count. arvolo (`arvolo_relay`,
 /// `arvolo_core`) gets louder with each `-v`; dependencies (iroh, hyper, …) stay
 /// quiet at `warn` until `-vvv`, which raises the base to `debug` so their logs
@@ -40,8 +49,24 @@ async fn main() -> Result<()> {
     // --version/--help; anything else is rejected so an accidental flag prints and
     // exits instead of silently starting the server and grabbing the listen port.
     let mut verbosity: u8 = 0;
-    for arg in std::env::args().skip(1) {
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
         match arg.as_str() {
+            // Write the browser decryptor bundle out instead of starting a
+            // server: the same bytes this binary serves at /dl/{claim}, ready to
+            // publish on a static origin. CI uses it to deploy the canonical
+            // page; a self-hoster uses it to put the page on a host of their own.
+            "--print-decryptor" => {
+                let Some(dir) = args.next() else {
+                    eprintln!("arvolo-relay: --print-decryptor needs a directory");
+                    std::process::exit(2);
+                };
+                let dir = std::path::PathBuf::from(dir);
+                arvolo_relay::decryptor::print_bundle(&dir)
+                    .map_err(|e| anyhow::anyhow!("write bundle to {}: {e}", dir.display()))?;
+                print!("{}", arvolo_relay::decryptor::MANIFEST);
+                return Ok(());
+            }
             "-V" | "--version" => {
                 println!("arvolo-relay {}", env!("CARGO_PKG_VERSION"));
                 return Ok(());
@@ -55,6 +80,9 @@ async fn main() -> Result<()> {
                 println!("Options:");
                 println!(
                     "  -v, -vv, -vvv   log verbosity: arvolo debug/trace; -vvv also shows iroh"
+                );
+                println!(
+                    "      --print-decryptor <DIR>  write the browser decryptor bundle and exit"
                 );
                 println!("  -V, --version   print version and exit");
                 println!("  -h, --help      print this help and exit");
@@ -120,8 +148,10 @@ async fn main() -> Result<()> {
         let state = state.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(60));
+            let mut ticks: u64 = 0;
             loop {
                 tick.tick().await;
+                ticks += 1;
                 let now = now_unix();
                 match state.mailbox.reap(now) {
                     Ok(n) if n > 0 => tracing::info!(removed = n, "reaped expired mailbox blobs"),
@@ -154,6 +184,25 @@ async fn main() -> Result<()> {
                 // Per-session offload meters whose TTL has passed (so a genuinely
                 // new transfer of the same file later starts with a fresh cap).
                 state.mailbox.reap_session_bytes(now);
+
+                // Hourly reconciliation. Everything above walks rows and deletes
+                // the file each row names; a file that lost its row (or never got
+                // one — a crash between the write and the insert) is invisible to
+                // all of it and would occupy the disk forever. This is the only
+                // pass that starts from what is actually on disk. It is a
+                // directory scan, hence hourly rather than every minute.
+                if ticks.is_multiple_of(SWEEP_EVERY_TICKS) {
+                    let n = state.mailbox.sweep_orphan_blobs(ORPHAN_GRACE_SECS);
+                    if n > 0 {
+                        tracing::info!(removed = n, "swept orphaned mailbox blobs");
+                    }
+                    let n = state
+                        .mailbox
+                        .sweep_orphan_chunks(state.blobs.store_dir(), ORPHAN_GRACE_SECS);
+                    if n > 0 {
+                        tracing::info!(removed = n, "swept orphaned seeded chunks");
+                    }
+                }
             }
         });
     }
@@ -189,8 +238,8 @@ async fn main() -> Result<()> {
     if arvolo_relay::max_total_blob_bytes() == 0 {
         tracing::warn!(
             "ARVOLO_MAX_TOTAL_BLOB_BYTES is unset (unlimited): the per-blob cap alone does not \
-             stop many deposits from filling the disk. Set it to the disk budget you are willing \
-             to lend on a public relay."
+             stop many deposits, or many seeded chunks, from filling the disk. It bounds both — \
+             set it to the disk budget you are willing to lend on a public relay."
         );
     }
     if arvolo_relay::max_session_relay_bytes() == 0 {

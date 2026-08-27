@@ -12,27 +12,93 @@ use crate::presence::{InboxSubscription, ReceivedOffer};
 
 use super::*;
 
+/// Drop a waiting code the moment the row stops waiting.
+///
+/// Both status setters call it, so the code cannot outlive the status it belongs
+/// to: a transfer that waited, then went active, would otherwise still be
+/// carrying "offered" for any client that read the field without checking the
+/// status first. Cheap insurance against a stale label — the sort that shows up
+/// as a row explaining itself with last week's reason.
+fn clear_waiting_code(t: &mut Transfer) {
+    if !matches!(t.status, TransferStatus::Waiting(_)) {
+        t.waiting_code.clear();
+        t.waiting_detail.clear();
+    }
+}
+
 /// Live state for an in-progress `send --to` delivery, so it can be paused,
 /// resumed, or re-driven. Mirrored to disk (a `SendToRecord`) for durability.
 #[derive(Clone)]
 pub(super) struct Held {
     pub(super) recipient: PublicId,
-    pub(super) payload: PathBuf,
+    pub(super) source: crate::source::SendSource,
     pub(super) name: String,
     pub(super) archive: bool,
     /// Optional sender note to attach to the offer.
     pub(super) note: String,
+    /// Which of our own devices this is for, when the sender named one. Lives
+    /// here rather than being threaded through the delivery functions because it
+    /// belongs to the *send*, and both the live attempt and the mailbox fallback
+    /// have to stamp the same value on the offer they post.
+    pub(super) target: Option<crate::sync::DeviceId>,
+    /// Where the recipient listens, when that is not where we do. Kept here for
+    /// the same reason as `target`: it belongs to the send, and a pause/resume or
+    /// a restart has to route to the same place the first attempt did.
+    pub(super) relay: Option<String>,
     /// Flipped by [`TransferManager::pause`] so the running loop, once its token is
     /// cancelled, knows to pause (keep the transfer) rather than cancel (drop it).
     pub(super) pause_flag: Arc<std::sync::atomic::AtomicBool>,
+    /// Flipped by [`TransferManager::deposit_now`]: stop waiting for the recipient
+    /// to accept and park the file on the relay at the next turn of the loop.
+    ///
+    /// Separate from `pause_flag` because it means the opposite thing about the
+    /// send — this one is "finish it by the other route", not "stop". It also
+    /// deliberately does **not** cancel the send's own token, which would pause it.
+    pub(super) deposit_now: Arc<std::sync::atomic::AtomicBool>,
+    /// The cancellation token of the live attempt currently serving, when one is.
+    ///
+    /// Published here so a `deposit_now` can end that attempt without waiting out
+    /// the watchdog — the same token the watchdog itself cancels to force the
+    /// fallback, so the loop around it already does the right thing. `None`
+    /// between attempts.
+    pub(super) attempt: Arc<Mutex<Option<CancellationToken>>>,
+    /// The content key, transport seed and chunk digests this send has already paid
+    /// for — here rather than in the delivery task, because the task is what a pause
+    /// destroys.
+    ///
+    /// Re-running the pass does not just cost the minute it takes: it mints a fresh
+    /// key and a fresh seed, so the recipient is looking at a different send, under a
+    /// node id nobody is serving. What they had in flight dies, and what they get
+    /// instead is another offer to approve by hand.
+    ///
+    /// The key therefore sits in memory for as long as a paused send is kept. It
+    /// already did for a running one, and `SendRecord` keeps a plain-key ticket on
+    /// disk for anonymous shares — but it is worth knowing rather than discovering.
+    pub(super) prep: crate::flow::PrepSlot,
 }
 
 pub(super) struct Inner {
     pub(super) next_id: AtomicU64,
     pub(super) transfers: Mutex<HashMap<u64, Transfer>>,
     pub(super) cancels: Mutex<HashMap<u64, CancellationToken>>,
+    /// Per-download abort intent (see `flow::RecvCancel`): defaults true, and
+    /// `pause` flips it to false *before* cancelling so the fetch slips away
+    /// like a drop (tail kept warm) instead of telling the sender to stop.
+    pub(super) recv_aborts: Mutex<HashMap<u64, Arc<std::sync::atomic::AtomicBool>>>,
     /// Delivery state for active/paused `send --to` transfers (for pause/resume).
     pub(super) held: Mutex<HashMap<u64, Held>>,
+    /// What each live chunked download is fetching, as
+    /// [`ChunkTicket::content_id`](crate::chunked::ChunkTicket::content_id) — so an
+    /// offer that arrives about a file already coming down can find it instead of
+    /// asking the user again.
+    ///
+    /// Keyed by transfer id and not by content: the same content can legitimately be
+    /// downloaded twice (two output paths), and a map keyed the other way would
+    /// silently drop one of them. Entries go in when a chunked download starts (or
+    /// is restored paused) and out when it reaches a terminal state — a *completed*
+    /// download deliberately stops matching, because the user may since have deleted
+    /// the file and "you already have this" is a different feature.
+    pub(super) download_content: Mutex<HashMap<u64, String>>,
     pub(super) pending: Mutex<HashMap<String, ReceivedOffer>>,
     pub(super) events: broadcast::Sender<ManagerEvent>,
     pub(super) me: Identity,
@@ -52,6 +118,13 @@ pub(super) struct Inner {
     /// offer ([`Offer::sender_name`]). Empty = don't advertise a name. Set once at
     /// startup via [`TransferManager::set_display_name`] before any `send_to`.
     pub(super) display_name: Mutex<String>,
+    /// This device's local id, stamped on every offer we post
+    /// ([`Offer::origin`](crate::presence::Offer::origin)) and handed to the inbox
+    /// so it can drop our own offers back out of our own poll. `None` for a client
+    /// that never set one — the engine works, it just cannot tell its own offers
+    /// from another of its devices'. Set at startup via
+    /// [`TransferManager::set_device_id`], like the display name.
+    pub(super) device_id: Mutex<Option<crate::sync::DeviceId>>,
 }
 
 impl Inner {
@@ -60,12 +133,106 @@ impl Inner {
         let _ = self.events.send(ev);
     }
 
+    /// Record what download `id` is fetching. A ticket that doesn't decode is simply
+    /// not indexed: nothing can match it either.
+    pub(super) fn note_download_content(&self, id: u64, ticket: &str) {
+        if let Ok(t) = crate::chunked::ChunkTicket::decode(ticket) {
+            self.download_content
+                .lock()
+                .unwrap()
+                .insert(id, t.content_id());
+        }
+    }
+
+    /// See [`TransferManager::download_of_same_content`], which is this with a doc
+    /// comment. Here because the inbox poll callback holds an `Inner`, not a manager.
+    pub(super) fn download_of_same_content(
+        &self,
+        ticket: &str,
+        from: Option<&PublicId>,
+    ) -> Option<u64> {
+        let want = crate::chunked::ChunkTicket::decode(ticket)
+            .ok()?
+            .content_id();
+        let ids: Vec<u64> = self
+            .download_content
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, c)| **c == want)
+            .map(|(id, _)| *id)
+            .collect();
+        let transfers = self.transfers.lock().unwrap();
+        let mut best: Option<(u8, u64)> = None;
+        for id in ids {
+            let Some(t) = transfers.get(&id) else {
+                continue;
+            };
+            if let (Some(from), Some(peer)) = (from, t.peer.as_ref()) {
+                if peer.to_bytes() != from.to_bytes() {
+                    continue;
+                }
+            }
+            // A live download first, a paused one only if there is no live one:
+            // deterministic, and it prefers the row that can act on the news.
+            let rank = match t.status {
+                TransferStatus::Active | TransferStatus::Preparing | TransferStatus::Waiting(_) => {
+                    0
+                }
+                TransferStatus::Paused(_) => 1,
+                _ => continue,
+            };
+            if best.map(|(r, bid)| (rank, id) < (r, bid)).unwrap_or(true) {
+                best = Some((rank, id));
+            }
+        }
+        best.map(|(_, id)| id)
+    }
+
+    /// The parked offers that carry the same content as `ticket` — the copies a
+    /// sender left behind before it kept one offer standing, and the ones a relay
+    /// withdrawal cannot reach because they are already in this map. Removed from
+    /// `pending` and returned, so the caller can ack them off the relay too.
+    pub(super) fn take_offers_for_same_content(&self, ticket: &str) -> Vec<String> {
+        let Ok(want) = crate::chunked::ChunkTicket::decode(ticket).map(|t| t.content_id()) else {
+            return Vec::new();
+        };
+        let mut pending = self.pending.lock().unwrap();
+        let ghosts: Vec<String> = pending
+            .iter()
+            .filter(|(_, o)| {
+                crate::chunked::ChunkTicket::decode(&o.offer.ticket)
+                    .map(|t| t.content_id() == want)
+                    .unwrap_or(false)
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &ghosts {
+            pending.remove(id);
+        }
+        ghosts
+    }
+
     /// Set a **terminal-or-paused** status: also drops the cancel token, since the
     /// running task is ending (finished, deposited, or paused — a resume installs a
     /// fresh token).
+    ///
+    /// Passing a *live* status here is always a bug, and a quiet one: the row keeps
+    /// running with no way left to stop it. That is not hypothetical — one call site
+    /// marked a send `Active` through this function and made every live P2P send
+    /// uncancellable from the moment it started serving. Hence the assertion: the
+    /// mistake is invisible in production and trips immediately in a test.
     pub(super) fn set_status(&self, id: u64, status: TransferStatus) {
+        debug_assert!(
+            !matches!(
+                status,
+                TransferStatus::Active | TransferStatus::Preparing | TransferStatus::Waiting(_)
+            ),
+            "set_status drops the cancel token — a live status needs set_status_live"
+        );
         if let Some(t) = self.transfers.lock().unwrap().get_mut(&id) {
             t.status = status;
+            clear_waiting_code(t);
         }
         self.cancels.lock().unwrap().remove(&id);
     }
@@ -75,6 +242,16 @@ impl Inner {
     pub(super) fn set_status_live(&self, id: u64, status: TransferStatus) {
         if let Some(t) = self.transfers.lock().unwrap().get_mut(&id) {
             t.status = status;
+            clear_waiting_code(t);
+        }
+    }
+
+    /// Record why a send is waiting, as the code a client translates. Set right
+    /// after the status, which is why it does not clear itself.
+    pub(super) fn set_waiting_code(&self, id: u64, code: &str, detail: &str) {
+        if let Some(t) = self.transfers.lock().unwrap().get_mut(&id) {
+            t.waiting_code = code.to_string();
+            t.waiting_detail = detail.to_string();
         }
     }
 

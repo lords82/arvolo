@@ -1,5 +1,6 @@
 //! The persistent zero-knowledge mailbox: SQLite metadata + ciphertext files.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -8,7 +9,7 @@ use rusqlite::{params, Connection};
 use crate::state::{
     max_blob_bytes, max_entries, max_total_blob_bytes, max_ttl_secs, MAX_DOWNLOADS_CAP,
 };
-use crate::util::{constant_time_eq, random_claim};
+use crate::util::{constant_time_eq, random_claim, sweep_orphan_files};
 
 /// What the sender deposits: an opaque, end-to-end-encrypted blob.
 #[derive(Clone)]
@@ -235,6 +236,29 @@ impl Mailbox {
             .max(0) as u64
     }
 
+    /// Aggregate bytes held by **seeded chunks**, counted at the nominal chunk
+    /// size — the same approximation the per-transfer offload meter uses, and for
+    /// the same reason: the `seeded` table records hashes, not sizes, and the last
+    /// chunk of a payload is short, so this over-counts slightly and the cap it
+    /// backs is marginally stricter than asked. Erring that way is the right way
+    /// to be wrong about a disk.
+    pub fn seeded_bytes(&self) -> u64 {
+        (self.seeded_count().max(0) as u64).saturating_mul(arvolo_core::chunked::CHUNK_SIZE as u64)
+    }
+
+    /// Everything this relay is holding on disk, mailbox blobs and seeded chunks
+    /// together.
+    ///
+    /// One number because there is one disk. The two paths used to be metered
+    /// separately and in different units — blobs in bytes, chunks in *rows* — so
+    /// neither could see the other filling the volume they share, and the row cap
+    /// (50k) stood for roughly 800 GB at the nominal chunk size, which is not a
+    /// disk guard on any ordinary machine. Whichever path asks for room now asks
+    /// against the whole of it.
+    pub fn disk_bytes(&self) -> u64 {
+        self.stored_bytes().saturating_add(self.seeded_bytes())
+    }
+
     /// A fresh, random claim token to write a blob under.
     pub fn new_claim(&self) -> String {
         random_claim()
@@ -297,11 +321,11 @@ impl Mailbox {
         if self.at_capacity() {
             return Err(MailboxError::Capacity);
         }
-        // Aggregate disk-budget guard (`0` = unlimited).
+        // Aggregate disk-budget guard (`0` = unlimited), over everything held.
         let total_cap = max_total_blob_bytes();
         if total_cap != 0
             && self
-                .stored_bytes()
+                .disk_bytes()
                 .saturating_add(deposit.ciphertext.len() as u64)
                 > total_cap
         {
@@ -446,6 +470,69 @@ impl Mailbox {
         conn.execute("DELETE FROM entries WHERE claim = ?1", params![claim])
             .map_err(backend)?;
         Ok(())
+    }
+
+    /// Delete ciphertext files in the blob directory that no `entries` row claims
+    /// and that are older than `grace_secs`.
+    ///
+    /// [`Mailbox::reap`] only frees a file it can name from a row, so a blob whose
+    /// row never landed — the process died between the streaming deposit writing
+    /// [`Mailbox::blob_path`] and `commit_deposit` inserting — is invisible to it
+    /// and stays on disk for good. The grace period keeps a deposit still
+    /// streaming in safe: its row appears the moment the body finishes.
+    pub fn sweep_orphan_blobs(&self, grace_secs: u64) -> usize {
+        // No readable row set means no sweep: an empty one would read as "nothing
+        // is claimed" and take the whole directory with it.
+        let Some(claims) = self.claims() else {
+            return 0;
+        };
+        sweep_orphan_files(&self.blob_dir, grace_secs, |name| {
+            match name.strip_suffix(".bin") {
+                Some(claim) => claims.contains(claim),
+                // Not something this mailbox wrote — leave it alone.
+                None => true,
+            }
+        })
+    }
+
+    /// Delete chunk files in the relay's blob-store directory that no `seeded` row
+    /// covers and that are older than `grace_secs`.
+    ///
+    /// The seed path writes the chunk files first and records their rows after
+    /// (both in `seed_chunks` and across the request), so a failure in between
+    /// strands the files: the TTL backstop walks rows, and there is no row to
+    /// walk. Only names that look like a chunk hash are ever considered, so
+    /// anything else living in that directory is left untouched.
+    pub fn sweep_orphan_chunks(&self, store_dir: &Path, grace_secs: u64) -> usize {
+        let Some(seeded) = self.seeded_hashes() else {
+            return 0;
+        };
+        sweep_orphan_files(store_dir, grace_secs, |name| {
+            let looks_like_chunk =
+                name.len() == 64 && name.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+            !looks_like_chunk || seeded.contains(name)
+        })
+    }
+
+    /// Every claim currently stored; `None` if the table could not be read.
+    fn claims(&self) -> Option<HashSet<String>> {
+        self.string_column("SELECT claim FROM entries")
+    }
+
+    /// Every chunk hash currently seeded (any token, expired or not: an expired
+    /// row is the TTL backstop's job, not the sweep's).
+    fn seeded_hashes(&self) -> Option<HashSet<String>> {
+        self.string_column("SELECT hash FROM seeded")
+    }
+
+    /// One text column of a query as a set, or `None` if the query failed. A
+    /// caller sweeping files against it must not confuse "nothing there" with
+    /// "could not tell".
+    fn string_column(&self, sql: &str) -> Option<HashSet<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(sql).ok()?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0)).ok()?;
+        rows.collect::<Result<_, _>>().ok()
     }
 
     /// Number of stored entries.
@@ -599,6 +686,47 @@ impl Mailbox {
             )
             .map_err(backend)?;
         Ok(())
+    }
+
+    /// When each chunk seeded under `token` is due to be dropped. For tests and
+    /// operators: the deadline a parked send was actually granted, as opposed to
+    /// the one it asked for.
+    pub fn seed_expiries(&self, token: &str) -> Vec<u64> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = match conn.prepare("SELECT expires_at FROM seeded WHERE token = ?1") {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        stmt.query_map(params![token], |r| r.get::<_, i64>(0))
+            .map(|rows| {
+                rows.filter_map(|r| r.ok())
+                    .map(|v| v.max(0) as u64)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Every chunk hash still seeded under `token`, and forget them all.
+    ///
+    /// The withdrawal half of a parked send: a sender that changes its mind has to
+    /// be able to take the pieces back off the relay, not merely stop pointing at
+    /// them. Returns the hashes so the caller can delete the files the rows named
+    /// — doing it the other way round would leave a file no row can ever free.
+    ///
+    /// Authorized by the token alone, which is the same capability that already
+    /// authorizes releasing a chunk one at a time. So this grants nothing new: it
+    /// is the existing power, spelled once instead of n times.
+    pub fn take_seeds_by_token(&self, token: &str) -> Vec<String> {
+        let conn = self.conn.lock().unwrap();
+        let hashes: Vec<String> = match conn.prepare("SELECT hash FROM seeded WHERE token = ?1") {
+            Ok(mut stmt) => stmt
+                .query_map(params![token], |r| r.get::<_, String>(0))
+                .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                .unwrap_or_default(),
+            Err(_) => return Vec::new(),
+        };
+        let _ = conn.execute("DELETE FROM seeded WHERE token = ?1", params![token]);
+        hashes
     }
 
     /// (token, hash) pairs of seeded chunks whose TTL has passed.

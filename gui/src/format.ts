@@ -2,7 +2,7 @@
 // metadata maps ported from the mock's `renderVals`.
 
 import { t } from "./i18n";
-import type { DepositDto, Method, UIStatus, UITransfer } from "./types";
+import type { DepositDto, UIStatus, UITransfer } from "./types";
 
 export function fmtBytes(bytes: number): string {
   if (!bytes && bytes !== 0) return "";
@@ -22,6 +22,21 @@ export function extOf(name: string): string {
   // A name like "." or "x." splits to an empty suffix — an empty chip reads as a
   // rendering fault. Fall back to the same label as a name with no extension.
   return ext || "FILE";
+}
+
+/** A contact name worth proposing, from the name a sender types about
+ *  themselves: lowercased, spaces to `-`, punctuation dropped. Empty when
+ *  nothing typeable is left — better no suggestion than one nobody can use.
+ *
+ *  Same rule as the CLI's `slug_contact_name`, so the two surfaces propose the
+ *  same name for the same sender. */
+export function slugName(claimed: string | undefined): string {
+  return (claimed ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "-")
+    .replace(/[^\p{L}\p{N}_-]/gu, "")
+    .replace(/^-+|-+$/g, "");
 }
 
 /** Shorten a base32 id to `if2xmne…c7daha`, matching the CLI/mock. */
@@ -47,6 +62,11 @@ export function statusMeta(s: UIStatus): StatusMeta {
   switch (s) {
     case "active":
       return { tone: "out", text: t("status.active") };
+    // Its own label, not "active": nothing has left this machine yet, and the
+    // recipient has not been told anything. Muted, because there is nothing to
+    // act on — only something to wait for.
+    case "preparing":
+      return { tone: "mut", text: t("status.preparing") };
     // Muted on purpose: nothing is happening, and nothing is wrong. A tone that
     // asked for attention would make every file you ever downloaded ask for it.
     case "sharing":
@@ -59,6 +79,12 @@ export function statusMeta(s: UIStatus): StatusMeta {
       return { tone: "warn", text: t("status.paused") };
     case "incoming":
       return { tone: "warn", text: t("status.incoming") };
+    // Not muted, and not "stalled": the file is one accept away from moving, and
+    // there is something the reader can do about it — leave it, or park it on the
+    // relay. A tone that said "nothing to see" would hide the only window in which
+    // a direct transfer is still possible.
+    case "offered":
+      return { tone: "out", text: t("status.offered") };
     case "stalled":
       return { tone: "mut", text: t("status.stalled") };
     case "failed":
@@ -68,30 +94,6 @@ export function statusMeta(s: UIStatus): StatusMeta {
     case "cancelled":
       return { tone: "mut", text: t("status.cancelled") };
   }
-}
-
-export interface MethodMeta {
-  glyph: string;
-  label: string;
-  tone: Tone;
-}
-/** Glyph and tone are language-independent; only the label is looked up, and it
- *  is looked up per call rather than baked into a module constant — a constant
- *  built at import time would keep the launch language for ever. */
-const METHODS: Record<Method, { glyph: string; key: "method.p2p" | "method.cloud" | "method.link" | "method.ticket"; tone: Tone }> = {
-  p2p: { glyph: "⇄", key: "method.p2p", tone: "in" },
-  cloud: { glyph: "☁", key: "method.cloud", tone: "mut" },
-  link: { glyph: "◇", key: "method.link", tone: "violet" },
-  ticket: { glyph: "⛓", key: "method.ticket", tone: "out" },
-};
-export function methodMeta(m: Method): MethodMeta {
-  // `METHODS[m]` alone walks the prototype chain: "toString"/"valueOf" would hit
-  // Object.prototype's, which is truthy, so `??` would not fall back and the row
-  // would render `undefined`. Only an own key counts.
-  const spec = Object.prototype.hasOwnProperty.call(METHODS, m)
-    ? METHODS[m]
-    : METHODS.cloud;
-  return { glyph: spec.glyph, label: t(spec.key), tone: spec.tone };
 }
 
 /** File-kind tint, as a tone. Grouped by what the file *is* rather than by
@@ -126,7 +128,8 @@ const EXT_TINT: Record<string, Tone> = {
   SVG: "violet",
 };
 export function extTint(ext: string): Tone {
-  // Own keys only — see `methodMeta` for why an inherited hit is not a match.
+  // Own keys only: a bare index would walk the prototype chain, where
+  // "toString"/"valueOf" are truthy hits for extensions nobody defined.
   return Object.prototype.hasOwnProperty.call(EXT_TINT, ext)
     ? EXT_TINT[ext]
     : "mut";
@@ -139,7 +142,11 @@ export function barClass(tx: UITransfer): string {
   const dir = tx.dir === "out" ? "out" : "in";
   if (tx.status === "completed") return `prog ${dir} done`;
   if (tx.status === "failed") return `prog ${dir} bad`;
-  if (tx.status === "stalled" || tx.status === "paused")
+  if (
+    tx.status === "stalled" ||
+    tx.status === "offered" ||
+    tx.status === "paused"
+  )
     return `prog ${dir} stall`;
   // A share is complete by definition — the file is all there, waiting. Drawing it
   // as a bar invites reading a full one as "done" and an empty one as "stuck",
@@ -167,6 +174,15 @@ export function fmtAgo(unixSecs: number, nowMs: number = Date.now()): string {
   return t("ago.days", Math.round(secs / 86400));
 }
 
+/** A relay URL as a person reads it: the host, without the scheme it always has.
+ *
+ *  Display only — nothing routes on this string, and the daemon keeps the URL it
+ *  actually dials. It mirrors what the CLI prints (`compact_relay`), so the same
+ *  address does not read as two different places in two windows of the same app. */
+export function relayHost(url: string): string {
+  return url.replace(/^https?:\/\//, "").replace(/\/+$/, "");
+}
+
 /** Human throughput, e.g. "42 MB/s". */
 export function fmtRate(bytesPerSec: number): string {
   return fmtBytes(bytesPerSec) + "/s";
@@ -188,6 +204,53 @@ export function fmtEta(tx: UITransfer): string {
   return t("eta.hours", Math.round(secs / 3600));
 }
 
+/** Every reason the engine can give for a send waiting, and the key that says it
+ *  in the reader's language.
+ *
+ *  Keyed by the daemon's stable code rather than by its English sentence: the
+ *  sentence is prose that gets reworded, and matching on prose would put the row
+ *  silently back into English the first time somebody improved the wording. The
+ *  codes come from `WaitingReason::code` in core/src/manager/mod.rs — the two
+ *  lists are kept in step by `waiting.test.ts`. */
+const WAITING_PLAIN: Record<
+  string,
+  "waiting.offered" | "waiting.tooLarge" | "waiting.parked" | "waiting.noRoute"
+> = {
+  offered: "waiting.offered",
+  tooLarge: "waiting.tooLarge",
+  parked: "waiting.parked",
+  noRoute: "waiting.noRoute",
+};
+
+/** The reasons that quote something from elsewhere inside them — the relay's own
+ *  message, or a cap it named. Those words are interpolated, never translated: we
+ *  did not write them and have no idea what they say. Kept apart from the plain
+ *  ones so the type system knows which entries take an argument. */
+const WAITING_QUOTED: Record<
+  string,
+  "waiting.relayRetry" | "waiting.relayCapped" | "waiting.offloadFailed"
+> = {
+  relayRetry: "waiting.relayRetry",
+  relayCapped: "waiting.relayCapped",
+  offloadFailed: "waiting.offloadFailed",
+};
+
+/** What a waiting row says, in the reader's language where we can.
+ *
+ *  Falls back to the daemon's English sentence, which is the honest thing to show
+ *  when there is nothing to look up: a daemon older than the code field, or a
+ *  reason this build has never heard of because the daemon is newer than the
+ *  window. Saying the wrong reason confidently would be worse than saying the
+ *  right one in English. */
+export function waitingText(tx: UITransfer): string {
+  const code = tx.waitingCode;
+  if (!code) return tx.reason || t("meta.stalled");
+  const quoted = WAITING_QUOTED[code];
+  if (quoted) return t(quoted, tx.waitingDetail || t("waiting.relayUnnamed"));
+  const plain = WAITING_PLAIN[code];
+  return plain ? t(plain) : tx.reason || t("meta.stalled");
+}
+
 /** The right-hand meta line under the status. */
 export function metaLine(tx: UITransfer): string {
   switch (tx.status) {
@@ -206,8 +269,21 @@ export function metaLine(tx: UITransfer): string {
         : t("meta.sharing");
     case "paused":
       return t("meta.paused");
+    case "preparing":
+      return t("meta.preparing");
+    // The offer is out and the answer has not come. Say which of the two things
+    // is true — it hasn't reached them, or it is sitting in front of them — in
+    // the same words the deposits panel uses for the same fact. The daemon's own
+    // reason string is deliberately not shown here: it is raw English, and this
+    // is the one waiting state a reader can act on.
+    case "offered":
+      return t(
+        tx.offerStatus === "arrived" || tx.offerStatus === "taken"
+          ? "deposit.offerArrived"
+          : "meta.offered"
+      );
     case "stalled":
-      return tx.reason ? tx.reason : t("meta.stalled");
+      return waitingText(tx);
     case "incoming":
       return t("meta.incoming");
     case "deposited": {
@@ -388,9 +464,11 @@ export function sectionsFor(
   // disagreeing with the engine, which is the bug this whole file guards against.
   const isActive = (s: UIStatus) =>
     s === "active" ||
+    s === "preparing" ||
     s === "sharing" ||
     s === "paused" ||
     s === "stalled" ||
+    s === "offered" ||
     s === "cancelling";
   const isTerminal = (s: UIStatus) =>
     s === "completed" ||

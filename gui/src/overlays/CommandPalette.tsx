@@ -15,7 +15,7 @@ import { fire, TITLE_KEY, useStore, type Route } from "../store";
 import { useT } from "../i18n";
 import { useModal } from "../ui/Sheet";
 import { Icon } from "../ui/Icons";
-import { Avatar } from "../ui/Bits";
+import { Avatar, claimText } from "../ui/Bits";
 
 interface Entry {
   key: string;
@@ -154,20 +154,25 @@ export function CommandPalette() {
 
     for (const c of contacts) {
       if (c.blocked) continue;
+      // `hint` is a string here, not JSX, so the claim joins the trust mark on
+      // one line rather than getting its own styling. Same words as the row.
+      const claim = claimText(c, t);
+      const trust = c.verified ? t("palette.verified") : t("palette.notVerified");
       list.push({
         key: `to:${c.name}`,
         label: t("palette.sendTo", c.name),
-        hint: c.verified ? t("palette.verified") : t("palette.notVerified"),
+        hint: claim ? `${trust} · ${claim.text}` : trust,
         icon: <Avatar name={c.display_name || c.name} id={c.id} size={18} />,
-        keywords: `${c.display_name} ${c.id}`,
+        keywords: `${c.display_name} ${c.pending_name} ${c.id}`,
         group: people,
         run: () => openSheet([], c.name, "contact"),
       });
       list.push({
         key: `open:${c.name}`,
         label: t("palette.openCard", c.name),
+        hint: claim?.text,
         icon: <Icon.Info />,
-        keywords: `${c.display_name} ${t("palette.personKw")}`,
+        keywords: `${c.display_name} ${c.pending_name} ${t("palette.personKw")}`,
         group: people,
         run: () => {
           go("people");

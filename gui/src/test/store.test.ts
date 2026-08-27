@@ -4,7 +4,8 @@
 // that moved no number. These lock that behaviour down.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { dto, harness, makeIpcMock, resetHarness } from "./mocks";
+import { PEER_ID, dto, harness, makeIpcMock, resetHarness } from "./mocks";
+import { en } from "../i18n/en";
 
 vi.mock("../ipc", () => makeIpcMock());
 
@@ -131,7 +132,9 @@ describe("the board never lies about what the daemon holds", () => {
   it("50. a snapshot that fails says so — it does not report an empty daemon", async () => {
     harness.fail = new Set(["listTransfers"]);
     await boot(false);
-    expect(useStore.getState().loadError).toMatch(/can't read the transfers/i);
+    expect(useStore.getState().loadError).toContain(
+      en["store.loadTransfers"]("").trim()
+    );
     expect(useStore.getState().connected).toBe(false);
   });
 
@@ -247,6 +250,38 @@ describe("engine events → rows", () => {
     expect(row("t1")).toMatchObject({ status: "stalled", reason: "relay unavailable" });
   });
 
+  // A send holding an offer open is waiting on a person, not on the network, and
+  // the two do not deserve the same word: `stalled` is the board's quietest tone
+  // ("nothing to do"), while this one has an action attached to it.
+  it("8b. a send whose offer has reached them is `offered`, not `stalled`", async () => {
+    await boot();
+    harness.emit({ started: { id: 1, direction: "send", name: "m.bin", total_size: 10 } });
+    harness.emit({
+      waiting: {
+        id: 1,
+        reason: "offered — waiting for them to accept",
+        offer_status: "arrived",
+      },
+    });
+    expect(row("t1")).toMatchObject({ status: "offered", offerStatus: "arrived" });
+  });
+
+  it("8c. an incoming transfer never becomes `offered`", async () => {
+    await boot();
+    harness.emit({ started: { id: 2, direction: "recv", name: "m.bin", total_size: 10 } });
+    harness.emit({ waiting: { id: 2, reason: "held", offer_status: "arrived" } });
+    expect(row("t2").status).toBe("stalled");
+  });
+
+  // An older daemon sends no `offer_status` at all. It must read as "nothing
+  // known" — the old word, the old behaviour — rather than as a state.
+  it("8d. a daemon that says nothing about the offer still reads as stalled", async () => {
+    await boot();
+    harness.emit({ started: { id: 1, direction: "send", name: "m.bin", total_size: 10 } });
+    harness.emit({ waiting: { id: 1, reason: "relay unavailable" } });
+    expect(row("t1").status).toBe("stalled");
+  });
+
   it("9. `paused` and `failed` and `cancelled` land on their statuses", async () => {
     await boot();
     for (const id of [1, 2, 3]) {
@@ -285,7 +320,7 @@ describe("engine events → rows", () => {
     const offer = (id: string) => ({
       offer_received: {
         id,
-        from: "peer1",
+        from: PEER_ID,
         name: "relazione.pdf",
         size: 10,
         note: "",
@@ -303,7 +338,7 @@ describe("engine events → rows", () => {
   it("11c. a different file from the same sender is not superseded", async () => {
     await boot();
     const offer = (id: string, name: string) => ({
-      offer_received: { id, from: "peer1", name, size: 10, note: "", sender_name: "" },
+      offer_received: { id, from: PEER_ID, name, size: 10, note: "", sender_name: "" },
     });
     harness.emit(offer("a", "uno.txt"));
     harness.emit(offer("b", "due.txt"));
@@ -313,12 +348,56 @@ describe("engine events → rows", () => {
   it("11d. the same file from a different sender is its own offer", async () => {
     await boot();
     harness.emit({
-      offer_received: { id: "a", from: "peer1", name: "x.txt", size: 1, note: "", sender_name: "" },
+      offer_received: { id: "a", from: PEER_ID, name: "x.txt", size: 1, note: "", sender_name: "" },
     });
     harness.emit({
       offer_received: { id: "b", from: "peer2", name: "x.txt", size: 1, note: "", sender_name: "" },
     });
     expect(rows().filter((t) => t.status === "incoming")).toHaveLength(2);
+  });
+
+  it("11e. an offer the daemon takes by itself is an arrival, not a question", async () => {
+    // `auto` means the daemon has already accepted: the sender is trusted, or it is
+    // another of the user's own devices. Drawing the offer row anyway asked the user
+    // to choose something already chosen, and the answer landed on an offer the
+    // daemon had consumed — "no such pending offer", next to a file downloading
+    // perfectly well.
+    await boot();
+    harness.emit({
+      offer_received: {
+        id: "auto1",
+        from: PEER_ID,
+        name: "relazione.pdf",
+        size: 10,
+        note: "",
+        sender_name: "Anna",
+        auto: true,
+      },
+    });
+    expect(rows().filter((t) => t.status === "incoming")).toHaveLength(0);
+    expect(row("oauto1")).toBeUndefined();
+
+    // What the user sees instead: the download, which announces itself.
+    harness.emit({
+      started: { id: 7, direction: "recv", name: "relazione.pdf", total_size: 10 },
+    });
+    expect(row("t7")).toMatchObject({ status: "active", dir: "in", name: "relazione.pdf" });
+  });
+
+  it("11f. a re-post closes the dialog left open on the offer it replaces", async () => {
+    // The row is superseded (11b), but the open dialog held the old id of its own
+    // accord: closing it is what stops the same dead button reappearing by another
+    // route.
+    await boot();
+    const offer = (id: string) => ({
+      offer_received: { id, from: PEER_ID, name: "relazione.pdf", size: 10, note: "", sender_name: "" },
+    });
+    harness.emit(offer("old1"));
+    useStore.getState().openIncoming("old1");
+    expect(useStore.getState().incomingOfferId).toBe("old1");
+
+    harness.emit(offer("new2"));
+    expect(useStore.getState().incomingOfferId).toBeNull();
   });
 
   it("11. an event for an unknown id still produces a row (no lost sends)", async () => {
@@ -368,7 +447,9 @@ describe("actions reach the daemon", () => {
   it("15. send forwards recipient, paths and note", async () => {
     await boot();
     await useStore.getState().send("proj", ["/a.txt", "/b.txt"], "ciao");
-    expect(harness.recorder.sendTo).toEqual([["proj", ["/a.txt", "/b.txt"], "ciao"]]);
+    expect(harness.recorder.sendTo).toEqual([
+      ["proj", ["/a.txt", "/b.txt"], "ciao", null],
+    ]);
   });
 
   it("16. cancel shows it landed, then the engine's verdict wins", async () => {
@@ -416,12 +497,12 @@ describe("actions reach the daemon", () => {
   });
 
   it("20. verifying a contact tells the daemon and re-stamps the badge", async () => {
-    harness.snapshot.contacts = [dto.contact({ name: "proj", id: "peer1", verified: false })];
-    harness.snapshot.transfers = [dto.transfer({ id: 1, peer: "peer1" })];
+    harness.snapshot.contacts = [dto.contact({ name: "proj", id: PEER_ID, verified: false })];
+    harness.snapshot.transfers = [dto.transfer({ id: 1, peer: PEER_ID })];
     await boot();
     expect(row("t1").verified).toBe(false);
 
-    harness.snapshot.contacts = [dto.contact({ name: "proj", id: "peer1", verified: true })];
+    harness.snapshot.contacts = [dto.contact({ name: "proj", id: PEER_ID, verified: true })];
     await useStore.getState().markVerified("proj");
 
     expect(harness.recorder.markVerified).toEqual(["proj"]);
@@ -499,9 +580,9 @@ describe("list housekeeping", () => {
   });
 
   it("24. the peer label prefers a saved contact over a raw id", async () => {
-    harness.snapshot.contacts = [dto.contact({ name: "proj", id: "peer1" })];
+    harness.snapshot.contacts = [dto.contact({ name: "proj", id: PEER_ID })];
     harness.snapshot.transfers = [
-      dto.transfer({ id: 1, peer: "peer1" }),
+      dto.transfer({ id: 1, peer: PEER_ID }),
       dto.transfer({ id: 2, peer: "unknownlongidentifier1234567890" }),
     ];
     await boot();

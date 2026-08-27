@@ -52,6 +52,41 @@ describe("wire → app model", () => {
           sender_name: "Marta",
         },
       ],
+      // The same event as the daemon really sends it when it is taking the file
+      // by itself — the shape pinned in Rust by `event_wire_format_is_stable`.
+      // `auto` decides whether the board draws a question or nothing at all, and
+      // it exists on this event alone: no snapshot carries it, so if it were
+      // dropped in the flattening every test above it would still pass while the
+      // window asked about files that were already downloading.
+      [
+        {
+          offer_received: {
+            id: "o2",
+            from: "peer1",
+            name: "f.zip",
+            size: 9,
+            note: "",
+            sender_name: "Anna",
+            auto: true,
+            fingerprint: "able-otter-nine",
+            seen_count: 2,
+            known_name: "Giulia",
+          },
+        },
+        {
+          type: "offer_received",
+          id: "o2",
+          from: "peer1",
+          name: "f.zip",
+          size: 9,
+          note: "",
+          sender_name: "Anna",
+          auto: true,
+          fingerprint: "able-otter-nine",
+          seen_count: 2,
+          known_name: "Giulia",
+        },
+      ],
       [
         { progress: { id: 1, transferred: 5, total_size: 10 } },
         { type: "progress", id: 1, transferred: 5, total_size: 10 },

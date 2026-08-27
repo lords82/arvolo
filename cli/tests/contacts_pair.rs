@@ -24,6 +24,17 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::time::timeout;
 
+/// How long to wait on a spawned `arvolo` before giving up on it.
+///
+/// Deliberately generous. nextest owns the hang deadline (`.config/nextest.toml`
+/// kills a wedged test and names it); these bounds exist only so a hang surfaces
+/// as an assertion here instead of a silent block, not to say how fast the CLI
+/// ought to be. Held tight they measure the runner instead of the code: at 20s
+/// this expired on a slow Windows runner before the host had printed its code,
+/// and the failure then read as a product bug — "the host should print a pairing
+/// code, got: \"\"" — when the pairing was fine and the machine was busy.
+const SPAWN_WAIT: Duration = Duration::from_secs(60);
+
 async fn spawn_relay() -> String {
     let dir = tempfile::tempdir().unwrap();
     let node = BlobNode::spawn(dir.path(), RelayChoice::Disabled)
@@ -46,8 +57,8 @@ fn arvolo(cfg: &Path, relay: &str, args: &[&str]) -> Command {
     let mut c = Command::new(env!("CARGO_BIN_EXE_arvolo"));
     c.args(args)
         .env("ARVOLO_CONFIG_DIR", cfg)
-        // Its own identity: the path does not follow ARVOLO_CONFIG_DIR, so without
-        // this both sides would load the same key and "pairing" would be a mirror.
+        // Its own identity: follows ARVOLO_CONFIG_DIR now, pinned anyway so the
+        // two sides can never share a key and turn "pairing" into a mirror.
         .env("ARVOLO_IDENTITY", cfg.join("identity.key"))
         .env("ARVOLO_RELAY", relay)
         .env("ARVOLO_NO_WIZARD", "1")
@@ -75,26 +86,22 @@ async fn pairing_saves_and_verifies_both_sides() {
     let cfg_a = TempDir::new().unwrap();
     let cfg_b = TempDir::new().unwrap();
 
-    let (_, id_a, _) = run(cfg_a.path(), &relay, &["me"]).await;
-    let (_, id_b, _) = run(cfg_b.path(), &relay, &["me"]).await;
+    let (_, id_a, _) = run(cfg_a.path(), &relay, &["me", "--plain"]).await;
+    let (_, id_b, _) = run(cfg_b.path(), &relay, &["me", "--plain"]).await;
     let (id_a, id_b) = (first_word(&id_a), first_word(&id_b));
     assert!(!id_a.is_empty() && !id_b.is_empty());
     assert_ne!(id_a, id_b, "the two sides must be different identities");
 
     // A shows a code and waits. The code goes to stdout; everything else to stderr.
-    let mut host = arvolo(
-        cfg_a.path(),
-        &relay,
-        &["contacts", "pair", "--name", "bob", "--use-http"],
-    )
-    .stdout(Stdio::piped())
-    .stderr(Stdio::null())
-    .spawn()
-    .expect("spawn the host side");
+    let mut host = arvolo(cfg_a.path(), &relay, &["contacts", "add", "bob"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn the host side");
 
     let mut lines = BufReader::new(host.stdout.take().unwrap()).lines();
     let mut code = String::new();
-    while let Ok(Ok(Some(line))) = timeout(Duration::from_secs(20), lines.next_line()).await {
+    while let Ok(Ok(Some(line))) = timeout(SPAWN_WAIT, lines.next_line()).await {
         let t = line.trim();
         if !t.is_empty() {
             code = t.to_string();
@@ -107,16 +114,11 @@ async fn pairing_saves_and_verifies_both_sides() {
     );
 
     // B types it.
-    let (ok, out, err) = run(
-        cfg_b.path(),
-        &relay,
-        &["contacts", "pair", &code, "--name", "alice"],
-    )
-    .await;
+    let (ok, out, err) = run(cfg_b.path(), &relay, &["contacts", "add", "alice", &code]).await;
     assert!(ok, "the joining side failed: {err}");
     assert!(out.contains("verified"), "joiner should verify: {out}");
 
-    let status = timeout(Duration::from_secs(30), host.wait())
+    let status = timeout(SPAWN_WAIT, host.wait())
         .await
         .expect("the host side should finish once paired")
         .expect("host exit");
@@ -163,19 +165,15 @@ async fn a_wrong_code_saves_nobody() {
     let cfg_a = TempDir::new().unwrap();
     let cfg_b = TempDir::new().unwrap();
 
-    let mut host = arvolo(
-        cfg_a.path(),
-        &relay,
-        &["contacts", "pair", "--name", "bob", "--use-http"],
-    )
-    .stdout(Stdio::piped())
-    .stderr(Stdio::null())
-    .spawn()
-    .expect("spawn the host side");
+    let mut host = arvolo(cfg_a.path(), &relay, &["contacts", "add", "bob"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn the host side");
 
     let mut lines = BufReader::new(host.stdout.take().unwrap()).lines();
     let mut code = String::new();
-    while let Ok(Ok(Some(line))) = timeout(Duration::from_secs(20), lines.next_line()).await {
+    while let Ok(Ok(Some(line))) = timeout(SPAWN_WAIT, lines.next_line()).await {
         let t = line.trim();
         if !t.is_empty() {
             code = t.to_string();
@@ -192,12 +190,7 @@ async fn a_wrong_code_saves_nobody() {
         format!("{head}-wrong-words{tail}")
     };
 
-    let (ok, _, _) = run(
-        cfg_b.path(),
-        &relay,
-        &["contacts", "pair", &wrong, "--name", "alice"],
-    )
-    .await;
+    let (ok, _, _) = run(cfg_b.path(), &relay, &["contacts", "add", "alice", &wrong]).await;
     assert!(!ok, "a wrong code must fail, not save a contact");
 
     let (_, book_b, _) = run(
@@ -212,4 +205,67 @@ async fn a_wrong_code_saves_nobody() {
     );
 
     let _ = host.start_kill();
+}
+
+/// The same exchange with the two people on **different relays**, which is the
+/// case the routing hint exists for.
+///
+/// Each direction is learned a different way, on purpose. The joiner reads the
+/// host's relay off the code itself (`N-word-word@relay`) — free, and it works
+/// against any relay. The host learns the joiner's from the exchange's extras key,
+/// which is the half that needed a new rendezvous key. Getting either one wrong is
+/// silent in production: the send goes to an inbox nobody reads and simply waits,
+/// so it is asserted here rather than discovered there.
+#[tokio::test]
+async fn pairing_across_two_relays_teaches_each_side_where_the_other_is() {
+    let relay_a = spawn_relay().await;
+    let relay_b = spawn_relay().await;
+    assert_ne!(relay_a, relay_b);
+    let cfg_a = TempDir::new().unwrap();
+    let cfg_b = TempDir::new().unwrap();
+
+    let mut host = arvolo(cfg_a.path(), &relay_a, &["contacts", "add", "bob"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn the host side");
+
+    let mut lines = BufReader::new(host.stdout.take().unwrap()).lines();
+    let mut code = String::new();
+    while let Ok(Ok(Some(line))) = timeout(SPAWN_WAIT, lines.next_line()).await {
+        let t = line.trim();
+        if !t.is_empty() {
+            code = t.to_string();
+            break;
+        }
+    }
+    assert!(
+        code.contains('@'),
+        "a code has to carry its relay for the far side to reach it: {code:?}"
+    );
+
+    // B is configured on its *own* relay and never told about A's — the code is
+    // the only thing that crosses.
+    let (ok, _, err) = run(cfg_b.path(), &relay_b, &["contacts", "add", "alice", &code]).await;
+    assert!(ok, "the joining side failed: {err}");
+
+    let status = timeout(SPAWN_WAIT, host.wait())
+        .await
+        .expect("the host side should finish once paired")
+        .expect("host exit");
+    assert!(status.success(), "the host side failed");
+
+    // A learned where B listens, from the extras the joiner sealed back.
+    let (ok, shown, err) = run(cfg_a.path(), &relay_a, &["contacts", "relay", "bob"]).await;
+    assert!(ok, "reading back the relay failed: {err}");
+    assert_eq!(
+        shown.trim(),
+        relay_b,
+        "the host must learn the joiner's relay, or it can never send to them"
+    );
+
+    // And B learned where A listens, from the code.
+    let (ok, shown, err) = run(cfg_b.path(), &relay_b, &["contacts", "relay", "alice"]).await;
+    assert!(ok, "reading back the relay failed: {err}");
+    assert_eq!(shown.trim(), relay_a);
 }

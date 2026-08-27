@@ -1,3 +1,16 @@
+//! Which channel a sentence goes out on.
+//!
+//! `docs/COPY.md` splits everything the user reads into three slots: what
+//! happened, what they can do about it, and why. The first two go to stderr
+//! unconditionally — an action nobody sees is an action nobody takes. The third
+//! is what [`vprintln!`] is for: still there, still true, and out of the way of
+//! somebody who has read it before.
+//!
+//! An error cannot use that split on its own, because an `anyhow::Error` is a
+//! value travelling up the stack rather than a line being printed. [`refuse`]
+//! is the same shape for that case.
+
+use std::fmt::Display;
 use std::sync::atomic::{AtomicU8, Ordering};
 
 /// Process-global verbosity, set once from the `-v/--verbose` count in `main`.
@@ -60,6 +73,27 @@ pub(crate) fn init_tracing(verbose: u8) {
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
         .init();
+}
+
+/// Refuse to do something: `short` becomes the error, `why` goes to `-v`.
+///
+/// The three slots do not apply to an error by themselves. `bail!` and `ensure!`
+/// build a value that some caller will print much later, so there is no second
+/// channel to put the reason on — which is how the longest strings in this
+/// binary came to be errors, one of them 299 characters explaining a config key
+/// to somebody who only needed to know what to run instead.
+///
+/// So `short` carries the outcome **and the way out** — never demote the way out,
+/// or the refusal is a dead end — and `why` carries the reasoning, printed now if
+/// the user asked for it and dropped if they did not.
+///
+/// Note that `why` reaches the terminal *before* the error does, since the error
+/// is printed by whoever unwinds to it. That reads correctly with the `·` prefix
+/// (it is narration arriving in order) but it is worth knowing when reading a
+/// `-v` transcript.
+pub(crate) fn refuse(short: impl Display, why: impl Display) -> anyhow::Error {
+    vprintln!("{why}");
+    anyhow::anyhow!("{short}")
 }
 
 pub(crate) use {vprintln, vvprintln};

@@ -9,7 +9,7 @@
 //! inbox, on a real relay, to catch.
 //!
 //! Driven through the actual binary against an in-process relay: the one-shot
-//! `send <who> --deposit` path has no daemon behind it, so the tokens that retract
+//! `send <who> --mailbox` path has no daemon behind it, so the tokens that retract
 //! the offer only survive if the *record* keeps them — which is the whole fix.
 
 use std::path::Path;
@@ -56,9 +56,16 @@ async fn run(cfg: &Path, relay: &str, args: &[&str]) -> (bool, String) {
         .output()
         .await
         .expect("run arvolo");
+    // stdout carries the artefact alone; the narration — including the
+    // deposit id the user is told to cancel with — lives on stderr. Tests read
+    // both, the way a person watching the terminal sees both.
     (
         out.status.success(),
-        String::from_utf8_lossy(&out.stdout).into_owned(),
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        ),
     )
 }
 
@@ -79,21 +86,15 @@ async fn cancelling_a_mailbox_send_also_retracts_the_recipients_offer() {
     let (ok, _) = run(alice.path(), &relay, &["contacts", "add", "bob", &bob_b32]).await;
     assert!(ok, "contacts add");
 
-    // `--deposit` forces the mailbox path even though presence is unknown: one blob
+    // `--mailbox` forces the mailbox path even though presence is unknown: one blob
     // on the relay, one offer in bob's inbox, no daemon anywhere.
     let (ok, out) = run(
         alice.path(),
         &relay,
-        &[
-            "send",
-            "bob",
-            file.to_str().unwrap(),
-            "--deposit",
-            "--use-http",
-        ],
+        &["send", file.to_str().unwrap(), "--to", "bob", "--mailbox"],
     )
     .await;
-    assert!(ok, "send bob --deposit failed: {out}");
+    assert!(ok, "send bob --mailbox failed: {out}");
 
     let inbox = InboxSubscription::new(relay.clone(), &bob);
     let offers = inbox.poll().await.expect("poll bob's inbox");

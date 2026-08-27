@@ -112,8 +112,8 @@ async fn lists_what_is_waiting_and_downloads_the_chosen_one() {
     let cfg_send = TempDir::new().unwrap();
     let cfg_recv = TempDir::new().unwrap();
 
-    let send_id = first_word(run(cfg_send.path(), &relay, &["me"]).await.1);
-    let recv_id = first_word(run(cfg_recv.path(), &relay, &["me"]).await.1);
+    let send_id = first_word(run(cfg_send.path(), &relay, &["me", "--plain"]).await.1);
+    let recv_id = first_word(run(cfg_recv.path(), &relay, &["me", "--plain"]).await.1);
     assert!(!send_id.is_empty() && !recv_id.is_empty());
     assert_ne!(send_id, recv_id);
 
@@ -127,15 +127,16 @@ async fn lists_what_is_waiting_and_downloads_the_chosen_one() {
         &relay,
         &[
             "send",
-            &recv_id,
             file.to_str().unwrap(),
-            "--deposit",
+            "--to",
+            &recv_id,
+            "--mailbox",
             "--note",
             "the one we talked about",
         ],
     )
     .await;
-    assert!(ok, "send --deposit failed: {out}{err}");
+    assert!(ok, "send --mailbox failed: {out}{err}");
 
     // 1. See it. Stdin is closed, so the command lists and stops.
     let (ok, listed, err) = run(cfg_recv.path(), &relay, &["recv"]).await;
@@ -187,7 +188,7 @@ async fn lists_what_is_waiting_and_downloads_the_chosen_one() {
     let (ok, after, _) = run(cfg_recv.path(), &relay, &["recv"]).await;
     assert!(ok);
     assert!(
-        after.contains("Nothing waiting") && !after.contains("report.txt"),
+        after.contains("Nothing addressed to you") && !after.contains("report.txt"),
         "a taken offer should be gone from the relay: {after}"
     );
 }
@@ -203,7 +204,7 @@ async fn nothing_waiting_says_why_a_code_can_never_be_listed() {
     let (ok, out, err) = run(cfg.path(), &relay, &["recv"]).await;
     assert!(ok, "an empty inbox is not an error: {out}{err}");
     assert!(
-        out.contains("Nothing waiting"),
+        out.contains("Nothing addressed to you"),
         "should say the inbox is empty: {out}"
     );
     assert!(
@@ -223,16 +224,22 @@ async fn an_offer_can_be_declined_and_then_it_is_gone() {
     let cfg_send = TempDir::new().unwrap();
     let cfg_recv = TempDir::new().unwrap();
 
-    let recv_id = first_word(run(cfg_recv.path(), &relay, &["me"]).await.1);
+    let recv_id = first_word(run(cfg_recv.path(), &relay, &["me", "--plain"]).await.1);
     let file = cfg_send.path().join("unwanted.bin");
     std::fs::write(&file, b"no thanks").unwrap();
     let (ok, out, err) = run(
         cfg_send.path(),
         &relay,
-        &["send", &recv_id, file.to_str().unwrap(), "--deposit"],
+        &[
+            "send",
+            file.to_str().unwrap(),
+            "--to",
+            &recv_id,
+            "--mailbox",
+        ],
     )
     .await;
-    assert!(ok, "send --deposit failed: {out}{err}");
+    assert!(ok, "send --mailbox failed: {out}{err}");
 
     let (ok, log) = run_answering(cfg_recv.path(), &relay, &["recv"], "d1\n").await;
     assert!(ok, "declining should succeed: {log}");
@@ -242,7 +249,7 @@ async fn an_offer_can_be_declined_and_then_it_is_gone() {
     let (ok, after, _) = run(cfg_recv.path(), &relay, &["recv"]).await;
     assert!(ok);
     assert!(
-        after.contains("Nothing waiting") && !after.contains("unwanted.bin"),
+        after.contains("Nothing addressed to you") && !after.contains("unwanted.bin"),
         "a declined offer must not come back: {after}"
     );
 }
@@ -260,16 +267,22 @@ async fn status_without_a_daemon_shows_what_is_waiting() {
     let cfg_send = TempDir::new().unwrap();
     let cfg_recv = TempDir::new().unwrap();
 
-    let recv_id = first_word(run(cfg_recv.path(), &relay, &["me"]).await.1);
+    let recv_id = first_word(run(cfg_recv.path(), &relay, &["me", "--plain"]).await.1);
     let file = cfg_send.path().join("invoice.pdf");
     std::fs::write(&file, b"payable on receipt").unwrap();
     let (ok, out, err) = run(
         cfg_send.path(),
         &relay,
-        &["send", &recv_id, file.to_str().unwrap(), "--deposit"],
+        &[
+            "send",
+            file.to_str().unwrap(),
+            "--to",
+            &recv_id,
+            "--mailbox",
+        ],
     )
     .await;
-    assert!(ok, "send --deposit failed: {out}{err}");
+    assert!(ok, "send --mailbox failed: {out}{err}");
 
     let (ok, status, err) = run(cfg_recv.path(), &relay, &["status"]).await;
     assert!(ok, "status should succeed: {status}{err}");
@@ -298,7 +311,7 @@ async fn status_says_nothing_when_nothing_is_waiting() {
     let cfg = TempDir::new().unwrap();
     // Give the config dir an identity, so the inbox really is read and found empty
     // rather than skipped for want of one.
-    run(cfg.path(), &relay, &["me"]).await;
+    run(cfg.path(), &relay, &["me", "--plain"]).await;
 
     let (ok, status, err) = run(cfg.path(), &relay, &["status"]).await;
     assert!(ok, "status should succeed: {status}{err}");
@@ -322,18 +335,24 @@ async fn a_blocked_sender_is_not_listed() {
     let cfg_send = TempDir::new().unwrap();
     let cfg_recv = TempDir::new().unwrap();
 
-    let send_id = first_word(run(cfg_send.path(), &relay, &["me"]).await.1);
-    let recv_id = first_word(run(cfg_recv.path(), &relay, &["me"]).await.1);
+    let send_id = first_word(run(cfg_send.path(), &relay, &["me", "--plain"]).await.1);
+    let recv_id = first_word(run(cfg_recv.path(), &relay, &["me", "--plain"]).await.1);
 
     let file = cfg_send.path().join("spam.txt");
     std::fs::write(&file, b"unwanted").unwrap();
     let (ok, out, err) = run(
         cfg_send.path(),
         &relay,
-        &["send", &recv_id, file.to_str().unwrap(), "--deposit"],
+        &[
+            "send",
+            file.to_str().unwrap(),
+            "--to",
+            &recv_id,
+            "--mailbox",
+        ],
     )
     .await;
-    assert!(ok, "send --deposit failed: {out}{err}");
+    assert!(ok, "send --mailbox failed: {out}{err}");
 
     let (ok, out, err) = run(cfg_recv.path(), &relay, &["contacts", "block", &send_id]).await;
     assert!(ok, "block failed: {out}{err}");

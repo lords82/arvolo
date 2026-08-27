@@ -117,6 +117,12 @@ export function locale(): string {
 export function setLangChoice(next: LangChoice): void {
   choice = next;
   lang = next === "system" ? systemLang() : next;
+  // The native side (tray, notifications) follows along. Deliberately a dynamic
+  // import: this module is loaded by tests and by the pure-web preview, where no
+  // Tauri backend exists to invoke.
+  import("../ipc")
+    .then((m) => m.api.setUiLanguage(lang))
+    .catch(() => {});
   // `<html lang>` is not decoration: it is what a screen reader picks its voice
   // from, and what the webview hyphenates and spell-checks against.
   if (typeof document !== "undefined") {

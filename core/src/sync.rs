@@ -5,7 +5,14 @@
 //! snapshot of its address book as a mutable cell on that slot; the others pull
 //! it and **merge**. Merge is a state-based CRDT — commutative, associative and
 //! idempotent — so ordering, re-delivery and concurrent edits all converge with
-//! no coordination and no device roster.
+//! no coordination.
+//!
+//! The snapshot also carries a roster of the machines themselves, so a send can
+//! be aimed at one of them. It is a register like the others and rides inside the
+//! same encrypted cell, so the relay learns nothing from it — but it is *self
+//! reported*: each machine writes its own row and nothing outside proves that a
+//! row corresponds to a computer that exists. See [`DeviceEntry`] and the
+//! authorship rule in [`SyncState::merge`].
 //!
 //! This module is the pure engine: wire types, snapshot encryption (under a key
 //! derived from the identity secret, so every device derives it independently),
@@ -100,12 +107,27 @@ pub struct MarkEntry {
     pub since: u64,
 }
 
-/// One TOFU seen counter. Merged by `max` (idempotent; preserves the only value
-/// ever consumed — the "seen before?" boolean).
+/// One TOFU seen counter, and when this identity was last exchanged with.
+///
+/// Both merged by `max`: idempotent, order-independent, and for the counter it
+/// preserves the only value ever consumed — the "seen before?" boolean.
+///
+/// `last` is here rather than in a ledger of its own because it answers a
+/// question about the same key and merges the same way. A date kept locally would
+/// read differently on each of your machines, which for an address book that
+/// syncs is worse than not showing it at all: "last week" here and "never" there,
+/// about the same person. Max is the right merge for a most-recent stamp — two
+/// machines that exchanged with somebody keep the later of the two, and neither
+/// has to be right about the clock beyond the day.
+///
+/// `0` means never — including for a contact last exchanged with before this
+/// field existed, which is the honest answer: we did not record it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SeenEntry {
     pub pubkey: String,
     pub count: u64,
+    #[serde(default)]
+    pub last: u64,
 }
 
 /// One advertised-name binding, keyed by pubkey (last-writer-wins, like a
@@ -120,6 +142,64 @@ pub struct NameEntry {
     pub pending: Option<String>,
     pub clock: Lamport,
     pub deleted: bool,
+}
+
+/// Where one identity listens, keyed by pubkey. Last-writer-wins with a
+/// tombstone, exactly like [`NameEntry`].
+///
+/// Routing, not identity — it decides which relay a send is aimed at and nothing
+/// about who the far side is. It syncs for the same reason a petname does: it is
+/// something you learned about somebody, and having to relearn it on every one of
+/// your machines is the kind of chore that ends with one of them quietly unable to
+/// reach a contact the others can.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelayEntry {
+    pub pubkey: String,
+    pub relay: String,
+    pub clock: Lamport,
+    pub deleted: bool,
+}
+
+/// One machine holding this identity, as it describes itself.
+///
+/// The register that is **not** like the others: a contact is something you write
+/// about somebody else, a device row is something a machine writes about itself.
+/// Nobody adds a device — pairing hands over the seed and the new machine starts
+/// announcing itself on its next sync round. See [`SyncState::merge`] for the one
+/// extra rule that makes that safe.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceEntry {
+    /// Lowercase hex of the writer's [`DeviceId`] — the key, repeated in the row
+    /// so a snapshot stays a flat list.
+    pub id: String,
+    /// What the user calls this machine. Defaulted from its hostname, editable
+    /// only on the machine itself (again: see `merge`).
+    pub name: String,
+    /// `std::env::consts::OS` on the machine that wrote the row. A hint for the
+    /// icon and for telling two similarly-named rows apart, never a decision.
+    pub platform: String,
+    /// Unix seconds when that machine last published a snapshot. Self-reported —
+    /// there is no neutral clock here — so a reader clamps it to "now" and shows
+    /// it as elapsed time, never as a presence light.
+    pub last_seen: u64,
+    pub clock: Lamport,
+    pub deleted: bool,
+}
+
+/// The state-side form of [`DeviceEntry`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeviceReg {
+    pub name: String,
+    pub platform: String,
+    pub last_seen: u64,
+    pub clock: Lamport,
+    pub deleted: bool,
+}
+
+/// A [`DeviceId`] as it keys the device register: lowercase hex, so the map key
+/// and the row's own `id` are the same string everywhere.
+pub fn device_key(id: &DeviceId) -> String {
+    data_encoding::HEXLOWER.encode(id)
 }
 
 /// A full, self-contained snapshot of the address book — the on-the-wire form of
@@ -145,6 +225,22 @@ pub struct SyncSnapshot {
     /// merges as "no information", never as "unblock everything".
     #[serde(default)]
     pub blocked: Vec<MarkEntry>,
+    /// The machines holding this identity, each row written by the machine it
+    /// describes. `#[serde(default)]` for the same reason as the two above: a
+    /// device that predates the register sends none, which reads as "I know of no
+    /// devices" and never as "there are none".
+    #[serde(default)]
+    pub devices: Vec<DeviceEntry>,
+    /// Where each contact listens, when it is not wherever you do.
+    ///
+    /// Last field, and that placement is the only thing keeping the local sidecar
+    /// readable across the upgrade: postcard decodes positionally, so
+    /// [`decode_snapshot`] reads a sidecar written without it by falling back to
+    /// the shape that had none. On the wire it needs no such care — the sealed
+    /// form changed at the same time (see `seal_under`), so a build old enough to
+    /// lack this field cannot open a note carrying it in the first place.
+    #[serde(default)]
+    pub relays: Vec<RelayEntry>,
 }
 
 /// The sealed inbox payload carrying a snapshot to the user's other devices.
@@ -210,6 +306,23 @@ pub struct NameReg {
     pub deleted: bool,
 }
 
+/// The state-side form of [`RelayEntry`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RelayReg {
+    pub relay: String,
+    pub clock: Lamport,
+    pub deleted: bool,
+}
+
+/// What is known about exchanges with one key: how many were taken from it, and
+/// when the last one happened (0 = never recorded). Both merge by `max`, so this
+/// register needs no clock — see [`SeenEntry`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SeenReg {
+    pub count: u64,
+    pub last: u64,
+}
+
 /// The canonical, in-memory CRDT state — the merge target and the source of the
 /// projection into the four TOML ledgers. Kept as maps for O(log n) merge.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -220,15 +333,46 @@ pub struct SyncState {
     pub verified: BTreeMap<String, MarkReg>,
     /// pubkey → trusted mark.
     pub trusted: BTreeMap<String, MarkReg>,
-    /// pubkey → seen counter.
-    pub seen: BTreeMap<String, u64>,
+    /// pubkey → seen counter and last exchange.
+    pub seen: BTreeMap<String, SeenReg>,
     /// pubkey → advertised-name register.
     pub names: BTreeMap<String, NameReg>,
     /// pubkey → blocked mark.
     pub blocked: BTreeMap<String, MarkReg>,
+    /// pubkey → the relay that identity listens on.
+    pub relays: BTreeMap<String, RelayReg>,
+    /// [`device_key`] → what that machine says about itself.
+    pub devices: BTreeMap<String, DeviceReg>,
 }
 
 impl SyncState {
+    /// Does any register here carry a clock stamped by a device other than `mine`?
+    ///
+    /// A register only gets a foreign device id by winning a merge against a
+    /// snapshot another device published, so this answering `true` is proof that
+    /// this identity has been on at least two machines. It is *not* proof of the
+    /// reverse: a device paired a minute ago, or one that has only ever received,
+    /// has nothing of anyone else's to show. Only good enough to decide whether to
+    /// suggest `device pair`, which is all it is used for.
+    pub fn authored_by_another_device(&self, mine: &DeviceId) -> bool {
+        let contacts = self.contacts.values().map(|r| &r.clock);
+        let names = self.names.values().map(|r| &r.clock);
+        let marks = self
+            .verified
+            .values()
+            .chain(self.trusted.values())
+            .chain(self.blocked.values())
+            .map(|r| &r.clock);
+        // A device row authored by somebody else is the least circumstantial
+        // evidence of the lot: it is another machine saying so itself.
+        let devices = self.devices.values().map(|r| &r.clock);
+        contacts
+            .chain(names)
+            .chain(marks)
+            .chain(devices)
+            .any(|c| &c.device != mine)
+    }
+
     /// Build canonical state from a wire snapshot.
     pub fn from_snapshot(s: &SyncSnapshot) -> Self {
         let mut state = SyncState::default();
@@ -273,7 +417,13 @@ impl SyncState {
             );
         }
         for e in &s.seen {
-            state.seen.insert(e.pubkey.clone(), e.count);
+            state.seen.insert(
+                e.pubkey.clone(),
+                SeenReg {
+                    count: e.count,
+                    last: e.last,
+                },
+            );
         }
         for n in &s.names {
             state.names.insert(
@@ -283,6 +433,28 @@ impl SyncState {
                     pending: n.pending.clone(),
                     clock: n.clock,
                     deleted: n.deleted,
+                },
+            );
+        }
+        for r in &s.relays {
+            state.relays.insert(
+                r.pubkey.clone(),
+                RelayReg {
+                    relay: r.relay.clone(),
+                    clock: r.clock,
+                    deleted: r.deleted,
+                },
+            );
+        }
+        for d in &s.devices {
+            state.devices.insert(
+                d.id.clone(),
+                DeviceReg {
+                    name: d.name.clone(),
+                    platform: d.platform.clone(),
+                    last_seen: d.last_seen,
+                    clock: d.clock,
+                    deleted: d.deleted,
                 },
             );
         }
@@ -339,9 +511,10 @@ impl SyncState {
             seen: self
                 .seen
                 .iter()
-                .map(|(pubkey, count)| SeenEntry {
+                .map(|(pubkey, r)| SeenEntry {
                     pubkey: pubkey.clone(),
-                    count: *count,
+                    count: r.count,
+                    last: r.last,
                 })
                 .collect(),
             names: self
@@ -351,6 +524,28 @@ impl SyncState {
                     pubkey: pubkey.clone(),
                     pinned: r.pinned.clone(),
                     pending: r.pending.clone(),
+                    clock: r.clock,
+                    deleted: r.deleted,
+                })
+                .collect(),
+            relays: self
+                .relays
+                .iter()
+                .map(|(pubkey, r)| RelayEntry {
+                    pubkey: pubkey.clone(),
+                    relay: r.relay.clone(),
+                    clock: r.clock,
+                    deleted: r.deleted,
+                })
+                .collect(),
+            devices: self
+                .devices
+                .iter()
+                .map(|(id, r)| DeviceEntry {
+                    id: id.clone(),
+                    name: r.name.clone(),
+                    platform: r.platform.clone(),
+                    last_seen: r.last_seen,
                     clock: r.clock,
                     deleted: r.deleted,
                 })
@@ -375,9 +570,10 @@ impl SyncState {
         merge_marks(&mut self.verified, &other.verified);
         merge_marks(&mut self.trusted, &other.trusted);
         merge_marks(&mut self.blocked, &other.blocked);
-        for (pubkey, count) in &other.seen {
-            let e = self.seen.entry(pubkey.clone()).or_insert(0);
-            *e = (*e).max(*count);
+        for (pubkey, incoming) in &other.seen {
+            let e = self.seen.entry(pubkey.clone()).or_default();
+            e.count = e.count.max(incoming.count);
+            e.last = e.last.max(incoming.last);
         }
         for (pubkey, incoming) in &other.names {
             match self.names.get(pubkey) {
@@ -387,6 +583,15 @@ impl SyncState {
                 }
             }
         }
+        for (pubkey, incoming) in &other.relays {
+            match self.relays.get(pubkey) {
+                Some(cur) if cur.clock >= incoming.clock => {}
+                _ => {
+                    self.relays.insert(pubkey.clone(), incoming.clone());
+                }
+            }
+        }
+        merge_devices(&mut self.devices, &other.devices);
     }
 
     /// The highest Lamport counter observed anywhere in this state — used to
@@ -408,7 +613,54 @@ impl SyncState {
         for r in self.blocked.values() {
             m = m.max(r.clock.counter);
         }
+        for r in self.relays.values() {
+            m = m.max(r.clock.counter);
+        }
+        for r in self.devices.values() {
+            m = m.max(r.clock.counter);
+        }
         m
+    }
+}
+
+/// Merge the device register: last-writer-wins by [`Lamport`], like the contacts,
+/// **plus one rule the contacts do not have** — a live row is only accepted from
+/// the machine it describes.
+///
+/// Without it the register is an ordinary LWW map, so any device could rewrite
+/// any other device's row and win by holding the higher counter. That matters
+/// here in a way it does not for a contact: the rows are what a targeted send
+/// picks from, so "send it to the MacBook" would come to mean "send it to
+/// whichever machine last called itself the MacBook". Requiring `clock.device` to
+/// be the row's own id makes a device's description of itself the only one there
+/// is.
+///
+/// Tombstones are exempt, and have to be: forgetting a machine is something you
+/// do *from another machine*, usually because the one being forgotten is gone. So
+/// anyone may delete a row and nobody may write one but its owner. (What stops a
+/// forgotten-but-still-running device from simply re-announcing itself is not
+/// here — it is the retirement check on the writing side, which declines to
+/// republish a row its own identity has tombstoned.)
+fn merge_devices(into: &mut BTreeMap<String, DeviceReg>, other: &BTreeMap<String, DeviceReg>) {
+    for (id, incoming) in other {
+        // Self-authorship, checked against the key rather than against whoever
+        // handed us the snapshot: snapshots are relayed between devices, so the
+        // machine we merged this from is very often not the one that wrote it.
+        if !incoming.deleted && device_key(&incoming.clock.device) != *id {
+            continue;
+        }
+        match into.get(id) {
+            Some(cur) if cur.clock > incoming.clock => {}
+            Some(cur) if cur.clock == incoming.clock => {
+                // Exact-clock tie, as for a mark: delete wins.
+                if incoming.deleted && !cur.deleted {
+                    into.insert(id.clone(), incoming.clone());
+                }
+            }
+            _ => {
+                into.insert(id.clone(), incoming.clone());
+            }
+        }
     }
 }
 
@@ -438,34 +690,132 @@ pub fn encode_snapshot(snap: &SyncSnapshot) -> Result<Vec<u8>> {
 }
 
 /// Inverse of [`encode_snapshot`].
+///
+/// Falls back to the shape written before [`SyncSnapshot::relays`] existed. Only
+/// the *local* sidecar needs this — a wire note carrying relays is sealed in a
+/// form older builds cannot open at all — and it matters because the caller
+/// swallows a failure here and rebuilds from the TOML ledgers, which silently
+/// costs every Lamport clock and every tombstone this device was holding.
 pub fn decode_snapshot(bytes: &[u8]) -> Result<SyncSnapshot> {
-    postcard::from_bytes(bytes).context("deserialize sync snapshot")
+    // Newest first: postcard ignores trailing bytes, so the older shape would
+    // happily read a current sidecar and drop the relays without a word.
+    if let Ok(snap) = postcard::from_bytes::<SyncSnapshot>(bytes) {
+        return Ok(snap);
+    }
+    let v1: SyncSnapshotV1 = postcard::from_bytes(bytes).context("deserialize sync snapshot")?;
+    Ok(SyncSnapshot {
+        lamport: v1.lamport,
+        device: v1.device,
+        contacts: v1.contacts,
+        verified: v1.verified,
+        trusted: v1.trusted,
+        seen: v1.seen,
+        names: v1.names,
+        blocked: v1.blocked,
+        devices: v1.devices,
+        relays: Vec::new(),
+    })
+}
+
+/// [`SyncSnapshot`] as the local sidecar was written before it tracked relays.
+#[derive(Deserialize)]
+struct SyncSnapshotV1 {
+    lamport: u64,
+    device: DeviceId,
+    contacts: Vec<ContactEntry>,
+    verified: Vec<MarkEntry>,
+    trusted: Vec<MarkEntry>,
+    seen: Vec<SeenEntry>,
+    names: Vec<NameEntry>,
+    blocked: Vec<MarkEntry>,
+    devices: Vec<DeviceEntry>,
 }
 
 // ---- snapshot encryption --------------------------------------------------
 
+/// Marks a sealed payload as carrying its own salt. A blob without it is the
+/// unsalted shape described on [`seal_under`].
+const SALTED_MAGIC: &[u8; 4] = b"ASS1";
+/// Bytes of fresh randomness per message. Sixteen, not twelve: this is a KDF
+/// input, not a nonce, so it costs nothing to be past any birthday-bound argument.
+const SALT_LEN: usize = 16;
+
+/// Context for turning the long-lived snapshot key into a per-message one.
+const MESSAGE_KEY_CONTEXT: &str = "arvolo/contacts-sync/message-key/v1";
+
+/// Encrypt `plain` under a **fresh key per message**, derived from the long-lived
+/// one and a random salt that travels with the ciphertext.
+///
+/// The salt is what makes this safe, and it was missing. [`crypto::seal_chunk`]
+/// derives its nonce from the chunk index alone, and says why that is sound:
+/// *"the key is fresh-random per transfer, so each (key, nonce) pair is used
+/// exactly once"*. That holds for a file transfer, whose content key is random.
+/// It did not hold here — the snapshot key is `blake3(identity_secret)`, constant
+/// for the identity and identical on every device — so every snapshot this
+/// identity ever published was sealed under the same key at nonce zero.
+///
+/// AES-GCM does not survive that. Two ciphertexts under one (key, nonce) reveal
+/// the XOR of their plaintexts, and repeated reuse recovers the GHASH
+/// authentication subkey, which turns confidentiality loss into forgery. These
+/// blobs sit in an inbox slot on the relay, so the party best placed to collect
+/// them is the relay operator — the adversary the rest of this design is built
+/// against — and a forged sync note rewrites contacts and their verified marks on
+/// the user's other machines.
+///
+/// Deriving per message restores the invariant `seal_chunk` documents rather than
+/// working around it: each message gets a key used exactly once, at nonce zero.
+fn seal_under(key: &[u8; crypto::CHUNK_KEY_LEN], plain: &[u8]) -> Result<Vec<u8>> {
+    let salt: [u8; SALT_LEN] = rand::random();
+    let mut input = Vec::with_capacity(key.len() + SALT_LEN);
+    input.extend_from_slice(key);
+    input.extend_from_slice(&salt);
+    let message_key = blake3::derive_key(MESSAGE_KEY_CONTEXT, &input);
+
+    let mut out = Vec::with_capacity(SALTED_MAGIC.len() + SALT_LEN + plain.len() + 16);
+    out.extend_from_slice(SALTED_MAGIC);
+    out.extend_from_slice(&salt);
+    out.extend_from_slice(&crypto::seal_chunk(&message_key, 0, 1, plain)?);
+    Ok(out)
+}
+
+/// Inverse of [`seal_under`], accepting the unsalted shape written before it.
+///
+/// Notes already sitting in an inbox were written the old way and live for up to
+/// their TTL, so refusing them would drop a week of address-book edits at the
+/// upgrade. The fallback can go once no relay can still be holding one.
+fn open_under(key: &[u8; crypto::CHUNK_KEY_LEN], blob: &[u8]) -> Result<Vec<u8>> {
+    if let Some(rest) = blob.strip_prefix(&SALTED_MAGIC[..]) {
+        if rest.len() > SALT_LEN {
+            let (salt, ct) = rest.split_at(SALT_LEN);
+            let mut input = Vec::with_capacity(key.len() + SALT_LEN);
+            input.extend_from_slice(key);
+            input.extend_from_slice(salt);
+            let message_key = blake3::derive_key(MESSAGE_KEY_CONTEXT, &input);
+            // Only fall through on failure: a legacy ciphertext beginning with
+            // those four bytes by chance is a 1-in-2^32 nuisance, not a reason to
+            // refuse it.
+            if let Ok(plain) = crypto::open_chunk(&message_key, 0, 1, ct) {
+                return Ok(plain);
+            }
+        }
+    }
+    crypto::open_chunk(key, 0, 1, blob).context("decrypt sync payload")
+}
+
 /// Encrypt a snapshot under the identity-derived key. Reuses the AES-256-GCM
-/// chunk cipher (index 0 / total 1); the key's domain-separated derivation is
-/// what isolates this ciphertext from the chunked-transfer path.
+/// chunk cipher, with a per-message key so the (key, nonce) pair is fresh — see
+/// [`seal_under`]. The key's domain-separated derivation is what isolates this
+/// ciphertext from the chunked-transfer path.
 pub fn encrypt_snapshot(key: &[u8; crypto::CHUNK_KEY_LEN], snap: &SyncSnapshot) -> Result<Vec<u8>> {
     let plain = postcard::to_allocvec(snap).context("serialize sync snapshot")?;
-    crypto::seal_chunk(key, 0, 1, &plain)
+    seal_under(key, &plain)
 }
 
 /// Decrypt a snapshot produced by [`encrypt_snapshot`]. Fails on the wrong key or
 /// tampering (AEAD).
 pub fn decrypt_snapshot(key: &[u8; crypto::CHUNK_KEY_LEN], blob: &[u8]) -> Result<SyncSnapshot> {
-    let plain = crypto::open_chunk(key, 0, 1, blob).context("decrypt sync snapshot")?;
+    let plain = open_under(key, blob).context("decrypt sync snapshot")?;
     postcard::from_bytes(&plain).context("deserialize sync snapshot")
-}
-
-/// A stable id for a sync note, used to dedup already-merged notes. Derived from
-/// the encrypted blob so identical snapshots share an id.
-pub fn note_id(blob: &[u8]) -> [u8; 16] {
-    let h = blake3::hash(blob);
-    let mut id = [0u8; 16];
-    id.copy_from_slice(&h.as_bytes()[..16]);
-    id
 }
 
 // ---- device-join authorization seam ---------------------------------------
@@ -530,6 +880,8 @@ mod tests {
             blocked: vec![],
             seen: vec![],
             names: vec![],
+            devices: vec![],
+            relays: vec![],
         })
     }
 
@@ -546,12 +898,95 @@ mod tests {
             seen: vec![SeenEntry {
                 pubkey: "aaaa".into(),
                 count: 2,
+                last: 1_700_000_000,
             }],
             names: vec![],
+            devices: vec![],
+            relays: vec![],
         };
         let blob = encrypt_snapshot(&key, &snap).unwrap();
         assert_ne!(blob, postcard::to_allocvec(&snap).unwrap());
         assert_eq!(decrypt_snapshot(&key, &blob).unwrap(), snap);
+    }
+
+    /// Two snapshots sealed under one identity key must not share a keystream.
+    ///
+    /// They did. `seal_chunk` takes its nonce from the chunk index, sound only
+    /// because a transfer's content key is fresh-random — and the snapshot key is
+    /// `blake3(identity_secret)`, the same value forever on every device. So every
+    /// snapshot an identity published went out under (same key, nonce 0), and any
+    /// two of them XOR to the XOR of their plaintexts. The relay holds them.
+    ///
+    /// The check is the attack: if the keystream repeats, `c1 ^ c2 == p1 ^ p2`
+    /// over the common prefix. It has to stay false.
+    #[test]
+    fn two_snapshots_never_share_a_keystream() {
+        let key = snapshot_key(b"an identity secret 32 bytes long!");
+        let mk = |lamport: u64| SyncSnapshot {
+            lamport,
+            device: [9u8; 16],
+            contacts: vec![contact("alice", "aaaa", lam(3, 1), false)],
+            verified: vec![],
+            trusted: vec![],
+            blocked: vec![],
+            seen: vec![],
+            names: vec![],
+            devices: vec![],
+            relays: vec![],
+        };
+        let (a, b) = (mk(1), mk(2));
+        let (ca, cb) = (
+            encrypt_snapshot(&key, &a).unwrap(),
+            encrypt_snapshot(&key, &b).unwrap(),
+        );
+        let (pa, pb) = (
+            postcard::to_allocvec(&a).unwrap(),
+            postcard::to_allocvec(&b).unwrap(),
+        );
+
+        let n = pa.len().min(pb.len());
+        let body = SALTED_MAGIC.len() + SALT_LEN;
+        let ct_xor: Vec<u8> = ca[body..body + n]
+            .iter()
+            .zip(&cb[body..body + n])
+            .map(|(x, y)| x ^ y)
+            .collect();
+        let pt_xor: Vec<u8> = pa[..n].iter().zip(&pb[..n]).map(|(x, y)| x ^ y).collect();
+        assert_ne!(
+            ct_xor, pt_xor,
+            "the keystream repeats — nonce reuse is back"
+        );
+
+        // And the same plaintext twice must not produce the same ciphertext, which
+        // is the cheap tell that a salt is being generated at all.
+        assert_ne!(
+            encrypt_snapshot(&key, &a).unwrap(),
+            encrypt_snapshot(&key, &a).unwrap()
+        );
+    }
+
+    /// A note written before the salt existed still opens. They sit in an inbox
+    /// for up to their TTL, so refusing them would throw away a week of edits at
+    /// the upgrade rather than at some later, quieter moment.
+    #[test]
+    fn an_unsalted_snapshot_still_opens() {
+        let key = snapshot_key(b"an identity secret 32 bytes long!");
+        let snap = SyncSnapshot {
+            lamport: 4,
+            device: [1u8; 16],
+            contacts: vec![contact("bob", "bbbb", lam(2, 1), false)],
+            verified: vec![],
+            trusted: vec![],
+            blocked: vec![],
+            seen: vec![],
+            names: vec![],
+            devices: vec![],
+            relays: vec![],
+        };
+        // Exactly what the old `encrypt_snapshot` wrote.
+        let legacy =
+            crypto::seal_chunk(&key, 0, 1, &postcard::to_allocvec(&snap).unwrap()).unwrap();
+        assert_eq!(decrypt_snapshot(&key, &legacy).unwrap(), snap);
     }
 
     #[test]
@@ -565,6 +1000,8 @@ mod tests {
             blocked: vec![],
             seen: vec![],
             names: vec![],
+            devices: vec![],
+            relays: vec![],
         };
         let blob = encrypt_snapshot(&snapshot_key(b"secret-one"), &snap).unwrap();
         assert!(decrypt_snapshot(&snapshot_key(b"secret-two"), &blob).is_err());
@@ -621,8 +1058,11 @@ mod tests {
             seen: vec![SeenEntry {
                 pubkey: "k".into(),
                 count: 3,
+                last: 1_700_000_000,
             }],
             names: vec![],
+            devices: vec![],
+            relays: vec![],
         });
         let b = SyncState::from_snapshot(&SyncSnapshot {
             lamport: 0,
@@ -639,12 +1079,23 @@ mod tests {
             seen: vec![SeenEntry {
                 pubkey: "k".into(),
                 count: 5,
+                last: 1_600_000_000,
             }],
             names: vec![],
+            devices: vec![],
+            relays: vec![],
         });
         a.merge(&b);
         assert!(a.verified["k"].deleted, "later remove wins the 2P-set");
-        assert_eq!(a.seen["k"], 5, "seen merges by max");
+        assert_eq!(a.seen["k"].count, 5, "seen merges by max");
+        // The stamp beside it merges the same way, and the *later* one wins even
+        // though it arrived on the side with the smaller count: an address book
+        // that syncs must answer "when did I last deal with them" the same on
+        // every machine, and max is what makes that independent of merge order.
+        assert_eq!(
+            a.seen["k"].last, 1_700_000_000,
+            "the last exchange merges by max, not by whoever spoke last"
+        );
     }
 
     #[test]
@@ -695,6 +1146,8 @@ mod tests {
                 clock,
                 deleted: false,
             }],
+            devices: vec![],
+            relays: vec![],
         })
     }
 
@@ -735,6 +1188,8 @@ mod tests {
                 clock,
                 deleted: true,
             }],
+            devices: vec![],
+            relays: vec![],
         })
     }
 
@@ -790,5 +1245,235 @@ mod tests {
         a.merge(&b);
         assert_eq!(a.names["k1"].pinned, "Alice");
         assert_eq!(a.names["k2"].pinned, "Bob");
+    }
+
+    fn relay_state(rows: Vec<RelayEntry>) -> SyncState {
+        SyncState::from_snapshot(&SyncSnapshot {
+            lamport: 0,
+            device: [0u8; 16],
+            contacts: vec![],
+            verified: vec![],
+            trusted: vec![],
+            blocked: vec![],
+            seen: vec![],
+            names: vec![],
+            devices: vec![],
+            relays: rows,
+        })
+    }
+
+    fn relay_row(pubkey: &str, relay: &str, clock: Lamport, deleted: bool) -> RelayEntry {
+        RelayEntry {
+            pubkey: pubkey.into(),
+            relay: relay.into(),
+            clock,
+            deleted,
+        }
+    }
+
+    /// The relay register behaves like every other one: last writer wins, both
+    /// orders agree, and a tombstone is a value rather than an omission — a peer
+    /// still holding the old row must not put it back.
+    #[test]
+    fn relays_converge_and_tombstone() {
+        let older = relay_row("k", "https://one.example", lam(1, 1), false);
+        let newer = relay_row("k", "https://two.example", lam(2, 2), false);
+
+        let mut a = relay_state(vec![older.clone()]);
+        a.merge(&relay_state(vec![newer.clone()]));
+        let mut b = relay_state(vec![newer.clone()]);
+        b.merge(&relay_state(vec![older.clone()]));
+        assert_eq!(a, b, "merge commutes");
+        assert_eq!(a.relays["k"].relay, "https://two.example");
+
+        // Idempotent.
+        let mut again = a.clone();
+        again.merge(&relay_state(vec![newer.clone()]));
+        assert_eq!(again, a);
+
+        // A clearing wins by clock, and a later re-add beats it back.
+        let mut c = a.clone();
+        c.merge(&relay_state(vec![relay_row("k", "", lam(3, 1), true)]));
+        assert!(c.relays["k"].deleted);
+        c.merge(&relay_state(vec![relay_row(
+            "k",
+            "https://three.example",
+            lam(4, 1),
+            false,
+        )]));
+        assert!(!c.relays["k"].deleted);
+        assert_eq!(c.relays["k"].relay, "https://three.example");
+
+        // And it feeds the clock, or a device that only ever edited a relay would
+        // keep minting counters everyone else has already passed.
+        assert_eq!(c.max_counter(), 4);
+    }
+
+    /// A sidecar written before relays existed still loads, keeping the clocks and
+    /// tombstones it holds. Losing it is not loud — the caller falls back to
+    /// rebuilding from the TOML ledgers, which have neither.
+    #[test]
+    fn a_sidecar_without_relays_still_decodes() {
+        #[derive(Serialize)]
+        struct OldSidecar {
+            lamport: u64,
+            device: DeviceId,
+            contacts: Vec<ContactEntry>,
+            verified: Vec<MarkEntry>,
+            trusted: Vec<MarkEntry>,
+            seen: Vec<SeenEntry>,
+            names: Vec<NameEntry>,
+            blocked: Vec<MarkEntry>,
+            devices: Vec<DeviceEntry>,
+        }
+        let old = OldSidecar {
+            lamport: 5,
+            device: [3u8; 16],
+            contacts: vec![contact("alice", "aaaa", lam(3, 1), false)],
+            verified: vec![],
+            trusted: vec![],
+            seen: vec![],
+            names: vec![],
+            blocked: vec![],
+            devices: vec![],
+        };
+        let bytes = postcard::to_allocvec(&old).unwrap();
+
+        let snap = decode_snapshot(&bytes).expect("an older sidecar still loads");
+        assert_eq!(snap.lamport, 5);
+        assert_eq!(snap.contacts.len(), 1);
+        assert!(snap.relays.is_empty());
+
+        // And a current sidecar is not mistaken for the old shape, which postcard
+        // would otherwise read happily and silently drop the relays from.
+        let mut current = snap.clone();
+        current.relays = vec![relay_row("k", "https://r.example", lam(1, 1), false)];
+        let round = decode_snapshot(&encode_snapshot(&current).unwrap()).unwrap();
+        assert_eq!(round.relays.len(), 1);
+    }
+
+    fn device_state(rows: Vec<DeviceEntry>) -> SyncState {
+        SyncState::from_snapshot(&SyncSnapshot {
+            lamport: 0,
+            device: [0u8; 16],
+            contacts: vec![],
+            verified: vec![],
+            trusted: vec![],
+            blocked: vec![],
+            seen: vec![],
+            names: vec![],
+            devices: rows,
+            relays: vec![],
+        })
+    }
+
+    /// A device row carries its own id, so the key and the clock's device agree.
+    fn device_row(d: u8, name: &str, last_seen: u64, counter: u64, deleted: bool) -> DeviceEntry {
+        DeviceEntry {
+            id: device_key(&[d; 16]),
+            name: name.into(),
+            platform: "linux".into(),
+            last_seen,
+            clock: lam(counter, d),
+            deleted,
+        }
+    }
+
+    #[test]
+    fn a_device_row_is_last_writer_wins_from_its_own_machine() {
+        let mut a = device_state(vec![device_row(1, "laptop", 100, 1, false)]);
+        a.merge(&device_state(vec![device_row(
+            1,
+            "the laptop",
+            400,
+            2,
+            false,
+        )]));
+        assert_eq!(a.devices[&device_key(&[1u8; 16])].name, "the laptop");
+        assert_eq!(a.devices[&device_key(&[1u8; 16])].last_seen, 400);
+
+        // Two machines describing themselves are two rows, not a contest.
+        a.merge(&device_state(vec![device_row(2, "desktop", 50, 1, false)]));
+        assert_eq!(a.devices.len(), 2);
+    }
+
+    #[test]
+    fn only_a_machine_may_describe_itself() {
+        // The whole reason this register is not an ordinary LWW map. Device 2
+        // writes a *live* row for device 1's id, with a clock high enough to win
+        // every ordinary comparison — and is ignored, because a send aimed at
+        // "laptop" must not be aimed at whoever last claimed the name.
+        let forged = DeviceEntry {
+            id: device_key(&[1u8; 16]),
+            clock: lam(99, 2),
+            name: "laptop".into(),
+            platform: "linux".into(),
+            last_seen: 999,
+            deleted: false,
+        };
+        let mut a = device_state(vec![device_row(1, "laptop", 100, 1, false)]);
+        a.merge(&device_state(vec![forged]));
+        let row = &a.devices[&device_key(&[1u8; 16])];
+        assert_eq!(row.last_seen, 100, "a foreign live row must not land");
+        assert_eq!(row.clock, lam(1, 1));
+
+        // A row nobody has ever seen is not created either.
+        let mut empty = device_state(vec![]);
+        empty.merge(&device_state(vec![DeviceEntry {
+            id: device_key(&[7u8; 16]),
+            clock: lam(1, 8),
+            name: "invented".into(),
+            platform: "linux".into(),
+            last_seen: 1,
+            deleted: false,
+        }]));
+        assert!(empty.devices.is_empty());
+    }
+
+    #[test]
+    fn anyone_may_forget_a_device() {
+        // The exemption that makes `forget` possible at all: you retire a machine
+        // *from another machine*, usually because that one is gone for good.
+        let mut a = device_state(vec![device_row(1, "laptop", 100, 1, false)]);
+        a.merge(&device_state(vec![DeviceEntry {
+            id: device_key(&[1u8; 16]),
+            clock: lam(2, 2),
+            name: String::new(),
+            platform: String::new(),
+            last_seen: 0,
+            deleted: true,
+        }]));
+        assert!(
+            a.devices[&device_key(&[1u8; 16])].deleted,
+            "tombstone lands"
+        );
+
+        // And the machine itself can come back, because a tombstone is
+        // bookkeeping and not a revocation — which is why the writing side has
+        // to decline to republish (see the retirement check in the CLI).
+        a.merge(&device_state(vec![device_row(1, "laptop", 500, 3, false)]));
+        assert!(!a.devices[&device_key(&[1u8; 16])].deleted);
+    }
+
+    #[test]
+    fn devices_converge_in_any_order() {
+        let rows = [
+            device_row(1, "laptop", 100, 1, false),
+            device_row(1, "laptop renamed", 300, 4, false),
+            device_row(2, "desktop", 200, 2, false),
+        ];
+        let mut forward = device_state(vec![]);
+        for r in &rows {
+            forward.merge(&device_state(vec![r.clone()]));
+        }
+        let mut backward = device_state(vec![]);
+        for r in rows.iter().rev() {
+            backward.merge(&device_state(vec![r.clone()]));
+        }
+        assert_eq!(forward, backward, "any order → same state");
+        // Idempotent too.
+        let once = forward.clone();
+        forward.merge(&once);
+        assert_eq!(forward, once);
     }
 }

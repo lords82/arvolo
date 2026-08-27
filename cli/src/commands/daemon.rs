@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use arvolo_core::manager::{ManagerEvent, TransferManager};
@@ -9,6 +10,7 @@ use crate::{book, sync};
 
 use crate::ipc;
 use crate::notify;
+use crate::output::vprintln;
 
 use crate::ui::*;
 use crate::util::*;
@@ -115,10 +117,18 @@ fn close_control() {
 #[cfg(windows)]
 fn close_control() {}
 
+/// Where `arvolo daemon stop` leaves its marker. Anything that auto-respawns the
+/// daemon (the GUI's event pump above all) checks it: a stop the user asked for
+/// must stay stopped, not be resurrected within seconds by a supervisor loop.
+/// Shared with the GUI through `arvolo_ipc`, so both sides mean the same file.
+pub(crate) fn stop_marker_path() -> PathBuf {
+    arvolo_ipc::stop_marker_path()
+}
+
+/// `arvolo daemon run` — the service itself, in this terminal (blocking).
 pub(crate) async fn daemon(
     download_dir: Option<PathBuf>,
     relay: Option<String>,
-    use_http: bool,
     no_sync: bool,
 ) -> Result<()> {
     use std::collections::HashMap;
@@ -129,7 +139,11 @@ pub(crate) async fn daemon(
     // far as subscribing to the relay inbox.
     let (listener, _instance_lock) = open_control()?;
 
-    let relay = require_relay(relay, use_http)?;
+    // Starting on purpose clears a leftover `daemon stop` marker, so the GUI's
+    // supervisor loop resumes its job.
+    std::fs::remove_file(stop_marker_path()).ok();
+
+    let relay = require_relay(relay)?;
     let me = my_identity()?;
     let my_id = encode_id(&me.public());
     let download_dir = download_dir
@@ -146,6 +160,7 @@ pub(crate) async fn daemon(
         Some(state_dir),
     );
     manager.set_display_name(book::my_display_name());
+    manager.set_device_id(book::load_or_init_device());
     let inbox = manager.spawn_inbox()?;
     let _auto_sync =
         (!no_sync && book::sync_enabled()).then(|| sync::spawn_auto_sync(relay.clone()));
@@ -164,6 +179,16 @@ pub(crate) async fn daemon(
     // should raise the desktop notification itself or leave it to the UI.
     let front_ends: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
 
+    // Events the daemon raises itself rather than relaying from the engine. Made
+    // here, and handed to the IPC server, rather than made inside it: the intake
+    // task below also has things to announce — an offer taken because the sender is
+    // trusted, one superseded by a re-post, one dropped because the sender is
+    // blocked — and it starts before the server exists. Without this the removals
+    // it makes were invisible, and an attached window kept a row (and a button)
+    // pointing at an offer the daemon had already disposed of.
+    let side_events: tokio::sync::broadcast::Sender<ipc::protocol::EventDto> =
+        tokio::sync::broadcast::channel(64).0;
+
     // Engine task: park incoming offers and persist finished transfers to history,
     // whether or not a front-end is attached.
     {
@@ -171,6 +196,7 @@ pub(crate) async fn daemon(
         let front_ends = front_ends.clone();
         let manager = manager.clone();
         let pending = pending.clone();
+        let side_events = side_events.clone();
         tokio::spawn(async move {
             loop {
                 match events.recv().await {
@@ -181,6 +207,7 @@ pub(crate) async fn daemon(
                         size,
                         note,
                         sender_name,
+                        relay,
                     }) => {
                         let from_b32 = encode_id(&from);
                         // Blocked senders are dropped before anything else: no name
@@ -190,47 +217,126 @@ pub(crate) async fn daemon(
                         if book::is_blocked(&from_b32) {
                             tracing::debug!("dropping offer from blocked sender {from_b32}");
                             manager.reject_offer(&id).await;
+                            // Say so: the arrival already reached the front-ends
+                            // (they subscribe to the engine, not to this task), so
+                            // silence here would leave a row for an offer that is
+                            // gone. Same reason as the two removals below.
+                            let _ = side_events
+                                .send(ipc::protocol::EventDto::OfferGone { id: id.clone() });
                             continue;
                         }
                         // Record any advertised-name change durably (surfaced later in
                         // `contacts list` / to an attached front-end); never blocks.
                         book::observe_advertised_name(&from_b32, &sender_name);
+                        // And where to answer them. Only for a contact we already
+                        // have, so an offer cannot enrol a stranger into the book.
+                        if let Some(r) = book::learn_sender_relay(&from_b32, &relay) {
+                            tracing::debug!("{from_b32} now listens on {r}");
+                        }
                         // Supersede any older parked offer for the same (sender, file).
-                        // A live→mailbox fallback posts a fresh offer and retracts the
-                        // stale live one, but we may already have pulled that stale copy
-                        // into the inbox; accepting it would download nothing. Drop the
-                        // older one(s) and keep only this newest offer.
-                        let superseded: Vec<String> = {
-                            let map = pending.lock().unwrap();
-                            map.values()
-                                .filter(|o| o.from == from_b32 && o.name == name)
-                                .map(|o| o.id.clone())
-                                .collect()
-                        };
+                        let superseded = superseded_ids(&pending.lock().unwrap(), &from_b32, &name);
                         for old in &superseded {
                             pending.lock().unwrap().remove(old);
                             manager.reject_offer(old).await;
+                            // And tell the windows, which cannot see this map. Their
+                            // own rule for spotting a re-post is a comparison of
+                            // sender and filename; this is the fact behind it, so a
+                            // row cannot outlive the offer it stands for.
+                            let _ = side_events
+                                .send(ipc::protocol::EventDto::OfferGone { id: old.clone() });
                         }
                         let status = book::sender_status(&from_b32);
                         let who = status.name.clone().unwrap_or_else(|| from_b32.clone());
                         // Trusted sender → auto-download. Everyone else parks and
                         // waits for the user's approval (the default).
-                        if status.trusted {
+                        //
+                        // "Everyone else" excludes ourselves. An offer that opens
+                        // and authenticates as our own identity can only have been
+                        // sealed by something holding our identity secret — another
+                        // of our devices — so there is nobody here to be asked to
+                        // trust. Asking would mean asking the user's permission to
+                        // receive what the user just sent, from the other side of
+                        // the same desk. It is deliberately NOT folded into
+                        // `trusted` — that is a fact about the identity, not a
+                        // standing decision about a contact, and the two are revoked
+                        // by completely different means — but both live behind
+                        // [`auto_accepts`], because the front-ends are told the
+                        // answer and must be told the same one.
+                        let own_device = is_self(&from_b32);
+                        // Set when an automatic take was refused and this offer is
+                        // going back in front of the user. The windows were told, on
+                        // the arrival itself, that this one needed no answer — so
+                        // they drew nothing, and parking it silently would leave the
+                        // question in a map nobody is looking at.
+                        let mut refused_to_a_question = false;
+                        if auto_accepts(&from_b32) {
                             let size_h = human_size(size);
-                            eprintln!(
-                                "⬇ auto-downloading {} ({size_h}) from trusted {who}",
-                                sanitize_display(&name)
-                            );
+                            if own_device {
+                                eprintln!(
+                                    "⬇ auto-downloading {} ({size_h}) from another of your devices",
+                                    sanitize_display(&name)
+                                );
+                            } else {
+                                eprintln!(
+                                    "⬇ auto-downloading {} ({size_h}) from trusted {who}",
+                                    sanitize_display(&name)
+                                );
+                            }
                             // Auto-accept, but still surface a notification so the
                             // user knows a trusted download is happening — unless a
                             // front-end is attached and will say so itself.
-                            if !front_ends.load(Ordering::SeqCst) > 0 {
-                                notify::auto_downloading(&name, &who, &size_h);
+                            if should_self_notify(&front_ends) {
+                                if own_device {
+                                    notify::auto_downloading_own_device(&name, &size_h);
+                                } else {
+                                    notify::auto_downloading(&name, &who, &size_h);
+                                }
                             }
-                            if let Err(e) = manager.accept_offer(&id, None).await {
-                                eprintln!("   ✗ could not auto-accept: {e:#}");
+                            match manager.accept_offer(&id, None).await {
+                                // Same ledger, same rule as the IPC accept: a
+                                // receipt is recorded when the transfer is taken,
+                                // never when the offer merely turns up.
+                                Ok(_) => {
+                                    book::record_seen(&from_b32);
+                                    // The offer is spent. A front-end that drew it
+                                    // as an arrival has nothing more to do with it,
+                                    // and one that (wrongly) drew it as a question
+                                    // must lose the question rather than keep a
+                                    // button wired to an id we have consumed.
+                                    let _ = side_events.send(ipc::protocol::EventDto::OfferGone {
+                                        id: id.clone(),
+                                    });
+                                    continue;
+                                }
+                                // Refused, and the engine still has the offer: the
+                                // deposit wants a password, or P2P is off and this
+                                // one is a direct transfer. Automatic was the wrong
+                                // answer, not the file — so fall through and ask,
+                                // which is where the password field lives. Asking
+                                // the engine rather than reading the error keeps
+                                // this right for a refusal nobody has typed yet.
+                                Err(e) if manager.is_pending(&id) => {
+                                    eprintln!("   … not automatically: {e:#}");
+                                    eprintln!("     asking instead.");
+                                    refused_to_a_question = true;
+                                }
+                                // Failed after the offer was taken: there is nothing
+                                // left to accept, so there is no question to ask.
+                                // Say it out loud — this is the one place where a
+                                // window shows nothing by design, so silence here is
+                                // a file that never arrived and never said so. The
+                                // sender's next re-post is another chance.
+                                Err(e) => {
+                                    eprintln!("   ✗ could not auto-accept: {e:#}");
+                                    notify::auto_download_failed(&name, &who, &format!("{e:#}"));
+                                    let _ = side_events.send(ipc::protocol::EventDto::OfferGone {
+                                        id: id.clone(),
+                                    });
+                                    continue;
+                                }
                             }
-                        } else {
+                        }
+                        {
                             let size_h = human_size(size);
                             // Announce an *arrival*, not a re-posting. A sender whose
                             // live attempt keeps failing — the recipient's presence
@@ -248,14 +354,41 @@ pub(crate) async fn daemon(
                                 );
                             } else {
                                 eprintln!(
-                                    "📨 offer parked: {name} ({size_h}) from {who} — approve with `arvolo accept {id}`"
+                                    "📨 offer waiting: {name} ({size_h}) from {who} — take it with `arvolo recv {}`",
+                                    crate::handles::short(&id)
                                 );
                                 // Nudge the user with a desktop notification (best-effort;
                                 // no-op on headless hosts, where the log line above stands
                                 // in). A attached front-end does its own, in its own words.
-                                if !front_ends.load(Ordering::SeqCst) > 0 {
+                                if should_self_notify(&front_ends) {
                                     notify::offer_awaiting(&name, &who, &size_h);
                                 }
+                            }
+                            // Say it again, as a question this time.
+                            //
+                            // Only after a refused automatic take: every other offer
+                            // reached the front-ends already, on the engine's own
+                            // event, and a second one would draw the row twice. This
+                            // one they were told to ignore. `auto` is false because
+                            // that is now true — the daemon tried and is asking —
+                            // and the book stamps are filled here because a side
+                            // event does not pass through the fan-out that adds them.
+                            if refused_to_a_question {
+                                let _ = side_events.send(ipc::protocol::EventDto::OfferReceived {
+                                    id: id.clone(),
+                                    from: from_b32.clone(),
+                                    name: name.clone(),
+                                    size,
+                                    note: note.clone(),
+                                    sender_name: sender_name.clone(),
+                                    auto: false,
+                                    fingerprint: book::fingerprint_of(&from_b32)
+                                        .unwrap_or_default(),
+                                    seen_count: book::seen_count(&from_b32),
+                                    known_name: book::known_name_of(&from_b32)
+                                        .map(|n| sanitize_display(&n))
+                                        .unwrap_or_default(),
+                                });
                             }
                             pending.lock().unwrap().insert(
                                 id.clone(),
@@ -266,6 +399,10 @@ pub(crate) async fn daemon(
                                     size,
                                     note,
                                     sender_name,
+                                    // Stamped from the address book on the way out
+                                    // (`stamp_offer`), not here: the book moves while
+                                    // an offer waits.
+                                    ..Default::default()
                                 },
                             );
                         }
@@ -312,6 +449,17 @@ pub(crate) async fn daemon(
         });
     }
 
+    // Advertised-name rows for identities nobody points at any more. Nothing
+    // produces them now — `contact_remove` clears its own row, and a sync merge
+    // sweeps what a sibling device's deletion stranded — but books written by
+    // older builds still carry them, and they would keep riding every snapshot.
+    // One sweep per start, best-effort: it reads two small TOMLs.
+    match book::prune_orphan_names() {
+        Ok(n) if n > 0 => tracing::debug!("pruned {n} orphan advertised-name record(s)"),
+        Err(e) => tracing::debug!("orphan-name sweep skipped: {e:#}"),
+        _ => {}
+    }
+
     eprintln!("arvolo daemon up.");
     eprintln!("  identity: {my_id}");
     eprintln!("  relay:    {relay}");
@@ -326,7 +474,15 @@ pub(crate) async fn daemon(
     }
 
     let shutdown = daemon_shutdown_signal();
-    let daemon = ipc::server::Daemon::new(manager, Some(relay), download_dir, pending, front_ends);
+    let daemon = ipc::server::Daemon::new(
+        manager,
+        Some(relay),
+        download_dir,
+        pending,
+        front_ends,
+        side_events,
+        shutdown.clone(),
+    );
     let pairings = daemon.pairings.clone();
     let result = ipc::server::run(daemon, listener, shutdown).await;
     // A hosted `device pair` offers this device's identity secret for its whole
@@ -337,6 +493,190 @@ pub(crate) async fn daemon(
     close_control();
     std::fs::remove_file(&pidfile).ok();
     result
+}
+
+/// `arvolo daemon start` — spawn `daemon run` detached and return once it
+/// answers. Its output goes to `daemon.log` next to the config, where
+/// `daemon stop`'s advice and the GUI's diagnostics already look.
+pub(crate) async fn daemon_start(
+    download_dir: Option<PathBuf>,
+    relay: Option<String>,
+    no_sync: bool,
+) -> Result<()> {
+    if let Some(mut client) = daemon_client().await {
+        let s = client.status().await?;
+        anyhow::bail!(
+            "a daemon is already running (v{}, {} transfer(s)) — `arvolo daemon status` for details",
+            s.version,
+            s.transfers
+        );
+    }
+    let exe = std::env::current_exe().context("locate the arvolo binary")?;
+    let log_path = book::config_dir().join("daemon.log");
+    std::fs::create_dir_all(book::config_dir()).ok();
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .with_context(|| format!("open {}", log_path.display()))?;
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("daemon").arg("run");
+    if let Some(d) = &download_dir {
+        cmd.arg("--download-dir").arg(d);
+    }
+    if let Some(r) = &relay {
+        cmd.arg("--relay").arg(r);
+    }
+    if no_sync {
+        cmd.arg("--no-sync");
+    }
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(log.try_clone().context("clone log handle")?)
+        .stderr(log);
+    // Its own process group / detached, so closing this terminal doesn't take
+    // the daemon with it.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        cmd.creation_flags(DETACHED_PROCESS);
+    }
+    let child = cmd.spawn().context("spawn the daemon")?;
+    let pid = child.id();
+
+    // Wait for it to answer, briefly — "started" should mean reachable.
+    for _ in 0..40 {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        if let Some(mut client) = daemon_client().await {
+            let s = client.status().await?;
+            eprintln!(
+                "✓ daemon running (pid {pid}, v{}) — log: {}",
+                s.version,
+                log_path.display()
+            );
+            return Ok(());
+        }
+    }
+    anyhow::bail!(
+        "the daemon did not come up within 10s — its last words are in {}",
+        log_path.display()
+    )
+}
+
+/// `arvolo daemon stop` — ask it to exit over IPC; fall back to the pidfile for
+/// a daemon too old to know the request. Leaves the stop marker either way, so
+/// nothing (the GUI above all) respawns what the user just stopped.
+pub(crate) async fn daemon_stop_cmd() -> Result<()> {
+    // The marker goes down BEFORE the daemon does: a supervisor that notices the
+    // death first would otherwise win the race and respawn it.
+    std::fs::write(stop_marker_path(), b"stopped by `arvolo daemon stop`\n").ok();
+
+    // No version gate here: stopping a daemon of ANOTHER version is exactly
+    // this command's job — the mismatch error recommends `daemon stop`, so
+    // `daemon stop` must not refuse on mismatch. An old daemon that doesn't
+    // know `Shutdown` errors the request and the pidfile below finishes it.
+    if let Some(mut client) = daemon_client_any_version().await {
+        match client.shutdown().await {
+            Ok(()) => {
+                eprintln!("✓ daemon stopped. Start it again with `arvolo daemon start`.");
+                return Ok(());
+            }
+            Err(e) => vprintln!("IPC shutdown not accepted ({e:#}) — trying the pidfile"),
+        }
+    }
+
+    let pidfile = book::config_dir().join("daemon.pid");
+    let pid = std::fs::read_to_string(&pidfile)
+        .ok()
+        .and_then(|s| s.trim().parse::<i32>().ok());
+    match pid {
+        None => {
+            std::fs::remove_file(stop_marker_path()).ok();
+            eprintln!("no daemon is running.");
+            Ok(())
+        }
+        #[cfg(unix)]
+        Some(pid) => {
+            // SAFETY: plain kill(2) with SIGTERM; an ESRCH just means it's gone.
+            let rc = unsafe { libc::kill(pid, libc::SIGTERM) };
+            if rc == 0 {
+                eprintln!(
+                    "✓ daemon stopped (pid {pid}). Start it again with `arvolo daemon start`."
+                );
+            } else {
+                std::fs::remove_file(&pidfile).ok();
+                eprintln!("no daemon is running (stale pidfile removed).");
+            }
+            Ok(())
+        }
+        #[cfg(windows)]
+        Some(pid) => {
+            let ok = std::process::Command::new("taskkill")
+                .args(["/PID", &pid.to_string(), "/F"])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if ok {
+                eprintln!(
+                    "✓ daemon stopped (pid {pid}). Start it again with `arvolo daemon start`."
+                );
+            } else {
+                std::fs::remove_file(&pidfile).ok();
+                eprintln!("no daemon is running (stale pidfile removed).");
+            }
+            Ok(())
+        }
+    }
+}
+
+/// `arvolo daemon status` — is it running, and what is it doing.
+pub(crate) async fn daemon_status_cmd(json: bool) -> Result<()> {
+    match daemon_client().await {
+        None => {
+            if json {
+                println!("{{\"running\": false}}");
+            } else {
+                eprintln!("not running — start it with `arvolo daemon start`.");
+            }
+            Ok(())
+        }
+        Some(mut client) => {
+            let s = client.status().await?;
+            if json {
+                let mut v = serde_json::to_value(&s)?;
+                if let Some(obj) = v.as_object_mut() {
+                    obj.insert("running".into(), serde_json::Value::Bool(true));
+                }
+                println!("{}", serde_json::to_string_pretty(&v)?);
+                return Ok(());
+            }
+            println!("version:       {}", s.version);
+            // Which process, before what it is doing: with a released install, a
+            // checkout build and one the desktop app spawned all possible on one
+            // machine, "there is a daemon" is only half an answer.
+            if s.pid > 0 {
+                println!("pid:           {}", s.pid);
+            }
+            if !s.exe.is_empty() {
+                println!("running:       {}", s.exe);
+            }
+            println!("id:            {}", s.public_id);
+            println!("fingerprint:   {}", s.fingerprint);
+            println!("relay:         {}", s.relay.as_deref().unwrap_or("(none)"));
+            println!("downloads to:  {}", s.download_dir);
+            if !s.display_name.is_empty() {
+                println!("display name:  {}", s.display_name);
+            }
+            println!("transfers:     {}", s.transfers);
+            println!("pending:       {} offer(s) awaiting approval", s.pending);
+            Ok(())
+        }
+    }
 }
 
 /// Is semver `a` strictly older than `b`? Compares the numeric major/minor/patch
@@ -384,6 +724,81 @@ pub(crate) fn acquire_instance_lock(path: &std::path::Path) -> Result<std::fs::F
         );
     }
     Ok(file)
+}
+
+/// The daemon raises desktop notifications only when no front-end holds an
+/// event subscription — an attached UI announces offers in its own words.
+fn should_self_notify(front_ends: &AtomicUsize) -> bool {
+    front_ends.load(Ordering::SeqCst) == 0
+}
+
+/// The parked offers a newly arrived one replaces: same sender, same file.
+///
+/// A live→mailbox fallback posts a fresh offer and retracts the stale live one,
+/// and a sender whose live attempt keeps failing re-posts on every retry — so the
+/// id churns while the file does not, and accepting a stale copy would download
+/// nothing. Keep only the newest.
+///
+/// Lifted out of the intake loop, which needs a relay and a real sender to reach,
+/// so the rule can be tested on its own. It is also kept, independently, at the
+/// other end of the socket (the desktop app drops rows by the same sender+name
+/// comparison): two implementations of one rule, and this is the one that decides.
+fn superseded_ids(
+    pending: &std::collections::HashMap<String, ipc::protocol::OfferDto>,
+    from: &str,
+    name: &str,
+) -> Vec<String> {
+    pending
+        .values()
+        .filter(|o| o.from == from && o.name == name)
+        .map(|o| o.id.clone())
+        .collect()
+}
+
+#[cfg(test)]
+mod intake_tests {
+    use super::superseded_ids;
+    use crate::ipc::protocol::OfferDto;
+    use std::collections::HashMap;
+
+    fn offer(id: &str, from: &str, name: &str) -> OfferDto {
+        OfferDto {
+            id: id.into(),
+            from: from.into(),
+            name: name.into(),
+            size: 1,
+            ..Default::default()
+        }
+    }
+
+    /// What counts as "the same file, again" — the rule that keeps a re-posting
+    /// sender from filling the list with one file, and the reason an id the user
+    /// was shown can stop existing while the file is still on its way.
+    #[test]
+    fn a_re_post_supersedes_only_the_same_sender_and_file() {
+        let mut pending = HashMap::new();
+        for o in [
+            offer("old", "anna", "arrivo.zip"),
+            offer("other-file", "anna", "altro.zip"),
+            offer("other-sender", "bruno", "arrivo.zip"),
+        ] {
+            pending.insert(o.id.clone(), o);
+        }
+
+        assert_eq!(
+            superseded_ids(&pending, "anna", "arrivo.zip"),
+            vec!["old".to_string()],
+            "same sender, same file: the older offer is spent"
+        );
+        assert!(
+            superseded_ids(&pending, "anna", "mai-visto.zip").is_empty(),
+            "a file we have not seen from them supersedes nothing"
+        );
+        assert!(
+            superseded_ids(&pending, "carla", "arrivo.zip").is_empty(),
+            "the same filename from somebody else is a different offer"
+        );
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -466,8 +881,7 @@ pub(crate) fn daemon_shutdown_signal() -> CancellationToken {
 /// version here: same version → use it; different (or a pre-versioning daemon
 /// that reports none) → refuse loudly and exit, telling the user to restart it.
 pub(crate) async fn daemon_client() -> Option<ipc::client::DaemonClient> {
-    let mut c = ipc::client::DaemonClient::connect().await.ok()?;
-    c.ping().await.ok()?;
+    let mut c = daemon_client_any_version().await?;
     // `status` predates the newer requests, so an old daemon still answers it
     // (with an empty version) — safe to probe without risking a hang.
     if let Ok(st) = c.status().await {
@@ -494,13 +908,20 @@ pub(crate) async fn daemon_client() -> Option<ipc::client::DaemonClient> {
             } else {
                 eprintln!(
                     "  The daemon kept running the old binary after the upgrade. Restart it:\n    \
-                     kill $(cat ~/.config/arvolo/daemon.pid)   # stop the stale daemon\n    \
-                     arvolo daemon                             # start it on {ours}"
+                     arvolo daemon stop && arvolo daemon start   # restart on {ours}"
                 );
             }
             std::process::exit(1);
         }
     }
+    Some(c)
+}
+
+/// Connect + ping, with no version gate. Only for operations that must work
+/// across versions (today: `daemon stop`).
+async fn daemon_client_any_version() -> Option<ipc::client::DaemonClient> {
+    let mut c = ipc::client::DaemonClient::connect().await.ok()?;
+    c.ping().await.ok()?;
     Some(c)
 }
 
@@ -532,6 +953,63 @@ pub(crate) fn transfer_state(t: &ipc::protocol::TransferDto) -> String {
         };
     }
     t.status.clone()
+}
+
+/// What a row shows and the user types: the transfer's 8-hex handle — falling
+/// back to the numeric id only against a daemon too old to send one.
+pub(crate) fn dto_handle(t: &ipc::protocol::TransferDto) -> String {
+    if t.handle.is_empty() {
+        t.id.to_string()
+    } else {
+        t.handle.clone()
+    }
+}
+
+/// Resolve what the user typed — an 8-hex handle (any unique prefix) or a plain
+/// number — to the daemon's internal transfer id.
+pub(crate) async fn resolve_transfer_id(
+    client: &mut ipc::client::DaemonClient,
+    input: &str,
+) -> Result<u64> {
+    use crate::handles::{looks_like_handle, resolve_prefix, Match};
+    if looks_like_handle(input) {
+        let list = client.list().await?;
+        match resolve_prefix(input, list.iter().map(|t| (t.handle.clone(), t.id))) {
+            Match::One(id) => return Ok(id),
+            Match::Many(hs) => anyhow::bail!(
+                "'{input}' matches more than one transfer ({}) — type more of it",
+                hs.join(", ")
+            ),
+            // An all-digit input can still be a plain transfer number.
+            Match::None => {
+                if input.parse::<u64>().is_err() {
+                    // Well-formed handle, no such transfer: say that, not
+                    // "invalid digit" from trying to read hex as a number.
+                    anyhow::bail!(
+                        "no transfer with handle '{input}' — it may have ended, or \
+                         belonged to a previous daemon. `arvolo status` lists the \
+                         live ones."
+                    );
+                }
+            }
+        }
+    }
+    input
+        .parse::<u64>()
+        .context("not a transfer id — `arvolo status` lists them")
+}
+
+/// The handle of a transfer the daemon just created, looked back up from its
+/// numeric id — so freshly-printed hints use the same currency as `status`.
+pub(crate) async fn handle_for(client: &mut ipc::client::DaemonClient, id: u64) -> String {
+    match client.list().await {
+        Ok(list) => list
+            .iter()
+            .find(|t| t.id == id)
+            .map(dto_handle)
+            .unwrap_or_else(|| id.to_string()),
+        Err(_) => id.to_string(),
+    }
 }
 
 pub(crate) fn print_transfer_dto(t: &ipc::protocol::TransferDto, rate: Option<u64>) {
@@ -576,7 +1054,7 @@ pub(crate) fn print_transfer_dto(t: &ipc::protocol::TransferDto, rate: Option<u6
     };
     println!(
         "  [{}] {arrow} {peer}  {}{progress}{speed}  ({}){peers}",
-        t.id,
+        dto_handle(t),
         t.name,
         transfer_state(t)
     );
@@ -593,54 +1071,104 @@ pub(crate) fn print_transfer_dto(t: &ipc::protocol::TransferDto, rate: Option<u6
     }
 }
 
-/// `arvolo accept <offer_id>` — approve a parked offer and download it.
-pub(crate) async fn accept_cmd(offer_id: String, out: Option<PathBuf>) -> Result<()> {
+/// `arvolo pause <id>` — hold a transfer running in the daemon.
+pub(crate) async fn pause_cmd(id: String) -> Result<()> {
     let mut client = daemon_client()
         .await
-        .context("no daemon running (start `arvolo daemon`)")?;
-    let id = client.accept(offer_id, out).await?;
-    eprintln!("✓ accepted — downloading (transfer {id}). Track it with `arvolo status`.");
+        .context("no daemon running (start `arvolo daemon start`)")?;
+    let tid = resolve_transfer_id(&mut client, &id).await?;
+    let shown = handle_for(&mut client, tid).await;
+    client.pause(tid).await?;
+    eprintln!(
+        "paused transfer {shown} — `arvolo resume {shown}` to continue, or `arvolo cancel {shown}`."
+    );
     Ok(())
 }
 
-/// `arvolo reject <offer_id>` — decline a parked offer.
-pub(crate) async fn reject_cmd(offer_id: String) -> Result<()> {
+/// `arvolo deposit <id>` — park a waiting send on the relay instead of waiting
+/// any longer for the recipient to accept.
+pub(crate) async fn deposit_cmd(id: String) -> Result<()> {
     let mut client = daemon_client()
         .await
-        .context("no daemon running (start `arvolo daemon`)")?;
-    client.reject(offer_id).await?;
-    eprintln!("✗ rejected.");
+        .context("no daemon running (start `arvolo daemon start`)")?;
+    let tid = resolve_transfer_id(&mut client, &id).await?;
+    let shown = handle_for(&mut client, tid).await;
+    client.deposit_now(tid).await?;
+    eprintln!(
+        "transfer {shown} is going to the mailbox — they collect it whenever they come back. \
+         Take it back with `arvolo cancel {shown}`."
+    );
     Ok(())
 }
 
-/// `arvolo pause <id>` — hold a `send --to` running in the daemon.
-pub(crate) async fn pause_cmd(id: u64) -> Result<()> {
+/// `arvolo resume <id>` — continue a paused transfer.
+pub(crate) async fn resume_cmd(id: &str) -> Result<()> {
     let mut client = daemon_client()
         .await
-        .context("no daemon running (start `arvolo daemon`)")?;
-    client.pause(id).await?;
-    eprintln!("paused transfer {id} — `arvolo resume {id}` to continue, or `arvolo cancel {id}`.");
+        .context("no daemon running (start `arvolo daemon start`)")?;
+    let tid = resolve_transfer_id(&mut client, id).await?;
+    let shown = handle_for(&mut client, tid).await;
+    client.resume(tid).await?;
+    eprintln!("resumed transfer {shown}.");
     Ok(())
 }
 
-/// `arvolo resume <id>` — continue a paused `send --to`.
-pub(crate) async fn resume_cmd(id: u64) -> Result<()> {
-    let mut client = daemon_client()
-        .await
-        .context("no daemon running (start `arvolo daemon`)")?;
-    client.resume(id).await?;
-    eprintln!("resumed transfer {id}.");
-    Ok(())
+/// The guard for a pending descriptor hand-off; `()` where none can exist.
+#[cfg(unix)]
+pub(crate) type FdOfferGuard = arvolo_ipc::fdpass::FdOffer;
+#[cfg(windows)]
+pub(crate) type FdOfferGuard = ();
+
+/// Stand up the descriptor hand-off for `paths` when it applies — unix, exactly
+/// one plain file this process can open. The CLI runs in the user's own context
+/// (macOS settles folder consent here, prompting if it must), so its open
+/// succeeds where the daemon's would not; the daemon then reads through the
+/// descriptor instead of the path. Keep the returned guard alive until the
+/// daemon has replied — its thread is what serves the fd. Every `None` simply
+/// means plain path behavior, as before.
+pub(crate) fn offer_sources(
+    paths: &[PathBuf],
+) -> (Option<ipc::client::FdHandoff>, Option<FdOfferGuard>) {
+    #[cfg(unix)]
+    {
+        if paths.len() != 1 || !paths[0].is_file() {
+            return (None, None);
+        }
+        let Ok(f) = std::fs::File::open(&paths[0]) else {
+            // `guard_readable` in `send` already turned a real permission
+            // problem into its own error; anything left is a race — let the
+            // daemon try the path and report in its own words.
+            return (None, None);
+        };
+        match arvolo_ipc::fdpass::offer_files(vec![f]) {
+            Ok(o) => {
+                let handoff = ipc::client::FdHandoff {
+                    socket: o.socket.display().to_string(),
+                    token: o.token.clone(),
+                };
+                (Some(handoff), Some(o))
+            }
+            Err(_) => (None, None),
+        }
+    }
+    #[cfg(windows)]
+    {
+        // Windows has no per-app folder consent: same-user processes read the
+        // same files, so the daemon's own open is exactly as good.
+        let _ = paths;
+        (None, None)
+    }
 }
 
-/// Hand a plain ticket send to the daemon: it serves in the background. Prints the
-/// `arvc…` ticket and returns immediately; the transfer is tracked in the daemon.
+/// Hand a plain ticket send to the daemon: it serves in the background and this
+/// returns immediately with the transfer's handle and the `arvc…` ticket — the
+/// caller decides how the ticket is delivered (raw, or written as a `.arvolo`
+/// file).
 pub(crate) async fn serve_ticket_via_daemon(
     mut client: ipc::client::DaemonClient,
     paths: Vec<PathBuf>,
     seed_relay: Option<String>,
-    qr: bool,
-) -> Result<()> {
+) -> Result<(String, String)> {
     // The daemon resolves paths on its own cwd — absolutize relative to ours.
     let paths_s: Vec<String> = paths
         .iter()
@@ -651,19 +1179,12 @@ pub(crate) async fn serve_ticket_via_daemon(
         })
         .collect::<Result<Vec<_>>>()
         .context("no such file or folder to serve")?;
+    let (handoff, _offer) = offer_sources(&paths);
     let (id, ticket) = client
-        .serve_ticket(paths_s, seed_relay)
+        .serve_ticket(paths_s, seed_relay, handoff)
         .await
         .context("daemon rejected the serve")?;
-    println!("\nServing via the daemon. On the other device:\n");
-    println!("    arvolo recv {ticket}\n");
-    if qr {
-        print_qr(&ticket);
-    }
-    println!(
-        "Tracked as transfer {id} — follow it with `arvolo status`, stop it with `arvolo cancel {id}`."
-    );
-    Ok(())
+    Ok((handle_for(&mut client, id).await, ticket))
 }
 
 /// Hand a pairing code to the daemon: it hosts the rendezvous *and* serves the
@@ -686,24 +1207,28 @@ pub(crate) async fn serve_code_via_daemon(
         })
         .collect::<Result<Vec<_>>>()
         .context("no such file or folder to serve")?;
+    let (handoff, _offer) = offer_sources(&paths);
     let (id, code) = client
-        .serve_code(paths_s, relay, keep)
+        .serve_code(paths_s, relay, keep, handoff)
         .await
         .context("daemon refused to host the code")?;
-    println!("\nOn the other device:\n");
-    println!("    arvolo recv {code}\n");
+    let shown = handle_for(&mut client, id).await;
+    // The artefact alone on stdout; the words around it go to stderr.
+    println!("{code}");
+    eprintln!("\nOn the other device:\n");
+    eprintln!("    arvolo recv {code}\n");
     if qr {
         print_qr(&code);
     }
     if keep {
-        println!(
-            "Serving via the daemon, for anyone with the code. Tracked as transfer {id} — \
-             follow it with `arvolo status`, stop it with `arvolo cancel {id}`."
+        eprintln!(
+            "Serving via the daemon, for anyone with the code. Tracked as transfer {shown} — \
+             follow it with `arvolo status`, stop it with `arvolo cancel {shown}`."
         );
     } else {
-        println!(
+        eprintln!(
             "Serving via the daemon. The code works once; the transfer keeps going after that. \
-             Tracked as {id} — follow it with `arvolo status`, stop it with `arvolo cancel {id}`."
+             Tracked as {shown} — follow it with `arvolo status`, stop it with `arvolo cancel {shown}`."
         );
     }
     Ok(())
@@ -712,11 +1237,16 @@ pub(crate) async fn serve_code_via_daemon(
 /// Hand a push off to the running daemon and return immediately — the daemon
 /// delivers it in the background, concurrent and surviving our exit. Mirrors
 /// [`serve_ticket_via_daemon`]; observe progress with `arvolo status`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn push_via_daemon(
     mut client: ipc::client::DaemonClient,
     paths: Vec<PathBuf>,
     to: String,
     note: String,
+    ttl: Option<u64>,
+    max: Option<u32>,
+    password: Option<String>,
+    device: Option<String>,
 ) -> Result<()> {
     // The daemon resolves paths on *its own* cwd (e.g. `/` under systemd), not
     // ours — so absolutize here, relative to the client's cwd, and validate the
@@ -730,14 +1260,26 @@ pub(crate) async fn push_via_daemon(
         })
         .collect::<Result<Vec<_>>>()
         .context("no such file or folder to push")?;
-    eprintln!("Handing off to the daemon (sending to {to})…");
+    let (handoff, _offer) = offer_sources(&paths);
+    // `--to me` has already become our own base32 id by the time it gets here
+    // (the in-process fallback resolves against the address book, which does not
+    // know the reserved word), and a 52-character id is not a recipient anybody
+    // recognises as themselves. Same rule as everywhere else: never print the
+    // wire value.
+    let shown_to = if crate::is_self(&to) {
+        "your devices".to_string()
+    } else {
+        to.clone()
+    };
+    eprintln!("Handing off to the daemon (sending to {shown_to})…");
     let id = client
-        .push(to, paths_s, note)
+        .push(to, paths_s, note, ttl, max, password, device, handoff)
         .await
         .context("daemon rejected the push")?;
+    let shown = handle_for(&mut client, id).await;
     println!(
-        "queued as transfer {id} — the daemon delivers it in the background.\n\
-         Track it with `arvolo status`, stop it with `arvolo cancel {id}`."
+        "queued as transfer {shown} — the daemon delivers it in the background.\n\
+         Track it with `arvolo status`, stop it with `arvolo cancel {shown}`."
     );
     Ok(())
 }
@@ -750,6 +1292,7 @@ mod share_line_tests {
     fn dto(sharing: bool, download_peers: usize, status: &str) -> TransferDto {
         TransferDto {
             id: 1,
+            handle: "8cd63bda".into(),
             direction: "send".into(),
             peer: None,
             name: "delega.pdf".into(),
@@ -767,7 +1310,11 @@ mod share_line_tests {
             last_pickup: 0,
             from_download: 0,
             path: None,
+            sender_name: String::new(),
             offer_status: None,
+            waiting_code: None,
+            waiting_detail: None,
+            can_pause: None,
         }
     }
 
@@ -795,5 +1342,24 @@ mod share_line_tests {
         assert_eq!(transfer_state(&dto(false, 0, "active")), "active");
         let failed = "failed: relay unreachable";
         assert_eq!(transfer_state(&dto(true, 0, failed)), failed);
+    }
+}
+
+// Last module in the file on purpose: the two above are unix-only, so on Windows
+// this is the only test module, and anything below it would trip
+// `clippy::items_after_test_module`.
+#[cfg(test)]
+mod notify_tests {
+    use super::should_self_notify;
+    use std::sync::atomic::AtomicUsize;
+
+    // Regression: this used to read `!front_ends.load(..) > 0` — a bitwise NOT
+    // on usize, true for every count — so the daemon notified on top of the
+    // GUI and every offer rang twice.
+    #[test]
+    fn daemon_stays_quiet_while_a_front_end_is_attached() {
+        assert!(should_self_notify(&AtomicUsize::new(0)));
+        assert!(!should_self_notify(&AtomicUsize::new(1)));
+        assert!(!should_self_notify(&AtomicUsize::new(3)));
     }
 }

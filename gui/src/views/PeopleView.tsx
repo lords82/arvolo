@@ -30,8 +30,16 @@ import {
   TextInput,
   TrustBadges,
 } from "../ui/Primitives";
-import { Avatar, CopyField, Fingerprint, ShortId } from "../ui/Bits";
+import {
+  Avatar,
+  ClaimedName,
+  claimText,
+  CopyField,
+  Fingerprint,
+} from "../ui/Bits";
+import { fmtAgo, relayHost } from "../format";
 import { MenuButton, type MenuItem } from "../ui/Menu";
+import { nameCollision } from "../ui/SaveSenderFields";
 import { Confirm, Sheet } from "../ui/Sheet";
 import { toast } from "../ui/Toasts";
 import type { ContactDto } from "../types";
@@ -70,6 +78,29 @@ function PresenceDot({ id }: { id: string }) {
       aria-label={online ? t("people.presenceOn") : t("people.presenceOff")}
     />
   );
+}
+
+/** The line under a name in the list.
+ *
+ *  Two facts, and only when they say something. *When you last dealt with them*
+ *  is what an address book is for — it is how you tell the four people you work
+ *  with from the thirty-six you met once — and it is synced, so it reads the same
+ *  on every one of your machines. *Where they listen* appears only when it is not
+ *  where you do: printing "same relay as you" on every row is a column that says
+ *  nothing, which is what the CLI decided for its own list.
+ *
+ *  A contact with neither gets an empty line rather than filler. Somebody saved a
+ *  minute ago and never written to has nothing to report yet, and saying so takes
+ *  up a row's worth of attention for no answer. */
+function ContactMeta({ c }: { c: ContactDto }) {
+  const t = useT();
+  const mine = useStore((s) => s.status?.relay ?? "");
+  const parts: string[] = [];
+  if (c.last_exchange) parts.push(t("people.lastExchange", fmtAgo(c.last_exchange)));
+  const elsewhere = c.relay && relayHost(c.relay) !== relayHost(mine);
+  if (elsewhere) parts.push(t("people.listensOn", relayHost(c.relay!)));
+  if (!parts.length) return null;
+  return <span className="t-xs t-mut truncate">{parts.join(" · ")}</span>;
 }
 
 function PersonRow({ c }: { c: ContactDto }) {
@@ -111,12 +142,14 @@ function PersonRow({ c }: { c: ContactDto }) {
       ? {
           key: "untrust",
           label: t("people.menuUntrust"),
+          desc: t("people.menuUntrustDesc"),
           icon: <Icon.Star size={13} />,
           onSelect: () => fire(markUntrusted(c.name)),
         }
       : {
           key: "trust",
           label: t("people.menuTrust"),
+          desc: t("people.menuTrustDesc"),
           icon: <Icon.Star size={13} />,
           onSelect: () => {
             if (c.verified) fire(markTrusted(c.name, false));
@@ -163,8 +196,8 @@ function PersonRow({ c }: { c: ContactDto }) {
           to be read out loud and compared, and an ellipsis through the middle of
           it makes that impossible. A row cannot promise it the width, so it
           stays whole in the details panel, which is where comparing happens
-          anyway. The row carries the short id instead: that one is for
-          recognising someone, not for verifying them. */}
+          anyway. What the row carries under the name is not identity at all —
+          see `ContactMeta`. */}
       <div className={`row ${c.blocked ? "is-done" : ""}`}>
         <Avatar name={c.display_name || c.name} id={c.id} size={34} />
 
@@ -178,30 +211,30 @@ function PersonRow({ c }: { c: ContactDto }) {
           <div className="row-name hstack-sm" title={c.name}>
             <PresenceDot id={c.id} />
             <span className="truncate">{c.name}</span>
+            <ClaimedName c={c} />
           </div>
+          {/* What the row is asked, once there are forty of them: when did I last
+              deal with this person, and — when it is not the ordinary answer —
+              where they listen. The truncated public id that used to live here
+              answered neither: the name above already recognises them, and
+              verifying is done against the whole fingerprint in the panel. */}
           <div className="row-meta">
-            {c.display_name && c.display_name !== c.name && (
-              <>
-                <span className="truncate">
-                  {t("people.goesBy", c.display_name)}
-                </span>
-                <span className="sep" />
-              </>
-            )}
-            <ShortId value={c.id} />
+            <ContactMeta c={c} />
           </div>
 
+          {/* The name itself is already up there in brackets, readable without
+              deciding anything. What is left for this box is the one thing the
+              brackets cannot say: that acknowledging changes nothing about how
+              the contact is named here. */}
           {c.pending_name && (
             <div
-              className="card card-pad t-xs"
+              className="card card-pad t-xs hstack-sm wrap"
               style={{ borderColor: "var(--amber)", padding: 10, marginTop: 8 }}
             >
-              {t("people.wantsToBeCalled", c.pending_name)}
-              <div className="hstack-sm" style={{ marginTop: 7 }}>
-                <Button size="sm" onClick={() => fire(acceptName(c.name))}>
-                  {t("people.approve")}
-                </Button>
-              </div>
+              <span className="grow">{t("people.claimedNote", c.name)}</span>
+              <Button size="sm" onClick={() => fire(acceptName(c.name))}>
+                {t("people.acknowledge")}
+              </Button>
             </div>
           )}
         </div>
@@ -256,9 +289,6 @@ function PersonRow({ c }: { c: ContactDto }) {
             <div style={{ marginTop: 10 }}>
               <Fingerprint value={c.fingerprint} />
             </div>
-            <div style={{ marginTop: 10 }}>
-              {t("people.confirmForceFooter")}
-            </div>
           </>
         }
         confirmLabel={t("people.confirmForceLabel")}
@@ -284,19 +314,48 @@ function AddPersonSheet({
   onClose: () => void;
 }) {
   const t = useT();
+  const contacts = useStore((s) => s.contacts);
   const addContact = useStore((s) => s.addContact);
+  const rebindContact = useStore((s) => s.rebindContact);
   const [name, setName] = useState("");
   const [id, setId] = useState("");
   const [busy, setBusy] = useState(false);
+  // The name is already somebody else's. Re-pointing it is a real thing to want
+  // — a contact reinstalled and has a new key — but it drops their verified and
+  // trusted marks, so it is a question, not a side effect. The daemon refuses the
+  // plain save for exactly this case; this is the only way past it.
+  const [confirmRebind, setConfirmRebind] = useState(false);
+  const clash = nameCollision(contacts, name, undefined);
+
+  const done = (label: string, detail: string) => {
+    toast.ok(label, detail);
+    setName("");
+    setId("");
+    setConfirmRebind(false);
+    onClose();
+  };
 
   const submit = async () => {
+    if (clash) {
+      setConfirmRebind(true);
+      return;
+    }
     setBusy(true);
     try {
       await addContact(name.trim(), id.trim());
-      toast.ok(t("people.addSaved", name.trim()), t("people.addSavedDetail"));
-      setName("");
-      setId("");
-      onClose();
+      done(t("people.addSaved", name.trim()), t("people.addSavedDetail"));
+    } catch {
+      // reported by the store
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const doRebind = async () => {
+    setBusy(true);
+    try {
+      await rebindContact(name.trim(), id.trim());
+      done(t("people.rekeyed", name.trim()), t("people.rekeyedDetail"));
     } catch {
       // reported by the store
     } finally {
@@ -328,11 +387,15 @@ function AddPersonSheet({
         </>
       }
     >
-      <Field label={t("people.addNameLabel")}>
-        {({ id: fid }) => (
+      <Field
+        label={t("people.addNameLabel")}
+        hint={clash ? t("people.addNameTaken", clash.name) : undefined}
+      >
+        {({ id: fid, describedBy }) => (
           <TextInput
             id={fid}
             data-autofocus
+            aria-describedby={describedBy}
             value={name}
             onChange={(e) => setName(e.currentTarget.value)}
             placeholder={t("people.addNamePlaceholder")}
@@ -357,6 +420,24 @@ function AddPersonSheet({
         )}
       </Field>
       <div className="card card-pad t-sm t-sec">{t("people.addTip")}</div>
+      <Confirm
+        open={confirmRebind}
+        danger
+        busy={busy}
+        title={t("people.confirmRekeyTitle", name.trim())}
+        body={
+          <>
+            <div>{t("people.confirmRekeyBody", name.trim())}</div>
+            <div style={{ marginTop: 8 }}>
+              <div className="t-label">{t("people.confirmRekeyCurrent")}</div>
+              <Fingerprint value={clash?.fingerprint ?? ""} />
+            </div>
+          </>
+        }
+        confirmLabel={t("people.confirmRekeyDo")}
+        onConfirm={doRebind}
+        onCancel={() => setConfirmRebind(false)}
+      />
     </Sheet>
   );
 }
@@ -375,6 +456,7 @@ function PersonSheet() {
   const markVerified = useStore((s) => s.markVerified);
   const markUnverified = useStore((s) => s.markUnverified);
   const renameContact = useStore((s) => s.renameContact);
+  const acceptName = useStore((s) => s.acceptName);
 
   const c = contacts.find((x) => x.name === name);
   const [checked, setChecked] = useState(false);
@@ -391,9 +473,9 @@ function PersonSheet() {
         close(null);
       }}
       title={c.name}
-      subtitle={
-        c.display_name ? t("people.goesBy", c.display_name) : undefined
-      }
+      // `<ClaimedName>` is always a truthy element even when it renders
+      // nothing, and `Sheet` would keep an empty subtitle line for it.
+      subtitle={claimText(c, t) ? <ClaimedName c={c} /> : undefined}
     >
       <div className="hstack">
         <Avatar name={c.display_name || c.name} id={c.id} size={48} />
@@ -405,6 +487,20 @@ function PersonSheet() {
           />
         </div>
       </div>
+
+      {/* Same offer as the row, because this panel is where someone lands when
+          they open a contact to look into exactly this. */}
+      {c.pending_name && (
+        <div
+          className="card card-pad t-sm hstack-sm wrap"
+          style={{ borderColor: "var(--amber)" }}
+        >
+          <span className="grow">{t("people.claimedNote", c.name)}</span>
+          <Button size="sm" onClick={() => fire(acceptName(c.name))}>
+            {t("people.acknowledge")}
+          </Button>
+        </div>
+      )}
 
       <Field
         label={t("person.fingerprint")}
@@ -503,7 +599,6 @@ export function PeopleView() {
   const contacts = useStore((s) => s.contacts);
   const startPairing = useStore((s) => s.startPairing);
   const addContact = useStore((s) => s.addContact);
-  const pruneNames = useStore((s) => s.pruneNames);
   const loadPresence = useStore((s) => s.loadPresence);
   const presenceLoading = useStore((s) => s.presenceLoading);
 
@@ -553,6 +648,7 @@ export function PeopleView() {
       return (
         c.name.toLowerCase().includes(needle) ||
         c.display_name.toLowerCase().includes(needle) ||
+        c.pending_name.toLowerCase().includes(needle) ||
         c.id.toLowerCase().startsWith(needle)
       );
     });
@@ -659,29 +755,6 @@ export function PeopleView() {
         >
           <Icon.Relay size={13} /> {t("people.whoIsOnline")}
         </Button>
-        <MenuButton
-          label={t("people.moreActions")}
-          items={[
-            {
-              key: "prune",
-              label: t("people.prune"),
-              icon: <Icon.Trash size={13} />,
-              onSelect: async () => {
-                const n = await pruneNames();
-                toast.ok(
-                  n === 0
-                    ? t("people.pruneNone")
-                    : n === 1
-                      ? t("people.pruneOne")
-                      : t("people.pruneMany", n),
-                  n ? t("people.pruneDetail") : undefined
-                );
-              },
-            },
-          ]}
-        >
-          <Icon.More size={15} />
-        </MenuButton>
       </div>
 
       <div className="hstack wrap">

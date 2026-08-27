@@ -19,7 +19,8 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
-import { dto, harness, makeIpcMock, resetHarness, pick } from "./mocks";
+import { MAILBOX_TICKET, P2P_TICKET, PEER_ID, dto, harness, makeIpcMock, resetHarness, pick } from "./mocks";
+import { en } from "../i18n/en";
 
 vi.mock("../ipc", () => makeIpcMock());
 vi.mock("@tauri-apps/api/webview", () => ({
@@ -33,11 +34,11 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 }));
 const revealItemInDir = vi.fn(() => Promise.resolve());
 const openUrl = vi.fn(() => Promise.resolve());
-const openPath = vi.fn(() => Promise.resolve());
+// No `openPath` here: opening a file goes through the bridge (`api.openPath`),
+// not the plugin — see the comment on the command in `bridge.rs`.
 vi.mock("@tauri-apps/plugin-opener", () => ({
   revealItemInDir: (...a: unknown[]) => revealItemInDir(...(a as [])),
   openUrl: (...a: unknown[]) => openUrl(...(a as [])),
-  openPath: (...a: unknown[]) => openPath(...(a as [])),
 }));
 
 import { useStore } from "../store";
@@ -91,9 +92,9 @@ function fresh() {
 /** Seed the daemon's snapshot with one pending offer and mount the whole app,
  *  waiting for `init()`'s reload to land. Setting the store directly is not enough
  *  here: mounting `App` refetches, and would wipe a hand-placed row. */
-async function renderAppWithOffer() {
+async function renderAppWithOffer(over: Record<string, unknown> = {}) {
   harness.snapshot.pending = [
-    dto.offer({ id: "o1", from: "peer1", name: "arrivo.zip" }),
+    dto.offer({ id: "o1", from: PEER_ID, name: "arrivo.zip", ...(over as object) }),
   ];
   render(<App />);
   await screen.findByText("arrivo.zip");
@@ -106,6 +107,22 @@ async function renderAppWithSend(over: Record<string, unknown> = {}) {
   ];
   render(<App />);
   await screen.findByText("invio.txt");
+}
+
+/** A download under way from someone the address book has never heard of. */
+async function renderAppWithDownload(over: Record<string, unknown> = {}) {
+  harness.snapshot.transfers = [
+    dto.transfer({
+      id: 7,
+      direction: "recv",
+      name: "arrivo.zip",
+      peer: "peer9",
+      status: "active",
+      ...(over as object),
+    }),
+  ];
+  render(<App />);
+  await screen.findByText("arrivo.zip");
 }
 
 /** The row's overflow menu, opened. Every row action lives behind it. */
@@ -148,7 +165,7 @@ describe("an incoming offer", () => {
   it("102. opening the row and pressing Accetta tells the daemon", async () => {
     await renderAppWithOffer();
     fireEvent.click(screen.getByText("arrivo.zip"));
-    fireEvent.click(await screen.findByText("Accept and download"));
+    fireEvent.click(await screen.findByText(en["incoming.accept"]));
     await waitFor(() =>
       expect(harness.recorder.accept).toEqual([["o1", null, null]])
     );
@@ -158,7 +175,7 @@ describe("an incoming offer", () => {
     await renderAppWithOffer();
     harness.fail = new Set(["acceptOffer"]);
     fireEvent.click(screen.getByText("arrivo.zip"));
-    fireEvent.click(await screen.findByText("Accept and download"));
+    fireEvent.click(await screen.findByText(en["incoming.accept"]));
     await waitFor(() => expect(toastText()).toMatch(/reject|didn't work/i));
   });
 
@@ -166,7 +183,7 @@ describe("an incoming offer", () => {
     await renderAppWithOffer();
     harness.fail = new Set(["acceptOffer"]);
     fireEvent.click(screen.getByText("arrivo.zip"));
-    fireEvent.click(await screen.findByText("Accept and download"));
+    fireEvent.click(await screen.findByText(en["incoming.accept"]));
     await waitFor(() => expect(toastText()).toBeTruthy());
     expect(useStore.getState().transfers["oo1"]).toBeTruthy();
   });
@@ -207,13 +224,13 @@ describe("an incoming offer", () => {
     fireEvent.click(screen.getByText("arrivo.zip"));
     expect(screen.queryByLabelText("Password")).toBeNull();
 
-    fireEvent.click(await screen.findByText("Accept and download"));
+    fireEvent.click(await screen.findByText(en["incoming.accept"]));
     const field = await screen.findByLabelText("Password");
     // The offer must survive the refusal, or there is nothing left to retry.
     expect(useStore.getState().transfers["oo1"]).toBeTruthy();
 
     fireEvent.change(field, { target: { value: "segreto" } });
-    fireEvent.click(screen.getByText("Accept and download"));
+    fireEvent.click(screen.getByText(en["incoming.accept"]));
     await waitFor(() =>
       expect(
         harness.recorder.accept[harness.recorder.accept.length - 1]
@@ -221,9 +238,255 @@ describe("an incoming offer", () => {
     );
   });
 
+  it("152. the field appears because the daemon named the refusal, not because the sentence said \"password\"", async () => {
+    // The refusal here carries `needsPassword` and a message with no such word in
+    // it. Before the code existed this was decided by /password/i over the
+    // engine's English, so rewording that sentence — or translating it — would
+    // have removed the only place a password can be typed, silently.
+    harness.fail = new Set(["acceptOffer:refused"]);
+    await renderAppWithOffer();
+    fireEvent.click(screen.getByText("arrivo.zip"));
+    fireEvent.click(await screen.findByText(en["incoming.accept"]));
+
+    const field = await screen.findByLabelText("Password");
+    expect(useStore.getState().transfers["oo1"], "the offer survives a refusal").toBeTruthy();
+    fireEvent.change(field, { target: { value: "segreto" } });
+    fireEvent.click(screen.getByText(en["incoming.accept"]));
+    await waitFor(() =>
+      expect(harness.recorder.accept[harness.recorder.accept.length - 1]).toEqual([
+        "o1",
+        null,
+        "segreto",
+      ])
+    );
+  });
+
+  it("153. a refusal that is not about a password asks for none", async () => {
+    harness.fail = new Set(["acceptOffer:p2pOff"]);
+    await renderAppWithOffer();
+    fireEvent.click(screen.getByText("arrivo.zip"));
+    fireEvent.click(await screen.findByText(en["incoming.accept"]));
+    await act(async () => {});
+    expect(screen.queryByLabelText("Password")).toBeNull();
+  });
+
+  // The dialog used to show a stranger the raw base32 id and offer to hand over
+  // words *after* they were saved — asking the reader to commit before it would
+  // inform them. The fingerprint is a pure function of the key; the daemon stamps
+  // it onto every offer, saved sender or not.
+  it("140. a stranger's fingerprint is on screen before anything is saved", async () => {
+    await renderAppWithOffer();
+    fireEvent.click(screen.getByText("arrivo.zip"));
+    await screen.findByText("Somebody is sending you a file");
+    expect(
+      screen.getByText("able-otter-nine-plum-river-cedar-lantern-fox")
+    ).toBeTruthy();
+    expect(harness.recorder.addContact).toEqual([]);
+  });
+
+  it("141. a key that has never sent before says so; one that has, says how often", async () => {
+    await renderAppWithOffer();
+    fireEvent.click(screen.getByText("arrivo.zip"));
+    expect(await screen.findByText(en["incoming.firstTime"])).toBeTruthy();
+
+    cleanup();
+    resetHarness();
+    fresh();
+    await renderAppWithOffer({ seen_count: 3 });
+    fireEvent.click(screen.getByText("arrivo.zip"));
+    expect(await screen.findByText(en["incoming.seenBefore"]("3"))).toBeTruthy();
+    expect(screen.queryByText(en["incoming.firstTime"])).toBeNull();
+  });
+
+  // A key that introduced itself as one person and came back as another is
+  // indistinguishable from a key that only ever used the second name — unless
+  // somebody kept the first claim. That difference is the whole signal.
+  it("142. a stranger whose claimed name has changed is called out", async () => {
+    await renderAppWithOffer({ sender_name: "Marco", known_name: "Giulia" });
+    fireEvent.click(screen.getByText("arrivo.zip"));
+    expect(
+      await screen.findByText(en["incoming.wasCalled"]("Giulia"))
+    ).toBeTruthy();
+  });
+
+  it("143. a stranger claiming the same name as always is not called out", async () => {
+    await renderAppWithOffer({ sender_name: "Giulia", known_name: "Giulia" });
+    fireEvent.click(screen.getByText("arrivo.zip"));
+    await screen.findByText("Somebody is sending you a file");
+    expect(screen.queryByText(en["incoming.wasCalled"]("Giulia"))).toBeNull();
+  });
+
+  it("144. the name field is filled in from what the sender calls themselves", async () => {
+    await renderAppWithOffer({ sender_name: "Anna Maria" });
+    fireEvent.click(screen.getByText("arrivo.zip"));
+    const field = (await screen.findByLabelText(
+      en["incoming.saveAsLabel"]
+    )) as HTMLInputElement;
+    expect(field.value).toBe("anna-maria");
+  });
+
+  // One gesture, one commit. There is no Save of its own any more: the address
+  // book used to move mid-decision, which re-rendered the sender as known and
+  // took the panel — and with it the place the user was reading — off screen.
+  it("145. Accept saves the typed name first, then takes the file", async () => {
+    await renderAppWithOffer({ sender_name: "Anna" });
+    fireEvent.click(screen.getByText("arrivo.zip"));
+    const field = await screen.findByLabelText(en["incoming.saveAsLabel"]);
+    fireEvent.change(field, { target: { value: "annamaria" } });
+    fireEvent.click(screen.getByText(en["incoming.acceptAndSave"]));
+    await waitFor(() =>
+      expect(harness.recorder.addContact).toEqual([["annamaria", PEER_ID]])
+    );
+    expect(harness.recorder.accept).toEqual([["o1", null, null]]);
+  });
+
+  it("146. with the field left empty it is a plain Accept, and saves nobody", async () => {
+    await renderAppWithOffer();
+    fireEvent.click(screen.getByText("arrivo.zip"));
+    fireEvent.click(await screen.findByText(en["incoming.accept"]));
+    await waitFor(() => expect(harness.recorder.accept).toHaveLength(1));
+    expect(harness.recorder.addContact).toEqual([]);
+  });
+
+  it("147. a refused save does not go on to take the file", async () => {
+    await renderAppWithOffer({ sender_name: "Anna" });
+    harness.fail = new Set(["addContact"]);
+    fireEvent.click(screen.getByText("arrivo.zip"));
+    fireEvent.click(await screen.findByText(en["incoming.acceptAndSave"]));
+    await waitFor(() => expect(toastText()).toBeTruthy());
+    expect(harness.recorder.accept).toEqual([]);
+    expect(useStore.getState().transfers["oo1"]).toBeTruthy();
+  });
+
+  // `contact_add` re-points a name that already exists and drops that name's
+  // verified and trusted marks. Typing a name you already use, over a stranger's
+  // offer, would quietly demote the person you had actually checked.
+  it("148. a name that belongs to somebody else is refused before it is sent", async () => {
+    harness.snapshot.contacts = [
+      dto.contact({ name: "giulia", id: "someone-else", verified: true }),
+    ];
+    await renderAppWithOffer();
+    fireEvent.click(screen.getByText("arrivo.zip"));
+    const field = await screen.findByLabelText(en["incoming.saveAsLabel"]);
+    fireEvent.change(field, { target: { value: "giulia" } });
+    expect(screen.getByText(en["incoming.nameTaken"]("giulia"))).toBeTruthy();
+    fireEvent.click(screen.getByText(en["incoming.accept"]));
+    await act(async () => {});
+    expect(harness.recorder.addContact).toEqual([]);
+    expect(harness.recorder.accept).toEqual([]);
+  });
+
+  // The panel changes shape as it is used; a click aimed at a control that has
+  // just been replaced must not land on the backdrop and read as the dialog
+  // closing itself.
+  it("149. the backdrop does not dismiss the decision, but Escape does", async () => {
+    await renderAppWithOffer();
+    fireEvent.click(screen.getByText("arrivo.zip"));
+    await screen.findByText("Somebody is sending you a file");
+    fireEvent.click(document.querySelector(".scrim")!);
+    expect(useStore.getState().incomingOfferId).toBe("o1");
+    fireEvent.keyDown(document, { key: "Escape" });
+    await waitFor(() =>
+      expect(useStore.getState().incomingOfferId).toBeNull()
+    );
+  });
+
+  // The dialog is mounted for the life of the window, so without a fresh mount
+  // per offer the second arrival inherits the first one's proposed name.
+  it("150. a second offer proposes its own sender's name, not the first one's", async () => {
+    await renderAppWithOffer({ sender_name: "Anna" });
+    fireEvent.click(screen.getByText("arrivo.zip"));
+    await screen.findByLabelText(en["incoming.saveAsLabel"]);
+
+    act(() => {
+      useStore.getState().applyEvent({
+        type: "offer_received",
+        id: "o2",
+        from: "peer-two",
+        name: "secondo.zip",
+        size: 10,
+        note: "",
+        sender_name: "Bruno",
+      });
+      useStore.getState().openIncoming("o2");
+    });
+    const field = (await screen.findByLabelText(
+      en["incoming.saveAsLabel"]
+    )) as HTMLInputElement;
+    expect(field.value).toBe("bruno");
+  });
+
+  it("154. a transfer that cannot be held is not offered a pause", async () => {
+    // A pickup from the mailbox is one fetch — it would start over, not resume —
+    // and the daemon refuses to hold it. The window used to draw the button from
+    // the status alone, the daemon answered "Ok", and nothing happened.
+    await renderAppWithSend({ can_pause: false });
+    expect(screen.queryByLabelText(en["transfers.pause"])).toBeNull();
+    expect(harness.recorder.pause).toEqual([]);
+  });
+
+  it("155. a transfer that can be held keeps its pause", async () => {
+    await renderAppWithSend({ can_pause: true });
+    fireEvent.click(screen.getByLabelText(en["transfers.pause"]));
+    await waitFor(() => expect(harness.recorder.pause).toEqual([1]));
+  });
+
+  it("156. a stalled row is already trying, so it is offered no play", async () => {
+    // Stalled means waiting — on the relay, or on the recipient — not paused, and
+    // `resume` refuses anything that is not paused. The play button asked for it
+    // anyway and got a silent no.
+    await renderAppWithSend({
+      status: "waiting: offered — waiting for them to accept",
+      waiting_code: "offered",
+      can_pause: true,
+    });
+    // The row really is the stalled one, or the assertion below would pass for an
+    // active row that has no play button either.
+    expect(screen.getByText(en["waiting.offered"])).toBeTruthy();
+    expect(screen.queryByLabelText(en["transfers.resume"])).toBeNull();
+  });
+
+  // The bug this whole file exists for, in its second shape: not a button that
+  // does nothing, but a button that should never have been drawn. A trusted
+  // sender's file (or one from another of the user's own machines) is downloading
+  // before the window hears about it, so the daemon marks the arrival `auto` — and
+  // pressing Accetta on it reached for an offer the daemon had already consumed.
+  it("151. a file already arriving offers nothing to press", async () => {
+    render(<App />);
+    // Mounting refetches; emitting before that lands would race the snapshot.
+    await waitFor(() => expect(useStore.getState().connected).toBe(true));
+    act(() => {
+      harness.emit({
+        offer_received: {
+          id: "auto1",
+          from: PEER_ID,
+          name: "arrivo.zip",
+          size: 9,
+          note: "",
+          sender_name: "Anna",
+          auto: true,
+        },
+      });
+    });
+    await act(async () => {});
+
+    expect(screen.queryByText(en["incoming.accept"])).toBeNull();
+    expect(screen.queryByText(en["transfers.review"])).toBeNull();
+    expect(useStore.getState().incomingOfferId).toBeNull();
+
+    // And the download says it, once the daemon starts it.
+    act(() => {
+      harness.emit({
+        started: { id: 7, direction: "recv", name: "arrivo.zip", total_size: 9 },
+      });
+    });
+    expect(await screen.findByText("arrivo.zip")).toBeTruthy();
+    expect(screen.queryByText(en["incoming.accept"])).toBeNull();
+  });
+
   it("135. it shows the sender's note", async () => {
     harness.snapshot.pending = [
-      dto.offer({ id: "o1", from: "peer1", name: "arrivo.zip", note: "guarda qui" }),
+      dto.offer({ id: "o1", from: PEER_ID, name: "arrivo.zip", note: "guarda qui" }),
     ];
     render(<App />);
     fireEvent.click(await screen.findByText("arrivo.zip"));
@@ -240,7 +503,7 @@ describe("an incoming offer", () => {
   it("134. Accetta without picking a folder uses the daemon's default", async () => {
     await renderAppWithOffer();
     fireEvent.click(screen.getByText("arrivo.zip"));
-    fireEvent.click(await screen.findByText("Accept and download"));
+    fireEvent.click(await screen.findByText(en["incoming.accept"]));
     await waitFor(() =>
       expect(harness.recorder.accept[0][1]).toBeNull()
     );
@@ -263,7 +526,7 @@ describe("an incoming offer", () => {
           .value
       ).toBe("qui")
     );
-    fireEvent.click(screen.getByText("Accept and download"));
+    fireEvent.click(screen.getByText(en["incoming.accept"]));
     await waitFor(() =>
       expect(harness.recorder.accept).toEqual([["o1", dir.id, null]])
     );
@@ -278,6 +541,36 @@ describe("the row menu", () => {
     const menu = await openRowMenu("invio.txt");
     fireEvent.click(within(menu).getByText("Pause"));
     await waitFor(() => expect(harness.recorder.pause).toEqual([1]));
+  });
+
+  // The escape hatch from the wait. A send holds a direct offer open for a while
+  // before parking the file on the relay, so there has to be a way to say "I know
+  // they are not going to answer" without cancelling and starting again.
+  it("119a. a send waiting on an accept offers to park it on the relay", async () => {
+    await renderAppWithSend({
+      status: "waiting: offered — waiting for them to accept",
+      offer_status: "arrived",
+    });
+    const menu = await openRowMenu("invio.txt");
+    fireEvent.click(within(menu).getByText(en["transfers.depositNow"]));
+    await waitFor(() => expect(harness.recorder.depositNow).toEqual([1]));
+  });
+
+  it("119b. nothing else offers it — there is no wait to cut short", async () => {
+    await renderAppWithSend({ status: "active" });
+    const menu = await openRowMenu("invio.txt");
+    expect(within(menu).queryByText(en["transfers.depositNow"])).toBeNull();
+  });
+
+  it("119c. a daemon that refuses says so instead of looking done", async () => {
+    await renderAppWithSend({
+      status: "waiting: offered — waiting for them to accept",
+      offer_status: "arrived",
+    });
+    harness.fail = new Set(["depositNow"]);
+    const menu = await openRowMenu("invio.txt");
+    fireEvent.click(within(menu).getByText(en["transfers.depositNow"]));
+    await waitFor(() => expect(toastText()).toBeTruthy());
   });
 
   it("111. a refused menu action reports itself", async () => {
@@ -308,7 +601,7 @@ describe("the row menu", () => {
   it("114. Take off the list removes a concluded one", async () => {
     await renderAppWithSend({ status: "completed" });
     const menu = await openRowMenu("invio.txt");
-    fireEvent.click(within(menu).getByText("Take off the list"));
+    fireEvent.click(within(menu).getByText(en["transfers.removeRow"]));
     await waitFor(() => expect(harness.recorder.remove).toEqual([1]));
   });
 
@@ -316,7 +609,7 @@ describe("the row menu", () => {
     await renderAppWithSend({ status: "completed" });
     harness.fail = new Set(["remove"]);
     const menu = await openRowMenu("invio.txt");
-    fireEvent.click(within(menu).getByText("Take off the list"));
+    fireEvent.click(within(menu).getByText(en["transfers.removeRow"]));
     await waitFor(() => expect(toastText()).toBeTruthy());
     expect(screen.getByText("invio.txt")).toBeTruthy();
   });
@@ -331,10 +624,45 @@ describe("the row menu", () => {
       },
     }));
     const menu = await openRowMenu("invio.txt");
-    fireEvent.click(within(menu).getByText("Open the folder"));
+    fireEvent.click(within(menu).getByText(en["transfers.openFolder"]));
     await waitFor(() =>
       expect(revealItemInDir).toHaveBeenCalledWith("/Users/ls/Arvolo/invio.txt")
     );
+  });
+
+  // The offer dialog asks the same question, but only if you go through it: an
+  // auto-accepted arrival, or one waved past, otherwise leaves the sender
+  // nameless — with their id nowhere but a tooltip.
+  it("117a. a download from a stranger offers to save them, and saves what you type", async () => {
+    await renderAppWithDownload();
+    const menu = await openRowMenu("arrivo.zip");
+    fireEvent.click(within(menu).getByText("Save the sender…"));
+    const field = await screen.findByLabelText("Name to give the contact");
+    fireEvent.change(field, { target: { value: "lorenzo" } });
+    fireEvent.click(screen.getByText("Save"));
+    await waitFor(() =>
+      expect(harness.recorder.addContact).toEqual([["lorenzo", "peer9"]])
+    );
+  });
+
+  it("117b. someone already in the address book is not offered again", async () => {
+    harness.snapshot.contacts = [dto.contact({ name: "proj", id: "peer9" })];
+    await renderAppWithDownload();
+    const menu = await openRowMenu("arrivo.zip");
+    expect(within(menu).queryByText("Save the sender…")).toBeNull();
+  });
+
+  // Their own name for themselves is a claim, not evidence — but it is the best
+  // first guess at what to call them, and typing it out again is the friction
+  // that stops people saving anyone at all.
+  it("117c. the name the sender claims is offered as the default", async () => {
+    await renderAppWithDownload({ sender_name: "Anna Maria" });
+    const menu = await openRowMenu("arrivo.zip");
+    fireEvent.click(within(menu).getByText("Save the sender…"));
+    const field = (await screen.findByLabelText(
+      "Name to give the contact"
+    )) as HTMLInputElement;
+    expect(field.value).toBe("anna-maria");
   });
 
   it("118. the arrow keys on a row's grip reorder without touching the daemon", async () => {
@@ -353,7 +681,7 @@ describe("the row menu", () => {
     // one step at a time. Without it the board would be unorderable without a
     // pointer, which is what the menu items used to cover.
     const grip = screen.getByLabelText(
-      `Move ${below}: drag, or use the up and down arrows`
+      en["transfers.reorder"](below)
     );
     fireEvent.keyDown(grip, { key: "ArrowUp" });
     await waitFor(() => expect(order()[0]).toBe(below));
@@ -374,7 +702,7 @@ describe("the row menu", () => {
     const [top, mid, bottom] = order();
 
     const grip = screen.getByLabelText(
-      `Move ${top}: drag, or use the up and down arrows`
+      en["transfers.reorder"](top)
     );
     // jsdom lays nothing out — every rect is 0×0 — so the drag has to be given
     // the geometry it would read from a real window: three rows, 60px each.
@@ -407,7 +735,7 @@ describe("the row menu", () => {
     const before = order();
 
     const grip = screen.getByLabelText(
-      `Move ${before[0]}: drag, or use the up and down arrows`
+      en["transfers.reorder"](before[0])
     );
     const rows = Array.from(
       grip.closest(".rows")!.querySelectorAll<HTMLElement>(":scope > .row")
@@ -460,6 +788,20 @@ describe("the board's own controls", () => {
 // ---------------------------------------------------------------------------
 
 describe("the send panel", () => {
+  /** The recipient rows, and only those: the mode switch above them is a
+   *  radiogroup as well, so an unscoped role query returns "To a contact" first. */
+  const recipientRows = async () =>
+    within(
+      await screen.findByRole("radiogroup", { name: "Recipient" })
+    ).getAllByRole("radio");
+
+  /** One of the five destinations on the mode switch. Scoped for the same reason
+   *  in reverse — and because "Your devices" is also the name of a screen. */
+  const modeButton = async (label: string) =>
+    within(
+      await screen.findByRole("radiogroup", { name: "Way of sending" })
+    ).getByText(label);
+
   const openSend = async () => {
     render(<App />);
     fireEvent.click(await screen.findByText("Send…"));
@@ -508,7 +850,9 @@ describe("the send panel", () => {
     );
     await waitFor(() =>
       expect(harness.recorder.sendTo).toEqual([
-        ["proj", [pick("a.txt").id, pick("b.txt").id], ""],
+        // The trailing null is the aim: no machine named, because this is a
+        // send to a person and only your own devices can be aimed at.
+        ["proj", [pick("a.txt").id, pick("b.txt").id], "", null],
       ])
     );
     for (const sent of harness.recorder.sendTo[0][1]) {
@@ -531,6 +875,175 @@ describe("the send panel", () => {
     await waitFor(() =>
       expect(harness.recorder.sendTo[0]?.[0]).toBe("proj")
     );
+  });
+
+  it("125a. your own devices are a mode, and travel as the reserved word", async () => {
+    // No recipient to pick: choosing the mode *is* choosing the destination, so
+    // the send goes through with an empty address book — which is exactly when a
+    // new user has nobody else to send to.
+    useStore.setState({ sheetPicks: [pick("a.txt")] });
+    render(<App />);
+    fireEvent.click(await modeButton("Your devices"));
+    fireEvent.click(
+      within(document.querySelector(".sheet-foot") as HTMLElement).getByText(
+        "Send"
+      )
+    );
+    // `me` is what the daemon resolves against its own identity. Anything else
+    // here — an id, a contact name — means the two ends stopped agreeing.
+    await waitFor(() => expect(harness.recorder.sendTo[0]?.[0]).toBe("me"));
+    // And no note rides along: the only screen that shows one never opens for
+    // your own identity, so there is no field and nothing to send.
+    expect(harness.recorder.sendTo[0]?.[2]).toBe("");
+    expect(
+      screen.queryByText("A couple of lines for the recipient (optional)")
+    ).toBeNull();
+  });
+
+  it("125b. a contact called “me” is sent by id, not by the reserved word", async () => {
+    // The word wins at the daemon, so passing the name would seal the file to
+    // ourselves and never reach them. Their id says the same thing safely.
+    harness.snapshot.contacts = [dto.contact({ name: "me", id: PEER_ID })];
+    useStore.setState({ sheetPicks: [pick("a.txt")] });
+    render(<App />);
+    await screen.findByText("me");
+    fireEvent.click((await recipientRows())[0]);
+    fireEvent.click(
+      within(document.querySelector(".sheet-foot") as HTMLElement).getByText(
+        "Send"
+      )
+    );
+    await waitFor(() => expect(harness.recorder.sendTo[0]?.[0]).toBe(PEER_ID));
+  });
+
+  it("125e. one of your machines can be named, and travels as the aim", async () => {
+    harness.snapshot.devices = [
+      ...harness.snapshot.devices,
+      {
+        id: "bb00000000000000000000000000bb00",
+        name: "the desktop",
+        platform: "linux",
+        last_seen: 1_700_000_000,
+        is_this_device: false,
+      },
+    ];
+    useStore.setState({ sheetPicks: [pick("a.txt")] });
+    render(<App />);
+    fireEvent.click(await modeButton("Your devices"));
+    fireEvent.click(await screen.findByText("the desktop"));
+    fireEvent.click(
+      within(document.querySelector(".sheet-foot") as HTMLElement).getByText(
+        "Send"
+      )
+    );
+    // The name goes on the wire; the daemon turns it into a device id. Sending
+    // the id from here would put the register's shape in the webview.
+    await waitFor(() =>
+      expect(harness.recorder.sendTo[0]?.[3]).toBe("the desktop")
+    );
+  });
+
+  it("125f. by default no machine is named, and this one is never offered", async () => {
+    harness.snapshot.devices = [
+      ...harness.snapshot.devices,
+      {
+        id: "bb00000000000000000000000000bb00",
+        name: "the desktop",
+        platform: "linux",
+        last_seen: 1_700_000_000,
+        is_this_device: false,
+      },
+    ];
+    useStore.setState({ sheetPicks: [pick("a.txt")] });
+    render(<App />);
+    fireEvent.click(await modeButton("Your devices"));
+    await screen.findByText("the desktop");
+    // This machine does not take its own offer, so aiming at it would be a send
+    // that waits for a computer already in front of you.
+    expect(screen.queryByText("this mac")).toBeNull();
+    fireEvent.click(
+      within(document.querySelector(".sheet-foot") as HTMLElement).getByText(
+        "Send"
+      )
+    );
+    await waitFor(() => expect(harness.recorder.sendTo[0]?.[3]).toBeNull());
+  });
+
+  // The bug these two are here for: the name field committed on Enter and closed
+  // on blur, so both gestures a person makes after typing — press the button
+  // beside it, click anywhere — threw the name away without a word. The daemon
+  // was fine; nothing ever reached it.
+  it("125g. a machine is named by pressing Save, not only by pressing Enter", async () => {
+    render(<App />);
+    useStore.getState().go("devices");
+    fireEvent.click(await screen.findByLabelText("Actions for this mac"));
+    fireEvent.click(await screen.findByText("Rename"));
+    fireEvent.change(await screen.findByLabelText("Name this device"), {
+      target: { value: "portatile" },
+    });
+    // Clicking Save blurs the field first. That used to be the end of the edit.
+    fireEvent.blur(screen.getByLabelText("Name this device"));
+    fireEvent.click(screen.getByText("Save"));
+    await waitFor(() =>
+      expect(harness.recorder.renameThisDevice).toEqual(["portatile"])
+    );
+    expect(await screen.findByText("Renamed")).toBeTruthy();
+  });
+
+  it("125h. the row menu carries both actions, with the impossible one refused in place", async () => {
+    harness.snapshot.devices = [
+      ...harness.snapshot.devices,
+      {
+        id: "bb00000000000000000000000000bb00",
+        name: "the desktop",
+        platform: "linux",
+        last_seen: 1_700_000_000,
+        is_this_device: false,
+      },
+    ];
+    render(<App />);
+    useStore.getState().go("devices");
+    // This machine: named here, and not forgettable here — it would only
+    // announce itself again on the next round.
+    fireEvent.click(await screen.findByLabelText("Actions for this mac"));
+    expect(
+      (await screen.findByText("Rename")).closest("button")?.disabled
+    ).toBe(false);
+    expect(screen.getByText("Forget").closest("button")?.disabled).toBe(true);
+    fireEvent.keyDown(document, { key: "Escape" });
+    // The other one: the mirror image, for the same reason read the other way.
+    fireEvent.click(await screen.findByLabelText("Actions for the desktop"));
+    expect(
+      (await screen.findByText("Rename")).closest("button")?.disabled
+    ).toBe(true);
+    expect(screen.getByText("Forget").closest("button")?.disabled).toBe(false);
+  });
+
+  it("125d. the Devices screen opens the sheet already on that mode", async () => {
+    render(<App />);
+    fireEvent.click(await screen.findByText("Your devices")); // the rail item
+    fireEvent.click(await screen.findByText("Send to your devices"));
+    // Not just "the sheet opened": it opened on the right destination, which is
+    // the whole reason for a button there rather than "use Send".
+    const mode = await modeButton("Your devices");
+    await waitFor(() =>
+      expect(mode.getAttribute("aria-checked")).toBe("true")
+    );
+  });
+
+  it("125c. sending to your own devices never shows the wire word", async () => {
+    useStore.setState({ sheetPicks: [pick("a.txt")] });
+    render(<App />);
+    fireEvent.click(await modeButton("Your devices"));
+    fireEvent.click(
+      within(document.querySelector(".sheet-foot") as HTMLElement).getByText(
+        "Send"
+      )
+    );
+    // "On its way to me" is the sentence this exists to prevent — and the toast
+    // is written whole rather than splicing a name in, so it reads as a sentence
+    // in every language instead of "On its way to Your devices".
+    expect(await screen.findByText("On its way to your devices")).toBeDefined();
   });
 
   it("126. the note typed in rides along with the send", async () => {
@@ -572,15 +1085,15 @@ describe("the send panel", () => {
     useStore.setState({ sheetPicks: [pick("a.txt")] });
     render(<App />);
     fireEvent.click(await screen.findByText("Ticket"));
-    fireEvent.click(screen.getByText("Create the ticket"));
-    expect(await screen.findByText("arvc-test")).toBeTruthy();
+    fireEvent.click(screen.getByText(en["send.submitTicket"]));
+    expect(await screen.findByText(P2P_TICKET)).toBeTruthy();
   });
 
   it("130. the Link mode creates a link and shows it", async () => {
     useStore.setState({ sheetPicks: [pick("a.txt")] });
     render(<App />);
     fireEvent.click(await screen.findByText("Link"));
-    fireEvent.click(screen.getByText("Create the link"));
+    fireEvent.click(screen.getByText(en["send.submitLink"]));
     expect(
       await screen.findByText("https://relay.test/dl/abc#key")
     ).toBeTruthy();
@@ -591,7 +1104,7 @@ describe("the send panel", () => {
     useStore.setState({ sheetPicks: [pick("a.txt")] });
     render(<App />);
     fireEvent.click(await screen.findByText("Link"));
-    fireEvent.click(screen.getByText("Create the link"));
+    fireEvent.click(screen.getByText(en["send.submitLink"]));
     await waitFor(() => expect(toastText()).toBeTruthy());
   });
 
@@ -599,7 +1112,7 @@ describe("the send panel", () => {
     useStore.setState({ sheetPicks: [pick("a.txt")] });
     render(<App />);
     fireEvent.click(await screen.findByText("Code"));
-    fireEvent.click(screen.getByText("Generate the code"));
+    fireEvent.click(screen.getByText(en["send.submitCode"]));
     expect(await screen.findByText("4821-crater-mango")).toBeTruthy();
   });
 
@@ -611,7 +1124,7 @@ describe("the send panel", () => {
     // TTL and password protect a *deposit*; offering them on a live send would
     // promise something that is not being applied.
     expect(screen.queryByText("Expires after")).toBeNull();
-    fireEvent.click(screen.getByLabelText("Leave it in the mailbox"));
+    fireEvent.click(screen.getByLabelText(en["send.depositLabel"]));
     expect(await screen.findByText("Expires after")).toBeTruthy();
   });
 
@@ -620,11 +1133,11 @@ describe("the send panel", () => {
     useStore.setState({ sheetPicks: [pick("a.txt")] });
     render(<App />);
     fireEvent.click(await screen.findByText("proj"));
-    fireEvent.click(screen.getByLabelText("Leave it in the mailbox"));
+    fireEvent.click(screen.getByLabelText(en["send.depositLabel"]));
     fireEvent.change(await screen.findByPlaceholderText("none"), {
       target: { value: "segreto" },
     });
-    fireEvent.click(screen.getByText("Deposit it"));
+    fireEvent.click(screen.getByText(en["send.submitDeposit"]));
     await waitFor(() => expect(harness.recorder.depositTo).toHaveLength(1));
     const [to, , ttl, max, password] = harness.recorder.depositTo[0];
     expect(to).toBe("proj");
@@ -633,14 +1146,69 @@ describe("the send panel", () => {
     expect(password).toBe("segreto");
   });
 
+  it("a cap typed as text cannot become a silently unlimited link", async () => {
+    useStore.setState({ sheetPicks: [pick("a.txt")] });
+    render(<App />);
+    fireEvent.click(await screen.findByText("Link"));
+    const cap = (await screen.findByPlaceholderText(
+      "unlimited"
+    )) as HTMLInputElement;
+    // "tre" used to parse to NaN and fall through to null — a link anyone could
+    // download forever, from a field the user believed said three.
+    fireEvent.change(cap, { target: { value: "tre" } });
+    expect(cap.value).toBe("");
+    fireEvent.change(cap, { target: { value: "1a2" } });
+    expect(cap.value).toBe("12");
+    // A decimal or a minus is a `u32` round-trip error, not a cap.
+    fireEvent.change(cap, { target: { value: "-2.5" } });
+    expect(cap.value).toBe("25");
+    fireEvent.change(cap, { target: { value: "3" } });
+    fireEvent.click(screen.getByText(en["send.submitLink"]));
+    await waitFor(() => expect(harness.recorder.createLink).toHaveLength(1));
+    expect(harness.recorder.createLink[0]?.[1]).toBe(3);
+  });
+
+  it("a cap of zero is unreachable, in the mailbox as on a link", async () => {
+    harness.snapshot.contacts = [dto.contact({ name: "proj" })];
+    useStore.setState({ sheetPicks: [pick("a.txt")] });
+    render(<App />);
+    fireEvent.click(await screen.findByText("proj"));
+    fireEvent.click(screen.getByLabelText(en["send.depositLabel"]));
+    const cap = (await screen.findByPlaceholderText("1")) as HTMLInputElement;
+    // Zero collections is a deposit nobody may ever pick up: a way to lose a
+    // file, never a thing to ask for.
+    fireEvent.change(cap, { target: { value: "0" } });
+    expect(cap.value).toBe("");
+    fireEvent.change(cap, { target: { value: "05" } });
+    expect(cap.value).toBe("5");
+    fireEvent.click(screen.getByText(en["send.submitDeposit"]));
+    await waitFor(() => expect(harness.recorder.depositTo).toHaveLength(1));
+    expect(harness.recorder.depositTo[0]?.[3]).toBe(5);
+  });
+
+  it("an emptied cap falls back to the daemon's default, not to no limit", async () => {
+    harness.snapshot.contacts = [dto.contact({ name: "proj" })];
+    useStore.setState({ sheetPicks: [pick("a.txt")] });
+    render(<App />);
+    fireEvent.click(await screen.findByText("proj"));
+    fireEvent.click(screen.getByLabelText(en["send.depositLabel"]));
+    fireEvent.change(await screen.findByPlaceholderText("1"), {
+      target: { value: "" },
+    });
+    fireEvent.click(screen.getByText(en["send.submitDeposit"]));
+    await waitFor(() => expect(harness.recorder.depositTo).toHaveLength(1));
+    // null, which the daemon reads as one pickup — what the placeholder says.
+    expect(harness.recorder.depositTo[0]?.[3]).toBeNull();
+  });
+
   it("a deposit hands back the arvm… ticket for hand-delivery", async () => {
     harness.snapshot.contacts = [dto.contact({ name: "proj" })];
     useStore.setState({ sheetPicks: [pick("a.txt")] });
     render(<App />);
     fireEvent.click(await screen.findByText("proj"));
-    fireEvent.click(screen.getByLabelText("Leave it in the mailbox"));
-    fireEvent.click(await screen.findByText("Deposit it"));
-    expect(await screen.findByText("arvm-test")).toBeTruthy();
+    fireEvent.click(screen.getByLabelText(en["send.depositLabel"]));
+    fireEvent.click(await screen.findByText(en["send.submitDeposit"]));
+    expect(await screen.findByText(MAILBOX_TICKET)).toBeTruthy();
   });
 
   it("reopening the panel never inherits the last send's password", async () => {
@@ -648,14 +1216,14 @@ describe("the send panel", () => {
     useStore.setState({ sheetPicks: [pick("a.txt")] });
     render(<App />);
     fireEvent.click(await screen.findByText("proj"));
-    fireEvent.click(screen.getByLabelText("Leave it in the mailbox"));
+    fireEvent.click(screen.getByLabelText(en["send.depositLabel"]));
     fireEvent.change(await screen.findByPlaceholderText("none"), {
       target: { value: "segreto" },
     });
     useStore.getState().closeSheet();
     useStore.getState().openSheet([pick("b.txt")]);
     fireEvent.click(await screen.findByText("proj"));
-    fireEvent.click(screen.getByLabelText("Leave it in the mailbox"));
+    fireEvent.click(screen.getByLabelText(en["send.depositLabel"]));
     // A password carried over would silently protect a different file for a
     // different person.
     expect(
@@ -713,6 +1281,48 @@ describe("receiving from a pasted artefact", () => {
 // ---------------------------------------------------------------------------
 
 describe("the address book", () => {
+  // What the line under a name is for. It used to hold eight characters of the
+  // public id: the name above already recognises them, and verifying is done
+  // against the whole fingerprint in the panel, so it answered nothing.
+  it("157. a row says when you last dealt with somebody", async () => {
+    const threeDaysAgo = Math.floor(Date.now() / 1000) - 3 * 86400;
+    harness.snapshot.contacts = [
+      dto.contact({ name: "proj", id: "p1", last_exchange: threeDaysAgo }),
+    ];
+    render(<App />);
+    useStore.getState().go("people");
+    await screen.findByText("proj");
+    expect(
+      await screen.findByText(en["people.lastExchange"](en["ago.days"](3)))
+    ).toBeTruthy();
+    // And not the id it replaced.
+    expect(screen.queryByText(/^p1/)).toBeNull();
+  });
+
+  it("158. a contact on another relay says where, and one on yours says nothing", async () => {
+    harness.snapshot.contacts = [
+      dto.contact({ name: "altrove", id: "p1", relay: "https://other.relay.test" }),
+      // The ordinary case: the daemon's own relay. A column that repeats "same as
+      // you" on every row is a column that says nothing.
+      dto.contact({ name: "vicino", id: "p2", relay: "https://relay.test" }),
+    ];
+    render(<App />);
+    useStore.getState().go("people");
+    await screen.findByText("altrove");
+    expect(
+      await screen.findByText(en["people.listensOn"]("other.relay.test"))
+    ).toBeTruthy();
+    expect(screen.queryByText(en["people.listensOn"]("relay.test"))).toBeNull();
+  });
+
+  it("159. a contact with nothing to report gets no filler", async () => {
+    harness.snapshot.contacts = [dto.contact({ name: "nuovo", id: "p1" })];
+    render(<App />);
+    useStore.getState().go("people");
+    await screen.findByText("nuovo");
+    expect(screen.queryByText(/ultimo scambio|last exchange|listens on/)).toBeNull();
+  });
+
   it("an unreachable relay reads as unknown, never as offline", async () => {
     harness.snapshot.contacts = [dto.contact({ name: "proj", id: "p1" })];
     harness.fail = new Set(["presence"]);
@@ -782,6 +1392,70 @@ describe("the address book", () => {
       vi.useRealTimers();
       delete (document as unknown as { hidden?: boolean }).hidden;
     }
+  });
+
+  it("the name a peer gives itself is readable without approving anything", async () => {
+    harness.snapshot.contacts = [
+      dto.contact({ name: "proj", id: "p1", pending_name: "proj server" }),
+    ];
+    render(<App />);
+    useStore.getState().go("people");
+    // Nothing has been decided, and the claim is on screen anyway: hiding it
+    // until it is approved asks for a decision with no information behind it.
+    expect(
+      await screen.findByText("(calls themselves “proj server”)")
+    ).toBeTruthy();
+    // And the name the user typed is still the one the row is headed by.
+    expect(screen.getByText("proj")).toBeTruthy();
+  });
+
+  it("a peer that renames itself is shown against the name it had", async () => {
+    harness.snapshot.contacts = [
+      dto.contact({
+        name: "proj",
+        id: "p1",
+        display_name: "proj server",
+        pending_name: "banca",
+      }),
+    ];
+    render(<App />);
+    useStore.getState().go("people");
+    // The claim on its own is not the interesting part — the change is. This is
+    // what impersonation looks like from the receiving end.
+    expect(
+      await screen.findByText("(now: “banca” — was: “proj server”)")
+    ).toBeTruthy();
+  });
+
+  it("acknowledging a claimed name leaves the contact named as it was", async () => {
+    harness.snapshot.contacts = [
+      dto.contact({ name: "proj", id: "p1", pending_name: "proj server" }),
+    ];
+    render(<App />);
+    useStore.getState().go("people");
+    fireEvent.click(await screen.findByText("Got it"));
+    await waitFor(() =>
+      expect(harness.recorder.acceptName).toEqual(["proj"])
+    );
+    // The button takes the highlight off a name that has been read. It is not a
+    // rename, and nothing in the address book moves: `renameContact` is the only
+    // thing that touches what the user calls someone.
+    expect(harness.recorder.renameContact).toEqual([]);
+    expect(screen.getByText("proj")).toBeTruthy();
+  });
+
+  it("a claimed name is searchable before it is acknowledged", async () => {
+    harness.snapshot.contacts = [
+      dto.contact({ name: "proj", id: "p1", pending_name: "proj server" }),
+      dto.contact({ name: "luca", id: "p2" }),
+    ];
+    render(<App />);
+    useStore.getState().go("people");
+    fireEvent.change(await screen.findByPlaceholderText(/Search/i), {
+      target: { value: "server" },
+    });
+    await waitFor(() => expect(screen.queryByText("luca")).toBeNull());
+    expect(screen.getByText("proj")).toBeTruthy();
   });
 
   it("Send from a person row opens the sheet already addressed to them", async () => {
@@ -861,11 +1535,11 @@ describe("the address book", () => {
     useStore.getState().go("people");
     fireEvent.click(await screen.findByLabelText("Actions for proj"));
     fireEvent.click(
-      within(await screen.findByRole("menu")).getByText(/Mark as trusted/)
+      within(await screen.findByRole("menu")).getByText(en["people.menuTrust"])
     );
     // Not sent yet: auto-downloading from an unconfirmed key is a MITM risk.
     expect(harness.recorder.markTrusted).toEqual([]);
-    fireEvent.click(await screen.findByText("Force it anyway"));
+    fireEvent.click(await screen.findByText(en["people.confirmForceLabel"]));
     await waitFor(() =>
       expect(harness.recorder.markTrusted).toEqual([["proj", true]])
     );
@@ -877,7 +1551,7 @@ describe("the address book", () => {
     useStore.getState().go("people");
     fireEvent.click(await screen.findByLabelText("Actions for proj"));
     fireEvent.click(
-      within(await screen.findByRole("menu")).getByText(/Mark as trusted/)
+      within(await screen.findByRole("menu")).getByText(en["people.menuTrust"])
     );
     await waitFor(() =>
       expect(harness.recorder.markTrusted).toEqual([["proj", false]])
@@ -891,7 +1565,7 @@ describe("pairing", () => {
   it("hosting a contact exchange starts a session and shows its code", async () => {
     render(<App />);
     useStore.getState().go("people");
-    fireEvent.click((await screen.findAllByText("Swap contacts"))[0]);
+    fireEvent.click((await screen.findAllByText(en["people.swap"]))[0]);
     await waitFor(() =>
       expect(harness.recorder.startPairing[0]?.[0]).toBe("contact_host")
     );
@@ -907,7 +1581,7 @@ describe("pairing", () => {
   it("joining opens the code input without contacting the daemon first", async () => {
     render(<App />);
     useStore.getState().go("people");
-    fireEvent.click(await screen.findByText("I have a code"));
+    fireEvent.click(await screen.findByText(en["people.haveCode"]));
     // Starting a session now would spawn one that fails instantly ("a pairing
     // code is required") and replace the very input the user is meant to type
     // into with a spinner.
@@ -927,7 +1601,7 @@ describe("pairing", () => {
   it("starting a second exchange retires the first", async () => {
     render(<App />);
     useStore.getState().go("people");
-    fireEvent.click((await screen.findAllByText("Swap contacts"))[0]);
+    fireEvent.click((await screen.findAllByText(en["people.swap"]))[0]);
     await waitFor(() => expect(useStore.getState().pairing?.session).toBe("pair-1"));
     // The hosting side waits until cancelled, so an orphaned session would keep
     // its rendezvous slot with no handle left anywhere to stop it.
@@ -968,7 +1642,7 @@ describe("pairing", () => {
   it("closing the sheet cancels the session on the daemon", async () => {
     render(<App />);
     useStore.getState().go("people");
-    fireEvent.click((await screen.findAllByText("Swap contacts"))[0]);
+    fireEvent.click((await screen.findAllByText(en["people.swap"]))[0]);
     await waitFor(() => expect(useStore.getState().pairing?.session).toBe("pair-1"));
     fireEvent.click(screen.getByLabelText("Close"));
     await waitFor(() =>
@@ -979,7 +1653,7 @@ describe("pairing", () => {
   it("a cancelled exchange is not reported back as an error", async () => {
     render(<App />);
     useStore.getState().go("people");
-    fireEvent.click(await screen.findByText("I have a code"));
+    fireEvent.click(await screen.findByText(en["people.haveCode"]));
     await screen.findByText("Code");
     useStore.setState({
       pairing: {
@@ -1050,6 +1724,15 @@ describe("settings", () => {
     const field = (await screen.findByLabelText(
       "The name you show"
     )) as HTMLInputElement;
+    // Wait for the name to actually be in the field before clearing it. The field
+    // exists before the snapshot carrying it arrives, and it is controlled — so
+    // clearing an already-empty input changes nothing, fires no `change`, leaves
+    // the form clean, and leaves Save disabled. The click then does nothing and
+    // the assertion below reads an empty recorder. Locally the snapshot wins that
+    // race; on a slower machine it does not, which is how this reached CI green
+    // here and red there. Asserting the premise is also what the test *says*:
+    // clearing presupposes something to clear.
+    await waitFor(() => expect(field.value).toBe("Luca"));
     fireEvent.change(field, { target: { value: "" } });
     fireEvent.click(
       within(field.closest(".hstack-sm") as HTMLElement).getByText("Save")
