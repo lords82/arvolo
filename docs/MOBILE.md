@@ -361,6 +361,19 @@ Made 2026-08-27, widening the scope to full parity:
 
    67 MB, installs, runs. A release build would not need any of this.
 
+   **And it receives.** A file sent from the Mac's CLI to the phone's public id
+   with `--mailbox` went the whole way: sealed and deposited on the public
+   relay, the phone's in-app engine long-polling its inbox, the offer decrypted
+   and parked, the window drawing it as a question with the sender's fingerprint
+   and "not in the address book", accept, fetch over HTTPS, decrypt on the
+   phone, 47 bytes identical to what was sent, a history record written. The
+   mailbox-first architecture this document proposed, running.
+
+   Two things that test made plain. The accept dialog's "where to save it" reads
+   `/data/user/0/it.termox.arvolo/incoming` — the staging folder, exactly as
+   designed and exactly as useless to a person until something publishes out of
+   it. And the whole screen is still the desktop's.
+
    What is left is the layout: the window is still drawn for a 980×670 pointer —
    a rail down the left, a drop zone asking to have files dragged onto it — and
    the design of record is a phone.
