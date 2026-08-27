@@ -39,6 +39,10 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 arvolo-engine.workspace = true
 # The token the engine stops on.
 tokio-util = "0.7"
+# The camera, for reading a code off another device's screen. Mobile only in
+# every sense: the plugin has no desktop implementation, and a desktop has the
+# code in its clipboard rather than in front of a lens.
+tauri-plugin-barcode-scanner = "2"
 
 [dependencies]
 # `image-png` decodes the menu-bar template glyph baked in with `include_bytes!`.

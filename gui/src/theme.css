@@ -1925,12 +1925,18 @@ select {
     grid-template-rows: 1fr auto;
   }
 
-  /* The status bar and the notch belong to the system; the header starts below
-     them. Without this the title and the buttons sit under the clock. */
+  /* The status bar and the notch belong to the system, and the whole column
+     starts below them — not just the header. A banner is drawn *above* the
+     header, so an inset on the header alone let an arrival slide under the
+     clock, which is exactly where a message about somebody sending you a file
+     must not be. */
+  .app-phone .main {
+    padding-top: env(safe-area-inset-top, 0px);
+  }
   .app-phone .header {
     height: auto;
     min-height: var(--header-h);
-    padding: calc(env(safe-area-inset-top, 0px) + 6px) 12px 6px;
+    padding: 6px 12px;
   }
 
   .tabbar {
@@ -2114,6 +2120,14 @@ select {
   }
   .cs-hint {
     padding: 14px 2px 0;
+  }
+
+  /* Codes: the segmented control, then whichever half it chose. */
+  .codes {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding-top: 14px;
   }
 
   /* -- A thread, full screen ------------------------------------------------ */

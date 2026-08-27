@@ -206,6 +206,10 @@ pub fn run() {
     let builder = tauri::Builder::default();
     // Starting at login, and replacing yourself with a newer build, are things a
     // desktop does. A phone is started by a person and updated by a store.
+    // Reading a code off another screen is something only a device with a camera
+    // in your hand does.
+    #[cfg(mobile)]
+    let builder = builder.plugin(tauri_plugin_barcode_scanner::init());
     #[cfg(desktop)]
     let builder = builder
         .plugin(tauri_plugin_autostart::init(

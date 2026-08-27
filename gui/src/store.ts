@@ -39,6 +39,10 @@ import type {
 export type Route =
   | "transfers"
   | "people"
+  /** Phone only: showing a code and reading one. A desktop makes a code inside
+   *  the send it belongs to and reads one by pasting, so it has no such place
+   *  and nothing navigates here. */
+  | "codes"
   | "deposits"
   | "history"
   | "devices"
@@ -50,6 +54,7 @@ export type Route =
 export const TITLE_KEY = {
   transfers: "title.transfers",
   people: "title.people",
+  codes: "title.codes",
   deposits: "title.deposits",
   history: "title.history",
   devices: "title.devices",

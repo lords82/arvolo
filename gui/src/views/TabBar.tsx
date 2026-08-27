@@ -19,7 +19,6 @@ export function TabBar() {
   const route = useStore((s) => s.route);
   const go = useStore((s) => s.go);
   const openSheet = useStore((s) => s.openSheet);
-  const openReceive = useStore((s) => s.openReceive);
   const transfers = useStore((s) => s.transfers);
 
   const rows = Object.values(transfers);
@@ -67,12 +66,7 @@ export function TabBar() {
         </span>
         <span className="truncate">{t("rail.send")}</span>
       </button>
-      <button className="tab" onClick={openReceive} title={t("rail.receive")}>
-        <span className="ico">
-          <Icon.Receive />
-        </span>
-        <span className="truncate">{t("rail.receive")}</span>
-      </button>
+      {place("codes", <Icon.Qr />)}
       {place("settings", <Icon.Settings />)}
     </nav>
   );

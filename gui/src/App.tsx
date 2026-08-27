@@ -21,6 +21,7 @@ import { ToastHost, toast } from "./ui/Toasts";
 import { Rail } from "./views/Rail";
 import { TabBar } from "./views/TabBar";
 import { CasellaView } from "./views/CasellaView";
+import { CodesView } from "./views/CodesView";
 import { ThreadSheet } from "./overlays/ThreadSheet";
 import { useIsPhone } from "./phone";
 import { TransfersView } from "./views/TransfersView";
@@ -307,13 +308,15 @@ export function App() {
         : TransfersView
       : route === "people"
         ? PeopleView
-        : route === "deposits"
-          ? DepositsView
-          : route === "history"
-            ? HistoryView
-            : route === "devices"
-              ? DevicesView
-              : SettingsView;
+        : route === "codes"
+          ? CodesView
+          : route === "deposits"
+            ? DepositsView
+            : route === "history"
+              ? HistoryView
+              : route === "devices"
+                ? DevicesView
+                : SettingsView;
 
   return (
     <div className={`app${isPhone ? " app-phone" : ""}`}>
