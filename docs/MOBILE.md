@@ -149,7 +149,7 @@ acceptance criteria for v1, one line per desktop place:
 | People — add, pair, verify fingerprint, trust, block, rename, forget, per-contact relay | People tab, verbs under the row menu; fingerprint compared out loud as on the desktop |
 | Your devices — pair, rename, forget, send to a device | under *You*, same actions; a paired phone is a send target like any other |
 | Links and deposits — create, list, extend, revoke | under *You*, full sheet; creating a link is a send option |
-| Settings — name, fingerprint, public id, theme, language, relay, download folder, seeding, identity | under *You*, plus the phone-only switches (push, auto-save, Wi-Fi only, foreground service) |
+| Settings — name, fingerprint, public id, theme, language, relay, download folder, seeding, identity | under *You*, plus the phone-only switches (push, auto-save, Wi-Fi only, foreground service). The download folder is the one row that is **read-only** — see *Where received files land* |
 | Send — files, folders, several recipients, a code, a public link | the Send tab and the platform share sheet, which replaces drag-and-drop |
 | Receive — paste a code, scan a QR, open an `arvolo send --link` URL | the Codes tab (show/scan) and URL handling in-app |
 | Incoming offers — accept, decline, choose where to save | the incoming sheet, reached from the notification or the Casella banner |
@@ -168,6 +168,62 @@ What the platform, not the design, takes away:
 - **Nothing reveals a file in Finder.** `~/.arvolo` is not browsable on a
   phone: the identity lives in the Keychain / Android Keystore, and the config
   is edited in the app or nowhere.
+
+## Where received files land (decided 2026-08-27)
+
+A file you cannot open with another app has not really arrived. On the desktop
+that is free — the download is written into a folder every program can read. On a
+phone it has to be designed, and what forces the design is our own code, not the
+platforms.
+
+A receive here **writes in place**: the output file is pre-allocated with
+`set_len`, every verified piece is written at its own offset, a `.arvticket`
+sidecar sits beside the partial so an interrupted download can resume, and the
+`name (1).ext` dance needs to list the directory. None of that is possible inside
+Android's MediaStore or a SAF tree — there is no path, no neighbours to list, and
+no file at all until the handle closes.
+
+So the phone **downloads into the app's own storage and publishes when the file
+is whole**. That is not a workaround so much as a better promise: nothing appears
+in a person's Downloads until it is complete and verified.
+
+- **Android**: published into the public `Download/Arvolo/` through MediaStore.
+  Visible in Files, indexed, and it survives uninstalling the app. No storage
+  permission is needed on API 29+, and neither `WRITE_EXTERNAL_STORAGE` nor
+  `MANAGE_EXTERNAL_STORAGE` — the latter would be a fight with Play review. It
+  costs one copy at the end, so accepting checks for **twice** the payload size
+  through the same `available_space` the disk-full pause already uses.
+- **iOS**: `Documents/` is the home, exposed in the Files app as "On My iPhone ›
+  Arvolo" by two `Info.plist` keys — `UIFileSharingEnabled` and
+  `LSSupportsOpeningDocumentsInPlace`. The second is the one that matters: other
+  apps open and edit the file **where it is** instead of taking a copy.
+  Publishing is a same-volume rename, so it is instant and costs no extra space.
+- **The destination is fixed on both**, and the download-folder setting is a
+  read-only row with an "open the folder" action. There is no per-transfer "save
+  where?" before accepting, because iOS cannot offer one and two behaviours are
+  worse than one honest one. What replaces it is per-file: **Open**, **Share**,
+  **Save to…** (SAF on Android, the document picker on iOS), **Save to Photos**
+  (on request only — Arvolo never puts things in the camera roll by itself, and
+  the permission is asked the first time you use it) and **Show in folder**.
+
+The engine's only part in this is one seam, `manager::SavePublisher`
+([core/src/manager/publish.rs](../core/src/manager/publish.rs)): the embedder is
+handed the finished file and answers with where it now lives — a path, or an
+opaque `content://` URI for the platforms that have no path to give. A manager
+without a publisher is every desktop, unchanged byte for byte. Three consequences
+worth writing down:
+
+- A failed publish **does not fail the transfer**. The file stays in staging and
+  the row says so; a download that took an hour is not thrown away because a
+  volume was full.
+- **A row with a URI has no path**, so a client opens `saved_uri` instead. Seeding
+  such a file back to the swarm means reading it through a descriptor the platform
+  opens — which the engine already supports as
+  [`SendSource::Handle`](../core/src/source.rs), built for macOS's file consent
+  and reusable here unchanged. Until a mobile shell wires it up, a published-by-URI
+  row does not seed.
+- **Forgetting a row does not delete the file.** Once published it belongs to the
+  person, not to Arvolo.
 
 ## Distribution
 
@@ -201,6 +257,9 @@ Made 2026-08-27, widening the scope to full parity:
    breakpoint; same features, same codebase.
 9. **The design is a starting point.** "Arvolo Mobile 1c — Casella" sets the
    direction; parity decides the details.
+10. **Received files: staged, then published** to `Download/Arvolo/` on Android
+    and to the Files-visible `Documents/` on iOS; fixed destination, per-file
+    Open / Share / Save to… / Save to Photos. See *Where received files land*.
 
 ## Build order
 
@@ -208,7 +267,8 @@ Made 2026-08-27, widening the scope to full parity:
    in-process face the mobile shell needs — the same command surface
    `bridge.rs` speaks over the socket, callable without a daemon. Desktop
    keeps the daemon; both frontends share one seam. Testable entirely on
-   desktop.
+   desktop. The `SavePublisher` hook and the `saved_uri` that rides beside a
+   row's path belong here, and are done.
 2. **Walking skeleton on Android** (fastest iteration loop): Tauri shell +
    embedded engine + the React frontend in a phone layout; identity pairing
    and foreground receive/send against a real relay.

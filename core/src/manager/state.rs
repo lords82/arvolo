@@ -118,6 +118,15 @@ pub(super) struct Inner {
     /// offer ([`Offer::sender_name`]). Empty = don't advertise a name. Set once at
     /// startup via [`TransferManager::set_display_name`] before any `send_to`.
     pub(super) display_name: Mutex<String>,
+    /// The platform's say in where a finished download comes to rest (see
+    /// [`SavePublisher`]). Unset on every desktop, where a download is already
+    /// where it belongs; set once at startup by a mobile shell.
+    ///
+    /// A `OnceLock` rather than a `Mutex` because it is written once before any
+    /// transfer runs and read on every one that finishes: there is nothing to
+    /// serialize, and a publisher that could change mid-download would mean two
+    /// halves of one file going to two different places.
+    pub(super) publisher: std::sync::OnceLock<Arc<dyn SavePublisher>>,
     /// This device's local id, stamped on every offer we post
     /// ([`Offer::origin`](crate::presence::Offer::origin)) and handed to the inbox
     /// so it can drop our own offers back out of our own poll. `None` for a client
@@ -260,6 +269,14 @@ impl Inner {
     pub(super) fn set_path(&self, id: u64, path: std::path::PathBuf) {
         if let Some(t) = self.transfers.lock().unwrap().get_mut(&id) {
             t.path = Some(path);
+        }
+    }
+
+    /// Remember the platform handle a publisher gave a completed receive, for the
+    /// rows whose file cannot be named by path (see [`SavedLocation::Uri`]).
+    pub(super) fn set_saved_uri(&self, id: u64, uri: String) {
+        if let Some(t) = self.transfers.lock().unwrap().get_mut(&id) {
+            t.saved_uri = Some(uri);
         }
     }
 

@@ -1310,6 +1310,7 @@ mod share_line_tests {
             last_pickup: 0,
             from_download: 0,
             path: None,
+            saved_uri: None,
             sender_name: String::new(),
             offer_status: None,
             waiting_code: None,

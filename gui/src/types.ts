@@ -48,6 +48,11 @@ export interface TransferDto {
    *  on the event that announced it — a window that starts after a download
    *  finished must still be able to open it. */
   path?: string | null;
+  /** The platform's own handle for a completed receive whose file cannot be named
+   *  by path — an Android content:// URI. Where it is set, `path` is null and
+   *  this is what "open" and "share" act on. Both null on a finished receive means
+   *  the file is still in the app's staging: publishing it failed. */
+  saved_uri?: string | null;
   /** How far the inbox offer for a deposited send has got. Same vocabulary as a
    *  deposit's `offer_status`; null when there is nothing to say. */
   offer_status?: string | null;

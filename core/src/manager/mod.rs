@@ -30,10 +30,12 @@ use crate::flow::{self, RecvEvent};
 use crate::presence::{self, InboxSubscription};
 use crate::transfer::RelayChoice;
 
+mod publish;
 mod records;
 mod state;
 mod work;
 
+pub use publish::{SavePublisher, SavedLocation};
 use records::*;
 use state::*;
 use work::*;
@@ -374,6 +376,16 @@ pub struct Transfer {
     /// it. "Downloaded, and now find it yourself" is a strange thing for the
     /// window that downloaded it to say.
     pub path: Option<PathBuf>,
+    /// The platform's own handle for a completed receive, when the file does not
+    /// live anywhere a client can `open()` — an Android `content://` URI, and
+    /// nothing else so far. `None` everywhere a path is the answer, which is every
+    /// desktop and iOS.
+    ///
+    /// Beside `path` rather than replacing it so that a client written before any
+    /// of this reads exactly what it always did. When both are `None` on a finished
+    /// receive, the file is still in the app's staging: publishing failed, and the
+    /// row is the only thing that knows.
+    pub saved_uri: Option<String>,
     /// [`WaitingReason::code`] while the status is
     /// [`Waiting`](TransferStatus::Waiting); empty otherwise.
     ///
@@ -610,6 +622,7 @@ impl TransferManager {
                 state_dir,
                 inbox,
                 display_name: Mutex::new(String::new()),
+                publisher: std::sync::OnceLock::new(),
                 device_id: Mutex::new(None),
             }),
         }
@@ -621,6 +634,16 @@ impl TransferManager {
     /// [`Offer::sender_name`](crate::presence::Offer::sender_name).
     pub fn set_display_name(&self, name: String) {
         *self.inner.display_name.lock().unwrap() = name;
+    }
+
+    /// Hand the engine the platform's say in where finished downloads come to
+    /// rest (see [`SavePublisher`]). Call once at startup, before any transfer.
+    ///
+    /// Only a mobile shell has one. Never calling it is the desktop, and leaves
+    /// every download exactly where `download_dir` put it. A second call is
+    /// ignored: two publishers would mean two answers to "where did it go?".
+    pub fn set_publisher(&self, publisher: Arc<dyn SavePublisher>) {
+        let _ = self.inner.publisher.set(publisher);
     }
 
     /// Tell the engine which device it is running on. Call once at startup, before
@@ -776,6 +799,7 @@ impl TransferManager {
                     offer_status: String::new(),
                     sender_name: String::new(),
                     path: None,
+                    saved_uri: None,
                     waiting_code: String::new(),
                     waiting_detail: String::new(),
                     // Answered per snapshot in `list`, where the record on disk and
@@ -2105,7 +2129,18 @@ impl TransferManager {
                         // No per-chunk progress for a one-shot mailbox fetch — record
                         // the fetched size so the history isn't "0 B".
                         inner.set_progress(id, n as u64);
-                        finish(&inner, id, cancelled.is_cancelled(), Ok(Some(path)));
+                        // A mailbox pickup is the *ordinary* way a file reaches a
+                        // phone, so it publishes like any other finished receive.
+                        // Not when it was cancelled: that row is not a delivery.
+                        let published = (!cancelled.is_cancelled())
+                            .then(|| publish_completed(&inner, id, &path))
+                            .flatten();
+                        finish(
+                            &inner,
+                            id,
+                            cancelled.is_cancelled(),
+                            Ok(resting_path(&published, path)),
+                        );
                     }
                     Err(e) => finish(&inner, id, false, Err(e)),
                 }
@@ -2181,6 +2216,15 @@ impl TransferManager {
                 },
             )
             .await;
+            // Where the platform wants this to live, if the embedder has an opinion
+            // (mobile only — see `SavePublisher`). Ahead of the seeding block on
+            // purpose: publishing *moves* the file, and a seed aimed at where it
+            // used to be serves nothing.
+            let published = result
+                .as_ref()
+                .ok()
+                .filter(|o| o.is_complete())
+                .and_then(|o| publish_completed(&inner, id, o.path()));
             // Seed-after-complete: on a clean finish, keep serving the payload to
             // the swarm (opt-in via ARVOLO_SEED). Persisted, so it survives a
             // restart. For an archive `saved` is the unpacked directory, so we seed
@@ -2198,7 +2242,22 @@ impl TransferManager {
                             let tar = flow::archive_stage_path(&t.chunks);
                             mgr.seed_file(tar, ticket.clone(), true);
                         }
-                        _ => mgr.seed_file(outcome.path().to_path_buf(), ticket.clone(), false),
+                        _ => match &published {
+                            // Published: seed from where the file now lives, not
+                            // from the staging path it has just left.
+                            Some(SavedLocation::Path(p)) => {
+                                mgr.seed_file(p.clone(), ticket.clone(), false)
+                            }
+                            // Published with no path to open: seeding it means
+                            // asking the platform for a descriptor and reading
+                            // through that (`SendSource::Handle`). Not wired up
+                            // until there is a mobile shell to ask, so this row
+                            // does not seed rather than seeding the wrong file.
+                            Some(SavedLocation::Uri(_)) => {}
+                            None => {
+                                mgr.seed_file(outcome.path().to_path_buf(), ticket.clone(), false)
+                            }
+                        },
                     }
                 }
             }
@@ -2234,7 +2293,7 @@ impl TransferManager {
                     &inner,
                     id,
                     receive_ended_cancelled(&result),
-                    result.map(|o| Some(o.into_path())),
+                    result.map(|o| resting_path(&published, o.into_path())),
                 );
                 if discard {
                     flow::discard_incomplete(&ticket, &out_path);

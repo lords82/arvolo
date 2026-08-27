@@ -589,6 +589,15 @@ pub struct TransferDto {
     /// `None` for a send, an unfinished receive, or a daemon that predates it.
     #[serde(default)]
     pub path: Option<String>,
+    /// The platform's own handle for a completed receive, where the file it saved
+    /// cannot be named by path — an Android `content://` URI. `None` on every
+    /// desktop, on iOS, and on a daemon that predates the field.
+    ///
+    /// A client that finds it set opens *this* and not `path`, which is `None`
+    /// alongside it. Both `None` on a finished receive means the file never left
+    /// the app's staging: publishing it failed, and it can be tried again.
+    #[serde(default)]
+    pub saved_uri: Option<String>,
     /// What the sender of an incoming transfer calls themselves, from the offer it
     /// came from. Empty for a send, a pasted ticket, or a sender advertising
     /// nothing — and always a claim, never evidence.
@@ -1157,6 +1166,7 @@ impl From<&Transfer> for TransferDto {
             last_pickup: t.last_pickup,
             from_download: t.from_download,
             path: t.path.as_ref().map(|p| p.to_string_lossy().into_owned()),
+            saved_uri: t.saved_uri.clone(),
             sender_name: t.sender_name.clone(),
             offer_status: (!t.offer_status.is_empty()).then(|| t.offer_status.clone()),
             waiting_code: (!t.waiting_code.is_empty()).then(|| t.waiting_code.clone()),

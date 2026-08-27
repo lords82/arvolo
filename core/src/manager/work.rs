@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
@@ -2114,6 +2114,48 @@ pub(super) async fn serve_session(
     match result {
         Err(e) => finish(&inner, id, false, Err(e)),
         Ok(()) => finish(&inner, id, !delivered.load(Ordering::Relaxed), Ok(None)),
+    }
+}
+
+/// Hand a finished download to the embedder's publisher, and keep what it
+/// answered.
+///
+/// `None` — the row stays pointed at the path the download wrote to — covers
+/// three different situations that all want the same behaviour: there is no
+/// publisher (every desktop), the download did not finish whole (a partial has
+/// nowhere to go yet), or publishing failed.
+///
+/// That last one is deliberately not fatal. Publishing happens *after* the bytes
+/// are down and verified: it is a move between two stores, and a full public
+/// volume or a permission the user has since revoked is worth a warning, not
+/// throwing away a download that may have taken an hour. The file stays in
+/// staging, the row still says where it is, and a client can offer to try again.
+pub(super) fn publish_completed(inner: &Inner, id: u64, staged: &Path) -> Option<SavedLocation> {
+    let publisher = inner.publisher.get()?;
+    let name = staged.file_name()?.to_string_lossy().into_owned();
+    match publisher.publish(staged, &name) {
+        Ok(saved) => {
+            if let Some(uri) = saved.as_uri() {
+                inner.set_saved_uri(id, uri.to_string());
+            }
+            Some(saved)
+        }
+        Err(e) => {
+            tracing::warn!("transfer {id}: {name} stays in staging, publishing it failed: {e:#}");
+            None
+        }
+    }
+}
+
+/// The path a finished receive's row should point at: what the publisher answered
+/// when one did and answered with a path, and otherwise where the download wrote.
+/// A URI is not a path — it rides on `saved_uri` instead, and leaves this `None`
+/// rather than naming a file that is no longer there.
+pub(super) fn resting_path(published: &Option<SavedLocation>, wrote: PathBuf) -> Option<PathBuf> {
+    match published {
+        Some(SavedLocation::Path(p)) => Some(p.clone()),
+        Some(SavedLocation::Uri(_)) => None,
+        None => Some(wrote),
     }
 }
 
