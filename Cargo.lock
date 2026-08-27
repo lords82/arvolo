@@ -292,6 +292,7 @@ version = "0.14.1"
 dependencies = [
  "anyhow",
  "arvolo-core",
+ "arvolo-engine",
  "arvolo-ipc",
  "block2",
  "data-encoding",
@@ -312,6 +313,7 @@ dependencies = [
  "tauri-plugin-updater",
  "time",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
 ]

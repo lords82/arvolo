@@ -32,6 +32,14 @@ tauri-build = { version = "2", features = [] }
 name = "arvolo_gui_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+# The engine itself, and only where there is no daemon to run it: a desktop
+# spawns the CLI and talks to it over a socket, and linking the engine into the
+# window as well would be a second copy of it in the same house.
+[target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
+arvolo-engine.workspace = true
+# The token the engine stops on.
+tokio-util = "0.7"
+
 [dependencies]
 # `image-png` decodes the menu-bar template glyph baked in with `include_bytes!`.
 tauri = { version = "2", features = ["tray-icon", "image-png"] }

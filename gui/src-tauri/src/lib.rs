@@ -23,7 +23,9 @@ mod update;
 
 use arvolo_ipc::client::DaemonClient;
 use arvolo_ipc::protocol::EventDto;
+#[cfg(desktop)]
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
+#[cfg(desktop)]
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, WindowEvent};
 use tauri_plugin_notification::NotificationExt;
@@ -104,19 +106,31 @@ fn arrival_body(lang: &str, auto: bool, name: &str, who: &str) -> String {
 #[tauri::command]
 fn set_ui_language(app: AppHandle, state: tauri::State<'_, UiLang>, lang: String) {
     *state.0.lock().unwrap() = lang.clone();
-    if let Some(tray) = app.tray_by_id("main") {
-        let rebuilt = (|| -> tauri::Result<_> {
-            let show = MenuItemBuilder::with_id("show", tr(&lang, "show")).build(&app)?;
-            let quit = MenuItemBuilder::with_id("quit", tr(&lang, "quit")).build(&app)?;
-            MenuBuilder::new(&app)
-                .item(&show)
-                .separator()
-                .item(&quit)
-                .build()
-        })();
-        if let Ok(menu) = rebuilt {
-            let _ = tray.set_menu(Some(menu));
-        }
+    #[cfg(desktop)]
+    rebuild_tray_menu(&app, &lang);
+    // A phone has no menu bar to keep in step, and the webview is the only thing
+    // on screen that speaks a language at all.
+    #[cfg(mobile)]
+    let _ = (app, lang);
+}
+
+/// Rewrite the tray menu in the language the webview just settled on.
+#[cfg(desktop)]
+fn rebuild_tray_menu(app: &AppHandle, lang: &str) {
+    let Some(tray) = app.tray_by_id("main") else {
+        return;
+    };
+    let rebuilt = (|| -> tauri::Result<_> {
+        let show = MenuItemBuilder::with_id("show", tr(lang, "show")).build(app)?;
+        let quit = MenuItemBuilder::with_id("quit", tr(lang, "quit")).build(app)?;
+        MenuBuilder::new(app)
+            .item(&show)
+            .separator()
+            .item(&quit)
+            .build()
+    })();
+    if let Ok(menu) = rebuilt {
+        let _ = tray.set_menu(Some(menu));
     }
 }
 
@@ -184,15 +198,20 @@ pub fn run() {
         .skip(1)
         .find_map(|a| read_arvolo_ticket(std::path::Path::new(&a)));
 
-    let app = tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // Starting at login, and replacing yourself with a newer build, are things a
+    // desktop does. A phone is started by a person and updated by a store.
+    #[cfg(desktop)]
+    let builder = builder
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec!["--autostart"]),
         ))
+        .plugin(tauri_plugin_updater::Builder::new().build());
+    let app = builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             bridge::status,
             bridge::list_transfers,
@@ -251,6 +270,7 @@ pub fn run() {
             update::install_update,
         ])
         .setup(move |app| {
+            #[cfg(desktop)]
             let has_tray = match setup_tray(app.handle()) {
                 Ok(()) => true,
                 Err(e) => {
@@ -258,6 +278,10 @@ pub fn run() {
                     false
                 }
             };
+            // Nowhere to put an icon, and nothing to get a window back from: on a
+            // phone the app is either in front of you or in the task switcher.
+            #[cfg(mobile)]
+            let has_tray = false;
             app.manage(HasTray(has_tray));
             // The window is declared hidden (`visible: false` in the config)
             // and shown from here, so there is nothing to hide and no flash: a
@@ -282,6 +306,13 @@ pub fn run() {
             // wanted to see. No-op when there is no bundle to ask for.
             #[cfg(target_os = "macos")]
             notify_mac::request_authorization();
+            // No daemon to dial here, so there is one to start: the engine runs
+            // inside this process and the bridge asks it directly. Before the
+            // event pump, which subscribes to whatever is answering.
+            #[cfg(mobile)]
+            if let Err(e) = start_embedded_engine(app.handle()) {
+                tracing::error!("the engine did not start: {e:#}");
+            }
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(event_pump(handle));
             Ok(())
@@ -354,6 +385,54 @@ pub fn run() {
     });
 }
 
+/// Bring the engine up inside this app, and point the bridge at it.
+///
+/// This is what `daemon.rs` does for a desktop, in one process instead of two.
+/// Two things differ and both are about where files live: the engine keeps its
+/// records wherever the config dir is, which on a phone is the app's private
+/// storage and nowhere a person will ever look; and downloads land in a staging
+/// folder there rather than in anybody's Downloads, because a receive writes in
+/// place and only a finished file can be published. See docs/MOBILE.md.
+#[cfg(mobile)]
+fn start_embedded_engine(app: &AppHandle) -> anyhow::Result<()> {
+    use anyhow::Context as _;
+
+    let dir = app
+        .path()
+        .app_data_dir()
+        .context("this app has no data directory")?;
+    std::fs::create_dir_all(&dir).context("create the app data directory")?;
+    // Every store in the engine resolves through this; setting it is the whole
+    // of teaching them where they are.
+    std::env::set_var("ARVOLO_CONFIG_DIR", &dir);
+    arvolo_engine::book::apply_config_to_env();
+
+    let relay = arvolo_engine::book::default_relay_or_builtin()
+        .context("no relay configured and no built-in one to fall back to")?;
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let running = tauri::async_runtime::block_on(arvolo_engine::start::start(
+        arvolo_engine::start::Options {
+            download_dir: Some(dir.join("incoming")),
+            relay,
+            auto_sync: true,
+            // Nothing to announce that the window is not already drawing: it is
+            // attached for as long as the app is on screen, and it is the only
+            // thing on screen. What speaks when it is *not* — a push waking the
+            // app for a deposit — is a later phase.
+            announce: std::sync::Arc::new(arvolo_engine::announce::Silent),
+            shutdown,
+            // Files stay in the app's storage until there is a publisher to move
+            // them out of it. That is the next thing this file needs.
+            publisher: None,
+            front_ends: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        },
+    ))?;
+    bridge::use_embedded(std::sync::Arc::new(running.daemon.clone()));
+    // Held for the life of the app: dropping it would take the inbox with it.
+    app.manage(running);
+    Ok(())
+}
+
 /// The ticket inside a `.arvolo` file, if `path` is one. The extension is what
 /// makes a path eligible; the content is trimmed and must be non-empty.
 fn read_arvolo_ticket(path: &std::path::Path) -> Option<String> {
@@ -368,6 +447,7 @@ fn read_arvolo_ticket(path: &std::path::Path) -> Option<String> {
 /// System-tray icon with a minimal menu (Mostra / Esci) — the way back to a
 /// window closed to the tray, and the only one once the Dock/taskbar entry is
 /// gone.
+#[cfg(desktop)]
 fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
     let lang = os_lang();
     let show = MenuItemBuilder::with_id("show", tr(&lang, "show")).build(app)?;
@@ -431,6 +511,7 @@ fn show_main_window(app: &AppHandle) {
     }
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.show();
+        #[cfg(desktop)]
         let _ = w.unminimize();
         let _ = w.set_focus();
     }

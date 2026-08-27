@@ -328,9 +328,16 @@ Made 2026-08-27, widening the scope to full parity:
    loads the `.so` and enters at `run`, which is the same function the desktop's
    four-line `main` calls.
 
-   What is left: the desktop-only parts of the GUI backend behind `cfg(desktop)`
-   — tray, autostart, the updater, spawning the daemon — the mobile entry point
-   that calls `start` and `use_embedded`, and a layout that fits a phone.
+   **The backend compiles for Android**, and starts the engine inside itself:
+   tray, autostart and the updater are behind `cfg(desktop)`, and
+   `start_embedded_engine` points the config dir at the app's private storage,
+   brings the engine up there and hands it to `use_embedded`. Downloads land in
+   a staging folder inside that storage, which is where they have to land — see
+   *Where received files land*; publishing them out of it is the next thing that
+   file needs.
+
+   What is left: running it. An emulator or a phone, `npm run tauri android
+   dev`, and then the layout — the window is still drawn for a 980×670 pointer.
 3. **iOS shell** + Keychain identity + the same flows.
 4. **Push**: `arvolo-push` gateway, relay wake forwarding, FCM + APNs, the
    iOS Notification Service Extension, background fetch fallback.

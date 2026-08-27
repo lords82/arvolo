@@ -225,11 +225,22 @@ pub async fn pick_files(
     use tauri_plugin_dialog::DialogExt;
     let (tx, rx) = tokio::sync::oneshot::channel();
     let dialog = app.dialog().file();
+    // Picking a *folder* is a desktop idea, and the plugin says so: there is no
+    // such call on mobile, where what you get is a document picker over files.
+    // Sending a folder from a phone is the share sheet's job, not this one's.
+    #[cfg(desktop)]
     if directory {
         dialog.pick_folders(move |p| {
             let _ = tx.send(p);
         });
     } else {
+        dialog.pick_files(move |p| {
+            let _ = tx.send(p);
+        });
+    }
+    #[cfg(mobile)]
+    {
+        let _ = directory;
         dialog.pick_files(move |p| {
             let _ = tx.send(p);
         });

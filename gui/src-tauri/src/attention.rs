@@ -18,6 +18,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use arvolo_ipc::client::DaemonClient;
+#[cfg(desktop)]
 use tauri::image::Image;
 use tauri::{AppHandle, Manager};
 
@@ -200,6 +201,14 @@ async fn settle(app: &AppHandle, from: usize, live: impl Fn() -> bool) {
 }
 
 /// Paint one frame onto the tray icon.
+///
+/// Nothing to paint on a phone: the mark this animates lives in a menu bar, and
+/// what stands in for it there is the platform's own notification.
+#[cfg(mobile)]
+fn set_frame(_app: &AppHandle, _frame: usize) {}
+
+/// Paint one frame onto the tray icon.
+#[cfg(desktop)]
 fn set_frame(app: &AppHandle, frame: usize) {
     let Some(tray) = app.tray_by_id("main") else {
         return;
