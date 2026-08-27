@@ -623,6 +623,19 @@ pub struct TransferDto {
     /// one. Not ours, and not translatable — a diagnostic from another machine.
     #[serde(default)]
     pub waiting_detail: Option<String>,
+    /// Whether pausing this row would do anything.
+    ///
+    /// Not every running transfer can be held — a mailbox pickup is one fetch that
+    /// starts over rather than resuming, a share is not a delivery to anyone in
+    /// particular — and only the engine knows which is which. Without it a window
+    /// draws its pause button from the status alone, the daemon answers `Ok`, and
+    /// nothing happens.
+    ///
+    /// `None` means the daemon predates the field, where the honest fallback is to
+    /// keep offering the button: it is what that daemon has always done, and the
+    /// worst case is the behaviour of the day before.
+    #[serde(default)]
+    pub can_pause: Option<bool>,
 }
 
 /// A parked incoming offer awaiting the user's accept/reject.
@@ -686,6 +699,15 @@ pub struct ContactDto {
     /// The relay this contact listens on, when one is recorded. Empty means
     /// "wherever you do", which is the ordinary case and worth no UI.
     ///
+    /// Unix seconds of the last completed transfer with this contact, either
+    /// direction. `0` = never, or before the stamp existed.
+    ///
+    /// Kept in the synced ledger beside the TOFU counter and merged by `max`, so
+    /// every one of the user's machines answers the same. It is what an address
+    /// book of forty people is actually asked — who do I still deal with — and the
+    /// question a truncated public id under a name was never going to answer.
+    #[serde(default)]
+    pub last_exchange: u64,
     /// Routing, not identity: it never affects verification, and a UI showing it
     /// should read as an address, not as a credential.
     #[serde(default)]
@@ -1139,6 +1161,7 @@ impl From<&Transfer> for TransferDto {
             offer_status: (!t.offer_status.is_empty()).then(|| t.offer_status.clone()),
             waiting_code: (!t.waiting_code.is_empty()).then(|| t.waiting_code.clone()),
             waiting_detail: (!t.waiting_detail.is_empty()).then(|| t.waiting_detail.clone()),
+            can_pause: Some(t.can_pause),
         }
     }
 }
@@ -1670,6 +1693,7 @@ mod tests {
             display_name: "Alice A.".into(),
             pending_name: String::new(),
             relay: String::new(),
+            last_exchange: 1_700_000_000,
         }]);
         let s = serde_json::to_string(&r).unwrap();
         assert_eq!(serde_json::from_str::<Response>(&s).unwrap(), r);
@@ -1681,6 +1705,10 @@ mod tests {
             panic!("expected contacts")
         };
         assert!(!v[0].trusted && !v[0].blocked && v[0].pending_name.is_empty());
+        assert_eq!(
+            v[0].last_exchange, 0,
+            "no stamp from an older daemon reads as never, which is what it knows"
+        );
     }
 
     #[test]

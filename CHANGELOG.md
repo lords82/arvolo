@@ -1,5 +1,40 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **The address book says when you last dealt with someone, instead of eight
+  characters of their public id.** The name above already recognises them, and
+  verifying is done against the whole fingerprint in the details panel — which
+  left the line under the name answering nothing. It now carries the last
+  exchange ("3 days ago"), and where a contact listens when that is not where you
+  do. A contact with neither gets an empty line rather than filler.
+
+  The stamp is recorded where a transfer completes, in either direction, and it
+  rides in the synced ledger beside the TOFU counter, merged by `max`. That
+  matters: a date kept only locally would read "last week" on one of your
+  machines and "never" on another, about the same person — which is the objection
+  the code had written down against dating receipts at all, and the reason it is
+  answered rather than ignored.
+
+### Fixed
+
+- **Pause and resume answered "Ok" for things they did not do.** Holding a
+  transfer only means something when there is something to come back to: a
+  download keeps its partial and continues from it, a held send parks without
+  re-preparing. A pickup from the mailbox has neither — it is one fetch that
+  would start over, which is why it is given no resume record — and a share is
+  not a delivery to anybody in particular. The daemon refused all of those and
+  reported success anyway, so the button did nothing and said nothing. It reports
+  the refusal now, and the window draws the button only where the daemon says it
+  can be used (`can_pause` on each row, from the same predicate `pause` obeys).
+
+- **The play button on a stalled row asked for something that cannot happen.**
+  Stalled means waiting — on the relay, or on the recipient — and resuming is for
+  what is *paused*, so pressing it was a silent no. The row keeps trying on its
+  own; the button is gone.
+
 ## v0.14.1 — nothing asks twice, and nothing waits for ever
 
 Four things the app knew and did not say. A file already arriving was put in

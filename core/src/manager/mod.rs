@@ -386,6 +386,16 @@ pub struct Transfer {
     /// The relay's own words inside a [`WaitingReason::RelayRetry`], for a client
     /// translating the sentence around them. Empty when there are none.
     pub waiting_detail: String,
+    /// Whether [`TransferManager::pause`] would actually do something.
+    ///
+    /// Not every transfer can be held: a pickup from the mailbox is one fetch that
+    /// re-fetches rather than resuming, and a share is not a delivery to anybody in
+    /// particular. Only the engine can tell — it depends on a resume record on disk
+    /// and on whether the send is held — so a window that draws a pause button by
+    /// looking at the status alone draws one that does nothing, and the daemon
+    /// answers it "Ok". Read from the same predicate `pause` obeys, so the button
+    /// and the outcome cannot disagree.
+    pub can_pause: bool,
 }
 
 /// What an offline send actually left on the relay, carried by
@@ -658,6 +668,13 @@ impl TransferManager {
             .values()
             .cloned()
             .collect();
+        // Stamped here rather than stored: what can be held changes underneath a
+        // row — a send becomes held, a download writes its resume record — and a
+        // window that draws a pause button from a stale yes offers a control that
+        // does nothing.
+        for t in &mut out {
+            t.can_pause = self.pausable(t.id, t.direction, &t.status);
+        }
         // Newest first: the id is a monotonic counter, so higher = more recent.
         out.sort_by_key(|t| std::cmp::Reverse(t.id));
         out
@@ -761,6 +778,10 @@ impl TransferManager {
                     path: None,
                     waiting_code: String::new(),
                     waiting_detail: String::new(),
+                    // Answered per snapshot in `list`, where the record on disk and
+                    // the held sends can be read; the stored row never carries a
+                    // stale yes.
+                    can_pause: false,
                 },
             );
             // Keep the map from growing without bound over a long session: once
@@ -1053,6 +1074,37 @@ impl TransferManager {
         true
     }
 
+    /// Can this transfer be held at all?
+    ///
+    /// Two things have to be true: it is running (or waiting to), and there is
+    /// something to pick up again afterwards — a held send, or a download with a
+    /// resume record. A one-shot mailbox pickup has neither: it is a single fetch
+    /// that would simply start over, which is why it is not given a record in the
+    /// first place ([`Self::spawn_receive`]'s caller).
+    ///
+    /// It exists as its own function because two callers need the same answer:
+    /// [`Self::pause`], which acts on it, and [`Self::list`], which stamps it on
+    /// every row so a window can draw the button only where it does something.
+    /// Written out twice, they would drift, and the drift shows up as a control
+    /// that answers "Ok" and changes nothing.
+    fn pausable(&self, id: u64, direction: Direction, status: &TransferStatus) -> bool {
+        if !matches!(
+            status,
+            TransferStatus::Active | TransferStatus::Preparing | TransferStatus::Waiting(_)
+        ) {
+            return false;
+        }
+        if self.inner.held.lock().unwrap().contains_key(&id) {
+            return true;
+        }
+        direction == Direction::Recv
+            && self
+                .inner
+                .state_dir
+                .as_ref()
+                .is_some_and(|dir| download_record_path(dir, id).exists())
+    }
+
     /// Pause an in-progress transfer (Active or Waiting): stop working on it and hold
     /// it as `Paused` until `resume`d or `cancel`led. Returns whether it was paused.
     ///
@@ -1061,27 +1113,20 @@ impl TransferManager {
     /// state on disk. No-op for anything else — an anonymous ticket serve, a one-shot
     /// mailbox fetch, an awaiting-pickup deposit.
     pub fn pause(&self, id: u64) -> bool {
-        let (can, is_recv) = self
+        let Some((direction, status)) = self
             .inner
             .transfers
             .lock()
             .unwrap()
             .get(&id)
-            .map(|t| {
-                (
-                    matches!(
-                        t.status,
-                        TransferStatus::Active
-                            | TransferStatus::Preparing
-                            | TransferStatus::Waiting(_)
-                    ),
-                    t.direction == Direction::Recv,
-                )
-            })
-            .unwrap_or((false, false));
-        if !can {
+            .map(|t| (t.direction, t.status.clone()))
+        else {
+            return false;
+        };
+        if !self.pausable(id, direction, &status) {
             return false;
         }
+        let is_recv = direction == Direction::Recv;
 
         // A held send: flag it and wake its delivery loop, which parks it as Paused.
         if let Some(h) = self.inner.held.lock().unwrap().get(&id).cloned() {
@@ -2636,6 +2681,57 @@ mod accept_refusal_tests {
         assert_eq!(AcceptRefusal::P2pOff.code(), "p2pOff");
         assert_eq!(AcceptRefusal::NoLongerWaiting.code(), "noLongerWaiting");
         assert_eq!(AcceptRefusal::from_code("whatever"), None);
+    }
+}
+
+#[cfg(test)]
+mod pausable_tests {
+    use super::*;
+
+    /// The button and the outcome, from one answer.
+    ///
+    /// Holding a transfer only means something when there is something to come
+    /// back to: a download with a resume record keeps its partial, while a pickup
+    /// from the mailbox is a single fetch that would start over — which is why it
+    /// is given no record. The window used to decide from the status alone, so it
+    /// drew a pause on the second one too; the daemon answered `Ok` and nothing
+    /// happened. What this pins is that the row's `can_pause` and what `pause`
+    /// actually does are the same fact, not two opinions.
+    #[tokio::test]
+    async fn only_a_transfer_with_something_to_come_back_to_can_be_held() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = TransferManager::with_state_dir(
+            Identity::generate(),
+            None,
+            dir.path().to_path_buf(),
+            Some(dir.path().to_path_buf()),
+        );
+
+        let (resumable, _c1) = m.register(Direction::Recv, None, "big.bin".into(), 1_000);
+        persist_download(
+            dir.path(),
+            &DownloadRecord {
+                id: resumable,
+                ticket: "arvcSOMETHING".into(),
+                out_path: dir.path().join("big.bin").to_string_lossy().into_owned(),
+                name: "big.bin".into(),
+                size: 1_000,
+            },
+        );
+        // A mailbox pickup: same shape of row, no record behind it.
+        let (one_shot, _c2) = m.register(Direction::Recv, None, "note.txt".into(), 5);
+
+        let rows = m.list();
+        let can = |id: u64| rows.iter().find(|t| t.id == id).expect("row").can_pause;
+        assert!(can(resumable), "a download that can resume can be held");
+        assert!(!can(one_shot), "a pickup that would start over cannot");
+
+        // And the action agrees with the row, which is the whole point.
+        assert!(!m.pause(one_shot));
+        assert!(m.pause(resumable));
+        // Resuming is refused for anything that is not paused — the answer the
+        // play button on a stalled row was getting in silence.
+        assert!(!m.resume(one_shot));
     }
 }
 

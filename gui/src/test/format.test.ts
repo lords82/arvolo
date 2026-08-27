@@ -29,6 +29,7 @@ function t(over: Partial<UITransfer> = {}): UITransfer {
     size: 1000,
     transferred: 0,
     status: "active",
+    canPause: true,
     verified: false,
     swarmPeers: 0,
     downloadPeers: 0,

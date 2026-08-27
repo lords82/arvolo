@@ -211,10 +211,17 @@ pub fn build_local_snapshot() -> Result<SyncSnapshot> {
         device,
     );
 
-    // Seen counters: monotone max into the sidecar.
-    for (pk, cnt) in load_seen().seen {
-        let e = state.seen.entry(pk).or_insert(0);
-        *e = (*e).max(cnt);
+    // Seen counters and last-exchange stamps: monotone max into the sidecar. Both
+    // merge the same way, and a key can have either without the other — a contact
+    // you have only ever *sent* to has a stamp and no count.
+    let local = load_seen();
+    for (pk, cnt) in &local.seen {
+        let e = state.seen.entry(pk.clone()).or_default();
+        e.count = e.count.max(*cnt);
+    }
+    for (pk, when) in &local.last {
+        let e = state.seen.entry(pk.clone()).or_default();
+        e.last = e.last.max(*when);
     }
 
     // Advertised names: last-writer-wins per id, tombstoning removals (same shape
@@ -504,8 +511,13 @@ pub(crate) fn project_to_ledgers(state: &SyncState) -> Result<()> {
     save_devices(&d)?;
 
     let mut s = Seen::default();
-    for (pk, cnt) in &state.seen {
-        s.seen.insert(pk.clone(), *cnt);
+    for (pk, r) in &state.seen {
+        if r.count > 0 {
+            s.seen.insert(pk.clone(), r.count);
+        }
+        if r.last > 0 {
+            s.last.insert(pk.clone(), r.last);
+        }
     }
     save_seen(&s)?;
 

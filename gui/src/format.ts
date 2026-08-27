@@ -174,6 +174,15 @@ export function fmtAgo(unixSecs: number, nowMs: number = Date.now()): string {
   return t("ago.days", Math.round(secs / 86400));
 }
 
+/** A relay URL as a person reads it: the host, without the scheme it always has.
+ *
+ *  Display only — nothing routes on this string, and the daemon keeps the URL it
+ *  actually dials. It mirrors what the CLI prints (`compact_relay`), so the same
+ *  address does not read as two different places in two windows of the same app. */
+export function relayHost(url: string): string {
+  return url.replace(/^https?:\/\//, "").replace(/\/+$/, "");
+}
+
 /** Human throughput, e.g. "42 MB/s". */
 export function fmtRate(bytesPerSec: number): string {
   return fmtBytes(bytesPerSec) + "/s";

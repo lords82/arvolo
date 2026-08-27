@@ -58,6 +58,11 @@ export interface TransferDto {
   waiting_code?: string | null;
   /** The relay's own message quoted inside a "relayRetry" reason. */
   waiting_detail?: string | null;
+  /** Whether pausing this row would do anything. A mailbox pickup and a share
+   *  cannot be held — only the engine knows which is which. Absent from a daemon
+   *  that predates the field, where the fallback is to keep offering the button:
+   *  the worst case is that daemon's own behaviour. */
+  can_pause?: boolean | null;
   /** What the sender of an incoming transfer calls themselves, carried over from
    *  the offer. Absent from a send, a pasted ticket, and an older daemon — and a
    *  claim either way, never evidence. */
@@ -108,6 +113,12 @@ export interface ContactDto {
   display_name: string;
   /** An advertised name awaiting approval ("" when none). */
   pending_name: string;
+  /** The relay this contact listens on. "" means "wherever you do", which is the
+   *  ordinary case and worth no UI. Routing, never identity. */
+  relay?: string;
+  /** Unix seconds of the last completed transfer either way; 0 = never, or older
+   *  than the stamp. Synced between your devices, so every one answers the same. */
+  last_exchange?: number;
 }
 
 /** One finished transfer from the daemon's history log (read-only). */
@@ -423,6 +434,9 @@ export interface UITransfer {
   /** The relay's own message quoted inside a "relayRetry" reason. Shown as it
    *  arrived: it is another machine's diagnostic, not our prose. */
   waitingDetail?: string;
+  /** Whether this row can be held. False for a mailbox pickup and a share, where
+   *  the button would ask for something the daemon refuses. */
+  canPause: boolean;
   /** Completed-receive path (for "open folder"). */
   path?: string;
   /** When the transfer began (ms). Comes from the engine's `created`; only a row

@@ -36,8 +36,8 @@ import {
   claimText,
   CopyField,
   Fingerprint,
-  ShortId,
 } from "../ui/Bits";
+import { fmtAgo, relayHost } from "../format";
 import { MenuButton, type MenuItem } from "../ui/Menu";
 import { nameCollision } from "../ui/SaveSenderFields";
 import { Confirm, Sheet } from "../ui/Sheet";
@@ -78,6 +78,29 @@ function PresenceDot({ id }: { id: string }) {
       aria-label={online ? t("people.presenceOn") : t("people.presenceOff")}
     />
   );
+}
+
+/** The line under a name in the list.
+ *
+ *  Two facts, and only when they say something. *When you last dealt with them*
+ *  is what an address book is for — it is how you tell the four people you work
+ *  with from the thirty-six you met once — and it is synced, so it reads the same
+ *  on every one of your machines. *Where they listen* appears only when it is not
+ *  where you do: printing "same relay as you" on every row is a column that says
+ *  nothing, which is what the CLI decided for its own list.
+ *
+ *  A contact with neither gets an empty line rather than filler. Somebody saved a
+ *  minute ago and never written to has nothing to report yet, and saying so takes
+ *  up a row's worth of attention for no answer. */
+function ContactMeta({ c }: { c: ContactDto }) {
+  const t = useT();
+  const mine = useStore((s) => s.status?.relay ?? "");
+  const parts: string[] = [];
+  if (c.last_exchange) parts.push(t("people.lastExchange", fmtAgo(c.last_exchange)));
+  const elsewhere = c.relay && relayHost(c.relay) !== relayHost(mine);
+  if (elsewhere) parts.push(t("people.listensOn", relayHost(c.relay!)));
+  if (!parts.length) return null;
+  return <span className="t-xs t-mut truncate">{parts.join(" · ")}</span>;
 }
 
 function PersonRow({ c }: { c: ContactDto }) {
@@ -173,8 +196,8 @@ function PersonRow({ c }: { c: ContactDto }) {
           to be read out loud and compared, and an ellipsis through the middle of
           it makes that impossible. A row cannot promise it the width, so it
           stays whole in the details panel, which is where comparing happens
-          anyway. The row carries the short id instead: that one is for
-          recognising someone, not for verifying them. */}
+          anyway. What the row carries under the name is not identity at all —
+          see `ContactMeta`. */}
       <div className={`row ${c.blocked ? "is-done" : ""}`}>
         <Avatar name={c.display_name || c.name} id={c.id} size={34} />
 
@@ -190,8 +213,13 @@ function PersonRow({ c }: { c: ContactDto }) {
             <span className="truncate">{c.name}</span>
             <ClaimedName c={c} />
           </div>
+          {/* What the row is asked, once there are forty of them: when did I last
+              deal with this person, and — when it is not the ordinary answer —
+              where they listen. The truncated public id that used to live here
+              answered neither: the name above already recognises them, and
+              verifying is done against the whole fingerprint in the panel. */}
           <div className="row-meta">
-            <ShortId value={c.id} />
+            <ContactMeta c={c} />
           </div>
 
           {/* The name itself is already up there in brackets, readable without
