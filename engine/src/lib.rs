@@ -18,8 +18,23 @@ pub mod book;
 pub mod deposits;
 pub mod handles;
 pub mod history;
-pub mod ids;
+pub mod identity;
+pub mod payload;
 pub mod sessions;
+pub mod sync;
+pub mod text;
+
+/// Current unix time in seconds.
+///
+/// At the crate root because everything here stamps something with it — a
+/// deposit's expiry, when a contact was last dealt with, a history row — and none
+/// of those owns it.
+pub fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
 /// Serializes tests that mutate the process-global `ARVOLO_CONFIG_DIR`.
 ///
 /// Not behind `#[cfg(test)]`: `arvolo-cli` has tests that move the same

@@ -355,25 +355,10 @@ mod save_contact_tests {
     }
 }
 
-/// Make a remote-supplied, untrusted string safe to print on one terminal line.
-/// A sender fully controls the offer's file name, note, and advertised display
-/// name; printed raw they could carry ANSI escape sequences (to forge output such
-/// as a fake "verified" banner or to hide a traversal name) or bidirectional
-/// override characters (to reverse the visible reading order). We drop every
-/// control character and Unicode bidi/format override, and bound the length.
-pub(crate) fn sanitize_display(s: &str) -> String {
-    // Unicode bidi/format overrides that can reorder or hide visible text.
-    fn is_bidi_override(c: char) -> bool {
-        matches!(c,
-            '\u{200E}' | '\u{200F}' | '\u{061C}'
-            | '\u{202A}'..='\u{202E}'
-            | '\u{2066}'..='\u{2069}')
-    }
-    s.chars()
-        .filter(|c| !c.is_control() && !is_bidi_override(*c))
-        .take(256)
-        .collect()
-}
+// Sanitizing an untrusted display string is not a terminal concern — the daemon
+// hands the same strings to whatever front-end is attached — so it lives in the
+// engine now, under the name this crate has always called it.
+pub(crate) use arvolo_engine::text::sanitize_display;
 
 /// Observe a sender's advertised display name on an incoming offer and print its
 /// TOFU status (new / changed), recording any change as pending. Never blocks the
@@ -422,36 +407,3 @@ pub(crate) fn print_qr(data: &str) {
 
 // ---- P2P ------------------------------------------------------------------
 
-#[cfg(test)]
-mod sanitize_tests {
-    use super::sanitize_display;
-
-    // A remote-supplied name/note/display-name must have terminal control sequences
-    // and bidi overrides stripped before printing, so a malicious sender can't forge
-    // output or reverse the visible reading order.
-    #[test]
-    fn strips_ansi_and_control_chars() {
-        // ANSI escape (ESC [ 31m … ESC [ 0m) is removed; the letters survive.
-        assert_eq!(
-            sanitize_display("\u{1b}[31mVERIFIED\u{1b}[0m"),
-            "[31mVERIFIED[0m"
-        );
-        // CR/LF/NUL/tab can't inject new lines or overwrite the current one.
-        assert_eq!(sanitize_display("a\r\nb\tc\0d"), "abcd");
-        // Plain text (incl. non-control unicode) is preserved.
-        assert_eq!(sanitize_display("Lorénzo 名前"), "Lorénzo 名前");
-    }
-
-    #[test]
-    fn strips_bidi_overrides() {
-        // A right-to-left override that would display "gpj.exe" as "exe.jpg".
-        assert_eq!(sanitize_display("photo\u{202e}gpj.exe"), "photogpj.exe");
-        assert_eq!(sanitize_display("\u{2066}x\u{2069}"), "x");
-    }
-
-    #[test]
-    fn bounds_length() {
-        let long = "a".repeat(1000);
-        assert_eq!(sanitize_display(&long).chars().count(), 256);
-    }
-}
