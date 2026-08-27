@@ -1177,4 +1177,43 @@ mod packaging_tests {
             );
         }
     }
+
+    /// The serialized-transfer group is spelled out three times — once for the
+    /// default profile, once for CI, once for CI on Windows — because nextest's
+    /// config has no way to name a list and reuse it. Three copies of one rule
+    /// drift the first time somebody adds a binary, and this is not hypothetical:
+    /// `fetch_hedge` went into the default list and stayed out of the other two,
+    /// so the run that matters — CI — kept starving it, with a wall-clock
+    /// assertion inside it to make the failure look like a product bug.
+    ///
+    /// It lives among the packaging tests for the same reason they do: it is a
+    /// file in this repository that has to agree with another file in this
+    /// repository, and nothing but a test makes that true.
+    #[test]
+    fn the_heavy_transfer_group_is_the_same_list_everywhere() {
+        let cfg = repo_file(".config/nextest.toml");
+        let lists: Vec<&str> = cfg
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("filter = "))
+            .collect();
+        assert!(
+            lists.len() >= 3,
+            "expected the group to be declared for default, ci and ci/windows; found {}",
+            lists.len()
+        );
+        for (i, l) in lists.iter().enumerate() {
+            assert_eq!(
+                *l,
+                lists[0],
+                "nextest.toml membership list #{} differs from the first — a binary \
+                 added to one profile and not the others is serialized in one run and \
+                 starved in the next",
+                i + 1
+            );
+        }
+        assert!(
+            lists[0].contains("binary(fetch_hedge)"),
+            "fetch_hedge moves real bytes and asserts on wall-clock: it belongs in the group"
+        );
+    }
 }
