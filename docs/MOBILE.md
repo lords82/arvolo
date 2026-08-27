@@ -1,14 +1,17 @@
 # Arvolo on phones — design
 
-> Status: **design decided** (2026-08-17), implementation not started. The
-> four calls at the bottom were made by the project owner; the rest of this
-> document is the reasoning they rest on.
+> Status: **design decided** (2026-08-17), **scope widened to desktop parity**
+> (2026-08-27), implementation not started. The calls at the bottom were made
+> by the project owner; the rest of this document is the reasoning they rest
+> on.
 
 ## The one constraint that shapes everything
 
 On a phone the app cannot stay listening. iOS suspends it seconds after it
 leaves the screen; Android is gentler but headed the same way. So the desktop
-model — a daemon holding a live inbox subscription — does not port. What does
+model — a daemon holding a live inbox subscription — does not port on its own
+(Android can buy it back with a foreground service the user turns on; iOS
+cannot, at any price). What does
 port, remarkably well, is the **mailbox**: Arvolo's offline path *is* the
 architecture Signal-class apps use on mobile. A send to a phone is a sealed
 deposit; the phone is told to wake up; it fetches over HTTPS, decrypts
@@ -47,12 +50,17 @@ zero-knowledge promise intact:
   never who sent, what, to whom, or from which inbox slot. Source stays open;
   an enterprise shipping its own app build under its own bundle id can run its
   own gateway with its own keys.
-- **v1 ships the essential path only**: the vendor gateway, APNs + FCM. Two
-  no-vendor roads stay on the map for later versions, deliberately not in v1:
-  UnifiedPush (self-hosted distributor instead of FCM) and an Android
-  **foreground service** ("always listening", Syncthing-style, opt-in).
+- **v1 ships the store path**: the vendor gateway, APNs + FCM. **UnifiedPush**
+  (a self-hosted distributor instead of FCM) belongs with the no-store
+  distribution road and waits for it — see *Distribution* below.
 - **iOS fallback** when push is declined: periodic `BGAppRefreshTask` inbox
   polls, and a full check on every app open. Slower, never broken.
+- **Android does not have to settle for wakes.** An opt-in **foreground
+  service** (Syncthing-style, off until the user turns it on) holds a live
+  inbox subscription with the screen off — that is the desktop daemon, on a
+  phone. It costs a permanent notification and a Play Store justification, and
+  it buys real parity on the one platform that allows it. iOS cannot have it;
+  there, mailbox-first is not a preference but the floor.
 
 ## Stack
 
@@ -84,11 +92,15 @@ rebuilt, still needs the same native edges).
 Today's interface assumes a 980×670 window, a pointer and a keyboard. None of
 those exist on a phone, so the adaptation is designed deliberately:
 
-- **Navigation**: the rail becomes a bottom **tab bar** (Transfers, People,
-  Send as the center action, History, Settings); "Links and deposits" and
-  "Your devices" move under Settings — six rail places don't fit five tabs.
+- **Navigation**: the rail becomes a bottom **tab bar** — *Casella*, *People*,
+  **Send** as the center action, *Codes*, *You*. Six rail places don't fit
+  five tabs, so they fold rather than drop: Transfers and History merge into
+  **Casella**, one row per correspondent showing the latest exchange and
+  opening a thread with everything before it; "Links and deposits" and "Your
+  devices" move under *You*. Nothing is lost — see *Parity with the desktop*
+  below.
 - **The two verbs get primary**: Send is the tab bar's center button; Receive
-  (paste a code / scan a QR) lives one tap away on the Transfers screen.
+  (paste a code / scan a QR) is the *Codes* tab, one tap from anywhere.
   Drag-and-drop disappears; the platform **share sheet** and file/photo
   pickers replace it.
 - **Sheets go full-screen** and gain swipe-to-dismiss; `⌘K` and every
@@ -97,10 +109,22 @@ those exist on a phone, so the adaptation is designed deliberately:
 - **Touch and platform**: 44 pt minimum targets, safe-area insets (notch,
   home indicator), on-screen keyboard pushing layouts, pull-to-refresh
   instead of a refresh button.
+- **Tablets are the same app, wider**: past a breakpoint the tab bar goes back
+  to being a rail and the sheets become two columns. Same features, one
+  codebase, no separate tablet design.
 - **What carries over untouched**: the store, the IPC command surface, i18n
   (all four languages), the design tokens/theme, and the component library —
   restyled where touch demands it. The claude.ai/design project holding the
   26 synced components is where the phone variants get designed first.
+
+**The design of record** is `gui/.design-sync/mobile/casella.dc.html` — a copy
+of the "Arvolo Mobile 1c — Casella" canvas in the *Proposte app mobile Arvolo*
+project on claude.ai/design. It shows the five tabs, the Casella list, the
+thread, the send sheet, the incoming sheet, deposits and links, search, and the
+pairing onboarding, all built from the real design system bundle. It is a
+**starting point, not a specification**: where parity and the mockup disagree,
+parity wins and the screen gets redrawn. The earlier three-layout exploration
+(A/B/C) is superseded and was deleted.
 
 ## Onboarding
 
@@ -111,19 +135,46 @@ phone-only user mints a fresh identity and points at a relay the same way the
 desktop app does. Identity key lands in Keychain / Android Keystore-backed
 storage.
 
-## v1 scope (decided)
+## Parity with the desktop (decided 2026-08-27)
 
-In: join-identity onboarding (+ fresh identity), receive with push + wake
-fetch + notification, browse/save/share received files, send via share sheet
-or in-app to a contact (live if both foreground, else deposit), **hosting
-codes from the phone while the app is in the foreground** (backgrounding
-pauses, reopening resumes), **deposits and links management** (create, list,
-revoke), scan/show pairing and transfer QR codes, open `arvolo send --link` URLs
-in-app.
+The phone is not a reduced Arvolo. **Everything the desktop app can do, the
+phone can do**; only the way you reach it changes, and only where the platform
+leaves no choice does behaviour change with it. Read the list below as the
+acceptance criteria for v1, one line per desktop place:
 
-Out, deliberately: swarm seeding from the phone, UnifiedPush, the Android
-always-listening foreground service (all later versions),
-tablets-as-first-class.
+| Desktop | Phone |
+| --- | --- |
+| Transfers — active, queued, stalled, pause/resume, cancel, retry | Casella rows and the thread sheet; pause/resume and cancel as swipe actions |
+| History — everything past, searchable | the same threads, scrolled back; full-text search from the Casella app bar |
+| People — add, pair, verify fingerprint, trust, block, rename, forget, per-contact relay | People tab, verbs under the row menu; fingerprint compared out loud as on the desktop |
+| Your devices — pair, rename, forget, send to a device | under *You*, same actions; a paired phone is a send target like any other |
+| Links and deposits — create, list, extend, revoke | under *You*, full sheet; creating a link is a send option |
+| Settings — name, fingerprint, public id, theme, language, relay, download folder, seeding, identity | under *You*, plus the phone-only switches (push, auto-save, Wi-Fi only, foreground service) |
+| Send — files, folders, several recipients, a code, a public link | the Send tab and the platform share sheet, which replaces drag-and-drop |
+| Receive — paste a code, scan a QR, open an `arvolo send --link` URL | the Codes tab (show/scan) and URL handling in-app |
+| Incoming offers — accept, decline, choose where to save | the incoming sheet, reached from the notification or the Casella banner |
+| Swarm seeding | **on, gated**: Wi-Fi and charging by default, and on iOS only while the app is in the foreground |
+
+What the platform, not the design, takes away:
+
+- **iOS cannot listen in the background.** No push, no wake; the fallbacks are
+  `BGAppRefreshTask` and opening the app. Android buys the difference back with
+  the opt-in foreground service.
+- **Live P2P and hosted codes need the app in the foreground** on iOS, and on
+  Android whenever the foreground service is off.
+- **Keyboard shortcuts and `⌘K` have no analogue.** The command palette
+  becomes the search field.
+- **Auto-update is the store's job** in v1, not the in-app minisign updater.
+- **Nothing reveals a file in Finder.** `~/.arvolo` is not browsable on a
+  phone: the identity lives in the Keychain / Android Keystore, and the config
+  is edited in the app or nowhere.
+
+## Distribution
+
+**v1 ships through the App Store and Play**, which settles push as APNs + FCM.
+The no-vendor road — a direct APK and F-Droid, UnifiedPush instead of FCM, and
+the minisign in-app updater the desktop already has — is a later version, kept
+open by not building anything that assumes the stores.
 
 ## The decisions
 
@@ -136,7 +187,20 @@ Made 2026-08-17 by the project owner:
    content-free wakes). UnifiedPush later.
 3. **Scope: the wider v1** — codes hosted from the phone and deposits/links
    management included.
-4. **Android foreground service: not in v1.**
+4. ~~**Android foreground service: not in v1.**~~ Superseded by 5.
+
+Made 2026-08-27, widening the scope to full parity:
+
+5. **Android foreground service: in v1, opt-in** — off until the user turns it
+   on, and then the desktop daemon's behaviour on Android.
+6. **Swarm seeding from the phone: in v1, gated** — Wi-Fi and charging by
+   default; foreground-only on iOS.
+7. **Distribution: stores first.** APK / F-Droid, UnifiedPush and the in-app
+   updater come in a later version, and nothing in v1 may make them harder.
+8. **Tablets: responsive, not redesigned** — the rail comes back past a
+   breakpoint; same features, same codebase.
+9. **The design is a starting point.** "Arvolo Mobile 1c — Casella" sets the
+   direction; parity decides the details.
 
 ## Build order
 
@@ -152,4 +216,10 @@ Made 2026-08-17 by the project owner:
 4. **Push**: `arvolo-push` gateway, relay wake forwarding, FCM + APNs, the
    iOS Notification Service Extension, background fetch fallback.
 5. **Share sheets** both platforms; codes-from-phone; deposits/links views.
-6. **Store passage**: signing, review, TestFlight / Play internal track.
+6. **The parity sweep**: People, Your devices, History and Settings in full —
+   every verb the desktop rail offers, reachable on the phone. This is the
+   phase that makes the table above true, and the one to measure against it.
+7. **Android foreground service** (opt-in) and the **seeding gates** (Wi-Fi,
+   charging, foreground-only on iOS).
+8. **The wide layout**: the tab bar becomes a rail past the breakpoint.
+9. **Store passage**: signing, review, TestFlight / Play internal track.
