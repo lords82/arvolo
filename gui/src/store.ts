@@ -434,6 +434,11 @@ interface State {
   closeSheet: () => void;
   openIncoming: (offerId: string) => void;
   closeIncoming: () => void;
+  /** The correspondent whose thread is open, by the Casella's group key. Phone
+   *  only: the desktop shows the same rows in two columns and has no thread. */
+  threadKey: string | null;
+  openThread: (key: string) => void;
+  closeThread: () => void;
   openShare: (id: number) => void;
   closeShare: () => void;
   openPerson: (name: string | null) => void;
@@ -715,6 +720,7 @@ export const useStore = create<State>((set, get) => {
     incomingOfferId: null,
     shareOpen: null,
     receiveOpen: false,
+    threadKey: null,
     receivePrefill: null,
     personOpen: null,
     presence: {},
@@ -1198,6 +1204,8 @@ export const useStore = create<State>((set, get) => {
     closeSheet: () =>
       set({ sheetPicks: null, sheetTo: null, sheetMode: null }),
     openIncoming: (offerId) => set({ incomingOfferId: offerId }),
+    openThread: (key) => set({ threadKey: key }),
+    closeThread: () => set({ threadKey: null }),
     closeIncoming: () => set({ incomingOfferId: null }),
     openShare: (id) => set({ shareOpen: id }),
     closeShare: () => set({ shareOpen: null }),

@@ -2041,6 +2041,119 @@ select {
     flex: none;
   }
 
+  /* -- Casella: one row per correspondent ---------------------------------- */
+
+  .casella {
+    display: flex;
+    flex-direction: column;
+    padding: 4px 14px 0;
+  }
+
+  /* A row is a whole button. The tap target is the row, not the name in it. */
+  .cs-row {
+    display: flex;
+    gap: 10px;
+    align-items: flex-start;
+    width: 100%;
+    min-height: 60px;
+    padding: 11px 2px;
+    border: 0;
+    border-bottom: 1px solid var(--line);
+    background: none;
+    color: var(--ink);
+    font-family: var(--font);
+    text-align: left;
+    cursor: pointer;
+  }
+  .cs-row:active {
+    background: var(--surface-2);
+  }
+  .cs-row:last-of-type {
+    border-bottom: 0;
+  }
+
+  .cs-body {
+    flex: 1;
+    min-width: 0;
+    display: block;
+  }
+  .cs-head {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+  }
+  .cs-who {
+    flex: 1;
+    font-size: 14px;
+    font-weight: 600;
+  }
+  .cs-line {
+    display: block;
+    margin: 1px 0 0;
+  }
+  .cs-track {
+    margin-top: 6px;
+  }
+  .cs-badges {
+    display: flex;
+    gap: 6px;
+    margin-top: 6px;
+  }
+  /* Stands in for an avatar where there is no person — a public link. */
+  .cs-glyph {
+    width: 36px;
+    height: 36px;
+    flex: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: var(--r-md);
+    background: var(--surface-3);
+    border: 1px solid var(--line);
+    color: var(--ink-mut);
+  }
+  .cs-hint {
+    padding: 14px 2px 0;
+  }
+
+  /* -- A thread, full screen ------------------------------------------------ */
+
+  .sheet-full {
+    position: fixed;
+    inset: 0;
+    z-index: 40;
+    display: flex;
+    flex-direction: column;
+    background: var(--canvas);
+  }
+  .sheet-full-bar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex: none;
+    padding: calc(env(safe-area-inset-top, 0px) + 10px) 14px 10px;
+    border-bottom: 1px solid var(--line);
+  }
+  .sheet-full-body {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 12px 14px calc(env(safe-area-inset-bottom, 0px) + 14px);
+  }
+  .th-past {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 11px 12px;
+    border-bottom: 1px solid var(--line);
+  }
+  .th-past:last-child {
+    border-bottom: 0;
+  }
+
   /* Dragging a file onto a phone is not a thing that happens: no overlay, and
      nothing dashed to invite it. What is left is a button the size of a card. */
   .app-phone .drop-overlay {

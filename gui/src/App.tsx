@@ -20,6 +20,8 @@ import { Button, IconButton, modKey, TextInput } from "./ui/Primitives";
 import { ToastHost, toast } from "./ui/Toasts";
 import { Rail } from "./views/Rail";
 import { TabBar } from "./views/TabBar";
+import { CasellaView } from "./views/CasellaView";
+import { ThreadSheet } from "./overlays/ThreadSheet";
 import { useIsPhone } from "./phone";
 import { TransfersView } from "./views/TransfersView";
 import { PeopleView } from "./views/PeopleView";
@@ -295,9 +297,14 @@ export function App() {
     dismissActionError();
   }, [actionError, dismissActionError, t, go, restartDaemon]);
 
+  // The desktop keeps every screen it had. Where a phone wants a different one —
+  // and Transfers is the case: two columns of files against one list of people —
+  // it gets its own, and the desktop never sees it.
   const View =
     route === "transfers"
-      ? TransfersView
+      ? isPhone
+        ? CasellaView
+        : TransfersView
       : route === "people"
         ? PeopleView
         : route === "deposits"
@@ -430,10 +437,20 @@ export function App() {
 
         {/* --- header --------------------------------------------------- */}
         <header className="header">
-          <h1>{t(TITLE_KEY[route])}</h1>
+          {/* The phone calls this place what the design calls it: the mailbox is
+              the thing you open to see who has written, and on that screen the
+              rows are people rather than files. */}
+          <h1>
+            {isPhone && route === "transfers"
+              ? t("casella.title")
+              : t(TITLE_KEY[route])}
+          </h1>
           <div className="spacer" />
 
-          {SEARCHABLE.includes(route) && (
+          {/* A 240px field is a third of a phone. The same search is a tap away
+              as a glyph, and it searches everything rather than filtering one
+              list. */}
+          {SEARCHABLE.includes(route) && !isPhone && (
             <div style={{ width: 240 }}>
               <TextInput
                 id="app-search"
@@ -450,6 +467,22 @@ export function App() {
               <Icon.Trash size={13} />
               {t("app.clearFinished", finishedCount)}
             </Button>
+          )}
+
+          {/* Search and "something new", which is what the design puts up here.
+              The send verb itself is in the bar, where a thumb is. */}
+          {isPhone && (
+            <>
+              <IconButton
+                label={t("app.searchLabel")}
+                onClick={() => setPaletteOpen(true)}
+              >
+                <Icon.Search size={17} />
+              </IconButton>
+              <IconButton label={t("app.send")} onClick={() => openSheet([])}>
+                <Icon.Plus size={17} />
+              </IconButton>
+            </>
           )}
 
           {/* Both are already in the bottom bar on a phone, and one of them is
@@ -482,6 +515,7 @@ export function App() {
       </div>
 
       {isPhone ? <TabBar /> : null}
+      {isPhone ? <ThreadSheet /> : null}
 
       {/* --- overlays ---------------------------------------------------- */}
       <SendSheet />

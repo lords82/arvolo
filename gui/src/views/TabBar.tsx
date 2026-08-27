@@ -30,7 +30,9 @@ export function TabBar() {
   const count = pending || active;
 
   const place = (route_: Route, icon: JSX.Element, badge?: number) => {
-    const label = t(TITLE_KEY[route_]);
+    // One name for one place: the header says it too.
+    const label =
+      route_ === "transfers" ? t("casella.title") : t(TITLE_KEY[route_]);
     return (
       <button
         className="tab"
