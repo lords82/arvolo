@@ -1905,6 +1905,155 @@ select {
 }
 
 /* ==========================================================================
+   6b. PHONE
+   ==========================================================================
+
+   Not a narrow desktop. Below this width the rail is replaced rather than
+   squeezed — a bottom bar, because that is the half of the screen a thumb can
+   reach — and everything the window assumed about a pointer stops applying:
+   targets grow to 44px, hover states are never seen, and the system's own bars
+   are kept out of the content with the safe-area insets.
+
+   The breakpoint is `PHONE_QUERY` in `phone.ts`. The two are one decision and
+   have to stay one number, or the app draws a rail and a bar at once. */
+
+@media (max-width: 560px) {
+  .app-phone {
+    /* The bar is a row of the frame, not something floating over the view: a
+       list that scrolls under its own navigation hides its last item. */
+    grid-template-columns: 1fr;
+    grid-template-rows: 1fr auto;
+  }
+
+  /* The status bar and the notch belong to the system; the header starts below
+     them. Without this the title and the buttons sit under the clock. */
+  .app-phone .header {
+    height: auto;
+    min-height: var(--header-h);
+    padding: calc(env(safe-area-inset-top, 0px) + 6px) 12px 6px;
+  }
+
+  .tabbar {
+    display: flex;
+    align-items: stretch;
+    gap: 2px;
+    padding: 6px 6px calc(env(safe-area-inset-bottom, 0px) + 6px);
+    background: var(--surface-sunk);
+    border-top: 1px solid var(--line);
+  }
+
+  .tab {
+    flex: 1 1 0;
+    min-width: 0;
+    /* The platform minimum for something meant to be hit with a finger. */
+    min-height: 44px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 3px;
+    padding: 4px 2px;
+    border: 0;
+    border-radius: var(--r-md);
+    background: none;
+    color: var(--ink-mut);
+    font: 500 10.5px var(--font);
+    cursor: pointer;
+  }
+
+  /* A fixed height, so the labels of five tabs sit on one line even though one
+     of them has a pill above it instead of a glyph. */
+  .tab .ico {
+    position: relative;
+    height: 30px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .tab[aria-current="page"] {
+    color: var(--ink);
+    background: var(--surface);
+  }
+
+  /* The verb, and it should not look like a place. */
+  .tab-send {
+    color: var(--ink);
+  }
+  .tab-send .ico {
+    width: 46px;
+    height: 30px;
+    border-radius: var(--r-pill);
+    /* The same pair the primary button uses, so the one filled thing on the
+       screen and the one filled thing in the bar are the same colour. */
+    background: var(--out-fill);
+    color: var(--on-fill);
+  }
+  .tab:active {
+    transform: scale(0.97);
+  }
+
+  /* A decision waiting on the user is visible whatever the screen. */
+  .tab-count {
+    position: absolute;
+    top: -6px;
+    right: -10px;
+    min-width: 15px;
+    padding: 0 4px;
+    border-radius: var(--r-pill);
+    background: var(--surface-3);
+    color: var(--ink-sec);
+    font-size: 10px;
+    line-height: 15px;
+    text-align: center;
+  }
+  .tab-count.hot {
+    background: var(--in);
+    color: #fff;
+  }
+
+  /* The way to the three places the bar has no room for. */
+  .place-link {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    min-height: 48px;
+    padding: 10px 14px;
+    border: 0;
+    border-top: 1px solid var(--line);
+    background: var(--surface);
+    color: var(--ink);
+    font: 500 14px var(--font);
+    text-align: left;
+    cursor: pointer;
+  }
+  .place-link:active {
+    background: var(--surface-2);
+  }
+  .place-link:last-child {
+    border-bottom-left-radius: var(--r-lg);
+    border-bottom-right-radius: var(--r-lg);
+  }
+  .place-link .ico,
+  .place-link svg {
+    color: var(--ink-mut);
+    flex: none;
+  }
+
+  /* Dragging a file onto a phone is not a thing that happens: no overlay, and
+     nothing dashed to invite it. What is left is a button the size of a card. */
+  .app-phone .drop-overlay {
+    display: none;
+  }
+  .app-phone .dropzone {
+    border-style: solid;
+    border-color: var(--line);
+    background: var(--surface);
+  }
+}
+
+/* ==========================================================================
    7. MOTION PREFERENCES
    ========================================================================== */
 

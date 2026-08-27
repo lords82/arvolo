@@ -187,6 +187,8 @@ export const de: Dict = {
   "transfers.emptyInAction": "Code einfügen",
   "transfers.firstRunTitle": "Ziehen Sie die Dateien zum Senden hierher",
   "transfers.firstRunBody": "Oder über Senden einen Kontakt, einen Code oder einen Link wählen.",
+  "transfers.firstRunTitlePhone": "Jemandem eine Datei schicken",
+  "transfers.firstRunBodyPhone": "Erst die Dateien, dann wer sie bekommt: ein Kontakt, ein Code oder ein Link.",
   "transfers.firstRunAction": "Etwas senden",
 
   "people.presenceUnknownTitle": "Das Relay hat nicht geantwortet",
@@ -447,6 +449,7 @@ export const de: Dict = {
     "Die Wörter, die andere vergleichen, um sicher zu sein, dass Sie es sind. Lesen Sie sie vor, wenn jemand Sie hinzufügt.",
   "settings.publicIdLabel": "Ihre öffentliche ID",
   "settings.appearance": "Darstellung",
+  "settings.morePlaces": "Der Rest der App",
   "settings.theme": "Erscheinungsbild",
   "settings.themeSystem": "System",
   "settings.themeLight": "Hell",

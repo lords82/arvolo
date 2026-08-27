@@ -183,6 +183,8 @@ export const it: Dict = {
   "transfers.emptyInAction": "Incolla un codice",
   "transfers.firstRunTitle": "Trascina qui i file da inviare",
   "transfers.firstRunBody": "Oppure usa Invia per scegliere un contatto, un codice o un link.",
+  "transfers.firstRunTitlePhone": "Manda un file a qualcuno",
+  "transfers.firstRunBodyPhone": "Scegli i file, poi a chi vanno: un contatto, un codice o un link.",
   "transfers.firstRunAction": "Invia qualcosa",
 
   "people.presenceUnknownTitle": "Il relay non ha risposto",
@@ -441,6 +443,7 @@ export const it: Dict = {
     "Le parole che gli altri confrontano per essere certi che sei tu. Leggile a voce quando qualcuno ti aggiunge.",
   "settings.publicIdLabel": "Il tuo id pubblico",
   "settings.appearance": "Aspetto",
+  "settings.morePlaces": "Il resto dell'app",
   "settings.theme": "Tema",
   "settings.themeSystem": "Sistema",
   "settings.themeLight": "Chiaro",

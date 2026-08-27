@@ -19,6 +19,8 @@ import { Icon } from "./ui/Icons";
 import { Button, IconButton, modKey, TextInput } from "./ui/Primitives";
 import { ToastHost, toast } from "./ui/Toasts";
 import { Rail } from "./views/Rail";
+import { TabBar } from "./views/TabBar";
+import { useIsPhone } from "./phone";
 import { TransfersView } from "./views/TransfersView";
 import { PeopleView } from "./views/PeopleView";
 import { DepositsView } from "./views/DepositsView";
@@ -38,6 +40,7 @@ import { CommandPalette } from "./overlays/CommandPalette";
 const SEARCHABLE: Route[] = ["transfers"];
 
 export function App() {
+  const isPhone = useIsPhone();
   const t = useT();
   const init = useStore((s) => s.init);
   const connected = useStore((s) => s.connected);
@@ -306,8 +309,8 @@ export function App() {
               : SettingsView;
 
   return (
-    <div className="app">
-      <Rail />
+    <div className={`app${isPhone ? " app-phone" : ""}`}>
+      {isPhone ? null : <Rail />}
 
       <div className="main">
         {/* --- health banners ------------------------------------------ */}
@@ -449,21 +452,27 @@ export function App() {
             </Button>
           )}
 
-          <IconButton
-            label={t("app.palette", modKey)}
-            onClick={() => setPaletteOpen(true)}
-          >
-            <Icon.Search size={15} />
-          </IconButton>
-          <Button
-            size="sm"
-            variant="primary"
-            onClick={() => openSheet([])}
-            title={t("app.sendShortcut", modKey)}
-          >
-            <Icon.Send size={13} />
-            {t("app.send")}
-          </Button>
+          {/* Both are already in the bottom bar on a phone, and one of them is
+              named after a key combination nobody can press there. */}
+          {isPhone ? null : (
+            <>
+              <IconButton
+                label={t("app.palette", modKey)}
+                onClick={() => setPaletteOpen(true)}
+              >
+                <Icon.Search size={15} />
+              </IconButton>
+              <Button
+                size="sm"
+                variant="primary"
+                onClick={() => openSheet([])}
+                title={t("app.sendShortcut", modKey)}
+              >
+                <Icon.Send size={13} />
+                {t("app.send")}
+              </Button>
+            </>
+          )}
         </header>
 
         {/* --- the screen ----------------------------------------------- */}
@@ -471,6 +480,8 @@ export function App() {
           <View />
         </main>
       </div>
+
+      {isPhone ? <TabBar /> : null}
 
       {/* --- overlays ---------------------------------------------------- */}
       <SendSheet />

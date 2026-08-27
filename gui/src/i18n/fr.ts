@@ -188,6 +188,8 @@ export const fr: Dict = {
   "transfers.emptyInAction": "Coller un code",
   "transfers.firstRunTitle": "Glissez ici les fichiers à envoyer",
   "transfers.firstRunBody": "Ou utilisez Envoyer pour choisir un contact, un code ou un lien.",
+  "transfers.firstRunTitlePhone": "Envoyer un fichier \u00e0 quelqu\u2019un",
+  "transfers.firstRunBodyPhone": "Choisissez les fichiers, puis le destinataire\u00a0: un contact, un code ou un lien.",
   "transfers.firstRunAction": "Envoyer quelque chose",
 
   "people.presenceUnknownTitle": "Le relais n'a pas répondu",
@@ -450,6 +452,7 @@ export const fr: Dict = {
     "Les mots que les autres comparent pour être sûrs que c'est bien vous. Lisez-les à voix haute quand quelqu'un vous ajoute.",
   "settings.publicIdLabel": "Votre identifiant public",
   "settings.appearance": "Apparence",
+  "settings.morePlaces": "Le reste de l'app",
   "settings.theme": "Thème",
   "settings.themeSystem": "Système",
   "settings.themeLight": "Clair",

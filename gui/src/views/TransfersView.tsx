@@ -27,6 +27,7 @@ import { useT } from "../i18n";
 import type { UITransfer } from "../types";
 import { Icon } from "../ui/Icons";
 import { Button, Empty, Field, IconButton } from "../ui/Primitives";
+import { useIsPhone } from "../phone";
 import { ExtChip, Fingerprint, Progress } from "../ui/Bits";
 import { nameCollision, SaveSenderFields } from "../ui/SaveSenderFields";
 import { MenuButton, type MenuItem } from "../ui/Menu";
@@ -599,6 +600,7 @@ function Column({
 }
 
 export function TransfersView() {
+  const isPhone = useIsPhone();
   const t = useT();
   const transfers = useStore((s) => s.transfers);
   const search = useStore((s) => s.search);
@@ -619,9 +621,14 @@ export function TransfersView() {
       <div className="view-narrow" style={{ paddingTop: 30 }}>
         <button className="dropzone" onClick={() => openSheet([])}>
           <Icon.Send size={30} className="tone-out" />
-          <div className="t-head">{t("transfers.firstRunTitle")}</div>
+          {/* Nothing is dragged onto a phone, so the first thing a person reads
+              there cannot be an instruction to drag. Same screen, same button,
+              a sentence that is true of the device it is on. */}
+          <div className="t-head">
+            {t(isPhone ? "transfers.firstRunTitlePhone" : "transfers.firstRunTitle")}
+          </div>
           <div className="t-sm t-mut" style={{ maxWidth: "44ch" }}>
-            {t("transfers.firstRunBody")}
+            {t(isPhone ? "transfers.firstRunBodyPhone" : "transfers.firstRunBody")}
           </div>
           <span className="btn btn-primary" style={{ marginTop: 6 }}>
             <Icon.Send size={14} />

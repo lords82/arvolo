@@ -221,6 +221,8 @@ export const en = {
   // Not a list of the four modes: they are the four tabs of the send panel,
   // one click away and labelled.
   "transfers.firstRunBody": "Or use Send to pick a contact, a code, or a link.",
+  "transfers.firstRunTitlePhone": "Send somebody a file",
+  "transfers.firstRunBodyPhone": "Pick the files, then who they go to \u2014 a contact, a code, or a link.",
   "transfers.firstRunAction": "Send something",
 
   // ---- people ------------------------------------------------------------
@@ -509,6 +511,7 @@ export const en = {
     "The words others compare to be sure it is you. Read them out loud when somebody adds you.",
   "settings.publicIdLabel": "Your public id",
   "settings.appearance": "Appearance",
+  "settings.morePlaces": "The rest of the app",
   "settings.theme": "Theme",
   "settings.themeSystem": "System",
   "settings.themeLight": "Light",

@@ -20,7 +20,8 @@ import {
 } from "@tauri-apps/plugin-autostart";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { api } from "../ipc";
-import { fire, useStore, type ThemeChoice } from "../store";
+import { fire, TITLE_KEY, useStore, type ThemeChoice } from "../store";
+import { useIsPhone } from "../phone";
 import { isBusy } from "../update";
 import {
   langNames,
@@ -51,6 +52,8 @@ const SOURCE_KEY = {
 } as const;
 
 export function SettingsView() {
+  const isPhone = useIsPhone();
+  const go = useStore((s) => s.go);
   const t = useT();
   const lang = useLangChoice();
   const config = useStore((s) => s.config);
@@ -233,6 +236,22 @@ export function SettingsView() {
           )}
         </Field>
       </div>
+
+      {/* ---- the places the bottom bar has no room for ----------------- */}
+      {/* Five tabs is what a thumb can hit; six places and two verbs is what
+          the app has. The three that did not fit are here rather than gone —
+          the phone reaches everything the desktop does, by one more tap. */}
+      {isPhone && (
+        <div className="card">
+          <div className="card-pad t-head">{t("settings.morePlaces")}</div>
+          {(["deposits", "history", "devices"] as const).map((r) => (
+            <button key={r} className="place-link" onClick={() => go(r)}>
+              <span className="grow truncate">{t(TITLE_KEY[r])}</span>
+              <Icon.ChevronRight size={15} />
+            </button>
+          ))}
+        </div>
+      )}
 
       {/* ---- appearance ----------------------------------------------- */}
       <div className="card card-pad stack">
