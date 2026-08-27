@@ -6,29 +6,29 @@ use serde::Deserialize;
 use super::*;
 
 #[derive(Default, Deserialize)]
-pub(crate) struct Config {
-    pub(crate) relay: Option<String>,
-    pub(crate) download_dir: Option<String>,
-    pub(crate) temp_dir: Option<String>,
-    pub(crate) identity: Option<String>,
-    pub(crate) iroh_relay: Option<String>,
-    pub(crate) iroh_discovery: Option<String>,
-    pub(crate) proxy: Option<String>,
-    pub(crate) p2p: Option<bool>,
-    pub(crate) seed: Option<bool>,
-    pub(crate) seed_after: Option<u64>,
+pub struct Config {
+    pub relay: Option<String>,
+    pub download_dir: Option<String>,
+    pub temp_dir: Option<String>,
+    pub identity: Option<String>,
+    pub iroh_relay: Option<String>,
+    pub iroh_discovery: Option<String>,
+    pub proxy: Option<String>,
+    pub p2p: Option<bool>,
+    pub seed: Option<bool>,
+    pub seed_after: Option<u64>,
     /// Seconds a `send --to` waits for the recipient to accept before parking the
     /// file on the relay instead. `0` deposits as soon as the live attempt gives
     /// up, which is what every version before this one did.
-    pub(crate) deposit_after: Option<u64>,
-    pub(crate) share_days: Option<u64>,
-    pub(crate) share_copies: Option<u64>,
-    pub(crate) swarm: Option<String>,
-    pub(crate) concurrency: Option<u32>,
+    pub deposit_after: Option<u64>,
+    pub share_days: Option<u64>,
+    pub share_copies: Option<u64>,
+    pub swarm: Option<String>,
+    pub concurrency: Option<u32>,
     ipv4_only: Option<bool>,
-    pub(crate) log: Option<String>,
-    pub(crate) sync: Option<bool>,
-    pub(crate) display_name: Option<String>,
+    pub log: Option<String>,
+    pub sync: Option<bool>,
+    pub display_name: Option<String>,
 }
 
 /// The local user's self-chosen display name, advertised inside every outgoing
@@ -175,7 +175,7 @@ pub fn sync_enabled() -> bool {
     load_config().sync.unwrap_or(true)
 }
 
-pub(crate) fn load_config() -> Config {
+pub fn load_config() -> Config {
     std::fs::read_to_string(config_path())
         .ok()
         .and_then(|s| toml::from_str(&s).ok())

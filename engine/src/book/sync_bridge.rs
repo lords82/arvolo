@@ -9,21 +9,21 @@ use arvolo_core::sync::{
 
 use super::*;
 
-pub(crate) fn sync_dir() -> PathBuf {
+pub fn sync_dir() -> PathBuf {
     config_dir().join("sync")
 }
 
-pub(crate) fn meta_path() -> PathBuf {
+pub fn meta_path() -> PathBuf {
     sync_dir().join("meta.bin")
 }
 
-pub(crate) fn device_path() -> PathBuf {
+pub fn device_path() -> PathBuf {
     sync_dir().join("device.bin")
 }
 
 /// This device's local id (a random tiebreak for the Lamport clock, **not** the
 /// shared identity). Minted and persisted on first use.
-pub(crate) fn load_or_init_device() -> DeviceId {
+pub fn load_or_init_device() -> DeviceId {
     if let Ok(bytes) = std::fs::read(device_path()) {
         if bytes.len() == 16 {
             let mut id = [0u8; 16];
@@ -37,13 +37,13 @@ pub(crate) fn load_or_init_device() -> DeviceId {
     id
 }
 
-pub(crate) fn paired_marker_path() -> PathBuf {
+pub fn paired_marker_path() -> PathBuf {
     sync_dir().join("paired")
 }
 
 /// Remember that this identity now lives on more than one device. Written by both
 /// halves of `device pair`/`device join`, once the exchange has actually happened.
-pub(crate) fn mark_paired() {
+pub fn mark_paired() {
     std::fs::create_dir_all(sync_dir()).ok();
     let _ = std::fs::write(paired_marker_path(), b"");
 }
@@ -63,7 +63,7 @@ pub(crate) fn mark_paired() {
 ///
 /// Both can be false negatives (a fresh pairing that has not synced, on a build
 /// that predates the marker), which is exactly why the caller only adds a hint.
-pub(crate) fn paired_with_another_device() -> bool {
+pub fn paired_with_another_device() -> bool {
     if paired_marker_path().exists() {
         return true;
     }
@@ -72,7 +72,7 @@ pub(crate) fn paired_with_another_device() -> bool {
 }
 
 /// Load the CRDT sidecar: `(state, lamport, device)`. Missing/corrupt → empty.
-pub(crate) fn load_meta() -> (SyncState, u64, DeviceId) {
+pub fn load_meta() -> (SyncState, u64, DeviceId) {
     let device = load_or_init_device();
     match std::fs::read(meta_path())
         .ok()
@@ -83,14 +83,14 @@ pub(crate) fn load_meta() -> (SyncState, u64, DeviceId) {
     }
 }
 
-pub(crate) fn save_meta(state: &SyncState, lamport: u64, device: DeviceId) -> Result<()> {
+pub fn save_meta(state: &SyncState, lamport: u64, device: DeviceId) -> Result<()> {
     std::fs::create_dir_all(sync_dir()).ok();
     let snap = state.to_snapshot(lamport, device);
     let bytes = sync::encode_snapshot(&snap).context("serialize sync meta")?;
     write_private_bytes(&meta_path(), &bytes).context("write sync meta")
 }
 
-pub(crate) fn tombstone_marks(
+pub fn tombstone_marks(
     state: &mut BTreeMap<String, MarkReg>,
     present: &Marks,
     lamport: &mut u64,
@@ -323,7 +323,7 @@ pub fn build_local_snapshot() -> Result<SyncSnapshot> {
 /// tells the others; a tombstone written there and nowhere else leaves the row
 /// on screen until something re-projects. Two call sites did the pair by hand
 /// until a test caught one of them doing half of it.
-pub(crate) fn forget_device(id: &DeviceId) -> Result<()> {
+pub fn forget_device(id: &DeviceId) -> Result<()> {
     let key = sync::device_key(id);
     let mut ledger = load_devices();
     if ledger.devices.remove(&key).is_some() {
@@ -459,7 +459,7 @@ pub fn apply_merged_state(incoming: &SyncSnapshot) -> Result<()> {
 
 /// Project the merged CRDT state into the authoritative TOML ledgers: a
 /// non-deleted register becomes a live row, a tombstone becomes absence.
-pub(crate) fn project_to_ledgers(state: &SyncState) -> Result<()> {
+pub fn project_to_ledgers(state: &SyncState) -> Result<()> {
     let mut c = Contacts::default();
     for (name, r) in &state.contacts {
         if !r.deleted {

@@ -4,19 +4,19 @@ use serde::{Deserialize, Serialize};
 use super::*;
 
 #[derive(Default, Serialize, Deserialize)]
-pub(crate) struct Verified {
+pub struct Verified {
     #[serde(default, deserialize_with = "de_marks")]
-    pub(crate) verified: Marks,
+    pub verified: Marks,
 }
 
-pub(crate) fn load_verified() -> Verified {
+pub fn load_verified() -> Verified {
     std::fs::read_to_string(verified_path())
         .ok()
         .and_then(|s| toml::from_str(&s).ok())
         .unwrap_or_default()
 }
 
-pub(crate) fn save_verified(v: &Verified) -> Result<()> {
+pub fn save_verified(v: &Verified) -> Result<()> {
     std::fs::create_dir_all(config_dir()).ok();
     let text = toml::to_string_pretty(v).context("serialize verified")?;
     write_private(&verified_path(), &text).context("write verified")

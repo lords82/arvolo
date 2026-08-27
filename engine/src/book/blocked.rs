@@ -4,19 +4,19 @@ use serde::{Deserialize, Serialize};
 use super::*;
 
 #[derive(Default, Serialize, Deserialize)]
-pub(crate) struct Blocked {
+pub struct Blocked {
     #[serde(default, deserialize_with = "de_marks")]
-    pub(crate) blocked: Marks,
+    pub blocked: Marks,
 }
 
-pub(crate) fn load_blocked() -> Blocked {
+pub fn load_blocked() -> Blocked {
     std::fs::read_to_string(blocked_path())
         .ok()
         .and_then(|s| toml::from_str(&s).ok())
         .unwrap_or_default()
 }
 
-pub(crate) fn save_blocked(b: &Blocked) -> Result<()> {
+pub fn save_blocked(b: &Blocked) -> Result<()> {
     std::fs::create_dir_all(config_dir()).ok();
     let text = toml::to_string_pretty(b).context("serialize blocked")?;
     write_private(&blocked_path(), &text).context("write blocked")

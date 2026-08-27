@@ -23,19 +23,19 @@ use super::*;
 
 /// Base32 id → the relay that identity listens on, canonicalized.
 #[derive(Default, Serialize, Deserialize)]
-pub(crate) struct Relays {
+pub struct Relays {
     #[serde(default)]
-    pub(crate) relays: BTreeMap<String, String>,
+    pub relays: BTreeMap<String, String>,
 }
 
-pub(crate) fn load_relays() -> Relays {
+pub fn load_relays() -> Relays {
     std::fs::read_to_string(relays_path())
         .ok()
         .and_then(|s| toml::from_str(&s).ok())
         .unwrap_or_default()
 }
 
-pub(crate) fn save_relays(r: &Relays) -> Result<()> {
+pub fn save_relays(r: &Relays) -> Result<()> {
     std::fs::create_dir_all(config_dir()).ok();
     let text = toml::to_string_pretty(r).context("serialize relays")?;
     write_private(&relays_path(), &text).context("write relays")

@@ -4,19 +4,19 @@ use serde::{Deserialize, Serialize};
 use super::*;
 
 #[derive(Default, Serialize, Deserialize)]
-pub(crate) struct Trusted {
+pub struct Trusted {
     #[serde(default, deserialize_with = "de_marks")]
-    pub(crate) trusted: Marks,
+    pub trusted: Marks,
 }
 
-pub(crate) fn load_trusted() -> Trusted {
+pub fn load_trusted() -> Trusted {
     std::fs::read_to_string(trusted_path())
         .ok()
         .and_then(|s| toml::from_str(&s).ok())
         .unwrap_or_default()
 }
 
-pub(crate) fn save_trusted(t: &Trusted) -> Result<()> {
+pub fn save_trusted(t: &Trusted) -> Result<()> {
     std::fs::create_dir_all(config_dir()).ok();
     let text = toml::to_string_pretty(t).context("serialize trusted")?;
     write_private(&trusted_path(), &text).context("write trusted")

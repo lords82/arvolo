@@ -9,11 +9,11 @@ use super::*;
 /// advertised name still awaiting approval (if any), and the very first name this
 /// key was ever seen to claim.
 #[derive(Default, Clone, Serialize, Deserialize)]
-pub(crate) struct NameRow {
+pub struct NameRow {
     #[serde(default)]
-    pub(crate) pinned: String,
+    pub pinned: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) pending: Option<String>,
+    pub pending: Option<String>,
     /// Written once, on the first claim ever observed from this key, and never
     /// touched again.
     ///
@@ -23,23 +23,23 @@ pub(crate) struct NameRow {
     /// ever used the second name. That difference is the whole signal, and until
     /// somebody approves a name (`pinned`) there is nowhere else it survives.
     #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub(crate) first: String,
+    pub first: String,
 }
 
 #[derive(Default, Serialize, Deserialize)]
-pub(crate) struct Names {
+pub struct Names {
     #[serde(default)]
-    pub(crate) names: BTreeMap<String, NameRow>,
+    pub names: BTreeMap<String, NameRow>,
 }
 
-pub(crate) fn load_names() -> Names {
+pub fn load_names() -> Names {
     std::fs::read_to_string(names_path())
         .ok()
         .and_then(|s| toml::from_str(&s).ok())
         .unwrap_or_default()
 }
 
-pub(crate) fn save_names(n: &Names) -> Result<()> {
+pub fn save_names(n: &Names) -> Result<()> {
     std::fs::create_dir_all(config_dir()).ok();
     let text = toml::to_string_pretty(n).context("serialize names")?;
     write_private(&names_path(), &text).context("write names")
@@ -172,7 +172,7 @@ pub fn pending_name_of(id_b32: &str) -> Option<String> {
 
 /// Resolve a contact alias or raw base32 id to the canonical base32 id string
 /// (lowercased), so name records key consistently with the other id-keyed ledgers.
-pub(crate) fn resolve_recipient_id(who: &str) -> Result<String> {
+pub fn resolve_recipient_id(who: &str) -> Result<String> {
     if let Some(id) = load_contacts().contacts.get(who.trim()) {
         return Ok(id.clone());
     }

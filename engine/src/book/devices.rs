@@ -30,29 +30,29 @@ const LAST_SEEN_GRANULARITY: u64 = 60;
 
 /// One row of `devices.toml`.
 #[derive(Clone, Default, Serialize, Deserialize)]
-pub(crate) struct DeviceRow {
-    pub(crate) name: String,
+pub struct DeviceRow {
+    pub name: String,
     #[serde(default)]
-    pub(crate) platform: String,
+    pub platform: String,
     #[serde(default)]
-    pub(crate) last_seen: u64,
+    pub last_seen: u64,
 }
 
 #[derive(Default, Serialize, Deserialize)]
-pub(crate) struct Devices {
+pub struct Devices {
     /// Lowercase hex device id → what that machine says about itself.
     #[serde(default)]
-    pub(crate) devices: BTreeMap<String, DeviceRow>,
+    pub devices: BTreeMap<String, DeviceRow>,
 }
 
-pub(crate) fn load_devices() -> Devices {
+pub fn load_devices() -> Devices {
     std::fs::read_to_string(devices_path())
         .ok()
         .and_then(|s| toml::from_str(&s).ok())
         .unwrap_or_default()
 }
 
-pub(crate) fn save_devices(d: &Devices) -> Result<()> {
+pub fn save_devices(d: &Devices) -> Result<()> {
     std::fs::create_dir_all(config_dir()).ok();
     let s = toml::to_string_pretty(d).context("serialize devices")?;
     write_private(&devices_path(), &s).context("write devices")?;
@@ -62,7 +62,7 @@ pub(crate) fn save_devices(d: &Devices) -> Result<()> {
 /// The default name for a machine that has never been named: its hostname, or
 /// the OS if even that is unavailable. Editable afterwards, on the machine
 /// itself — see the authorship rule in `core::sync`.
-pub(crate) fn default_device_name() -> String {
+pub fn default_device_name() -> String {
     let host = gethostname::gethostname().to_string_lossy().to_string();
     let host = host.trim().trim_end_matches(".local").to_string();
     if host.is_empty() {
@@ -78,7 +78,7 @@ pub(crate) fn default_device_name() -> String {
 /// Ambiguity is an error rather than a pick. The whole point of aiming a send is
 /// that it lands on the machine the user meant, so guessing between two would
 /// defeat the feature in the one case where it matters.
-pub(crate) fn resolve_device(who: &str) -> Result<DeviceId> {
+pub fn resolve_device(who: &str) -> Result<DeviceId> {
     let who = who.trim();
     anyhow::ensure!(!who.is_empty(), "name a device");
     let devices = load_devices().devices;
@@ -109,7 +109,7 @@ pub(crate) fn resolve_device(who: &str) -> Result<DeviceId> {
 }
 
 /// Parse a lowercase-hex device id back into its bytes.
-pub(crate) fn decode_device_id(hex: &str) -> Result<DeviceId> {
+pub fn decode_device_id(hex: &str) -> Result<DeviceId> {
     let bytes = data_encoding::HEXLOWER
         .decode(hex.as_bytes())
         .context("invalid device id")?;
@@ -120,6 +120,6 @@ pub(crate) fn decode_device_id(hex: &str) -> Result<DeviceId> {
 }
 
 /// Round a timestamp down to [`LAST_SEEN_GRANULARITY`].
-pub(crate) fn quantize_last_seen(now: u64) -> u64 {
+pub fn quantize_last_seen(now: u64) -> u64 {
     now - (now % LAST_SEEN_GRANULARITY)
 }

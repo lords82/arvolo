@@ -112,7 +112,7 @@ pub fn config_exists() -> bool {
 /// the trust marks that gate the daemon's auto-download, so another local user
 /// must not be able to read or tamper with them. On non-unix, permissions are not
 /// applied (accepted limitation; the file still lands in the user's profile dir).
-pub(crate) fn write_private(path: &Path, contents: &str) -> std::io::Result<()> {
+pub fn write_private(path: &Path, contents: &str) -> std::io::Result<()> {
     write_private_bytes(path, contents.as_bytes())
 }
 
@@ -128,7 +128,7 @@ pub(crate) fn write_private(path: &Path, contents: &str) -> std::io::Result<()> 
 /// This closes torn reads, **not** lost updates: two processes that each
 /// read-modify-write the same ledger can still have one overwrite the other. That
 /// needs locking across the read too, and is left as a known limitation.
-pub(crate) fn write_private_bytes(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub fn write_private_bytes(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let tmp = path.with_extension(format!("tmp{}", std::process::id()));
     std::fs::write(&tmp, bytes)?;
     #[cfg(unix)]
@@ -144,35 +144,35 @@ pub(crate) fn write_private_bytes(path: &Path, bytes: &[u8]) -> std::io::Result<
     Ok(())
 }
 
-pub(crate) fn contacts_path() -> PathBuf {
+pub fn contacts_path() -> PathBuf {
     config_dir().join("contacts.toml")
 }
 
-pub(crate) fn seen_path() -> PathBuf {
+pub fn seen_path() -> PathBuf {
     config_dir().join("seen.toml")
 }
 
-pub(crate) fn verified_path() -> PathBuf {
+pub fn verified_path() -> PathBuf {
     config_dir().join("verified.toml")
 }
 
-pub(crate) fn trusted_path() -> PathBuf {
+pub fn trusted_path() -> PathBuf {
     config_dir().join("trusted.toml")
 }
 
-pub(crate) fn blocked_path() -> PathBuf {
+pub fn blocked_path() -> PathBuf {
     config_dir().join("blocked.toml")
 }
 
-pub(crate) fn names_path() -> PathBuf {
+pub fn names_path() -> PathBuf {
     config_dir().join("names.toml")
 }
 
-pub(crate) fn devices_path() -> PathBuf {
+pub fn devices_path() -> PathBuf {
     config_dir().join("devices.toml")
 }
 
-pub(crate) fn relays_path() -> PathBuf {
+pub fn relays_path() -> PathBuf {
     config_dir().join("relays.toml")
 }
 
@@ -187,7 +187,7 @@ pub(crate) fn relays_path() -> PathBuf {
 /// receipt and would fire on traffic, not on a book edit. So is `devices.toml`,
 /// for the same shape of reason: its `last_seen` moves on its own every sync
 /// round, and the address book has not changed because a machine is still awake.
-pub(crate) fn book_stamp() -> u64 {
+pub fn book_stamp() -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     for p in [

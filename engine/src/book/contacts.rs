@@ -7,26 +7,26 @@ use serde::{Deserialize, Serialize};
 use super::*;
 
 #[derive(Default, Serialize, Deserialize)]
-pub(crate) struct Contacts {
+pub struct Contacts {
     #[serde(default)]
-    pub(crate) contacts: BTreeMap<String, String>,
+    pub contacts: BTreeMap<String, String>,
 }
 
-pub(crate) fn load_contacts() -> Contacts {
+pub fn load_contacts() -> Contacts {
     std::fs::read_to_string(contacts_path())
         .ok()
         .and_then(|s| toml::from_str(&s).ok())
         .unwrap_or_default()
 }
 
-pub(crate) fn save_contacts(c: &Contacts) -> Result<()> {
+pub fn save_contacts(c: &Contacts) -> Result<()> {
     std::fs::create_dir_all(config_dir()).ok();
     let s = toml::to_string_pretty(c).context("serialize contacts")?;
     write_private(&contacts_path(), &s).context("write contacts")?;
     Ok(())
 }
 
-pub(crate) fn decode_id(s: &str) -> Result<PublicId> {
+pub fn decode_id(s: &str) -> Result<PublicId> {
     let bytes = data_encoding::BASE32_NOPAD
         .decode(s.trim().to_uppercase().as_bytes())
         .context("invalid public id (base32)")?;

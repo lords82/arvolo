@@ -19,7 +19,11 @@ use std::sync::atomic::Ordering;
 use anyhow::Result;
 use clap::FromArgMatches;
 
-mod book;
+// The address book, the config file and the device register now live in
+// `arvolo-engine`, so a phone can reach them without a daemon. Re-exported here
+// under the name they have always had: every `crate::book::…` in this crate is
+// the same path it was.
+pub use arvolo_engine::book;
 mod deposits;
 mod handles;
 mod history;
@@ -38,7 +42,7 @@ mod commands;
 mod completions;
 mod output;
 #[cfg(test)]
-pub(crate) mod testlock;
+pub(crate) use arvolo_engine::testlock;
 mod ui;
 mod util;
 

@@ -34,24 +34,24 @@ pub struct SenderStatus {
 /// installation: a value that changed shape would fail to parse and take every
 /// counter with it, silently. A missing `last` table simply reads as empty.
 #[derive(Default, Serialize, Deserialize)]
-pub(crate) struct Seen {
+pub struct Seen {
     #[serde(default)]
-    pub(crate) seen: BTreeMap<String, u64>,
+    pub seen: BTreeMap<String, u64>,
     /// pubkey → unix seconds of the last completed transfer either way. Absent
     /// for a key last exchanged with before this was recorded, which reads as
     /// "not recorded" rather than as "never".
     #[serde(default)]
-    pub(crate) last: BTreeMap<String, u64>,
+    pub last: BTreeMap<String, u64>,
 }
 
-pub(crate) fn load_seen() -> Seen {
+pub fn load_seen() -> Seen {
     std::fs::read_to_string(seen_path())
         .ok()
         .and_then(|s| toml::from_str(&s).ok())
         .unwrap_or_default()
 }
 
-pub(crate) fn save_seen(s: &Seen) -> Result<()> {
+pub fn save_seen(s: &Seen) -> Result<()> {
     std::fs::create_dir_all(config_dir()).ok();
     let text = toml::to_string_pretty(s).context("serialize seen")?;
     write_private(&seen_path(), &text).context("write seen")

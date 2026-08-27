@@ -210,6 +210,7 @@ version = "0.14.1"
 dependencies = [
  "anyhow",
  "arvolo-core",
+ "arvolo-engine",
  "arvolo-ipc",
  "arvolo-relay",
  "axum",
@@ -266,6 +267,20 @@ dependencies = [
  "tracing",
  "windows-sys 0.61.2",
  "zeroize",
+]
+
+[[package]]
+name = "arvolo-engine"
+version = "0.14.1"
+dependencies = [
+ "anyhow",
+ "arvolo-core",
+ "data-encoding",
+ "gethostname",
+ "serde",
+ "tempfile",
+ "toml 0.8.2",
+ "tracing",
 ]
 
 [[package]]

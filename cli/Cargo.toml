@@ -16,6 +16,7 @@ path = "src/main.rs"
 
 [dependencies]
 arvolo-core.workspace = true
+arvolo-engine.workspace = true
 arvolo-ipc.workspace = true
 anyhow.workspace = true
 tokio.workspace = true

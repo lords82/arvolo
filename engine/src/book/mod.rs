@@ -13,18 +13,18 @@ mod sync_bridge;
 mod trusted;
 mod verified;
 
-pub(crate) use blocked::*;
-pub(crate) use config::*;
-pub(crate) use contacts::*;
-pub(crate) use devices::*;
-pub(crate) use marks::*;
-pub(crate) use names::*;
-pub(crate) use paths::*;
-pub(crate) use relays::*;
-pub(crate) use seen::*;
-pub(crate) use sync_bridge::*;
-pub(crate) use trusted::*;
-pub(crate) use verified::*;
+pub use blocked::*;
+pub use config::*;
+pub use contacts::*;
+pub use devices::*;
+pub use marks::*;
+pub use names::*;
+pub use paths::*;
+pub use relays::*;
+pub use seen::*;
+pub use sync_bridge::*;
+pub use trusted::*;
+pub use verified::*;
 
 #[cfg(test)]
 mod tests {
