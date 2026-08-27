@@ -290,7 +290,7 @@ pub fn record_from_event(transfer_id: Option<u64>, info: &arvolo_core::manager::
         // Empty on a deposit the engine *restored* rather than made; `save` keeps
         // whatever this record already had rather than blanking it.
         &info.ticket,
-        info.recipient.as_ref().map(crate::util::encode_id),
+        info.recipient.as_ref().map(crate::ids::encode_id),
         info.expires,
         transfer_id,
         // Kept even though the engine holds its own copy: the daemon may be gone by

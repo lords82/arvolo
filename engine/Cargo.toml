@@ -12,7 +12,12 @@ categories = ["network-programming", "cryptography"]
 
 [dependencies]
 arvolo-core.workspace = true
+# The wire shapes the daemon answers in. One direction only: `arvolo-ipc` knows
+# nothing about the engine, so the CLI and the GUI can keep speaking the
+# protocol without linking this crate.
+arvolo-ipc.workspace = true
 anyhow.workspace = true
+tokio.workspace = true
 tracing.workspace = true
 data-encoding = "2"
 serde = { version = "1", features = ["derive"] }

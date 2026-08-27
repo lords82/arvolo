@@ -23,10 +23,12 @@ use clap::FromArgMatches;
 // `arvolo-engine`, so a phone can reach them without a daemon. Re-exported here
 // under the name they have always had: every `crate::book::…` in this crate is
 // the same path it was.
-pub use arvolo_engine::book;
-mod deposits;
-mod handles;
-mod history;
+// The address book, the config file, the device register and the registers the
+// daemon keeps — deposits, sessions, handles, history — now live in
+// `arvolo-engine`, so a phone can reach them without a daemon. Re-exported here
+// under the names they have always had: every `crate::book::…` and
+// `crate::deposits::…` in this crate is the same path it was.
+pub use arvolo_engine::{book, deposits, handles, history, sessions};
 // The daemon speaks over a local control channel: a Unix-domain socket where
 // there is one, a named pipe on Windows. Which of the two is decided inside
 // `arvolo_ipc` and in `commands::daemon::open_control`; everything above that —
@@ -34,7 +36,6 @@ mod history;
 // code on both.
 mod ipc;
 mod notify;
-mod sessions;
 mod sync;
 
 mod args;

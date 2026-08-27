@@ -13,13 +13,13 @@ use data_encoding::HEXLOWER;
 /// The 8-hex handle for any internal identifier — same construction as
 /// `deposits::id_for` / `sessions::id_for`, shared so every namespace hashes
 /// alike.
-pub(crate) fn short(full: &str) -> String {
+pub fn short(full: &str) -> String {
     HEXLOWER.encode(&Hash::new(full.as_bytes()).as_bytes()[..4])
 }
 
 /// Could `input` be a handle (or a prefix of one)? Cheap shape check used to
 /// decide whether prefix resolution is even worth attempting.
-pub(crate) fn looks_like_handle(input: &str) -> bool {
+pub fn looks_like_handle(input: &str) -> bool {
     !input.is_empty()
         && input.len() <= 8
         && input
@@ -29,7 +29,7 @@ pub(crate) fn looks_like_handle(input: &str) -> bool {
 
 /// The outcome of matching a typed prefix against a set of handles.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum Match<T> {
+pub enum Match<T> {
     /// Exactly one candidate starts with the prefix.
     One(T),
     /// More than one does — the handles, so the caller can list them.
@@ -41,7 +41,7 @@ pub(crate) enum Match<T> {
 /// Resolve a typed prefix against `(handle, value)` candidates. Case-insensitive
 /// on the input (handles are lowercase); an exact 8-char match wins immediately
 /// even if it is also a prefix of nothing else.
-pub(crate) fn resolve_prefix<T>(
+pub fn resolve_prefix<T>(
     input: &str,
     candidates: impl IntoIterator<Item = (String, T)>,
 ) -> Match<T> {

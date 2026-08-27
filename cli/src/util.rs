@@ -217,11 +217,10 @@ pub(crate) fn auto_accepts(id_b32: &str) -> bool {
     crate::book::sender_status(id_b32).trusted || is_self(id_b32)
 }
 
-pub(crate) fn encode_id(p: &PublicId) -> String {
-    data_encoding::BASE32_NOPAD
-        .encode(&p.to_bytes())
-        .to_lowercase()
-}
+/// How a public id is written down, now that more than one crate has to spell it
+/// the same way. Re-exported rather than moved-and-renamed: `util::encode_id` is
+/// what this crate has always called it.
+pub(crate) use arvolo_engine::ids::encode_id;
 
 #[cfg(test)]
 mod tests {

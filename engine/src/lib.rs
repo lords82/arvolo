@@ -15,6 +15,11 @@
 //! server becomes a thin wrapper around the same calls the phone makes directly.
 
 pub mod book;
+pub mod deposits;
+pub mod handles;
+pub mod history;
+pub mod ids;
+pub mod sessions;
 /// Serializes tests that mutate the process-global `ARVOLO_CONFIG_DIR`.
 ///
 /// Not behind `#[cfg(test)]`: `arvolo-cli` has tests that move the same
