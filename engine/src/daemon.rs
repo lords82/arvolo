@@ -129,6 +129,28 @@ impl Drop for FrontEnd {
     }
 }
 
+/// Answer requests with no socket in between.
+///
+/// This is the whole of what a shell without a daemon needs: hold a `Daemon`,
+/// hand it to `DaemonClient::embedded`, and every typed method the desktop's
+/// window calls over a pipe works unchanged in-process. The two clients differ
+/// in one line of setup and nowhere else.
+impl arvolo_ipc::client::Answer for Daemon {
+    fn answer(&self, cmd: Request) -> arvolo_ipc::client::BoxFuture<'_, Response> {
+        Box::pin(dispatch(self, cmd))
+    }
+
+    fn events(&self) -> Box<dyn arvolo_ipc::client::Events> {
+        Box::new(self.subscribe())
+    }
+}
+
+impl arvolo_ipc::client::Events for Subscription {
+    fn next(&mut self) -> arvolo_ipc::client::BoxFuture<'_, Option<EventDto>> {
+        Box::pin(Subscription::next(self))
+    }
+}
+
 /// The outcome of the most recent sync round, for [`Request::SyncStatus`].
 #[derive(Debug, Clone, Default)]
 pub struct SyncState {

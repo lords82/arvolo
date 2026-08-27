@@ -295,6 +295,14 @@ Made 2026-08-27, widening the scope to full parity:
 2. **Walking skeleton on Android** (fastest iteration loop): Tauri shell +
    embedded engine + the React frontend in a phone layout; identity pairing
    and foreground receive/send against a real relay.
+
+   The half of this that is not Android is done: `DaemonClient` now carries
+   either a socket or an engine in this process, `bridge.rs` asks it either way,
+   and `bridge::use_embedded` is where a shell hands one over. Everything the
+   window can ask a daemon it can ask an engine, and the tests prove it without
+   a socket in sight. What is left is Android itself — `rustup target add`, the
+   Tauri shell, the entry point that calls `start` and `use_embedded`, and a
+   layout that fits a phone.
 3. **iOS shell** + Keychain identity + the same flows.
 4. **Push**: `arvolo-push` gateway, relay wake forwarding, FCM + APNs, the
    iOS Notification Service Extension, background fetch fallback.

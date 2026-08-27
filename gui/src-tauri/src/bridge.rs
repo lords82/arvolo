@@ -63,7 +63,32 @@ impl From<String> for AcceptFailed {
 }
 
 /// Connect to the daemon, mapping the "no daemon" error to a UI-friendly string.
+/// The engine running inside this process, when there is one.
+///
+/// Empty on every desktop, where the window is a thin client of a daemon it
+/// spawns. A shell that cannot keep a daemon alive — a phone — starts the engine
+/// itself and leaves it here, and every command below then answers from memory
+/// instead of from a socket. Nothing else in this file knows which it is.
+static EMBEDDED: std::sync::OnceLock<std::sync::Arc<dyn arvolo_ipc::client::Answer>> =
+    std::sync::OnceLock::new();
+
+/// Hand the window an engine to talk to instead of a daemon. Call once, before
+/// the first command. A second call is ignored: two engines on one address book
+/// is not a thing to do quietly.
+///
+/// Unused until there is a shell that calls it — the mobile entry point, which is
+/// the next phase. Kept here and not there because the seam is this file's: the
+/// commands below are what has to stop caring where the answers come from, and
+/// they now do.
+#[allow(dead_code)]
+pub fn use_embedded(engine: std::sync::Arc<dyn arvolo_ipc::client::Answer>) {
+    let _ = EMBEDDED.set(engine);
+}
+
 async fn client() -> Result<DaemonClient, String> {
+    if let Some(engine) = EMBEDDED.get() {
+        return Ok(DaemonClient::embedded(engine.clone()));
+    }
     DaemonClient::connect().await.map_err(|e| format!("{e:#}"))
 }
 
