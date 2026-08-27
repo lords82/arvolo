@@ -1,6 +1,6 @@
 //! Pairing as a *session*, for clients that cannot sit in a blocking call.
 //!
-//! The CLI's two pairing commands ([`crate::commands::pair`] and
+//! The CLI's two pairing commands (the CLI's `device pair` and
 //! [`crate::sync`]) are written for a terminal: they print a code, block until
 //! the other machine answers, and prompt for anything they still need. None of
 //! that survives a request/reply socket — the reply would arrive minutes later,
@@ -170,8 +170,8 @@ async fn contact_host(
     token: &CancellationToken,
 ) -> Result<Done> {
     let relay = resolve_relay(relay)?;
-    let me = crate::my_identity()?;
-    let my_id = crate::encode_id(&me.public());
+    let me = crate::identity::my_identity()?;
+    let my_id = crate::identity::encode_id(&me.public());
 
     if code::relay_rz_version(&relay).await != code::RzVersion::V2 {
         bail!(
@@ -240,8 +240,8 @@ async fn contact_join(
     name: Option<String>,
     token: &CancellationToken,
 ) -> Result<Done> {
-    let me = crate::my_identity()?;
-    let my_id = crate::encode_id(&me.public());
+    let me = crate::identity::my_identity()?;
+    let my_id = crate::identity::encode_id(&me.public());
     let default_relay = book::default_relay_or_builtin();
 
     // Their relay rides on the code (`N-word-word@relay`); ours goes back in the
@@ -351,7 +351,7 @@ async fn device_host(
     token: &CancellationToken,
 ) -> Result<Done> {
     let relay = resolve_relay(relay)?;
-    let me = crate::my_identity()?;
+    let me = crate::identity::my_identity()?;
     let identity_secret: [u8; 32] = me
         .secret_bytes()
         .try_into()
@@ -445,7 +445,7 @@ async fn device_join(code_str: String, token: &CancellationToken) -> Result<Done
     let payload = arvolo_core::sync::PairPayload::decode(&bytes)?;
     let new_id = Identity::from_secret_bytes(&payload.identity_secret)
         .context("received identity is invalid")?;
-    let path = crate::identity_path();
+    let path = crate::identity::identity_path();
 
     // Idempotent re-join: same identity, nothing destroyed, nothing to restart for.
     let same = Identity::load(&path)

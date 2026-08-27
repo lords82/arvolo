@@ -109,8 +109,7 @@ pub(crate) fn parse_dl_link(link: &str) -> Result<(String, String)> {
 // this crate has always used — `crate::my_identity()`, `util::encode_id`, and the
 // rest resolve exactly as before.
 pub(crate) use arvolo_engine::identity::{
-    auto_accepts, encode_id, identity_path, is_self, my_identity,
-    resolve_recipient_or_self_with_relay, SELF_RECIPIENT,
+    auto_accepts, encode_id, identity_path, is_self, my_identity, SELF_RECIPIENT,
 };
 pub(crate) use arvolo_engine::now_unix;
 pub(crate) use arvolo_engine::payload::resolve_payload;

@@ -15,10 +15,12 @@
 //! server becomes a thin wrapper around the same calls the phone makes directly.
 
 pub mod book;
+pub mod daemon;
 pub mod deposits;
 pub mod handles;
 pub mod history;
 pub mod identity;
+pub mod pairing;
 pub mod payload;
 pub mod sessions;
 pub mod sync;

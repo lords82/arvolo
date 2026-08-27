@@ -18,6 +18,7 @@ arvolo-core.workspace = true
 arvolo-ipc.workspace = true
 anyhow.workspace = true
 tokio.workspace = true
+tokio-util = "0.7"
 tracing.workspace = true
 data-encoding = "2"
 serde = { version = "1", features = ["derive"] }

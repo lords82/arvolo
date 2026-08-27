@@ -2,8 +2,9 @@
 //! now live in the shared `arvolo-ipc` crate so the desktop GUI can drive the
 //! same daemon; they are re-exported here for the CLI's existing call sites.
 //!
-//! * [`server`] — the daemon accept-loop and request dispatch (stays here: it
-//!   owns the [`arvolo_core::manager::TransferManager`] and the CLI's policy).
+//! * [`server`] — the accept loop and the line framing. What a request *means*
+//!   is `arvolo_engine::daemon`, so a phone can answer the same way without a
+//!   socket; pairing sessions moved there with it.
 //!
 //! On unix the channel is a socket at [`socket_path`] under the config dir, and
 //! the filesystem is the access control: owner-only permissions, so no token
@@ -12,7 +13,6 @@
 
 pub use arvolo_ipc::{client, protocol};
 
-pub mod pairing;
 pub mod server;
 
 #[cfg(test)]

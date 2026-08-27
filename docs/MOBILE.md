@@ -263,12 +263,23 @@ Made 2026-08-27, widening the scope to full parity:
 
 ## Build order
 
-1. **Engine as a library** (pure Rust, no mobile yet): give `arvolo-core` the
-   in-process face the mobile shell needs — the same command surface
-   `bridge.rs` speaks over the socket, callable without a daemon. Desktop
-   keeps the daemon; both frontends share one seam. Testable entirely on
-   desktop. The `SavePublisher` hook and the `saved_uri` that rides beside a
-   row's path belong here, and are done.
+1. **Engine as a library** (pure Rust, no mobile yet): the same command surface
+   `bridge.rs` speaks over the socket, callable without a daemon. Desktop keeps
+   the daemon; both frontends share one seam. Testable entirely on desktop.
+
+   This is the crate **`arvolo-engine`**, and it is where the line falls: what a
+   request *means* is `engine::daemon::dispatch`, and how it arrived is the
+   CLI's socket. With it went the address book, the config, deposits, sessions,
+   handles, history, pairing, the sync round, the identity helpers — everything
+   the daemon does on somebody's behalf. What stayed in `arvolo-cli` is argument
+   parsing, progress bars, prompts, and the accept loop.
+
+   Also done here: the `SavePublisher` hook and the `saved_uri` that rides
+   beside a row's path.
+
+   Still to do in this phase: the in-process handle a shell actually holds —
+   building a `Daemon` without a socket, and the event stream, which today is
+   `stream_events` writing lines to a connection.
 2. **Walking skeleton on Android** (fastest iteration loop): Tauri shell +
    embedded engine + the React frontend in a phone layout; identity pairing
    and foreground receive/send against a real relay.
