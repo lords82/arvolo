@@ -300,9 +300,37 @@ Made 2026-08-27, widening the scope to full parity:
    either a socket or an engine in this process, `bridge.rs` asks it either way,
    and `bridge::use_embedded` is where a shell hands one over. Everything the
    window can ask a daemon it can ask an engine, and the tests prove it without
-   a socket in sight. What is left is Android itself — `rustup target add`, the
-   Tauri shell, the entry point that calls `start` and `use_embedded`, and a
-   layout that fits a phone.
+   a socket in sight.
+
+   **`arvolo-core` and `arvolo-engine` compile for `aarch64-linux-android`** —
+   iroh, quinn, rustls, hpke, argon2, spake2 and all. That was the open question
+   under this whole plan and the answer is yes. The recipe, with the SDK where
+   Android Studio puts it:
+
+   ```sh
+   rustup target add aarch64-linux-android x86_64-linux-android
+   export ANDROID_HOME="$HOME/Library/Android/sdk"
+   export NDK_HOME="$ANDROID_HOME/ndk/27.1.12297006"
+   TC="$NDK_HOME/toolchains/llvm/prebuilt/darwin-x86_64/bin"
+   export PATH="$TC:$PATH"
+   export CC_aarch64_linux_android="$TC/aarch64-linux-android24-clang"
+   export AR_aarch64_linux_android="$TC/llvm-ar"
+   export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$TC/aarch64-linux-android24-clang"
+   cargo check -p arvolo-engine --target aarch64-linux-android
+   ```
+
+   The first pass takes about 40 minutes; after that it is cached. `npm run
+   tauri android init` inside `gui/` generates `src-tauri/gen/android`, which is
+   gitignored and regenerated per clone.
+
+   `gui/src-tauri` is now a library as well as a binary (`arvolo_gui_lib`,
+   `cdylib`) because a phone has no `main` to call — the platform's activity
+   loads the `.so` and enters at `run`, which is the same function the desktop's
+   four-line `main` calls.
+
+   What is left: the desktop-only parts of the GUI backend behind `cfg(desktop)`
+   — tray, autostart, the updater, spawning the daemon — the mobile entry point
+   that calls `start` and `use_embedded`, and a layout that fits a phone.
 3. **iOS shell** + Keychain identity + the same flows.
 4. **Push**: `arvolo-push` gateway, relay wake forwarding, FCM + APNs, the
    iOS Notification Service Extension, background fetch fallback.

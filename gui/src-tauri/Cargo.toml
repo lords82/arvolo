@@ -25,6 +25,13 @@ homepage.workspace = true
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+# A library as well as a binary: on mobile there is no process to start, only a
+# shared object the platform's activity loads and enters at `run`. The desktop
+# binary is four lines that call the same function.
+[lib]
+name = "arvolo_gui_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
 [dependencies]
 # `image-png` decodes the menu-bar template glyph baked in with `include_bytes!`.
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
