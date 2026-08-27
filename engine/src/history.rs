@@ -81,6 +81,38 @@ pub fn record(
     Ok(rec)
 }
 
+/// Persist a finished transfer the engine already knows about (best-effort).
+///
+/// Every terminal event goes through here, whichever client is driving — the
+/// daemon's intake loop, a one-shot `send`, a `recv` in a terminal — which is
+/// also why the address-book stamp rides along: "when did I last deal with this
+/// person" is answered by a file arriving or leaving, and this is the one place
+/// both directions pass through already holding the peer. A second hook would be
+/// a second place to forget.
+pub fn record_transfer(manager: &arvolo_core::manager::TransferManager, id: u64, status: &str) {
+    use arvolo_core::manager::Direction;
+
+    let Some(t) = manager.get(id) else { return };
+    let direction = match t.direction {
+        Direction::Send => "send",
+        Direction::Recv => "recv",
+    };
+    let peer_id = t.peer.as_ref().map(crate::identity::encode_id);
+    if status == "completed" {
+        if let Some(pk) = &peer_id {
+            book::record_exchange(pk, crate::now_unix());
+        }
+    }
+    let _ = record(
+        direction,
+        peer_id,
+        &t.name,
+        t.total_size,
+        t.transferred,
+        status,
+    );
+}
+
 fn write_record(rec: &HistoryRecord) -> Result<()> {
     let dir = history_dir();
     std::fs::create_dir_all(&dir).context("create history dir")?;

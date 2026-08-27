@@ -14,6 +14,7 @@
 //! `arvolo-cli`. The desktop keeps its daemon and loses nothing: the socket
 //! server becomes a thin wrapper around the same calls the phone makes directly.
 
+pub mod announce;
 pub mod book;
 pub mod daemon;
 pub mod deposits;
@@ -23,6 +24,7 @@ pub mod identity;
 pub mod pairing;
 pub mod payload;
 pub mod sessions;
+pub mod start;
 pub mod sync;
 pub mod text;
 

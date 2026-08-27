@@ -274,12 +274,24 @@ Made 2026-08-27, widening the scope to full parity:
    the daemon does on somebody's behalf. What stayed in `arvolo-cli` is argument
    parsing, progress bars, prompts, and the accept loop.
 
+   Starting it is `engine::start::start(Options)`: identity, transfer manager,
+   inbox subscription, the trust policy on an incoming offer, history, the
+   address-book watcher — and back comes a `Daemon` ready to answer. The CLI
+   wraps it in a socket; a phone holds it. What the embedder still owns is how
+   it is reached, when it stops, and where the engine's announcements go
+   (`announce::Announce` — the terminal prints and raises a desktop
+   notification, a phone will ask the system to).
+
+   Listening to it is `Daemon::subscribe()`: one stream of both event sources,
+   each already stamped with what the address book knows, and holding it is what
+   "a front-end is attached" means. The CLI writes those to a socket in four
+   lines; a phone renders them.
+
    Also done here: the `SavePublisher` hook and the `saved_uri` that rides
    beside a row's path.
 
-   Still to do in this phase: the in-process handle a shell actually holds —
-   building a `Daemon` without a socket, and the event stream, which today is
-   `stream_events` writing lines to a connection.
+   **Phase 1 is done.** What a shell has to bring is a `Announce`, optionally a
+   `SavePublisher`, and a way to be reached.
 2. **Walking skeleton on Android** (fastest iteration loop): Tauri shell +
    embedded engine + the React frontend in a phone layout; identity pairing
    and foreground receive/send against a real relay.

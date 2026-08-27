@@ -11,7 +11,7 @@ use arvolo_core::manager::{Direction, ManagerEvent, TransferManager};
 use arvolo_core::transfer::RelayChoice;
 use indicatif::{ProgressBar, ProgressStyle};
 
-use crate::{book, history, sync};
+use crate::{book, sync};
 
 use crate::ipc;
 
@@ -324,34 +324,9 @@ pub(crate) async fn listen_attached(
     Ok(())
 }
 
-/// Persist a finished transfer to the history store (best-effort).
-pub(crate) fn record_history(manager: &TransferManager, id: u64, status: &str) {
-    let Some(t) = manager.get(id) else { return };
-    let direction = match t.direction {
-        Direction::Send => "send",
-        Direction::Recv => "recv",
-    };
-    let peer_id = t.peer.as_ref().map(encode_id);
-    // Stamp the address book while we are here, and only for a transfer that
-    // actually moved: "when did I last deal with this person" is answered by a
-    // file arriving or leaving, not by one that failed or was called back. It
-    // rides with the history record because this is the one place both directions
-    // pass through, already holding the peer — a second hook would be a second
-    // place to forget.
-    if status == "completed" {
-        if let Some(pk) = &peer_id {
-            crate::book::record_exchange(pk, crate::util::now_unix());
-        }
-    }
-    let _ = history::record(
-        direction,
-        peer_id,
-        &t.name,
-        t.total_size,
-        t.transferred,
-        status,
-    );
-}
+// Writing a finished transfer to history is the engine's, now that more than one
+// client does it. Kept under the name this crate calls it by.
+pub(crate) use arvolo_engine::history::record_transfer as record_history;
 
 /// `arvolo recv` — with something to paste (or a `.arvolo` file, or a waiting
 /// offer's handle), fetch it; with nothing, show what is waiting for you and

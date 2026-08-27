@@ -9,13 +9,15 @@
 //! points at, and that a manager without one behaves exactly as it always has.
 
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use arvolo_core::crypto::Identity;
 use arvolo_core::flow;
-use arvolo_core::manager::{SavePublisher, SavedLocation, Transfer, TransferManager, TransferStatus};
+use arvolo_core::manager::{
+    SavePublisher, SavedLocation, Transfer, TransferManager, TransferStatus,
+};
 use arvolo_core::transfer::RelayChoice;
 use tokio_util::sync::CancellationToken;
 
@@ -56,13 +58,27 @@ impl SavePublisher for Public {
 
 /// Serve a payload over the local P2P path and hand back the ticket, the bytes,
 /// and the token that stops serving.
-async fn served(dir: &Path) -> (String, Vec<u8>, CancellationToken, tokio::task::JoinHandle<()>) {
+async fn served(
+    dir: &Path,
+) -> (
+    String,
+    Vec<u8>,
+    CancellationToken,
+    tokio::task::JoinHandle<()>,
+) {
     let src = dir.join("holiday.bin");
     let data: Vec<u8> = (0..(1024 * 1024u64)).map(|i| (i * 31 + 7) as u8).collect();
     std::fs::write(&src, &data).unwrap();
-    let session = flow::prepare_send(&src, "holiday.bin", false, None, None, RelayChoice::Disabled)
-        .await
-        .unwrap();
+    let session = flow::prepare_send(
+        &src,
+        "holiday.bin",
+        false,
+        None,
+        None,
+        RelayChoice::Disabled,
+    )
+    .await
+    .unwrap();
     let ticket = session.ticket.clone();
     let cancel = CancellationToken::new();
     let c = cancel.clone();
@@ -114,7 +130,11 @@ async fn a_published_download_points_at_where_the_platform_put_it() {
     let row = wait_terminal(&mgr, id).await;
 
     let calls = publisher.calls.lock().unwrap().clone();
-    assert_eq!(calls.len(), 1, "the publisher is called once, not per piece");
+    assert_eq!(
+        calls.len(),
+        1,
+        "the publisher is called once, not per piece"
+    );
     assert_eq!(calls[0].0, staged, "it is handed the finished file");
     assert_eq!(calls[0].1, "holiday.out", "under the name it landed with");
 

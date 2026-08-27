@@ -19,10 +19,6 @@ use std::sync::atomic::Ordering;
 use anyhow::Result;
 use clap::FromArgMatches;
 
-// The address book, the config file and the device register now live in
-// `arvolo-engine`, so a phone can reach them without a daemon. Re-exported here
-// under the name they have always had: every `crate::book::…` in this crate is
-// the same path it was.
 // The address book, the config file, the device register and the registers the
 // daemon keeps — deposits, sessions, handles, history — now live in
 // `arvolo-engine`, so a phone can reach them without a daemon. Re-exported here
@@ -38,6 +34,7 @@ mod ipc;
 mod notify;
 mod sync;
 
+mod announce;
 mod args;
 mod commands;
 mod completions;

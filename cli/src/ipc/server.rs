@@ -5,18 +5,14 @@
 //! accept loop, the line framing, and the subscription that turns engine events
 //! into lines on a connection.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
-
 use anyhow::Result;
 use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 #[cfg(unix)]
 use tokio::net::UnixListener;
-use tokio::sync::broadcast::error::RecvError;
 use tokio_util::sync::CancellationToken;
 
-use super::protocol::{EventDto, Request, RequestEnvelope, Response, ServerMessage};
-use arvolo_engine::daemon::{dispatch, stamp_offer};
+use super::protocol::{Request, RequestEnvelope, Response, ServerMessage};
+use arvolo_engine::daemon::dispatch;
 
 // Re-exported because this crate has always spoken of `ipc::server::Daemon`, and
 // the same code answering a phone under another name would not make either
@@ -138,56 +134,21 @@ where
     }
     Ok(())
 }
-/// Fan both event sources out onto one subscribed connection: the engine's
-/// [`ManagerEvent`]s, and the events the daemon raises itself (pairing progress,
-/// which has no transfer behind it). A client subscribes once and gets everything.
+/// Write everything the daemon has to say onto one subscribed connection, until
+/// the client hangs up or the engine stops.
 ///
-/// A closed engine channel ends the stream — the engine is the daemon. A closed
-/// *side* channel does not: it only means nobody currently holds a sender, which
-/// is the normal state between pairings.
+/// The merging, the stamping and the count of attached front-ends are the
+/// engine's ([`arvolo_engine::daemon::Subscription`]) — a phone needs all three
+/// and has no socket to put them on. What is left here is the writing.
 async fn stream_events(daemon: &Daemon, write: &mut (impl AsyncWrite + Unpin)) {
-    // Held for the life of the subscription: every exit from this function runs
-    // the drop, including the `return`s below, so the count cannot leak.
-    let _attached = FrontEnd::new(daemon.front_ends.clone());
-    let mut engine = daemon.manager.subscribe();
-    let mut side = daemon.side_events.subscribe();
-    loop {
-        let ev = tokio::select! {
-            e = engine.recv() => match e {
-                Ok(ev) => stamp_offer(EventDto::from(&ev)),
-                Err(RecvError::Lagged(_)) => continue,
-                Err(RecvError::Closed) => return,
-            },
-            e = side.recv() => match e {
-                Ok(ev) => ev,
-                Err(RecvError::Lagged(_)) => continue,
-                Err(RecvError::Closed) => {
-                    // Re-subscribe rather than tear the connection down: losing
-                    // pairing events would leave a UI's pairing sheet waiting on an
-                    // outcome that can no longer reach it.
-                    side = daemon.side_events.subscribe();
-                    continue;
-                }
-            },
-        };
+    let mut events = daemon.subscribe();
+    while let Some(ev) = events.next().await {
         if write_msg(write, &ServerMessage::Event(ev)).await.is_err() {
             return; // client hung up
         }
     }
 }
-/// Counts one attached front-end for as long as it is alive.
-struct FrontEnd(Arc<AtomicUsize>);
-impl FrontEnd {
-    fn new(count: Arc<AtomicUsize>) -> Self {
-        count.fetch_add(1, Ordering::SeqCst);
-        Self(count)
-    }
-}
-impl Drop for FrontEnd {
-    fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::SeqCst);
-    }
-}
+
 async fn write_msg(w: &mut (impl AsyncWrite + Unpin), msg: &ServerMessage) -> std::io::Result<()> {
     let mut line = serde_json::to_string(msg)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;

@@ -65,6 +65,70 @@ pub struct Daemon {
     pub shutdown: CancellationToken,
 }
 
+/// One stream of everything a client should hear, from both places it comes from.
+///
+/// The transfer manager's own events are one source; the other is what the
+/// daemon raises itself — pairing progress, an offer withdrawn by the intake task
+/// — which has no transfer behind it. A client subscribes once and gets both,
+/// each already stamped with what the address book knows about the sender.
+///
+/// Holding one of these is what "a front-end is attached" means: the count the
+/// embedder reads before making an announcement of its own goes up while this
+/// lives and down when it drops, on every path out, so it cannot leak.
+pub struct Subscription {
+    engine: broadcast::Receiver<ManagerEvent>,
+    side: broadcast::Receiver<EventDto>,
+    /// To re-subscribe from, see [`Subscription::next`].
+    side_source: broadcast::Sender<EventDto>,
+    _attached: FrontEnd,
+}
+
+impl Subscription {
+    /// The next event. `None` when the engine is gone, which is the end of
+    /// everything this stream had to say.
+    pub async fn next(&mut self) -> Option<EventDto> {
+        loop {
+            tokio::select! {
+                e = self.engine.recv() => match e {
+                    Ok(ev) => return Some(stamp_offer(EventDto::from(&ev))),
+                    Err(RecvError::Lagged(_)) => continue,
+                    // The engine is the daemon: there is nothing after this.
+                    Err(RecvError::Closed) => return None,
+                },
+                e = self.side.recv() => match e {
+                    Ok(ev) => return Some(ev),
+                    Err(RecvError::Lagged(_)) => continue,
+                    Err(RecvError::Closed) => {
+                        // Re-subscribe rather than end the stream: a closed side
+                        // channel only means nobody currently holds a sender, which
+                        // is the normal state between pairings. Ending here would
+                        // leave a UI's pairing sheet waiting on an outcome that can
+                        // no longer reach it.
+                        self.side = self.side_source.subscribe();
+                        continue;
+                    }
+                },
+            }
+        }
+    }
+}
+
+/// Counts one attached front-end for as long as it is alive.
+struct FrontEnd(Arc<AtomicUsize>);
+
+impl FrontEnd {
+    fn new(count: Arc<AtomicUsize>) -> Self {
+        count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Self(count)
+    }
+}
+
+impl Drop for FrontEnd {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 /// The outcome of the most recent sync round, for [`Request::SyncStatus`].
 #[derive(Debug, Clone, Default)]
 pub struct SyncState {
@@ -102,10 +166,17 @@ impl Daemon {
             shutdown,
         }
     }
+
+    /// Listen to everything this daemon has to say. See [`Subscription`].
+    pub fn subscribe(&self) -> Subscription {
+        Subscription {
+            engine: self.manager.subscribe(),
+            side: self.side_events.subscribe(),
+            side_source: self.side_events.clone(),
+            _attached: FrontEnd::new(self.front_ends.clone()),
+        }
+    }
 }
-
-
-
 
 pub async fn dispatch(d: &Daemon, cmd: Request) -> Response {
     match cmd {
@@ -463,7 +534,10 @@ async fn push(
     // the file would sit on the relay until its TTL, delivered to no one.
     let target = match &opts.device {
         None => None,
-        Some(_) if crate::identity::encode_id(&recipient) != crate::identity::encode_id(&d.manager.public_id()) => {
+        Some(_)
+            if crate::identity::encode_id(&recipient)
+                != crate::identity::encode_id(&d.manager.public_id()) =>
+        {
             return Response::Error(
                 "a device can only be named when sending to your own devices".into(),
             )
@@ -1240,7 +1314,6 @@ fn spawn_temp_cleanup(
     });
 }
 
-
 /// Fill in everything about an offer's sender that lives in the address book and
 /// not in the offer.
 ///
@@ -1323,9 +1396,6 @@ fn stamp_offer_dto(mut o: OfferDto) -> OfferDto {
     o
 }
 
-
-
-
 fn status(d: &Daemon) -> StatusDto {
     let pid = d.manager.public_id();
     let id_b32 = crate::identity::encode_id(&pid);
@@ -1350,8 +1420,6 @@ fn status(d: &Daemon) -> StatusDto {
             .unwrap_or_default(),
     }
 }
-
-
 
 #[cfg(test)]
 mod tests {
