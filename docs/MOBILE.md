@@ -374,9 +374,20 @@ Made 2026-08-27, widening the scope to full parity:
    designed and exactly as useless to a person until something publishes out of
    it. And the whole screen is still the desktop's.
 
-   What is left is the layout: the window is still drawn for a 980×670 pointer —
-   a rail down the left, a drop zone asking to have files dragged onto it — and
-   the design of record is a phone.
+   **The frame is a phone's now.** Below 560px (`PHONE_QUERY` in `gui/src/phone.ts`,
+   and the same number in `theme.css`) the rail is replaced by a bottom bar:
+   Transfers · People · **Send** · Receive · Settings, with Send filled and in
+   the middle where a thumb reaches. The three places that did not fit — links
+   and deposits, history, your devices — are under Settings, so a phone still
+   reaches everything a desktop does. The header and the bar keep clear of the
+   status bar and the gesture bar, and the first screen no longer asks anyone to
+   drag a file onto a telephone.
+
+   What is left of the layout is everything inside the frame: sheets that go
+   full-screen and dismiss with a swipe, row actions that become swipes and
+   long-presses, 44pt targets beyond the bar, pull-to-refresh. And then the
+   larger move the design of record proposes — Transfers and History folding
+   into one **Casella** of correspondents rather than two lists of files.
 3. **iOS shell** + Keychain identity + the same flows.
 4. **Push**: `arvolo-push` gateway, relay wake forwarding, FCM + APNs, the
    iOS Notification Service Extension, background fetch fallback.
