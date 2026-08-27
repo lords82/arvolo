@@ -336,8 +336,34 @@ Made 2026-08-27, widening the scope to full parity:
    *Where received files land*; publishing them out of it is the next thing that
    file needs.
 
-   What is left: running it. An emulator or a phone, `npm run tauri android
-   dev`, and then the layout — the window is still drawn for a 980×670 pointer.
+   **It runs.** On a Pixel 8 emulator (API 33, arm64) the app starts, the engine
+   comes up inside it — `arvolo: engine up` in logcat — and it writes what a
+   fresh installation writes: an identity, an address book, a device register,
+   an `incoming/` folder. The window says connected, because it is: the bridge
+   and the event pump both went through the engine and never looked for a
+   socket.
+
+   Three things had to be gated that only a running app could have found: the
+   updater plugin (asking a Tauri state that was never managed is a *panic*, not
+   an error), the event pump's daemon supervision, and `restart_daemon`.
+
+   One packaging note. A debug APK is **583 MB** — the unstripped debug info of
+   the whole transfer stack — and an emulator's data partition is smaller than
+   that. Neither cargo nor AGP strips it here, so:
+
+   ```sh
+   llvm-strip --strip-debug target/aarch64-linux-android/debug/libarvolo_gui_lib.so
+   # then, from a dir holding lib/arm64-v8a/libarvolo_gui_lib.so:
+   zip -d app.apk "META-INF/*" && zip -0 -X app.apk lib/arm64-v8a/libarvolo_gui_lib.so
+   zipalign -p -f 4 app.apk aligned.apk   # -0 and the alignment both matter:
+   apksigner sign --ks ~/.android/debug.keystore …   # a compressed .so is refused
+   ```
+
+   67 MB, installs, runs. A release build would not need any of this.
+
+   What is left is the layout: the window is still drawn for a 980×670 pointer —
+   a rail down the left, a drop zone asking to have files dragged onto it — and
+   the design of record is a phone.
 3. **iOS shell** + Keychain identity + the same flows.
 4. **Push**: `arvolo-push` gateway, relay wake forwarding, FCM + APNs, the
    iOS Notification Service Extension, background fetch fallback.

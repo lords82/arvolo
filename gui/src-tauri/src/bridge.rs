@@ -85,7 +85,7 @@ pub fn use_embedded(engine: std::sync::Arc<dyn arvolo_ipc::client::Answer>) {
     let _ = EMBEDDED.set(engine);
 }
 
-async fn client() -> Result<DaemonClient, String> {
+pub(crate) async fn client() -> Result<DaemonClient, String> {
     if let Some(engine) = EMBEDDED.get() {
         return Ok(DaemonClient::embedded(engine.clone()));
     }
@@ -594,10 +594,19 @@ pub async fn set_my_name(name: String) -> Result<(), String> {
 /// which is the whole point: the pair is a restart the user doesn't have to open
 /// a terminal for. A leftover `daemon stop` marker is cleared first: an in-app
 /// restart is the user asking for it to be up again.
+#[cfg(desktop)]
 #[tauri::command]
 pub async fn restart_daemon() -> Result<(), String> {
     let _ = std::fs::remove_file(arvolo_ipc::stop_marker_path());
     crate::daemon::stop().await.map_err(|e| format!("{e:#}"))
+}
+
+/// There is no daemon here to restart: the engine is this process, and restarting
+/// it means restarting the app.
+#[cfg(mobile)]
+#[tauri::command]
+pub async fn restart_daemon() -> Result<(), String> {
+    Err("the engine runs inside the app on this platform".into())
 }
 
 #[tauri::command]

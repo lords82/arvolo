@@ -15,13 +15,17 @@
 
 mod attention;
 mod bridge;
+// Both are about a daemon in another process: whether its version matches ours,
+// whether it is up, how to bring it up. A phone has neither the process nor the
+// question.
+#[cfg(desktop)]
 mod compat;
+#[cfg(desktop)]
 mod daemon;
 #[cfg(target_os = "macos")]
 mod notify_mac;
 mod update;
 
-use arvolo_ipc::client::DaemonClient;
 use arvolo_ipc::protocol::EventDto;
 #[cfg(desktop)]
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
@@ -34,6 +38,7 @@ use tauri_plugin_notification::NotificationExt;
 const EV_ENGINE: &str = "engine://event";
 const EV_CONNECTED: &str = "engine://connected";
 /// Why the daemon would not start, when it would not start.
+#[cfg(desktop)]
 const EV_DAEMON_ERROR: &str = "engine://daemon-error";
 /// Files just dropped on the window, already registered: `[PickedItemDto]`.
 const EV_FILES_PICKED: &str = "files://picked";
@@ -310,8 +315,11 @@ pub fn run() {
             // inside this process and the bridge asks it directly. Before the
             // event pump, which subscribes to whatever is answering.
             #[cfg(mobile)]
-            if let Err(e) = start_embedded_engine(app.handle()) {
-                tracing::error!("the engine did not start: {e:#}");
+            match start_embedded_engine(app.handle()) {
+                // stdout, not the log file: on Android that is logcat, and the
+                // log file's own home is not known until the line above has run.
+                Ok(dir) => println!("arvolo: engine up, keeping its files in {dir}"),
+                Err(e) => eprintln!("arvolo: the engine did not start: {e:#}"),
             }
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(event_pump(handle));
@@ -394,7 +402,7 @@ pub fn run() {
 /// folder there rather than in anybody's Downloads, because a receive writes in
 /// place and only a finished file can be published. See docs/MOBILE.md.
 #[cfg(mobile)]
-fn start_embedded_engine(app: &AppHandle) -> anyhow::Result<()> {
+fn start_embedded_engine(app: &AppHandle) -> anyhow::Result<String> {
     use anyhow::Context as _;
 
     let dir = app
@@ -428,9 +436,10 @@ fn start_embedded_engine(app: &AppHandle) -> anyhow::Result<()> {
         },
     ))?;
     bridge::use_embedded(std::sync::Arc::new(running.daemon.clone()));
+    let where_it_lives = dir.display().to_string();
     // Held for the life of the app: dropping it would take the inbox with it.
     app.manage(running);
-    Ok(())
+    Ok(where_it_lives)
 }
 
 /// The ticket inside a `.arvolo` file, if `path` is one. The extension is what
@@ -546,46 +555,55 @@ fn restore_dock_icon(app: &AppHandle) {
 /// UI recovers on its own after a daemon restart.
 async fn event_pump(app: AppHandle) {
     loop {
-        // An install is in flight and the daemon was stopped on purpose, so that
-        // the installer can replace the binary it runs from. Say nothing and wait:
-        // this is not a fault to report, and the app is on its way to restarting
-        // into the new build anyway.
-        if daemon::held_for_update() {
-            let _ = app.emit(EV_CONNECTED, false);
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            continue;
-        }
-        // `arvolo daemon stop` leaves a marker: the user asked for it to be down,
-        // and this loop must not win the argument by respawning it every two
-        // seconds. Report disconnected and wait for the marker to go (a `daemon
-        // start`/`run` removes it; so does the in-app restart below).
-        if arvolo_ipc::stop_marker_path().exists() && !daemon::is_running().await {
-            let _ = app.emit(
+        // Everything down to the subscription is about a daemon in another
+        // process: whether it is up, whether it was stopped on purpose, whether
+        // to start one. On a phone the engine is in *this* process, there is
+        // nothing to supervise, and asking would only find a socket that will
+        // never exist.
+        #[cfg(desktop)]
+        {
+            // An install is in flight and the daemon was stopped on purpose, so that
+            // the installer can replace the binary it runs from. Say nothing and wait:
+            // this is not a fault to report, and the app is on its way to restarting
+            // into the new build anyway.
+            if daemon::held_for_update() {
+                let _ = app.emit(EV_CONNECTED, false);
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                continue;
+            }
+            // `arvolo daemon stop` leaves a marker: the user asked for it to be down,
+            // and this loop must not win the argument by respawning it every two
+            // seconds. Report disconnected and wait for the marker to go (a `daemon
+            // start`/`run` removes it; so does the in-app restart below).
+            if arvolo_ipc::stop_marker_path().exists() && !daemon::is_running().await {
+                let _ = app.emit(
                 EV_DAEMON_ERROR,
                 "fermato con `arvolo daemon stop` — riavvialo da qui o con `arvolo daemon start`"
                     .to_string(),
             );
-            let _ = app.emit(EV_CONNECTED, false);
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            continue;
-        }
-        // Make sure a daemon exists; if we can't bring one up, report disconnected
-        // and retry shortly.
-        if let Err(e) = daemon::ensure_running().await {
-            // Say *why*, not just that. A daemon spawned from here has no terminal,
-            // so its own explanation — an identity file it refuses to load, a relay
-            // it cannot reach — would otherwise stay in a log file behind a banner
-            // reading "disconnesso", which is the one thing the user can already
-            // see. `ensure_running` quotes the tail of that log into this error.
-            let _ = app.emit(EV_DAEMON_ERROR, format!("{e:#}"));
-            let _ = app.emit(EV_CONNECTED, false);
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            continue;
+                let _ = app.emit(EV_CONNECTED, false);
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                continue;
+            }
+            // Make sure a daemon exists; if we can't bring one up, report disconnected
+            // and retry shortly.
+            if let Err(e) = daemon::ensure_running().await {
+                // Say *why*, not just that. A daemon spawned from here has no terminal,
+                // so its own explanation — an identity file it refuses to load, a relay
+                // it cannot reach — would otherwise stay in a log file behind a banner
+                // reading "disconnesso", which is the one thing the user can already
+                // see. `ensure_running` quotes the tail of that log into this error.
+                let _ = app.emit(EV_DAEMON_ERROR, format!("{e:#}"));
+                let _ = app.emit(EV_CONNECTED, false);
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                continue;
+            }
         }
 
-        let stream = match DaemonClient::connect().await {
+        let stream = match bridge::client().await {
             Ok(c) => c.subscribe().await,
-            Err(e) => Err(e),
+            // A dial that failed, said in the same shape the subscribe would.
+            Err(e) => Err(anyhow::anyhow!(e)),
         };
         let mut stream = match stream {
             Ok(s) => s,
