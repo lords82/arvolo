@@ -289,6 +289,7 @@ export const it: Dict = {
   "person.rename": "Rinomina",
   "person.renameHint": "Il nome è tuo: la chiave e i contrassegni restano.",
 
+  "people.moreActions": "Altri modi per aggiungere",
   "people.swap": "Scambia contatti",
   "people.haveCode": "Inserisci un codice",
   "people.byId": "Per id",

@@ -2122,6 +2122,14 @@ select {
     padding: 14px 2px 0;
   }
 
+  /* Where there is no Details button, the name is the way in. */
+  .row-name.tap {
+    cursor: pointer;
+  }
+  .row-name.tap:active {
+    opacity: 0.6;
+  }
+
   /* Codes: the segmented control, then whichever half it chose. */
   .codes {
     display: flex;

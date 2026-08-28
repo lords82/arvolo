@@ -18,6 +18,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { fire, useStore } from "../store";
+import { useIsPhone } from "../phone";
 import { api } from "../ipc";
 import { useT } from "../i18n";
 import { Icon } from "../ui/Icons";
@@ -105,6 +106,7 @@ function ContactMeta({ c }: { c: ContactDto }) {
 
 function PersonRow({ c }: { c: ContactDto }) {
   const t = useT();
+  const isPhone = useIsPhone();
   const openSheet = useStore((s) => s.openSheet);
   const openPerson = useStore((s) => s.openPerson);
   const markUnverified = useStore((s) => s.markUnverified);
@@ -208,7 +210,11 @@ function PersonRow({ c }: { c: ContactDto }) {
               same element and the ring is sliced off flat against the left edge.
               The name still ellipsises; `.row-main` above is `min-width: 0`, so
               the flex line can shrink to let it. */}
-          <div className="row-name hstack-sm" title={c.name}>
+          <div
+            className={`row-name hstack-sm ${isPhone ? "tap" : ""}`}
+            title={c.name}
+            onClick={isPhone ? () => openPerson(c.name) : undefined}
+          >
             <PresenceDot id={c.id} />
             <span className="truncate">{c.name}</span>
             <ClaimedName c={c} />
@@ -239,6 +245,11 @@ function PersonRow({ c }: { c: ContactDto }) {
           )}
         </div>
 
+        {/* Four controls per row is a desktop's answer, and it is a good one
+            there: a pointer is precise and the row is wide. A phone has neither,
+            so the row itself is the way in — tapping it opens the person, where
+            every verb already lives — and what stays beside the name is the one
+            thing that is read rather than pressed. */}
         <div className="row-actions">
           <TrustBadges
             verified={c.verified}
@@ -250,17 +261,21 @@ function PersonRow({ c }: { c: ContactDto }) {
               {t("people.notVerified")}
             </Badge>
           )}
-          <Button
-            size="sm"
-            variant="primary"
-            disabled={c.blocked}
-            onClick={() => openSheet([], c.name, "contact")}
-          >
-            <Icon.Send size={13} /> {t("people.send")}
-          </Button>
-          <Button size="sm" onClick={() => openPerson(c.name)}>
-            {t("people.details")}
-          </Button>
+          {!isPhone && (
+            <>
+              <Button
+                size="sm"
+                variant="primary"
+                disabled={c.blocked}
+                onClick={() => openSheet([], c.name, "contact")}
+              >
+                <Icon.Send size={13} /> {t("people.send")}
+              </Button>
+              <Button size="sm" onClick={() => openPerson(c.name)}>
+                {t("people.details")}
+              </Button>
+            </>
+          )}
           <MenuButton items={items} label={t("people.rowActions", c.name)}>
             <Icon.More size={15} />
           </MenuButton>
@@ -637,6 +652,42 @@ export function PeopleView() {
   const [importing, setImporting] = useState(false);
   const busyRef = useRef(false);
 
+  const isPhone = useIsPhone();
+
+  const moreItems: MenuItem[] = [
+    {
+      key: "have-code",
+      label: t("people.haveCode"),
+      icon: <Icon.Qr size={13} />,
+      onSelect: () => fire(startPairing("contact_join")),
+    },
+    {
+      key: "by-id",
+      label: t("people.byId"),
+      icon: <Icon.Plus size={13} />,
+      onSelect: () => setAddOpen(true),
+    },
+    {
+      key: "who",
+      label: t("people.whoIsOnline"),
+      icon: <Icon.Relay size={13} />,
+      onSelect: () => fire(loadPresence()),
+    },
+    {
+      key: "import",
+      label: t("people.import"),
+      icon: <Icon.Folder size={13} />,
+      onSelect: () => doImport(),
+    },
+    {
+      key: "export",
+      label: t("people.export"),
+      icon: <Icon.Copy size={13} />,
+      onSelect: () => doExport(),
+      disabled: !contacts.length,
+    },
+  ];
+
   const shown = useMemo(() => {
     const needle = q.trim().toLowerCase();
     return contacts.filter((c) => {
@@ -730,6 +781,25 @@ export function PeopleView() {
 
   return (
     <div className="stack">
+      {/* Six buttons across two rows, before a single person is on screen: that
+          is what a desktop toolbar becomes on a phone. Here the one way in that
+          matters keeps its place — swapping codes is how an address book starts —
+          and the other five go under a menu, which is the same list the row menus
+          already are. */}
+      {isPhone ? (
+        <div className="hstack">
+          <Button
+            variant="primary"
+            block
+            onClick={() => fire(startPairing("contact_host"))}
+          >
+            <Icon.Qr size={14} /> {t("people.swap")}
+          </Button>
+          <MenuButton items={moreItems} label={t("people.moreActions")}>
+            <Icon.More size={16} />
+          </MenuButton>
+        </div>
+      ) : (
       <div className="hstack wrap">
         <Button variant="primary" onClick={() => fire(startPairing("contact_host"))}>
           <Icon.Qr size={14} /> {t("people.swap")}
@@ -756,9 +826,11 @@ export function PeopleView() {
           <Icon.Relay size={13} /> {t("people.whoIsOnline")}
         </Button>
       </div>
+      )}
 
-      <div className="hstack wrap">
+      <div className={isPhone ? "stack-sm people-find" : "hstack wrap"}>
         <Segmented
+          block={isPhone}
           label={t("people.filterLabel")}
           value={filter}
           onChange={setFilter}
@@ -774,7 +846,7 @@ export function PeopleView() {
             },
           ]}
         />
-        <div className="grow" style={{ maxWidth: 280 }}>
+        <div className="grow" style={isPhone ? undefined : { maxWidth: 280 }}>
           <TextInput
             value={q}
             onChange={(e) => setQ(e.currentTarget.value)}

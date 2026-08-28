@@ -296,6 +296,7 @@ export const fr: Dict = {
   "person.renameHint":
     "Le nom vous appartient : la clé et les marques ne bougent pas.",
 
+  "people.moreActions": "Autres façons d’ajouter",
   "people.swap": "Échanger les contacts",
   "people.haveCode": "Saisir un code",
   "people.byId": "Par identifiant",

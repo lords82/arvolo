@@ -341,6 +341,7 @@ export const en = {
   "person.rename": "Rename",
   "person.renameHint": "The name is yours: the key and the marks stay put.",
 
+  "people.moreActions": "More ways to add",
   "people.swap": "Swap contacts",
   "people.haveCode": "Enter a code",
   "people.byId": "By id",
