@@ -724,6 +724,11 @@ fn config_dto(d: &Daemon) -> ConfigDto {
         download_dir_from_env: env_dir.is_some(),
         display_name: crate::book::my_display_name(),
         sync: crate::book::sync_enabled(),
+        // Resolved rather than echoed back: what a window has to draw is the rule
+        // in force, and an unset key is a rule all the same.
+        auto_accept: crate::identity::AutoAccept::configured()
+            .as_str()
+            .to_string(),
         seed: file.seed,
         swarm: file.swarm.unwrap_or_default(),
         concurrency: file.concurrency,
@@ -762,6 +767,9 @@ fn apply_config_patch(d: &Daemon, patch: ConfigPatch) -> anyhow::Result<()> {
     }
     if let Some(s) = &patch.swarm {
         set_config_value("swarm", text(s))?;
+    }
+    if let Some(s) = &patch.auto_accept {
+        set_config_value("auto_accept", text(s))?;
     }
     if let Some(s) = &patch.sync {
         set_config_value(

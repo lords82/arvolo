@@ -79,6 +79,54 @@ pub fn is_self(id_b32: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// What is taken without asking.
+///
+/// A phone is the reason this is a setting rather than a rule. On a desktop the
+/// window is usually open and a question costs a glance; a phone is in a pocket,
+/// and the same question is a notification, a walk to the app and a tap before
+/// anything moves. Some people want the file to be there when they look. Others
+/// want the opposite even from people they trust, because a device you carry is
+/// a device somebody else can be holding.
+///
+/// So the answer is the user's, and all three answers are legitimate:
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AutoAccept {
+    /// Nothing is taken automatically. Every arrival is a question — including
+    /// from a contact marked trusted, and from your own other devices. It is the
+    /// strict reading of "ask me first", and it is the only one that survives
+    /// somebody else holding an unlocked phone of yours.
+    Never,
+    /// Contacts you marked trusted, and your own devices. What every version
+    /// before this setting did, and the default.
+    Trusted,
+    /// Everything, from anybody who can reach you. Convenient, and worth being
+    /// plain about: a stranger who has your public id can then put a file on
+    /// this device without being asked about.
+    Everyone,
+}
+
+impl AutoAccept {
+    /// Read the policy from the config; anything unrecognised reads as the
+    /// default rather than as an error, since a typo in a file must not turn
+    /// into a stricter *or* a looser rule than the one that was meant.
+    pub fn configured() -> Self {
+        match book::load_config().auto_accept.as_deref() {
+            Some("never") | Some("ask") => AutoAccept::Never,
+            Some("everyone") | Some("always") => AutoAccept::Everyone,
+            _ => AutoAccept::Trusted,
+        }
+    }
+
+    /// The word for the config file and the wire. One spelling, both directions.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AutoAccept::Never => "never",
+            AutoAccept::Trusted => "trusted",
+            AutoAccept::Everyone => "everyone",
+        }
+    }
+}
+
 /// Is an offer from this sender taken without asking?
 ///
 /// Two senders qualify: a contact the user marked trusted, and another of our own
@@ -89,7 +137,11 @@ pub fn is_self(id_b32: &str) -> bool {
 /// socket need the same answer: the daemon *decides* with it, and the front-end is
 /// *told* with it (`stamp_offer` fills `OfferReceived::auto` from here).
 pub fn auto_accepts(id_b32: &str) -> bool {
-    book::sender_status(id_b32).trusted || is_self(id_b32)
+    match AutoAccept::configured() {
+        AutoAccept::Never => false,
+        AutoAccept::Trusted => book::sender_status(id_b32).trusted || is_self(id_b32),
+        AutoAccept::Everyone => true,
+    }
 }
 
 #[cfg(test)]
@@ -130,6 +182,52 @@ mod tests {
         book::mark_verified("giulia").unwrap();
         book::mark_trusted("giulia").unwrap();
         assert!(auto_accepts(&known), "trust is what the flag is made of");
+
+        std::env::remove_var("ARVOLO_CONFIG_DIR");
+    }
+
+    /// Three settings, three answers, and the middle one is what the app did
+    /// before the setting existed — which is what makes it the default.
+    #[test]
+    fn the_policy_decides_who_is_taken_without_asking() {
+        let _guard = crate::testlock::ENV
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("ARVOLO_CONFIG_DIR", dir.path());
+        std::env::remove_var("ARVOLO_IDENTITY");
+
+        let me = encode_id(&my_identity().unwrap().public());
+        let trusted = encode_id(&Identity::generate().public());
+        book::contact_add("giulia", &trusted).unwrap();
+        book::mark_verified("giulia").unwrap();
+        book::mark_trusted("giulia").unwrap();
+        let stranger = encode_id(&Identity::generate().public());
+
+        let set = |v: &str| {
+            book::set_config_value("auto_accept", Some(toml::Value::String(v.into()))).unwrap()
+        };
+
+        set("never");
+        assert_eq!(AutoAccept::configured(), AutoAccept::Never);
+        // Including our own devices: "ask me first" said strictly is the only
+        // reading that holds when the phone is in somebody else's hand.
+        assert!(!auto_accepts(&me));
+        assert!(!auto_accepts(&trusted));
+
+        set("trusted");
+        assert_eq!(AutoAccept::configured(), AutoAccept::Trusted);
+        assert!(auto_accepts(&me));
+        assert!(auto_accepts(&trusted));
+        assert!(!auto_accepts(&stranger));
+
+        set("everyone");
+        assert_eq!(AutoAccept::configured(), AutoAccept::Everyone);
+        assert!(auto_accepts(&stranger), "which is the whole point of it");
+
+        // A word nobody wrote on purpose must not silently loosen or tighten it.
+        set("banana");
+        assert_eq!(AutoAccept::configured(), AutoAccept::Trusted);
 
         std::env::remove_var("ARVOLO_CONFIG_DIR");
     }

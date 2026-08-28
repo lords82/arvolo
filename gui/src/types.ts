@@ -219,6 +219,9 @@ export interface ConfigDto {
   download_dir_from_env: boolean;
   display_name: string;
   sync: boolean;
+  /** What arrives without being asked about: "never" | "trusted" | "everyone".
+   *  Empty from a daemon that predates the setting, which behaved as "trusted". */
+  auto_accept: string;
   seed: boolean | null;
   swarm: string;
   concurrency: number | null;
@@ -238,6 +241,7 @@ export interface ConfigPatch {
   download_dir?: Setting<string>;
   display_name?: Setting<string>;
   sync?: Setting<boolean>;
+  auto_accept?: Setting<string>;
   seed?: Setting<boolean>;
   swarm?: Setting<string>;
   concurrency?: Setting<number>;

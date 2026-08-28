@@ -237,6 +237,42 @@ export function SettingsView() {
         </Field>
       </div>
 
+      {/* ---- what arrives on its own ----------------------------------- */}
+      {/* A phone is why this is a setting. On a desktop the window is usually
+          open and a question costs a glance; here the same question is a
+          notification, a walk back to the app and a tap before anything moves —
+          and the opposite want is just as real, because a device you carry is a
+          device somebody else can be holding.
+
+          Three answers, so a segmented control rather than a switch: "trusted
+          only" is a real position and not the halfway point between the other
+          two, and a two-state control would have had to drop one of them. */}
+      {isPhone && (
+        <div className="card card-pad stack">
+          <div className="t-head">{t("settings.autoAcceptTitle")}</div>
+          <Segmented
+            block
+            label={t("settings.autoAcceptTitle")}
+            value={config.auto_accept || "trusted"}
+            onChange={(v) => fire(save({ auto_accept: { set: v } }))}
+            options={[
+              { value: "never", label: t("settings.autoAcceptNever") },
+              { value: "trusted", label: t("settings.autoAcceptTrusted") },
+              { value: "everyone", label: t("settings.autoAcceptEveryone") },
+            ]}
+          />
+          <div className="t-xs t-mut">
+            {t(
+              config.auto_accept === "never"
+                ? "settings.autoAcceptHintNever"
+                : config.auto_accept === "everyone"
+                  ? "settings.autoAcceptHintEveryone"
+                  : "settings.autoAcceptHintTrusted"
+            )}
+          </div>
+        </div>
+      )}
+
       {/* ---- the places the bottom bar has no room for ----------------- */}
       {/* Five tabs is what a thumb can hit; six places and two verbs is what
           the app has. The three that did not fit are here rather than gone —

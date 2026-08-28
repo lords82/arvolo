@@ -364,6 +364,8 @@ pub struct ConfigPatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sync: Option<Setting<bool>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_accept: Option<Setting<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seed: Option<Setting<bool>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub swarm: Option<Setting<String>>,
@@ -845,6 +847,10 @@ pub struct ConfigDto {
     /// Automatic address-book sync across linked devices.
     #[serde(default)]
     pub sync: bool,
+    /// What arrives without being asked about: "never" | "trusted" | "everyone".
+    /// Empty from a daemon that predates the setting, which behaved as "trusted".
+    #[serde(default)]
+    pub auto_accept: String,
     /// Keep seeding completed files into the swarm. `None` = daemon default.
     #[serde(default)]
     pub seed: Option<bool>,

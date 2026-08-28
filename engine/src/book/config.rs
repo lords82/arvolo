@@ -29,6 +29,10 @@ pub struct Config {
     pub log: Option<String>,
     pub sync: Option<bool>,
     pub display_name: Option<String>,
+    /// What is taken without asking: "never" | "trusted" | "everyone". Unset is
+    /// "trusted". See [`crate::identity::AutoAccept`], which is where the word
+    /// becomes a decision.
+    pub auto_accept: Option<String>,
 }
 
 /// The local user's self-chosen display name, advertised inside every outgoing
@@ -281,6 +285,12 @@ pub fn write_default_config(relay: Option<&str>) -> Result<()> {
 
 # Where received files are saved.
 #download_dir = "{downloads}"
+
+# What arrives without being asked about first.
+#   "trusted"  — contacts you marked trusted, and your own devices (the default)
+#   "never"    — nothing: every arrival waits for you, trusted or not
+#   "everyone" — anything from anybody who has your public id
+#auto_accept = "trusted"
 
 # Scratch dir for temporary artifacts (packed tars, staged archives).
 #temp_dir = "{tmp}"

@@ -209,6 +209,7 @@ function freshSnapshot(): Harness["snapshot"] {
       download_dir_from_env: false,
       display_name: "",
       sync: true,
+      auto_accept: "trusted",
       seed: null,
       swarm: "",
       concurrency: null,
