@@ -14,6 +14,7 @@ import {
   type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
+import { useBackDismiss } from "../backstack";
 
 export interface MenuItem {
   key: string;
@@ -170,6 +171,10 @@ export function MenuButton({
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLButtonElement>(null);
+  // A click outside closes this, and on a phone the system's back is that
+  // click: without a turn at it, back would dismiss the screen behind the menu
+  // and leave the menu hanging over whatever arrived.
+  useBackDismiss(open, () => setOpen(false));
   return (
     <>
       <button

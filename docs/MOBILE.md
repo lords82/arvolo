@@ -389,6 +389,51 @@ Made 2026-08-27, widening the scope to full parity:
    larger move the design of record proposes — Transfers and History folding
    into one **Casella** of correspondents rather than two lists of files.
 3. **iOS shell** + Keychain identity + the same flows.
+
+   **The whole stack compiles for `aarch64-apple-ios` untouched** — core,
+   engine, iroh, the crypto — and `tauri ios build --debug` produces a signed
+   `.ipa` (25 MB) that installs on a device with the CryCatch team's Apple
+   Development certificate. `start_embedded_engine` needed nothing
+   iOS-specific: it is `cfg(mobile)` and resolves its home through
+   `app_data_dir()`, which lands in `Library/Application Support/it.termox.arvolo`.
+
+   Two things had to be added, and both live where a regeneration cannot eat
+   them: the iOS Rust targets (`rustup target add aarch64-apple-ios
+   aarch64-apple-ios-sim`), and `src-tauri/Info.ios.plist`, which is merged
+   into the generated plist and carries `NSCameraUsageDescription` (the QR
+   scanner) plus `UIFileSharingEnabled` and `LSSupportsOpeningDocumentsInPlace`
+   — the two keys that will make the app a folder in Files once there is a
+   publisher to move finished files into it.
+
+   **The build recipe, because this checkout is on a path with a space in it**
+   (`/Volumes/HD Esterno/…`, and Xcode itself is installed there too). Nothing
+   in this toolchain quotes paths consistently, and the failures are three
+   layers deep:
+
+   ```sh
+   APPLE_DEVELOPMENT_TEAM=D6FKBG7DZF npx tauri ios init   # generates gen/apple/
+   # then, in gen/apple/arvolo-gui.xcodeproj/project.pbxproj, the "Build Rust
+   # Code" script phase needs its sdk-root replaced by a space-free one:
+   #   SDK_LINK="$HOME/.arvolo-ios-sdk"; ln -sfn "${SDKROOT:?}" "$SDK_LINK"
+   #   … --sdk-root "$SDK_LINK" …
+   npx tauri ios build --debug     # → gen/apple/build/arm64/Arvolo.ipa
+   xcrun devicectl device install app --device "<name>" Arvolo.ipa
+   ```
+
+   Why a symlink rather than quoting. Quoting `${SDKROOT:?}` in the script
+   phase is necessary but not sufficient: it only fixes the argument this
+   project passes. `tauri ios xcode-script` then *builds its own flag string*
+   — `-isysroot <sdk>` — and hands it to cargo through the environment, and
+   cc-rs splits those strings on whitespace with no regard for quotes. So
+   clang received `-isysroot /Volumes/HD` and a stray second argument.
+   Shadowing the variable does not work either (the tool's value is added
+   anyway, alongside). The only lever this side of the tool is the path it is
+   given, and `$HOME` has no spaces in it. `cargo check --target
+   aarch64-apple-ios` passing while the Xcode build failed is the tell: it is
+   the environment, not the code.
+
+   `gen/apple/` is gitignored, so **`tauri ios init` undoes the script-phase
+   patch** and it has to be reapplied.
 4. **Push**: `arvolo-push` gateway, relay wake forwarding, FCM + APNs, the
    iOS Notification Service Extension, background fetch fallback.
 5. **Share sheets** both platforms; codes-from-phone; deposits/links views.

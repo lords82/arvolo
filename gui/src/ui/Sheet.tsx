@@ -16,6 +16,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { useT } from "../i18n";
+import { useBackDismiss } from "../backstack";
 import { useIsPhone } from "../phone";
 import { Icon } from "./Icons";
 import { Button, IconButton } from "./Primitives";
@@ -128,6 +129,9 @@ export function Sheet({
   const isPhone = useIsPhone();
   const ref = useRef<HTMLDivElement>(null);
   useModal(ref, onClose, open);
+  // Escape closes this on a desktop; the phone's equivalent is the system's
+  // back, and it has to reach here rather than the screen underneath.
+  useBackDismiss(open && isPhone, onClose);
   if (!open) return null;
   const pushed = isPhone && !!pushFrom;
   // Through a portal, whatever subtree asked for the sheet. `position: fixed`
@@ -230,6 +234,8 @@ export function Confirm({
     if (!busy) onCancel();
   }, [busy, onCancel]);
   useModal(ref, close, open);
+  // Back dismisses an alert the way Cancel does — never the way Confirm does.
+  useBackDismiss(open && isPhone, close);
   if (!open) return null;
   // Same portal as `Sheet`, same reason: an ancestor with a filter or a
   // transform would otherwise become this dialog's viewport.

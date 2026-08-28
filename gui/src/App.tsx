@@ -26,6 +26,7 @@ import { YouView } from "./views/YouView";
 import { AutoAcceptView } from "./views/AutoAcceptView";
 import { ThreadSheet } from "./overlays/ThreadSheet";
 import { useIsPhone } from "./phone";
+import { tookBack } from "./backstack";
 import { useEdgeBack } from "./edgeback";
 import { TransfersView } from "./views/TransfersView";
 import { PeopleBarMenu, PeopleView } from "./views/PeopleView";
@@ -136,7 +137,11 @@ export function App() {
   // `push` leaves an entry behind for it to pop.
   useEdgeBack(viewRef, isPhone && stack.length > 1, () => window.history.back());
   useEffect(() => {
-    const onPop = () => back();
+    // Layers first — a sheet, an alert, a menu, a thread — and only then the
+    // stack. `backstack` holds what is open and knows which pops are its own.
+    const onPop = () => {
+      if (!tookBack()) back();
+    };
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
   }, [back]);

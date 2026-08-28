@@ -10,6 +10,7 @@
 // do next, which is send them something back.
 
 import { useT } from "../i18n";
+import { useBackDismiss } from "../backstack";
 import { barClass, fmtAgo, fmtBytes, pct, statusMeta } from "../format";
 import { fire, useStore } from "../store";
 import type { UITransfer } from "../types";
@@ -38,6 +39,9 @@ export function ThreadSheet() {
   const openIncoming = useStore((s) => s.openIncoming);
   const openSheet = useStore((s) => s.openSheet);
   const reject = useStore((s) => s.reject);
+  // Not a `Sheet`, so it registers for the back gesture itself — see
+  // `backstack`. This is the screen the gesture is used on most.
+  useBackDismiss(!!key, close);
 
   if (!key) return null;
   const thread = threadsOf(Object.values(transfers)).find((x) => x.key === key);

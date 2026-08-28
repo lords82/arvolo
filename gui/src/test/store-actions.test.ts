@@ -643,12 +643,8 @@ describe("the way back, on a phone", () => {
     expect(s().stack).toHaveLength(1);
   });
 
-  it("103. opening a thread leaves an entry for the system's back to pop", async () => {
-    await boot();
-    const before = window.history.length;
-    s().openThread("p1");
-    expect(window.history.length).toBeGreaterThan(before);
-  });
+  // The entry the system's back pops is left by whatever is open, not by the
+  // store — see `backstack`, and the tests for it in backstack.test.ts.
 
   it("104. a person's page goes before a thread, which goes before the stack", async () => {
     // The palette can open a person over anything — including over an open

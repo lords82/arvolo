@@ -1283,36 +1283,16 @@ export const useStore = create<State>((set, get) => {
         return { stack, route: stack[stack.length - 1] };
       }),
     openIncoming: (offerId) => set({ incomingOfferId: offerId }),
-    openThread: (key) => {
-      // An entry of its own, for the same reason `push` leaves one: it is a
-      // screen, and every screen has to be one press of back away.
-      try {
-        window.history.pushState({ arvolo: "thread" }, "");
-      } catch {
-        // No history here: the button in the bar is then the only way out.
-      }
-      set({ threadKey: key });
-    },
+    // The entry for the back gesture is left by the screen itself while it is
+    // on — see `backstack` — not here: half of what can sit on top of a screen
+    // is component state the store never sees, and one register for both is
+    // the only way the gesture behaves the same over all of it.
+    openThread: (key) => set({ threadKey: key }),
     closeThread: () => set({ threadKey: null }),
     closeIncoming: () => set({ incomingOfferId: null }),
     openShare: (id) => set({ shareOpen: id }),
     closeShare: () => set({ shareOpen: null }),
-    openPerson: (name) => {
-      // On a phone the person's page is pushed, not presented, so opening it
-      // leaves a history entry for the system's back to pop — the same
-      // contract as `push` and `openThread`. A desktop keeps its modal and its
-      // history untouched.
-      if (name && typeof window !== "undefined") {
-        try {
-          if (window.matchMedia("(max-width: 560px)").matches)
-            window.history.pushState({ arvolo: "person" }, "");
-        } catch {
-          // No history to leave an entry in: the back button in the bar still
-          // falls back to closing directly.
-        }
-      }
-      set({ personOpen: name });
-    },
+    openPerson: (name) => set({ personOpen: name }),
     openReceive: () => set({ receiveOpen: true, receivePrefill: null }),
     openReceiveWith: (ticket) => set({ receiveOpen: true, receivePrefill: ticket }),
     closeReceive: () => set({ receiveOpen: false, receivePrefill: null }),
