@@ -11,12 +11,13 @@
 // settings". A phone that could not reach a setting would not be the same app.
 
 import { useT } from "../i18n";
-import { fire, useStore } from "../store";
+import { useStore } from "../store";
 import { Avatar, ShortId } from "../ui/Bits";
 import { Icon } from "../ui/Icons";
-import { Segmented } from "../ui/Primitives";
 
-/** One row that leads somewhere, with what is behind it said on the right. */
+/** A row that pushes, with what is behind it said on the right — the detail
+ *  text and the chevron this platform has always used to mean "there is more of
+ *  this, one screen in". */
 function Place({
   label,
   note,
@@ -27,20 +28,19 @@ function Place({
   onClick: () => void;
 }) {
   return (
-    <button className="place-link" onClick={onClick}>
+    <button className="ios-row" onClick={onClick}>
       <span className="grow truncate">{label}</span>
-      {note ? <span className="t-sm t-mut">{note}</span> : null}
-      <Icon.ChevronRight size={15} />
+      {note ? <span className="ios-detail">{note}</span> : null}
+      <Icon.ChevronRight size={15} className="ios-chev" />
     </button>
   );
 }
 
 export function YouView() {
   const t = useT();
-  const go = useStore((s) => s.go);
+  const push = useStore((s) => s.push);
   const status = useStore((s) => s.status);
   const config = useStore((s) => s.config);
-  const save = useStore((s) => s.saveConfig);
   const devices = useStore((s) => s.devices);
   const deposits = useStore((s) => s.deposits);
   const guiVersion = useStore((s) => s.guiVersion);
@@ -50,11 +50,11 @@ export function YouView() {
   const live = deposits.filter((d) => !d.expired).length;
 
   return (
-    <div className="you">
+    <div className="ios-page you">
       {/* The identity, first and whole. It is what the person on the other end
           checks, and burying it three taps into a settings screen would be
           saying it is a preference. */}
-      <button className="card card-pad you-me" onClick={() => go("advanced")}>
+      <button className="ios-group you-me" onClick={() => push("advanced")}>
         <Avatar name={name} id={status?.public_id} size={44} />
         <span className="grow" style={{ minWidth: 0 }}>
           <span className="truncate you-name">{name}</span>
@@ -63,48 +63,39 @@ export function YouView() {
         <Icon.ChevronRight size={16} />
       </button>
 
-      {/* The one decision that is different on a phone — see `AutoAccept` in the
+      {/* The one decision that is different on a phone. A row saying what is in
+          force, pushing to where the three answers are — see `AutoAccept` in the
           engine, where the same three words become the rule. */}
-      <div className="card card-pad stack">
-        <div className="t-head">{t("settings.autoAcceptTitle")}</div>
-        <Segmented
-          block
+      <div className="ios-group">
+        <Place
           label={t("settings.autoAcceptTitle")}
-          value={policy}
-          onChange={(v) => fire(save({ auto_accept: { set: v } }))}
-          options={[
-            { value: "never", label: t("settings.autoAcceptNever") },
-            { value: "trusted", label: t("settings.autoAcceptTrusted") },
-            { value: "everyone", label: t("settings.autoAcceptEveryone") },
-          ]}
-        />
-        <div className="t-xs t-mut">
-          {t(
+          note={t(
             policy === "never"
-              ? "settings.autoAcceptHintNever"
+              ? "settings.autoAcceptNever"
               : policy === "everyone"
-                ? "settings.autoAcceptHintEveryone"
-                : "settings.autoAcceptHintTrusted"
+                ? "settings.autoAcceptEveryone"
+                : "settings.autoAcceptTrusted"
           )}
-        </div>
+          onClick={() => push("autoAccept")}
+        />
       </div>
 
-      <div className="card">
+      <div className="ios-group">
         <Place
           label={t("title.devices")}
           note={devices.length ? String(devices.length) : undefined}
-          onClick={() => go("devices")}
+          onClick={() => push("devices")}
         />
         <Place
           label={t("title.deposits")}
           note={live ? t("you.liveCount", live) : undefined}
-          onClick={() => go("deposits")}
+          onClick={() => push("deposits")}
         />
-        <Place label={t("title.history")} onClick={() => go("history")} />
+        <Place label={t("title.history")} onClick={() => push("history")} />
         <Place
           label={t("you.allSettings")}
           note={status?.relay ? t("you.relaySet") : undefined}
-          onClick={() => go("advanced")}
+          onClick={() => push("advanced")}
         />
       </div>
 
@@ -112,7 +103,7 @@ export function YouView() {
           storage. It will be the keychain when something puts it there, and a
           line that said so first would be the app claiming a guarantee it does
           not have. */}
-      <div className="t-xs t-mut you-foot">
+      <div className="ios-foot you-foot">
         {t("you.footer", guiVersion || "…")}
       </div>
     </div>

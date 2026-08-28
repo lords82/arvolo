@@ -6,9 +6,11 @@
 // two lists they produce, and yourself — and the rest keeps its parity by moving
 // under *You*, which is where a phone puts everything that is not a verb.
 //
-// Send is the centre and looks like it. It is what the app is for, it is the one
-// control that is not navigation, and on a phone the middle of the bottom edge is
-// the easiest place on the screen to reach with a thumb.
+// Four places and no verb. A tab bar on this platform is navigation and nothing
+// else — the thing you *do* lives in the top right of the bar above, where a
+// compose button has lived since Mail had one. A filled action in the middle of
+// a tab bar is somebody else's convention, and next to the platform's own it
+// reads as a foreign object rather than as emphasis.
 
 import { phoneTitle, useStore, type Route } from "../store";
 import { useT } from "../i18n";
@@ -18,7 +20,6 @@ export function TabBar() {
   const t = useT();
   const route = useStore((s) => s.route);
   const go = useStore((s) => s.go);
-  const openSheet = useStore((s) => s.openSheet);
   const transfers = useStore((s) => s.transfers);
 
   const rows = Object.values(transfers);
@@ -55,16 +56,6 @@ export function TabBar() {
     <nav className="tabbar" aria-label={t("rail.nav")}>
       {place("transfers", <Icon.Transfers />, count)}
       {place("people", <Icon.People />)}
-      <button
-        className="tab tab-send"
-        onClick={() => openSheet([])}
-        title={t("tab.send")}
-      >
-        <span className="ico">
-          <Icon.Send />
-        </span>
-        <span className="truncate">{t("tab.send")}</span>
-      </button>
       {place("codes", <Icon.Qr />)}
       {place("settings", <Icon.Settings />)}
     </nav>

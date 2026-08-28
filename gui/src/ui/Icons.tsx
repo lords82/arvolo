@@ -163,6 +163,12 @@ export const Icon = {
       <path d="m6 3.6 4.4 4.4L6 12.4" />
     </Svg>
   ),
+  /** The way back, which on a phone is a chevron and a word. */
+  ChevronLeft: (p: Props) => (
+    <Svg {...p}>
+      <path d="M10 3.6 5.6 8l4.4 4.4" />
+    </Svg>
+  ),
   ChevronDown: (p: Props) => (
     <Svg {...p}>
       <path d="M3.6 6 8 10.4 12.4 6" />

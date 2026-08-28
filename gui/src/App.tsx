@@ -23,6 +23,7 @@ import { TabBar } from "./views/TabBar";
 import { CasellaView } from "./views/CasellaView";
 import { CodesView } from "./views/CodesView";
 import { YouView } from "./views/YouView";
+import { AutoAcceptView } from "./views/AutoAcceptView";
 import { ThreadSheet } from "./overlays/ThreadSheet";
 import { useIsPhone } from "./phone";
 import { TransfersView } from "./views/TransfersView";
@@ -45,6 +46,11 @@ const SEARCHABLE: Route[] = ["transfers"];
 
 export function App() {
   const isPhone = useIsPhone();
+  const stack = useStore((s) => s.stack);
+  const back = useStore((s) => s.back);
+  // Whether the title is still the big one under the bar, or has been handed up
+  // into it. Reset on arrival: a new screen starts at the top of itself.
+  const [bigTitle, setBigTitle] = useState(true);
   const t = useT();
   const init = useStore((s) => s.init);
   const connected = useStore((s) => s.connected);
@@ -55,6 +61,8 @@ export function App() {
   const dismissActionError = useStore((s) => s.dismissActionError);
   const reload = useStore((s) => s.reload);
   const route = useStore((s) => s.route);
+  // A screen you have just arrived at starts at the top of itself.
+  useEffect(() => setBigTitle(true), [route]);
   const go = useStore((s) => s.go);
   const search = useStore((s) => s.search);
   const setSearch = useStore((s) => s.setSearch);
@@ -311,6 +319,8 @@ export function App() {
         ? PeopleView
         : route === "codes"
           ? CodesView
+          : route === "autoAccept"
+            ? AutoAcceptView
           : route === "deposits"
             ? DepositsView
             : route === "history"
@@ -444,7 +454,22 @@ export function App() {
         )}
 
         {/* --- header --------------------------------------------------- */}
-        <header className="header">
+        <header
+          className={`header${
+            isPhone ? ` nav${bigTitle && stack.length === 1 ? " big" : ""}` : ""
+          }`}
+        >
+          {/* A back button, and the name of where it goes. Apple's own: the
+              chevron alone is a guess, and the label is what turns a stack into
+              somewhere you can read your way out of. */}
+          {isPhone && stack.length > 1 && (
+            <button className="nav-back" onClick={back}>
+              <Icon.ChevronLeft size={19} />
+              <span className="truncate">
+                {t(phoneTitle(stack[stack.length - 2]))}
+              </span>
+            </button>
+          )}
           {/* The phone calls this place what the design calls it: the mailbox is
               the thing you open to see who has written, and on that screen the
               rows are people rather than files. */}
@@ -516,7 +541,17 @@ export function App() {
         </header>
 
         {/* --- the screen ----------------------------------------------- */}
-        <main className="view">
+        <main
+          className="view"
+          onScroll={
+            isPhone
+              ? (e) => setBigTitle(e.currentTarget.scrollTop < 12)
+              : undefined
+          }
+        >
+          {isPhone && stack.length === 1 && (
+            <h2 className="large-title">{t(phoneTitle(route))}</h2>
+          )}
           <View />
         </main>
       </div>

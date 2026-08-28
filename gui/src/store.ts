@@ -50,7 +50,11 @@ export type Route =
   | "settings"
   /** Phone only: everything the desktop's settings window has, reached from a
    *  row inside *You* rather than being the screen you land on. */
-  | "advanced";
+  | "advanced"
+  /** Phone only: choosing what arrives without asking. Its own screen, because
+   *  three exclusive answers with a consequence each is what a platform draws as
+   *  a list with a checkmark, not as three words in a strip. */
+  | "autoAccept";
 
 /** What each place is called, as a dictionary key rather than as words. The rail,
  *  the header and the command palette all name the same six places; a second
@@ -64,6 +68,7 @@ export const TITLE_KEY = {
   devices: "title.devices",
   settings: "title.settings",
   advanced: "title.settings",
+  autoAccept: "settings.autoAcceptTitle",
 } as const satisfies Record<Route, string>;
 
 /** What a place is called on a phone, where it is called something else.
@@ -460,6 +465,18 @@ interface State {
   setPaletteOpen: (v: boolean) => void;
   openSheet: (picks: PickedItem[], to?: string, mode?: SendMode) => void;
   closeSheet: () => void;
+  /** Where the phone has drilled to, root first. The desktop never pushes: its
+   *  rail *is* the stack, one deep, and `go` keeps it that way.
+   *
+   *  A separate field rather than making `route` an array, because everything
+   *  reads `route` and what it wants is the same thing it always wanted: the
+   *  screen in front of you. This says how you got there. */
+  stack: Route[];
+  /** Drill in: keeps where you were, so there is something to go back to. */
+  push: (route: Route) => void;
+  /** Back one screen. Does nothing at the root, which is what a back button
+   *  that is not drawn at the root means. */
+  back: () => void;
   openIncoming: (offerId: string) => void;
   closeIncoming: () => void;
   /** The correspondent whose thread is open, by the Casella's group key. Phone
@@ -738,6 +755,7 @@ export const useStore = create<State>((set, get) => {
     contactsById: {},
     transfers: {},
     route: "transfers",
+    stack: ["transfers"],
     theme: readTheme(),
     search: "",
     pauseAll: false,
@@ -1193,12 +1211,15 @@ export const useStore = create<State>((set, get) => {
     // them. Doing it here rather than in each view keeps a stale panel from ever
     // being what greets the user, however they navigated to it — rail, command
     // palette or keyboard shortcut.
+    // Switching places starts a new stack: a tab bar is five roots, and coming
+    // back to one has never meant coming back to where you had drilled to.
     go: (r) => {
       // Errors are cleared on the way *out* as well as refetched on the way in:
       // a failure from a previous visit must not be what greets the user when
       // they come back, before the fresh fetch has had a chance to succeed.
       set({
         route: r,
+        stack: [r],
         paletteOpen: false,
         personOpen: null,
         depositsError: null,
@@ -1231,6 +1252,14 @@ export const useStore = create<State>((set, get) => {
       }),
     closeSheet: () =>
       set({ sheetPicks: null, sheetTo: null, sheetMode: null }),
+    push: (r) =>
+      set((st) => ({ route: r, stack: [...st.stack, r], personOpen: null })),
+    back: () =>
+      set((st) => {
+        if (st.stack.length < 2) return {};
+        const stack = st.stack.slice(0, -1);
+        return { stack, route: stack[stack.length - 1] };
+      }),
     openIncoming: (offerId) => set({ incomingOfferId: offerId }),
     openThread: (key) => set({ threadKey: key }),
     closeThread: () => set({ threadKey: null }),

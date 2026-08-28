@@ -1933,24 +1933,138 @@ select {
   .app-phone .main {
     padding-top: env(safe-area-inset-top, 0px);
   }
-  /* The canvas's own app bar: a title that carries the screen, two glyphs, and
-     nothing else. 6/14/10 and a 19px title are its numbers, not a shrunk
-     version of the desktop's 56px strip. */
+  /* -- The navigation bar --------------------------------------------------
+     A platform convention, followed on purpose: the title starts large under
+     the bar and is handed *up into* the bar as soon as the list moves. It is
+     not decoration — it is how this platform says "you are still where you
+     were, and you have scrolled", which a title that never moves has to say
+     with a second label or not at all. */
   .app-phone .header {
     height: auto;
-    min-height: 0;
-    padding: 6px 14px 10px;
-    gap: 10px;
+    min-height: 44px;
+    padding: 4px 12px;
+    gap: 6px;
+    background: var(--surface-sunk);
+    border-bottom-color: transparent;
+    transition: border-color var(--t) var(--ease);
   }
+  /* The bar takes the title over, and grows a hairline to sit on. */
+  .app-phone .header.nav:not(.big) {
+    border-bottom-color: var(--line);
+  }
+  /* Centred in the bar, not centred in what is left of it: the title belongs to
+     the screen, and the back button belongs to the stack. Absolute, so a long
+     back label cannot push the title off centre — it truncates instead, which is
+     what this platform does too. */
   .app-phone .header h1 {
-    font-size: 19px;
-    font-weight: 640;
-    letter-spacing: -0.015em;
-    line-height: 1.2;
+    position: absolute;
+    left: 50%;
+    transform: translateX(-50%);
+    max-width: 52%;
+    font-size: 17px;
+    font-weight: 620;
+    text-align: center;
+    opacity: 1;
+    transition: opacity var(--t) var(--ease);
   }
-  /* The view under it gets the canvas's gutters too. */
+  .app-phone .header {
+    position: relative;
+  }
+  .app-phone .header.big h1 {
+    opacity: 0;
+  }
+  /* Left, and never centred: it is the thing you read to know the way out. */
+  .nav-back {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    max-width: 42%;
+    min-height: 40px;
+    padding: 0 4px 0 0;
+    border: 0;
+    background: none;
+    color: var(--out-strong);
+    font: 500 16px var(--font);
+    cursor: pointer;
+  }
+  .nav-back:active {
+    opacity: 0.5;
+  }
+  .large-title {
+    margin: 2px 0 10px;
+    font-size: 32px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    line-height: 1.1;
+    color: var(--ink);
+  }
+
+  /* The grouped background this platform reads a list against. */
+  .app-phone .main {
+    background: var(--surface-sunk);
+  }
   .app-phone .view {
-    padding: 10px 14px 16px;
+    padding: 6px 16px 18px;
+    background: var(--surface-sunk);
+  }
+
+  /* -- Grouped, inset lists ------------------------------------------------
+     Rounded groups on a recessed ground, with the separator starting where the
+     text does rather than at the edge — the alignment is what makes a stack of
+     rows read as one list instead of as five cards. */
+  .ios-page {
+    display: flex;
+    flex-direction: column;
+    gap: 22px;
+  }
+  .ios-group {
+    display: flex;
+    flex-direction: column;
+    background: var(--surface);
+    border-radius: 11px;
+    overflow: hidden;
+  }
+  .ios-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    min-height: 47px;
+    padding: 11px 16px;
+    border: 0;
+    background: none;
+    color: var(--ink);
+    font: 400 16.5px var(--font);
+    text-align: left;
+    cursor: pointer;
+  }
+  .ios-row + .ios-row {
+    box-shadow: inset 0 1px 0 var(--line);
+  }
+  .ios-row:active {
+    background: var(--surface-2);
+  }
+  .ios-detail {
+    color: var(--ink-mut);
+    font-size: 16px;
+    flex: none;
+  }
+  .ios-chev {
+    color: var(--ink-mut);
+    opacity: 0.55;
+    flex: none;
+  }
+  .ios-check {
+    color: var(--out-strong);
+    flex: none;
+  }
+  /* The sentence under a group: what the choice above actually costs. */
+  .ios-foot {
+    padding: 0 4px;
+    margin-top: -14px;
+    color: var(--ink-mut);
+    font-size: 13px;
+    line-height: 1.35;
   }
 
   .tabbar {
@@ -1996,21 +2110,17 @@ select {
     background: var(--surface);
   }
 
-  /* The verb, and it should not look like a place. */
-  .tab-send {
-    color: var(--ink);
-  }
-  .tab-send .ico {
-    width: 46px;
-    height: 30px;
-    border-radius: var(--r-pill);
-    /* The same pair the primary button uses, so the one filled thing on the
-       screen and the one filled thing in the bar are the same colour. */
-    background: var(--out-fill);
-    color: var(--on-fill);
-  }
   .tab:active {
-    transform: scale(0.97);
+    opacity: 0.5;
+  }
+  /* Selected is a colour, not a chip: this platform tints the glyph and the
+     label and leaves the bar alone. */
+  .tab[aria-current="page"] {
+    background: none;
+    color: var(--out-strong);
+  }
+  .tabbar {
+    background: var(--surface);
   }
 
   /* A decision waiting on the user is visible whatever the screen. */
@@ -2147,19 +2257,18 @@ select {
   }
 
   /* You: an identity, a decision, a few doors, a line about the build. */
-  .you {
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-    padding-top: 4px;
-  }
   .you-me {
-    display: flex;
+    flex-direction: row;
     align-items: center;
     gap: 12px;
     width: 100%;
+    padding: 14px 16px;
+    border: 0;
     text-align: left;
     cursor: pointer;
+  }
+  .you-me:active {
+    background: var(--surface-2);
   }
   .you-name {
     display: block;
@@ -2172,7 +2281,7 @@ select {
     flex: none;
   }
   .you-foot {
-    padding: 2px 2px 10px;
+    margin-top: -14px;
   }
 
   /* Codes: the segmented control, then whichever half it chose. */
