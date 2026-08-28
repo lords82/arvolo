@@ -409,6 +409,25 @@ function AddPersonSheet({
       placement="center"
       title={t("people.addTitle")}
       subtitle={t("people.addSubtitle")}
+      // A task, so on a phone the decision moves into the sheet's top bar —
+      // cancel on the left, the saving verb on the right — like every form
+      // this platform presents.
+      bar={{
+        cancel: (
+          <button className="bar-btn" onClick={onClose} disabled={busy}>
+            {t("common.cancel")}
+          </button>
+        ),
+        confirm: (
+          <button
+            className="bar-btn strong"
+            onClick={submit}
+            disabled={!name.trim() || !id.trim() || busy}
+          >
+            {t("common.save")}
+          </button>
+        ),
+      }}
       footer={
         <>
           <div className="spacer" />
@@ -501,6 +520,15 @@ function PersonSheet() {
   const [checked, setChecked] = useState(false);
   const [newName, setNewName] = useState("");
 
+  // This component stays mounted between people, and on a phone the way out is
+  // the history rather than `onClose` — so the reset has to follow the person,
+  // not the closing. Without it, the verify checkbox ticked for one contact
+  // greets the next one already ticked.
+  useEffect(() => {
+    setChecked(false);
+    setNewName("");
+  }, [name]);
+
   if (!c) return null;
 
   return (
@@ -512,6 +540,10 @@ function PersonSheet() {
         close(null);
       }}
       title={c.name}
+      // A contact is content you drilled into, not a task: on a phone this
+      // arrives as a pushed screen, from the list whose name the back button
+      // carries.
+      pushFrom={t("title.people")}
       // `<ClaimedName>` is always a truthy element even when it renders
       // nothing, and `Sheet` would keep an empty subtitle line for it.
       subtitle={claimText(c, t) ? <ClaimedName c={c} /> : undefined}
@@ -633,103 +665,17 @@ function PersonSheet() {
 
 // ---------------------------------------------------------------------------
 
-export function PeopleView() {
+/** Everything the address book can *do* besides read itself: the two file
+ *  dialogs and the add-by-id sheet's switch. A hook rather than part of the
+ *  screen because two components need it: the screen, whose desktop toolbar
+ *  calls these directly, and the bar menu the phone gets instead. */
+function usePeopleActions() {
   const t = useT();
   const contacts = useStore((s) => s.contacts);
-  const startPairing = useStore((s) => s.startPairing);
   const addContact = useStore((s) => s.addContact);
-  const loadPresence = useStore((s) => s.loadPresence);
-  const presenceLoading = useStore((s) => s.presenceLoading);
-
-  // Presence is a photograph, and people come and go while the window sits
-  // open, so one probe on arrival is not enough: a dot left alone goes quietly
-  // wrong and nothing in the UI admits it. Hence a probe on arrival *and* on a
-  // timer, plus one the moment the window comes back — that is the instant the
-  // reading is both most stale and most likely to be read.
-  //
-  // The dependency is the id list, not the route: navigation and the address
-  // book landing are two different moments — the snapshot is still in flight on
-  // a fresh launch — and probing at the first one asks the relay about an empty
-  // list. Mounting re-runs this anyway, so opening the screen still refreshes.
-  const ids = contacts.map((c) => c.id).join(",");
-  useEffect(() => {
-    if (!ids) return;
-    // A hidden window asks for nothing: nobody is reading the dots, and the
-    // answer would be stale again by the time it is.
-    const probe = () => {
-      if (!document.hidden) fire(loadPresence());
-    };
-    probe();
-    const timer = window.setInterval(probe, PRESENCE_REFRESH_MS);
-    document.addEventListener("visibilitychange", probe);
-    window.addEventListener("focus", probe);
-    return () => {
-      window.clearInterval(timer);
-      document.removeEventListener("visibilitychange", probe);
-      window.removeEventListener("focus", probe);
-    };
-  }, [ids, loadPresence]);
-
-  const [filter, setFilter] = useState<Filter>("all");
-  const [q, setQ] = useState("");
   const [addOpen, setAddOpen] = useState(false);
   const [importing, setImporting] = useState(false);
   const busyRef = useRef(false);
-
-  const isPhone = useIsPhone();
-
-  const moreItems: MenuItem[] = [
-    {
-      key: "have-code",
-      label: t("people.haveCode"),
-      icon: <Icon.Qr size={13} />,
-      onSelect: () => fire(startPairing("contact_join")),
-    },
-    {
-      key: "by-id",
-      label: t("people.byId"),
-      icon: <Icon.Plus size={13} />,
-      onSelect: () => setAddOpen(true),
-    },
-    {
-      key: "who",
-      label: t("people.whoIsOnline"),
-      icon: <Icon.Relay size={13} />,
-      onSelect: () => fire(loadPresence()),
-    },
-    {
-      key: "import",
-      label: t("people.import"),
-      icon: <Icon.Folder size={13} />,
-      onSelect: () => doImport(),
-    },
-    {
-      key: "export",
-      label: t("people.export"),
-      icon: <Icon.Copy size={13} />,
-      onSelect: () => doExport(),
-      disabled: !contacts.length,
-    },
-  ];
-
-  const shown = useMemo(() => {
-    const needle = q.trim().toLowerCase();
-    return contacts.filter((c) => {
-      if (filter === "verified" && !c.verified) return false;
-      if (filter === "trusted" && !c.trusted) return false;
-      if (filter === "blocked" && !c.blocked) return false;
-      if (filter !== "blocked" && c.blocked) return false;
-      if (!needle) return true;
-      return (
-        c.name.toLowerCase().includes(needle) ||
-        c.display_name.toLowerCase().includes(needle) ||
-        c.pending_name.toLowerCase().includes(needle) ||
-        c.id.toLowerCase().startsWith(needle)
-      );
-    });
-  }, [contacts, filter, q]);
-
-  const blockedCount = contacts.filter((c) => c.blocked).length;
 
   /** Export mirrors `arvolo contacts export` byte for byte: name, id and the two
    *  marks, and nothing that describes *this* machine. */
@@ -803,27 +749,135 @@ export function PeopleView() {
     }
   };
 
+  return { contacts, addOpen, setAddOpen, importing, doExport, doImport };
+}
+
+/** The address book's verbs, where this platform keeps a screen's verbs: a "+"
+ *  in the bar, opening a menu. A filled button the width of the screen sitting
+ *  above the list was the loudest thing on it, and it was shouting about the
+ *  rarest thing done there — the list itself is what the screen is for.
+ *
+ *  Rendered by the phone header when the People tab is up, so the menu's sheet
+ *  has to come along: this component is the verbs *and* the screens they open. */
+export function PeopleBarMenu() {
+  const t = useT();
+  const startPairing = useStore((s) => s.startPairing);
+  const { contacts, addOpen, setAddOpen, doExport, doImport } =
+    usePeopleActions();
+
+  const items: MenuItem[] = [
+    {
+      key: "swap",
+      label: t("people.swap"),
+      icon: <Icon.Qr size={13} />,
+      onSelect: () => fire(startPairing("contact_host")),
+    },
+    {
+      key: "have-code",
+      label: t("people.haveCode"),
+      icon: <Icon.Qr size={13} />,
+      onSelect: () => fire(startPairing("contact_join")),
+    },
+    {
+      key: "by-id",
+      label: t("people.byId"),
+      icon: <Icon.Plus size={13} />,
+      onSelect: () => setAddOpen(true),
+    },
+    {
+      key: "import",
+      label: t("people.import"),
+      icon: <Icon.Folder size={13} />,
+      onSelect: () => doImport(),
+      separated: true,
+    },
+    {
+      key: "export",
+      label: t("people.export"),
+      icon: <Icon.Copy size={13} />,
+      onSelect: () => doExport(),
+      disabled: !contacts.length,
+    },
+  ];
+
+  return (
+    <>
+      <MenuButton items={items} label={t("people.moreActions")}>
+        <Icon.Plus size={17} />
+      </MenuButton>
+      <AddPersonSheet open={addOpen} onClose={() => setAddOpen(false)} />
+    </>
+  );
+}
+
+export function PeopleView() {
+  const t = useT();
+  const contacts = useStore((s) => s.contacts);
+  const startPairing = useStore((s) => s.startPairing);
+  const loadPresence = useStore((s) => s.loadPresence);
+  const presenceLoading = useStore((s) => s.presenceLoading);
+
+  // Presence is a photograph, and people come and go while the window sits
+  // open, so one probe on arrival is not enough: a dot left alone goes quietly
+  // wrong and nothing in the UI admits it. Hence a probe on arrival *and* on a
+  // timer, plus one the moment the window comes back — that is the instant the
+  // reading is both most stale and most likely to be read.
+  //
+  // The dependency is the id list, not the route: navigation and the address
+  // book landing are two different moments — the snapshot is still in flight on
+  // a fresh launch — and probing at the first one asks the relay about an empty
+  // list. Mounting re-runs this anyway, so opening the screen still refreshes.
+  const ids = contacts.map((c) => c.id).join(",");
+  useEffect(() => {
+    if (!ids) return;
+    // A hidden window asks for nothing: nobody is reading the dots, and the
+    // answer would be stale again by the time it is.
+    const probe = () => {
+      if (!document.hidden) fire(loadPresence());
+    };
+    probe();
+    const timer = window.setInterval(probe, PRESENCE_REFRESH_MS);
+    document.addEventListener("visibilitychange", probe);
+    window.addEventListener("focus", probe);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", probe);
+      window.removeEventListener("focus", probe);
+    };
+  }, [ids, loadPresence]);
+
+  const [filter, setFilter] = useState<Filter>("all");
+  const [q, setQ] = useState("");
+  const { addOpen, setAddOpen, importing, doExport, doImport } =
+    usePeopleActions();
+
+  const isPhone = useIsPhone();
+
+  const shown = useMemo(() => {
+    const needle = q.trim().toLowerCase();
+    return contacts.filter((c) => {
+      if (filter === "verified" && !c.verified) return false;
+      if (filter === "trusted" && !c.trusted) return false;
+      if (filter === "blocked" && !c.blocked) return false;
+      if (filter !== "blocked" && c.blocked) return false;
+      if (!needle) return true;
+      return (
+        c.name.toLowerCase().includes(needle) ||
+        c.display_name.toLowerCase().includes(needle) ||
+        c.pending_name.toLowerCase().includes(needle) ||
+        c.id.toLowerCase().startsWith(needle)
+      );
+    });
+  }, [contacts, filter, q]);
+
+  const blockedCount = contacts.filter((c) => c.blocked).length;
+
   return (
     <div className="stack">
-      {/* Six buttons across two rows, before a single person is on screen: that
-          is what a desktop toolbar becomes on a phone. Here the one way in that
-          matters keeps its place — swapping codes is how an address book starts —
-          and the other five go under a menu, which is the same list the row menus
-          already are. */}
-      {isPhone ? (
-        <div className="hstack">
-          <Button
-            variant="primary"
-            block
-            onClick={() => fire(startPairing("contact_host"))}
-          >
-            <Icon.Qr size={14} /> {t("people.swap")}
-          </Button>
-          <MenuButton items={moreItems} label={t("people.moreActions")}>
-            <Icon.More size={16} />
-          </MenuButton>
-        </div>
-      ) : (
+      {/* On a phone none of this row exists: the verbs live in the bar's "+"
+          (see `PeopleBarMenu`), which is where this platform keeps a screen's
+          verbs — the list is the screen. */}
+      {!isPhone && (
       <div className="hstack wrap">
         <Button variant="primary" onClick={() => fire(startPairing("contact_host"))}>
           <Icon.Qr size={14} /> {t("people.swap")}

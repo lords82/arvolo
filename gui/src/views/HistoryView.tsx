@@ -13,6 +13,7 @@ import { Icon } from "../ui/Icons";
 import { Button, Empty, Segmented, TextInput } from "../ui/Primitives";
 import { ExtChip } from "../ui/Bits";
 import { Confirm } from "../ui/Sheet";
+import { useIsPhone } from "../phone";
 import type { HistoryDto } from "../types";
 
 type Filter = "all" | "send" | "recv";
@@ -128,6 +129,7 @@ export function HistoryView() {
   const clear = useStore((s) => s.clearHistory);
   const peerLabel = useStore((s) => s.peerLabel);
 
+  const isPhone = useIsPhone();
   const [filter, setFilter] = useState<Filter>("all");
   const [q, setQ] = useState("");
   const [confirmClear, setConfirmClear] = useState(false);
@@ -152,40 +154,58 @@ export function HistoryView() {
     return Array.from(map.values()).sort((a, b) => b.when - a.when);
   }, [history, filter, q, peerLabel, lang]);
 
+  const choices = [
+    { value: "all" as Filter, label: t("history.filterAll") },
+    { value: "send" as Filter, label: t("history.filterSent") },
+    { value: "recv" as Filter, label: t("history.filterReceived") },
+  ];
+
   return (
     <div className="stack">
-      <div className="hstack wrap">
+      {/* One control, the width of the screen, and nothing beside it.
+          Everything else that stood in this row on a desktop is either already
+          somewhere else on a phone or does not need a button at all: the search
+          is the one in the bar, the refresh happens on arriving here, and
+          emptying the log is a destructive thing, which this platform puts at
+          the far end of what it destroys rather than above it. */}
+      {isPhone ? (
         <Segmented
+          block
           label={t("history.filterLabel")}
           value={filter}
           onChange={setFilter}
-          options={[
-            { value: "all", label: t("history.filterAll") },
-            { value: "send", label: t("history.filterSent") },
-            { value: "recv", label: t("history.filterReceived") },
-          ]}
+          options={choices}
         />
-        <div className="grow" style={{ maxWidth: 280 }}>
-          <TextInput
-            value={q}
-            onChange={(e) => setQ(e.currentTarget.value)}
-            placeholder={t("history.searchPlaceholder")}
-            aria-label={t("history.searchLabel")}
+      ) : (
+        <div className="hstack wrap">
+          <Segmented
+            label={t("history.filterLabel")}
+            value={filter}
+            onChange={setFilter}
+            options={choices}
           />
+          <div className="grow" style={{ maxWidth: 280 }}>
+            <TextInput
+              value={q}
+              onChange={(e) => setQ(e.currentTarget.value)}
+              placeholder={t("history.searchPlaceholder")}
+              aria-label={t("history.searchLabel")}
+            />
+          </div>
+          <div className="spacer grow" />
+          <Button size="sm" onClick={() => fire(reload())} busy={loading}>
+            <Icon.Refresh size={13} /> {t("common.refresh")}
+          </Button>
+          <Button
+            size="sm"
+            variant="danger"
+            disabled={!history.length}
+            onClick={() => setConfirmClear(true)}
+          >
+            <Icon.Trash size={13} /> {t("history.clear")}
+          </Button>
         </div>
-        <div className="spacer grow" />
-        <Button size="sm" onClick={() => fire(reload())} busy={loading}>
-          <Icon.Refresh size={13} /> {t("common.refresh")}
-        </Button>
-        <Button
-          size="sm"
-          variant="danger"
-          disabled={!history.length}
-          onClick={() => setConfirmClear(true)}
-        >
-          <Icon.Trash size={13} /> {t("history.clear")}
-        </Button>
-      </div>
+      )}
 
       {error && (
         <div className="card card-pad card-err t-sm">
@@ -222,6 +242,17 @@ export function HistoryView() {
             </div>
           </div>
         ))
+      )}
+
+      {isPhone && history.length > 0 && (
+        <div className="ios-group">
+          <button
+            className="ios-row destructive"
+            onClick={() => setConfirmClear(true)}
+          >
+            {t("history.clear")}
+          </button>
+        </div>
       )}
 
       <Confirm

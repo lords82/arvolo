@@ -16,7 +16,7 @@ import type { UITransfer } from "../types";
 import { threadsOf } from "../views/CasellaView";
 import { Avatar } from "../ui/Bits";
 import { Icon } from "../ui/Icons";
-import { Button, IconButton } from "../ui/Primitives";
+import { Button } from "../ui/Primitives";
 
 /** Is this the row the thread leads with — something arriving, or a question? */
 function isNow(tx: UITransfer): boolean {
@@ -49,22 +49,34 @@ export function ThreadSheet() {
 
   return (
     <div className="sheet-full" role="dialog" aria-label={thread.who}>
+      {/* A bar, not a dialog's header: this is one screen in from the list, so
+          the way out is the way out of any screen — a chevron and the name of
+          where it goes, on the left, with the title between. Going through the
+          history rather than straight to `closeThread` is what keeps this and
+          the system's own back the same single step. */}
       <div className="sheet-full-bar">
-        <IconButton label={t("common.close")} onClick={close}>
-          <Icon.Close size={16} />
-        </IconButton>
-        <Avatar name={thread.who} id={thread.peerId} size={36} />
-        <span className="grow" style={{ minWidth: 0 }}>
-          <span className="truncate" style={{ display: "block", fontWeight: 600 }}>
-            {thread.who}
-          </span>
-          <span className="t-xs t-mut">
-            {verified ? t("thread.verified") : t("thread.unverified")}
-          </span>
-        </span>
+        <button
+          className="nav-back"
+          onClick={() => (window.history.length > 1 ? window.history.back() : close())}
+        >
+          <Icon.ChevronLeft size={19} />
+          <span className="truncate">{t("casella.title")}</span>
+        </button>
+        <h2 className="truncate">{thread.who}</h2>
+        <span className="bar-pad" />
       </div>
 
       <div className="sheet-full-body">
+        {/* Who this is, said once and properly, where this platform says it:
+            under the bar rather than squeezed into it. */}
+        <div className="th-who">
+          <Avatar name={thread.who} id={thread.peerId} size={56} />
+          <span className="th-who-name truncate">{thread.who}</span>
+          <span className="t-xs t-mut">
+            {verified ? t("thread.verified") : t("thread.unverified")}
+          </span>
+        </div>
+
         {now.map((tx) => (
           <div className="card card-pad stack" key={tx.key}>
             <div className="section-head">
@@ -85,7 +97,11 @@ export function ThreadSheet() {
                 password field and the "save them as a contact" line live, and a
                 second way of accepting would be a second thing to keep right. */}
             {tx.status === "incoming" && tx.offerId && (
-              <div style={{ display: "flex", gap: 8 }}>
+              /* Stacked, filled over quiet: two half-width buttons squeezed
+                 side by side is a desktop dialog's row. This platform puts the
+                 one thing it recommends on top, whole, and the way out under
+                 it in the grey. */
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                 <Button
                   variant="in"
                   block

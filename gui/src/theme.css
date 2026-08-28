@@ -1425,6 +1425,12 @@ select {
 
 /* -- Banner ---------------------------------------------------------------- */
 
+/* Nothing at all, here: the banners are rows of the column, exactly as they were
+   before there was anything to wrap them in. The phone gives this a box. */
+.banners {
+  display: contents;
+}
+
 .banner {
   display: flex;
   align-items: flex-start;
@@ -1942,6 +1948,12 @@ select {
     /* Tertiary: a chevron is a hint about where a row goes, never a thing to
        read. */
     --ink-faint: rgba(60, 60, 67, 0.3);
+    /* The glass the two bars are made of: a hair lighter than the ground, and
+       thin enough that what passes under it can be seen passing. */
+    --bar: rgba(249, 249, 249, 0.82);
+    /* The fill under a quiet button: the system's own grey, which is a grey
+       with a little of every background in it rather than a colour. */
+    --fill-quiet: rgba(120, 120, 128, 0.16);
   }
   @media (prefers-color-scheme: dark) {
     .app-phone:not([data-theme="light"]) {
@@ -1956,23 +1968,68 @@ select {
       --ink-sec: rgba(235, 235, 245, 0.65);
       --ink-mut: rgba(235, 235, 245, 0.6);
       --ink-faint: rgba(235, 235, 245, 0.3);
+      --bar: rgba(28, 28, 30, 0.78);
+      --fill-quiet: rgba(120, 120, 128, 0.24);
     }
   }
 
   .app-phone {
-    /* The bar is a row of the frame, not something floating over the view: a
-       list that scrolls under its own navigation hides its last item. */
+    /* Both bars are lifted out of the frame and laid over the view — see the
+       material below. What is left is one cell holding the screen. */
     grid-template-columns: 1fr;
-    grid-template-rows: 1fr auto;
+    grid-template-rows: 1fr;
+    position: relative;
   }
 
-  /* The status bar and the notch belong to the system, and the whole column
-     starts below them — not just the header. A banner is drawn *above* the
-     header, so an inset on the header alone let an arrival slide under the
-     clock, which is exactly where a message about somebody sending you a file
-     must not be. */
   .app-phone .main {
-    padding-top: env(safe-area-inset-top, 0px);
+    position: relative;
+  }
+  /* Hung under the bar rather than laid out above it, and floating clear of the
+     edges: what is left of the column is the screen itself, and something that
+     pushed it down would be moving the screen out of the way to say a sentence
+     about the app. */
+  .app-phone .banners {
+    position: absolute;
+    z-index: 5;
+    top: calc(env(safe-area-inset-top, 0px) + 50px);
+    left: 10px;
+    right: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .app-phone .banners:empty {
+    display: none;
+  }
+  .app-phone .banner {
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    box-shadow: var(--shadow-1);
+    font-size: 13px;
+  }
+  /* -- The two materials ---------------------------------------------------
+     The bars on this platform are not opaque strips: they are frosted panes
+     with the screen moving underneath, and that movement — a title sliding out
+     of focus behind the clock, a row half-visible through the tab bar — is how
+     the platform says the list continues past the edge of the glass. An opaque
+     bar says the list ends there.
+
+     So the view fills the frame edge to edge, under the status bar and under
+     both bars, and each page insets its own content by exactly the height of
+     the glass above and below it. */
+  .app-phone .header,
+  .app-phone .tabbar {
+    background: var(--bar);
+    -webkit-backdrop-filter: saturate(180%) blur(20px);
+    backdrop-filter: saturate(180%) blur(20px);
+  }
+  /* Where there is no blur there is no material, only a translucent strip with
+     text showing through it. Then it is opaque, which is the honest fallback. */
+  @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+    .app-phone .header,
+    .app-phone .tabbar {
+      background: var(--surface-sunk);
+    }
   }
   /* -- The navigation bar --------------------------------------------------
      A platform convention, followed on purpose: the title starts large under
@@ -1981,11 +2038,17 @@ select {
      were, and you have scrolled", which a title that never moves has to say
      with a second label or not at all. */
   .app-phone .header {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 6;
     height: auto;
-    min-height: 44px;
+    /* 44 of bar, and the status bar above it covered by the same glass. */
+    min-height: calc(env(safe-area-inset-top, 0px) + 44px);
     padding: 4px 12px;
+    padding-top: calc(env(safe-area-inset-top, 0px) + 4px);
     gap: 6px;
-    background: var(--surface-sunk);
     border-bottom-color: transparent;
     transition: border-color var(--t) var(--ease);
   }
@@ -2007,9 +2070,6 @@ select {
     text-align: center;
     opacity: 1;
     transition: opacity var(--t) var(--ease);
-  }
-  .app-phone .header {
-    position: relative;
   }
   .app-phone .header.big h1 {
     opacity: 0;
@@ -2062,20 +2122,28 @@ select {
      Tabs do not move at all, which is also this platform: four roots side by
      side are not a depth, and sliding between them would claim one. */
   .app-phone .view.staged {
-    position: relative;
+    position: absolute;
+    inset: 0;
     overflow: hidden;
     padding: 0;
     background: var(--surface-sunk);
   }
+  /* The glass above and the glass below, given back as space. A page that set
+     no inset would begin its first row underneath the title. */
   .app-phone .page {
-    padding: 6px 16px 18px;
+    padding: calc(env(safe-area-inset-top, 0px) + 50px) 16px
+      calc(env(safe-area-inset-bottom, 0px) + 64px);
     background: var(--surface-sunk);
   }
-  .app-phone .view.staged > .page.entering,
-  .app-phone .view.staged > .page.leaving {
+  /* The page is the scroller, always — not just while a transition is running.
+     The frame around it is clipped (that is what stages the slide), so a page
+     that did not scroll for itself would leave a long list unreachable below
+     the fold. */
+  .app-phone .view.staged > .page {
     position: absolute;
     inset: 0;
     overflow-y: auto;
+    overflow-x: hidden;
   }
   .page.entering.push {
     z-index: 2;
@@ -2121,7 +2189,9 @@ select {
   .ios-page {
     display: flex;
     flex-direction: column;
-    gap: 22px;
+    /* The platform's own air between groups (35pt in its tables). Groups set
+       tighter than this stop reading as separate thoughts. */
+    gap: 32px;
   }
   .ios-group {
     display: flex;
@@ -2189,30 +2259,317 @@ select {
     color: var(--out-strong);
     flex: none;
   }
-  /* The sentence under a group: what the choice above actually costs. */
+  /* A whole row, centred, red, and at the bottom of what it destroys. This
+     platform never puts an emptying button above the list it empties: up there
+     it is one mis-tap away from the thing you came to read. */
+  .ios-row.destructive {
+    justify-content: center;
+    color: var(--red);
+  }
+
+  /* -- Controls, at this platform's sizes ----------------------------------
+     The desktop's buttons are 32px with a hairline border and 13px text, which
+     on a phone is both too small to hit and the wrong dialect. The system these
+     screens are speaking has exactly two buttons: a filled one — 50pt tall,
+     12pt corners, 17pt semibold, no border, no shadow, one per screen — and a
+     quiet one, the same shape on the grey fill with tinted text. Everything
+     else a desktop grows on a button (borders, hover states, the 1px press
+     dip) is not in the dialect: a press dims, and nothing moves. */
+  .app-phone .btn {
+    height: 50px;
+    padding: 0 20px;
+    border: 0;
+    border-radius: 12px;
+    font-size: 17px;
+    font-weight: 590;
+    letter-spacing: -0.01em;
+    background: var(--fill-quiet);
+    color: var(--out-strong);
+    box-shadow: none;
+    transition: opacity 320ms var(--ease);
+  }
+  .app-phone .btn:hover:not(:disabled) {
+    background: var(--fill-quiet);
+    filter: none;
+  }
+  .app-phone .btn:active:not(:disabled) {
+    transform: none;
+    opacity: 0.7;
+    transition: none;
+  }
+  .app-phone .btn-primary,
+  .app-phone .btn-in {
+    background: var(--out-fill);
+    color: var(--on-fill);
+  }
+  .app-phone .btn-primary:hover:not(:disabled),
+  .app-phone .btn-in:hover:not(:disabled) {
+    background: var(--out-fill);
+    filter: none;
+  }
+  .app-phone .btn-danger {
+    background: var(--fill-quiet);
+    color: var(--red);
+  }
+  .app-phone .btn-danger:hover:not(:disabled) {
+    background: var(--fill-quiet);
+  }
+  .app-phone .btn-ghost {
+    background: none;
+  }
+  /* An inline button — one sitting inside a row or beside a field, where 50pt
+     would be a wall. 34pt capsule, 15pt text: the size this platform uses for
+     a button that lives inside something else. */
+  .app-phone .btn-sm {
+    height: 34px;
+    padding: 0 14px;
+    border-radius: 17px;
+    font-size: 15px;
+    font-weight: 590;
+  }
+  .app-phone .btn-lg {
+    height: 50px;
+    border-radius: 12px;
+    font-size: 17px;
+  }
+  /* The glyph next to a label scales with it. */
+  .app-phone .btn svg {
+    width: 17px;
+    height: 17px;
+  }
+  .app-phone .btn-sm svg {
+    width: 15px;
+    height: 15px;
+  }
+  /* A finger's target, wherever the glyph is drawn small. */
+  .app-phone .icon-btn {
+    width: 44px;
+    height: 44px;
+  }
+  .app-phone .icon-btn:hover:not(:disabled) {
+    background: none;
+  }
+  .app-phone .icon-btn:active:not(:disabled) {
+    background: none;
+    opacity: 0.5;
+  }
+  /* A field is a row: 44pt, body text at 17 — which is also the size below
+     which this platform's browser zooms the whole page to reach the caret —
+     resting on the grouped surface with no border and no glow. The caret and
+     the keyboard are how a phone says "you are writing here"; a ring around
+     the field is a desktop answering a question the phone has already
+     answered. */
+  .app-phone .input,
+  .app-phone .select {
+    /* Set, not just floored: a single-line field IS the 44pt row, and an
+       input that computes its height from font metrics lands at 40-42 and
+       looks one size too small everywhere at once. */
+    height: 44px;
+    min-height: 44px;
+    padding: 0 16px;
+    border: 0;
+    border-radius: 11px;
+    background: var(--surface);
+    font-size: 17px;
+    letter-spacing: -0.01em;
+  }
+  /* The multi-line field keeps a floor instead of a height, and gets back the
+     vertical padding the single-line field pushed into centring. */
+  .app-phone .textarea {
+    min-height: 88px;
+    padding: 11px 16px;
+    border: 0;
+    border-radius: 11px;
+    background: var(--surface);
+    font-size: 17px;
+    letter-spacing: -0.01em;
+  }
+  .app-phone .input:hover,
+  .app-phone .textarea:hover,
+  .app-phone .select:hover {
+    border-color: transparent;
+  }
+  .app-phone .input:focus,
+  .app-phone .textarea:focus,
+  .app-phone .select:focus {
+    border-color: transparent;
+    box-shadow: none;
+    /* Including the webview's own ring, which surfaced the moment the border
+       it normally replaces went away. */
+    outline: none;
+  }
+  .app-phone .input-lg {
+    height: 44px;
+    min-height: 44px;
+    font-size: 17px;
+  }
+  /* The palette's own field opted out of `.input`; it does not opt out of the
+     platform's field height. */
+  .app-phone .palette input {
+    height: 52px;
+    padding: 0 18px;
+    font-size: 17px;
+  }
+  /* A field wrapped in a labelled `.field` keeps its label at footnote size
+     above the row, which is where this platform writes what a field is when
+     the placeholder is already saying what goes in it. */
+  .app-phone .field label {
+    font-size: 13px;
+  }
+  /* The one field drawn on a white card rather than on the ground: without its
+     own tone it disappears into the card entirely. The system's fields inside
+     a sheet sit a shade down. */
+  .app-phone .card .input,
+  .app-phone .card .textarea,
+  .app-phone .sheet .input,
+  .app-phone .sheet .textarea {
+    background: var(--fill-quiet);
+  }
+
+  /* -- The pull-down menu ---------------------------------------------------
+     Off a bar button this platform drops a card: 250pt, continuous corners,
+     the frosted material, and rows at reading size divided by hairlines. The
+     desktop's 12.5px dropdown under a 44pt finger reads as a tooltip. */
+  .app-phone .menu {
+    min-width: 250px;
+    padding: 0;
+    border: 0;
+    border-radius: 13px;
+    background: var(--bar);
+    -webkit-backdrop-filter: saturate(180%) blur(28px);
+    backdrop-filter: saturate(180%) blur(28px);
+    box-shadow: var(--shadow-3);
+    overflow: hidden;
+    animation: ios-menu-in 220ms var(--ease) both;
+    transform-origin: top right;
+  }
+  .app-phone .menu button {
+    border-radius: 0;
+    padding: 11px 16px;
+    gap: 12px;
+    font-size: 17px;
+    letter-spacing: -0.01em;
+  }
+  /* Each item sits in its own wrapper div, so the hairlines go between the
+     wrappers — except where the group break already stands. */
+  .app-phone .menu > div + div:not(:has(hr)) {
+    border-top: 1px solid var(--line);
+  }
+  /* The platform separates groups of actions with a thicker band of ground,
+     not a heavier line. */
+  .app-phone .menu hr {
+    margin: 0;
+    border: 0;
+    height: 6px;
+    background: var(--surface-sunk);
+  }
+  @keyframes ios-menu-in {
+    from {
+      opacity: 0;
+      transform: scale(0.6);
+    }
+  }
+
+  /* -- The segmented control ------------------------------------------------
+     A track, and one raised segment on it. The desktop's is a smaller, harder
+     object with a border on the selected chip; here the chip is a white pill
+     with a soft shadow and no outline, which is the one this platform draws. */
+  .app-phone .segmented {
+    padding: 2px;
+    border: 0;
+    border-radius: 9px;
+    background: var(--surface-2);
+  }
+  .app-phone .segmented button {
+    padding: 6px 10px;
+    border-radius: 7px;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--ink);
+    letter-spacing: -0.01em;
+  }
+  .app-phone .segmented button[aria-checked="true"] {
+    font-weight: 590;
+    background: var(--surface);
+    box-shadow: 0 3px 8px rgba(0, 0, 0, 0.12), 0 1px 1px rgba(0, 0, 0, 0.04);
+  }
+
+  /* -- Every other screen's list -------------------------------------------
+     The screens under *You* were written for a desktop and are shared with it:
+     a card with a border and a shadow, holding rows. On a phone that reads as
+     five objects stacked up; the same rows in a grouped, inset list read as one
+     thing. Only the surface changes — the markup is the desktop's. */
+  .app-phone .card {
+    border: 0;
+    border-radius: 11px;
+    box-shadow: none;
+  }
+  .app-phone .rows > * + * {
+    border-top: 0;
+  }
+  .app-phone .row {
+    padding: 11px 16px;
+    font-size: 15px;
+  }
+  /* Not the two rows that already draw their own, inset past an avatar. */
+  .app-phone .rows > * + *:not(.cs-row):not(.ios-row)::after {
+    content: "";
+    position: absolute;
+    top: 0;
+    left: 16px;
+    right: 0;
+    height: 1px;
+    background: var(--line);
+  }
+  .app-phone .row .row-name {
+    font-size: 17px;
+    font-weight: 500;
+    letter-spacing: -0.015em;
+  }
+  .app-phone .row .row-meta {
+    font-size: 13px;
+  }
+  /* The label over a group, in the ground's own colour: this platform titles a
+     list from outside it. */
+  .app-phone .section-head .t-label {
+    font-size: 13px;
+    font-weight: 400;
+    text-transform: none;
+    letter-spacing: 0;
+    color: var(--ink-mut);
+  }
+  /* The sentence under a group: what the choice above actually costs. Close
+     under it — the footnote belongs to the group, not to the space between. */
   .ios-foot {
     padding: 0 16px;
-    margin-top: -14px;
+    margin-top: -24px;
     color: var(--ink-mut);
     font-size: 13px;
     line-height: 1.35;
   }
   /* The label above a group. Grouped lists on this platform are titled from
-     outside, in the ground's own colour, not from a heading inside the card. */
+     outside, in the ground's own colour — and in capitals, which is how the
+     platform tells a section title from a sentence. */
   .ios-head {
-    padding: 0 16px 6px;
-    margin-bottom: -14px;
+    padding: 0 16px 7px;
+    margin-bottom: -25px;
     color: var(--ink-mut);
     font-size: 13px;
     line-height: 1.3;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
   }
 
   .tabbar {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 6;
     display: flex;
     align-items: stretch;
     gap: 2px;
-    padding: 6px 6px calc(env(safe-area-inset-bottom, 0px) + 6px);
-    background: var(--surface-sunk);
+    padding: 4px 6px calc(env(safe-area-inset-bottom, 0px) + 4px);
     border-top: 1px solid var(--line);
   }
 
@@ -2260,9 +2617,6 @@ select {
   .tab[aria-current="page"] {
     background: none;
     color: var(--out-strong);
-  }
-  .tabbar {
-    background: var(--surface);
   }
 
   /* A decision waiting on the user is visible whatever the screen. */
@@ -2465,8 +2819,12 @@ select {
     color: var(--ink-mut);
     flex: none;
   }
+  /* The version line is not a group's footnote: it is the bottom of the whole
+     screen, set centred with the full gap above it, the way the system writes
+     a build number under its own settings. */
   .you-foot {
-    margin-top: -14px;
+    margin-top: 0;
+    text-align: center;
   }
 
   /* Codes: the segmented control, then whichever half it chose. */
@@ -2486,7 +2844,7 @@ select {
      it came from. So every sheet fills the screen, which is also what the design
      of record draws.
   */
-  .sheet.center,
+  .sheet.center:not(.alert),
   .sheet.side {
     top: 0;
     left: 0;
@@ -2498,6 +2856,104 @@ select {
     border: 0;
     border-radius: 0;
     animation: ios-present 480ms var(--ease) both;
+  }
+  /* -- A pushed screen ------------------------------------------------------
+     Content the user drilled into, presented the way the stack presents
+     everything: from the right, over the list it came from, with the list's
+     name on the way back. Above the thread (a person can be opened from
+     anywhere, including over one). */
+  .sheet.pushscreen {
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 45;
+    width: auto;
+    max-height: none;
+    transform: none;
+    border: 0;
+    border-radius: 0;
+    background: var(--surface-sunk);
+    animation: ios-push-in 350ms var(--ease) both;
+    box-shadow: -8px 0 24px rgba(0, 0, 0, 0.12);
+  }
+  .sheet.pushscreen .sheet-body {
+    padding-top: 16px;
+  }
+
+  /* -- The alert ------------------------------------------------------------
+     The one modal this platform keeps small. 270pt wide in the middle of the
+     screen, everything centred, and the two answers side by side under a
+     hairline — as text, because an alert's buttons have never been pills: the
+     card is the button, divided. */
+  .sheet.center.alert {
+    width: 270px;
+    max-width: calc(100vw - 60px);
+    border: 0;
+    border-radius: 14px;
+    background: var(--bar);
+    -webkit-backdrop-filter: saturate(180%) blur(28px);
+    backdrop-filter: saturate(180%) blur(28px);
+    box-shadow: var(--shadow-3);
+    overflow: hidden;
+    animation: ios-alert-in 250ms var(--ease) both;
+  }
+  .sheet.center.alert .sheet-body {
+    padding: 19px 16px 15px;
+    gap: 4px;
+  }
+  .sheet.center.alert .t-head {
+    font-size: 17px;
+    font-weight: 620;
+    text-align: center;
+    letter-spacing: -0.01em;
+  }
+  .sheet.center.alert .t-sm {
+    margin-top: 0 !important;
+    font-size: 13px;
+    text-align: center;
+  }
+  .sheet.center.alert .sheet-foot {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0;
+    padding: 0;
+    border-top: 1px solid var(--line);
+  }
+  .sheet.center.alert .sheet-foot .spacer {
+    display: none;
+  }
+  .sheet.center.alert .sheet-foot .btn {
+    height: 44px;
+    border: 0;
+    border-radius: 0;
+    background: none;
+    font-size: 17px;
+    font-weight: 400;
+    color: var(--out-strong);
+    box-shadow: none;
+  }
+  .sheet.center.alert .sheet-foot .btn + .btn {
+    border-left: 1px solid var(--line);
+    /* The answer that goes ahead is the bold one. */
+    font-weight: 620;
+  }
+  .sheet.center.alert .sheet-foot .btn-danger {
+    color: var(--red);
+  }
+  .sheet.center.alert .sheet-foot .btn:active:not(:disabled) {
+    background: var(--fill-quiet);
+    transform: none;
+  }
+  @keyframes ios-alert-in {
+    from {
+      opacity: 0;
+      transform: translate(-50%, -50%) scale(1.12);
+    }
+    to {
+      opacity: 1;
+      transform: translate(-50%, -50%) scale(1);
+    }
   }
   .sheet-head {
     padding: calc(env(safe-area-inset-top, 0px) + 12px) 14px 12px;
@@ -2541,11 +2997,30 @@ select {
   }
   .sheet-body,
   .sheet-foot {
-    padding-left: 14px;
-    padding-right: 14px;
+    padding-left: 16px;
+    padding-right: 16px;
   }
-  .sheet-foot {
+  /* A footer's buttons, stacked and whole. Every footer in this app puts its
+     primary last in the row; reversing the column puts it on top, which is
+     where this platform stacks the thing it recommends — and each button gets
+     the full width, because half-width pairs are a desktop dialog's economy
+     that a 50pt button does not fit into. The alert keeps its own two-across
+     hairline layout, defined above. */
+  .sheet:not(.alert) .sheet-foot {
+    flex-direction: column-reverse;
+    align-items: stretch;
+    gap: 8px;
     padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 12px);
+    /* On the sheet's own ground: the grey strip under a desktop footer is a
+       window's way of saying "chrome", and these buttons are not chrome. */
+    background: none;
+    border-top: 0;
+  }
+  .sheet:not(.alert) .sheet-foot .btn {
+    width: 100%;
+  }
+  .sheet:not(.alert) .sheet-foot .spacer {
+    display: none;
   }
 
   /* -- A row you can swipe --------------------------------------------------
@@ -2580,21 +3055,44 @@ select {
 
   /* -- A thread, full screen ------------------------------------------------ */
 
+  /* One screen in from the Casella, and it arrives the way a screen does: from
+     the right edge, on the same curve as everything else. It came in with no
+     movement at all before, which is the one thing that made it read as a panel
+     that had been switched on rather than as somewhere you had gone. */
   .sheet-full {
     position: fixed;
     inset: 0;
     z-index: 40;
     display: flex;
     flex-direction: column;
-    background: var(--canvas);
+    background: var(--surface-sunk);
+    animation: ios-push-in 350ms var(--ease) both;
+    box-shadow: -8px 0 24px rgba(0, 0, 0, 0.12);
   }
   .sheet-full-bar {
-    display: flex;
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
     align-items: center;
     gap: 10px;
     flex: none;
-    padding: calc(env(safe-area-inset-top, 0px) + 10px) 14px 10px;
+    padding: calc(env(safe-area-inset-top, 0px) + 4px) 12px 4px;
+    min-height: calc(env(safe-area-inset-top, 0px) + 44px);
     border-bottom: 1px solid var(--line);
+    background: var(--bar);
+    -webkit-backdrop-filter: saturate(180%) blur(20px);
+    backdrop-filter: saturate(180%) blur(20px);
+  }
+  .sheet-full-bar h2 {
+    margin: 0;
+    font-size: 17px;
+    font-weight: 620;
+    letter-spacing: -0.01em;
+    text-align: center;
+  }
+  /* The third column, so the title sits in the middle of the bar rather than in
+     the middle of what is left of it. */
+  .bar-pad {
+    justify-self: end;
   }
   .sheet-full-body {
     flex: 1;
@@ -2603,7 +3101,23 @@ select {
     display: flex;
     flex-direction: column;
     gap: 12px;
-    padding: 12px 14px calc(env(safe-area-inset-bottom, 0px) + 14px);
+    padding: 18px 16px calc(env(safe-area-inset-bottom, 0px) + 16px);
+  }
+  /* Who you are looking at, in the place this platform puts it: its own block
+     under the bar, centred, with the name at a size you read rather than
+     glance at. */
+  .th-who {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    padding-bottom: 6px;
+  }
+  .th-who-name {
+    max-width: 100%;
+    font-size: 22px;
+    font-weight: 600;
+    letter-spacing: -0.02em;
   }
   .th-past {
     display: flex;
@@ -2649,6 +3163,22 @@ select {
     background: none;
     box-shadow: none;
     border: 0;
+  }
+  /* The way out of an empty screen is a tinted word, not a filled pill. A solid
+     block of colour in the middle of an otherwise empty screen is the loudest
+     thing this app can draw, and what it is saying is "there is nothing here" —
+     which is not the sentence that deserves it. */
+  .app-phone .empty .btn.btn-primary {
+    background: none;
+    border: 0;
+    box-shadow: none;
+    color: var(--out-strong);
+    font-size: 17px;
+    font-weight: 560;
+    padding: 6px 8px;
+  }
+  .app-phone .empty .btn.btn-primary svg {
+    display: none;
   }
 
   /* Dragging a file onto a phone is not a thing that happens: no overlay, and

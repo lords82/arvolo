@@ -1271,17 +1271,48 @@ export const useStore = create<State>((set, get) => {
     },
     back: () =>
       set((st) => {
+        // The screens that sit on top of the stack go first, topmost first: a
+        // person's page can be opened over anything (the palette does), a
+        // thread only over its list. Before this, the system's own back walked
+        // past an open thread and popped the screen underneath it — which on
+        // Android meant leaving the app from a person's page.
+        if (st.personOpen) return { personOpen: null };
+        if (st.threadKey) return { threadKey: null };
         if (st.stack.length < 2) return {};
         const stack = st.stack.slice(0, -1);
         return { stack, route: stack[stack.length - 1] };
       }),
     openIncoming: (offerId) => set({ incomingOfferId: offerId }),
-    openThread: (key) => set({ threadKey: key }),
+    openThread: (key) => {
+      // An entry of its own, for the same reason `push` leaves one: it is a
+      // screen, and every screen has to be one press of back away.
+      try {
+        window.history.pushState({ arvolo: "thread" }, "");
+      } catch {
+        // No history here: the button in the bar is then the only way out.
+      }
+      set({ threadKey: key });
+    },
     closeThread: () => set({ threadKey: null }),
     closeIncoming: () => set({ incomingOfferId: null }),
     openShare: (id) => set({ shareOpen: id }),
     closeShare: () => set({ shareOpen: null }),
-    openPerson: (name) => set({ personOpen: name }),
+    openPerson: (name) => {
+      // On a phone the person's page is pushed, not presented, so opening it
+      // leaves a history entry for the system's back to pop — the same
+      // contract as `push` and `openThread`. A desktop keeps its modal and its
+      // history untouched.
+      if (name && typeof window !== "undefined") {
+        try {
+          if (window.matchMedia("(max-width: 560px)").matches)
+            window.history.pushState({ arvolo: "person" }, "");
+        } catch {
+          // No history to leave an entry in: the back button in the bar still
+          // falls back to closing directly.
+        }
+      }
+      set({ personOpen: name });
+    },
     openReceive: () => set({ receiveOpen: true, receivePrefill: null }),
     openReceiveWith: (ticket) => set({ receiveOpen: true, receivePrefill: ticket }),
     closeReceive: () => set({ receiveOpen: false, receivePrefill: null }),

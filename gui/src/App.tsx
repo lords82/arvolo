@@ -28,7 +28,7 @@ import { ThreadSheet } from "./overlays/ThreadSheet";
 import { useIsPhone } from "./phone";
 import { useEdgeBack } from "./edgeback";
 import { TransfersView } from "./views/TransfersView";
-import { PeopleView } from "./views/PeopleView";
+import { PeopleBarMenu, PeopleView } from "./views/PeopleView";
 import { DepositsView } from "./views/DepositsView";
 import { HistoryView } from "./views/HistoryView";
 import { DevicesView } from "./views/DevicesView";
@@ -76,6 +76,16 @@ function viewFor(route: Route, isPhone: boolean) {
 
 export function App() {
   const isPhone = useIsPhone();
+  // The phone class goes on the document element, not only on the app's own
+  // div: sheets, menus and alerts render through portals into `document.body`,
+  // and a phone style scoped under a div they are not inside is a style they
+  // silently lose. On <html> it also sits beside `data-theme`, which makes the
+  // dark-palette guard `.app-phone:not([data-theme="light"])` actually able to
+  // see the choice it guards against.
+  useEffect(() => {
+    document.documentElement.classList.toggle("app-phone", isPhone);
+    return () => document.documentElement.classList.remove("app-phone");
+  }, [isPhone]);
   const stack = useStore((s) => s.stack);
   const back = useStore((s) => s.back);
   // Whether the title is still the big one under the bar, or has been handed up
@@ -385,6 +395,11 @@ export function App() {
 
       <div className="main">
         {/* --- health banners ------------------------------------------ */}
+        {/* A wrapper that is nothing on a desktop (`display: contents`) and, on
+            a phone, the tray these hang from under the bar. They cannot be rows
+            of the column any more: the column is one cell now, with the view
+            filling it and the glass laid over the top. */}
+        <div className="banners">
         {!connected && (
           <div className="banner bad" role="status">
             <Icon.Alert size={14} className="tone-bad" />
@@ -498,6 +513,7 @@ export function App() {
             </Button>
           </div>
         )}
+        </div>
 
         {/* --- header --------------------------------------------------- */}
         <header
@@ -547,8 +563,11 @@ export function App() {
             </Button>
           )}
 
-          {/* Search and "something new", which is what the design puts up here.
-              The send verb itself is in the bar, where a thumb is. */}
+          {/* Search, and a "+" that belongs to the screen it is on: on the
+              address book it adds a person (a menu of the ways in — see
+              `PeopleBarMenu`), everywhere else it starts a send. One glyph,
+              the screen's own meaning, which is how this platform's bars
+              work — Mail's compose and Contacts' add are the same corner. */}
           {isPhone && (
             <>
               <IconButton
@@ -557,9 +576,13 @@ export function App() {
               >
                 <Icon.Search size={17} />
               </IconButton>
-              <IconButton label={t("app.send")} onClick={() => openSheet([])}>
-                <Icon.Plus size={17} />
-              </IconButton>
+              {route === "people" ? (
+                <PeopleBarMenu />
+              ) : (
+                <IconButton label={t("app.send")} onClick={() => openSheet([])}>
+                  <Icon.Plus size={17} />
+                </IconButton>
+              )}
             </>
           )}
 
@@ -587,15 +610,7 @@ export function App() {
         </header>
 
         {/* --- the screen ----------------------------------------------- */}
-        <main
-          ref={viewRef}
-          className={`view${isPhone ? " staged" : ""}`}
-          onScroll={
-            isPhone && !leaving
-              ? (e) => setBigTitle(e.currentTarget.scrollTop < 12)
-              : undefined
-          }
-        >
+        <main ref={viewRef} className={`view${isPhone ? " staged" : ""}`}>
           {leaving && (
             <div className={`page leaving ${leaving.dir}`} aria-hidden>
               {(() => {
@@ -604,7 +619,18 @@ export function App() {
               })()}
             </div>
           )}
-          <div className={`page${leaving ? ` entering ${leaving.dir}` : ""}`}>
+          <div
+            className={`page${leaving ? ` entering ${leaving.dir}` : ""}`}
+            onScroll={
+              // On the page, because the page is what scrolls here. The bar
+              // takes the title over as the large one passes under the glass,
+              // not at the first pixel of scroll: the two saying the same name
+              // at once is the one state the handoff exists to prevent.
+              isPhone && !leaving
+                ? (e) => setBigTitle(e.currentTarget.scrollTop < 34)
+                : undefined
+            }
+          >
             {isPhone && stack.length === 1 && (
               <h2 className="large-title">{t(phoneTitle(route))}</h2>
             )}

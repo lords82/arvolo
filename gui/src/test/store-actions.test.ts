@@ -621,3 +621,51 @@ describe("clearFinished", () => {
     expect(row("oo1"), "an undecided arrival is not history").toBeTruthy();
   });
 });
+
+describe("the way back, on a phone", () => {
+  // Android's back is the system's, and it arrives here as a history pop — so
+  // every screen has to have left an entry behind, and one press has to undo
+  // exactly one screen. A thread that did neither let the back gesture walk
+  // straight past an open person and pop the list underneath them, which from
+  // the first screen means leaving the app.
+  it("102. takes an open thread away before it touches the stack", async () => {
+    await boot();
+    s().push("settings");
+    s().openThread("p1");
+    expect(s().threadKey).toBe("p1");
+
+    s().back();
+    expect(s().threadKey, "the thread goes first").toBeNull();
+    expect(s().route, "and the screen under it is still there").toBe("settings");
+
+    s().back();
+    expect(s().route).toBe("transfers");
+    expect(s().stack).toHaveLength(1);
+  });
+
+  it("103. opening a thread leaves an entry for the system's back to pop", async () => {
+    await boot();
+    const before = window.history.length;
+    s().openThread("p1");
+    expect(window.history.length).toBeGreaterThan(before);
+  });
+
+  it("104. a person's page goes before a thread, which goes before the stack", async () => {
+    // The palette can open a person over anything — including over an open
+    // thread. Back then has three things above the root, and takes them
+    // topmost first.
+    await boot();
+    s().push("settings");
+    s().openThread("p1");
+    s().openPerson("Giulia");
+
+    s().back();
+    expect(s().personOpen).toBeNull();
+    expect(s().threadKey, "the thread is still under it").toBe("p1");
+    s().back();
+    expect(s().threadKey).toBeNull();
+    expect(s().route).toBe("settings");
+    s().back();
+    expect(s().route).toBe("transfers");
+  });
+});
