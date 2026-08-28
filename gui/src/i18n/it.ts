@@ -196,6 +196,8 @@ export const it: Dict = {
   "codes.scanAction": "Apri la fotocamera",
   "codes.pasteAction": "Oppure incollane uno",
   "codes.scanNothing": "Non ho letto niente",
+  "you.receiving": "In arrivo",
+  "you.elsewhere": "Altrove",
   "you.unnamed": "Ancora senza nome",
   "you.allSettings": "Tutte le impostazioni",
   "you.relaySet": "impostato",

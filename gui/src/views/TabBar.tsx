@@ -54,10 +54,10 @@ export function TabBar() {
 
   return (
     <nav className="tabbar" aria-label={t("rail.nav")}>
-      {place("transfers", <Icon.Transfers />, count)}
-      {place("people", <Icon.People />)}
-      {place("codes", <Icon.Qr />)}
-      {place("settings", <Icon.Settings />)}
+      {place("transfers", <Icon.Transfers size={24} />, count)}
+      {place("people", <Icon.People size={24} />)}
+      {place("codes", <Icon.Qr size={24} />)}
+      {place("settings", <Icon.Settings size={24} />)}
     </nav>
   );
 }

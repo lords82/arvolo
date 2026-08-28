@@ -66,6 +66,7 @@ export function YouView() {
       {/* The one decision that is different on a phone. A row saying what is in
           force, pushing to where the three answers are — see `AutoAccept` in the
           engine, where the same three words become the rule. */}
+      <div className="ios-head">{t("you.receiving")}</div>
       <div className="ios-group">
         <Place
           label={t("settings.autoAcceptTitle")}
@@ -80,6 +81,7 @@ export function YouView() {
         />
       </div>
 
+      <div className="ios-head">{t("you.elsewhere")}</div>
       <div className="ios-group">
         <Place
           label={t("title.devices")}

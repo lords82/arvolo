@@ -201,6 +201,8 @@ export const fr: Dict = {
   "codes.scanAction": "Ouvrir la caméra",
   "codes.pasteAction": "Ou collez-en un",
   "codes.scanNothing": "Rien lu",
+  "you.receiving": "Réception",
+  "you.elsewhere": "Ailleurs",
   "you.unnamed": "Pas encore de nom",
   "you.allSettings": "Tous les réglages",
   "you.relaySet": "défini",

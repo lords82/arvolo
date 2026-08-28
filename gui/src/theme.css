@@ -1918,6 +1918,47 @@ select {
    have to stay one number, or the app draws a rail and a bar at once. */
 
 @media (max-width: 560px) {
+  /* -- Materials -----------------------------------------------------------
+     The brand is the tint, and the tint is the *only* place it appears: what a
+     control does is orange, and everything a control sits on is neutral. That
+     is not a preference, it is how this platform reads — a warm ground under a
+     white card says "somebody designed a theme", and a neutral one says
+     nothing at all, which is the point of a ground.
+
+     The greys are the system's: a grouped background under white cards in
+     light, and near-black under raised cards in dark, with separators thin
+     enough to be a hairline rather than a rule. */
+  .app-phone {
+    --canvas: #f2f2f7;
+    --surface: #ffffff;
+    --surface-2: #e9e9ee;
+    --surface-3: #e5e5ea;
+    --surface-sunk: #f2f2f7;
+    --line: rgba(60, 60, 67, 0.16);
+    --line-strong: rgba(60, 60, 67, 0.29);
+    --ink: #000000;
+    --ink-sec: rgba(60, 60, 67, 0.72);
+    --ink-mut: rgba(60, 60, 67, 0.6);
+    /* Tertiary: a chevron is a hint about where a row goes, never a thing to
+       read. */
+    --ink-faint: rgba(60, 60, 67, 0.3);
+  }
+  @media (prefers-color-scheme: dark) {
+    .app-phone:not([data-theme="light"]) {
+      --canvas: #000000;
+      --surface: #1c1c1e;
+      --surface-2: #2c2c2e;
+      --surface-3: #3a3a3c;
+      --surface-sunk: #000000;
+      --line: rgba(84, 84, 88, 0.6);
+      --line-strong: rgba(84, 84, 88, 0.65);
+      --ink: #ffffff;
+      --ink-sec: rgba(235, 235, 245, 0.65);
+      --ink-mut: rgba(235, 235, 245, 0.6);
+      --ink-faint: rgba(235, 235, 245, 0.3);
+    }
+  }
+
   .app-phone {
     /* The bar is a row of the frame, not something floating over the view: a
        list that scrolls under its own navigation hides its last item. */
@@ -1973,6 +2014,13 @@ select {
   .app-phone .header.big h1 {
     opacity: 0;
   }
+  /* Bar buttons are tinted, not grey. On this platform colour in a bar means
+     "this does something", and the only things in a bar are things that do. */
+  .app-phone .header .icon-btn,
+  .app-phone .header .icon-btn svg {
+    color: var(--out-strong);
+  }
+
   /* Left, and never centred: it is the thing you read to know the way out. */
   .nav-back {
     display: flex;
@@ -1990,12 +2038,13 @@ select {
   .nav-back:active {
     opacity: 0.5;
   }
+  /* 34/41 bold, which is the size this platform's large titles are. */
   .large-title {
-    margin: 2px 0 10px;
-    font-size: 32px;
+    margin: 0 0 8px;
+    font-size: 34px;
     font-weight: 700;
-    letter-spacing: -0.02em;
-    line-height: 1.1;
+    letter-spacing: -0.025em;
+    line-height: 41px;
     color: var(--ink);
   }
 
@@ -2034,7 +2083,10 @@ select {
     border: 0;
     background: none;
     color: var(--ink);
-    font: 400 16.5px var(--font);
+    /* Body is 17 here, and everything secondary is 15. Rows set at 16.5 read
+       as a web page that has been made small. */
+    font: 400 17px var(--font);
+    letter-spacing: -0.01em;
     text-align: left;
     cursor: pointer;
   }
@@ -2057,12 +2109,16 @@ select {
   }
   .ios-detail {
     color: var(--ink-mut);
-    font-size: 16px;
+    font-size: 17px;
+    letter-spacing: -0.01em;
     flex: none;
   }
+  /* Thin, tertiary, and small: a chevron says "there is more", and a chevron
+     you can read at a glance is one that is competing with the row. */
   .ios-chev {
-    color: var(--ink-mut);
-    opacity: 0.55;
+    color: var(--ink-faint);
+    width: 13px;
+    height: 13px;
     flex: none;
   }
   .ios-check {
@@ -2071,11 +2127,20 @@ select {
   }
   /* The sentence under a group: what the choice above actually costs. */
   .ios-foot {
-    padding: 0 4px;
+    padding: 0 16px;
     margin-top: -14px;
     color: var(--ink-mut);
     font-size: 13px;
     line-height: 1.35;
+  }
+  /* The label above a group. Grouped lists on this platform are titled from
+     outside, in the ground's own colour, not from a heading inside the card. */
+  .ios-head {
+    padding: 0 16px 6px;
+    margin-bottom: -14px;
+    color: var(--ink-mut);
+    font-size: 13px;
+    line-height: 1.3;
   }
 
   .tabbar {
@@ -2089,6 +2154,7 @@ select {
 
   .tab {
     flex: 1 1 0;
+    letter-spacing: 0;
     min-width: 0;
     /* The platform minimum for something meant to be hit with a finger. */
     min-height: 44px;
@@ -2111,6 +2177,7 @@ select {
   .tab .ico {
     position: relative;
     height: 30px;
+
     display: flex;
     align-items: center;
     justify-content: center;
@@ -2232,17 +2299,25 @@ select {
     align-items: baseline;
     gap: 8px;
   }
+  /* The time a row happened is secondary, and 15 is what secondary is. */
+  .cs-head .t-xs {
+    font-size: 15px;
+    color: var(--ink-mut);
+  }
   .cs-who {
     flex: 1;
-    font-size: 14px;
+    font-size: 17px;
     font-weight: 600;
+    letter-spacing: -0.015em;
   }
   .cs-head {
     gap: 8px;
   }
   .cs-line {
     display: block;
-    margin: 1px 0 0;
+    margin: 2px 0 0;
+    font-size: 15px;
+    letter-spacing: -0.01em;
   }
   .cs-track {
     margin-top: 6px;
@@ -2275,12 +2350,13 @@ select {
     min-height: 62px;
   }
   .people-row .row-name {
-    font-size: 16.5px;
+    font-size: 17px;
     font-weight: 500;
+    letter-spacing: -0.015em;
   }
   .people-row .row-meta {
     display: block;
-    font-size: 13px;
+    font-size: 15px;
     color: var(--ink-mut);
     margin-top: 1px;
   }
@@ -2312,8 +2388,9 @@ select {
   }
   .you-name {
     display: block;
-    font-size: 15px;
+    font-size: 20px;
     font-weight: 600;
+    letter-spacing: -0.02em;
   }
   .you-me .ico,
   .you-me svg {
@@ -2469,6 +2546,41 @@ select {
   }
   .th-past:last-child {
     border-bottom: 0;
+  }
+
+  /* An empty state is not an object. This platform writes it on the ground —
+     centred, grey, no edges — because there is nothing there to put in a box,
+     and the glyph is a symbol rather than a chip: a rounded grey square around
+     an icon is a button that cannot be pressed. */
+  .app-phone .empty {
+    background: none;
+    border: 0;
+  }
+  .app-phone .empty .glyph {
+    background: none;
+    border: 0;
+    width: auto;
+    height: auto;
+    color: var(--ink-faint);
+  }
+  .app-phone .empty .glyph svg {
+    width: 46px;
+    height: 46px;
+  }
+  .app-phone .empty h3 {
+    font-size: 17px;
+    font-weight: 600;
+  }
+  .app-phone .empty p {
+    font-size: 15px;
+    color: var(--ink-mut);
+  }
+  /* Wherever it is nested: the card around an empty state is the box, and the
+     box is what this platform does not draw. */
+  .app-phone .card:has(> .empty) {
+    background: none;
+    box-shadow: none;
+    border: 0;
   }
 
   /* Dragging a file onto a phone is not a thing that happens: no overlay, and

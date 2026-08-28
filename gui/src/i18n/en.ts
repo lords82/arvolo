@@ -234,6 +234,8 @@ export const en = {
   "codes.scanAction": "Open the camera",
   "codes.pasteAction": "Paste one instead",
   "codes.scanNothing": "Nothing read",
+  "you.receiving": "Receiving",
+  "you.elsewhere": "Elsewhere",
   "you.unnamed": "No name yet",
   "you.allSettings": "All settings",
   "you.relaySet": "set",
