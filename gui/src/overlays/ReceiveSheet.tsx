@@ -92,6 +92,22 @@ export function ReceiveSheet() {
       onClose={close}
       title={t("receive.title")}
       subtitle={t("receive.subtitle")}
+      bar={{
+        cancel: (
+          <button className="bar-btn" onClick={close} disabled={busy}>
+            {t("common.cancel")}
+          </button>
+        ),
+        confirm: (
+          <button
+            className="bar-btn strong"
+            onClick={submit}
+            disabled={!value.trim() || busy}
+          >
+            {t("receive.submit")}
+          </button>
+        ),
+      }}
       footer={
         <>
           <div className="spacer" />

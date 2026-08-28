@@ -1220,6 +1220,10 @@ export const useStore = create<State>((set, get) => {
       set({
         route: r,
         stack: [r],
+        // A thread belongs to the list it was opened from. Leaving it up over
+        // another place is how a tap on "Persone" came to show somebody's
+        // transfers.
+        threadKey: null,
         paletteOpen: false,
         personOpen: null,
         depositsError: null,
@@ -1252,8 +1256,19 @@ export const useStore = create<State>((set, get) => {
       }),
     closeSheet: () =>
       set({ sheetPicks: null, sheetTo: null, sheetMode: null }),
-    push: (r) =>
-      set((st) => ({ route: r, stack: [...st.stack, r], personOpen: null })),
+    push: (r) => {
+      // One entry per screen, so the platform's own back — the gesture from the
+      // edge on Android, which belongs to the system and not to this app —
+      // walks the same stack the button does. Without it the first back closes
+      // the app from three screens in.
+      try {
+        window.history.pushState({ arvolo: r }, "");
+      } catch {
+        // A renderer with no history to push to still navigates; it just has
+        // the button and nothing else.
+      }
+      set((st) => ({ route: r, stack: [...st.stack, r], personOpen: null }));
+    },
     back: () =>
       set((st) => {
         if (st.stack.length < 2) return {};
@@ -1532,12 +1547,48 @@ export const useStore = create<State>((set, get) => {
     },
 
     accept: async (offerId, out, password) => {
-      await act(t("store.errAccept"), () =>
+      // What the offer knew about who it is from. The row the events build has
+      // none of it — `started` carries an id, a direction, a name and a size —
+      // and the sender only comes back on the next snapshot. A window that
+      // groups by correspondent would lose the transfer until then, which is
+      // exactly what happened: a file accepted on a phone vanished from the
+      // list it had just been accepted in, and came back on the next reload.
+      const from = get().transfers[`o${offerId}`];
+      const id = await act(t("store.errAccept"), () =>
         api.acceptOffer(offerId, out, password ?? null)
       );
       set((s) => {
         const { [`o${offerId}`]: _drop, ...rest } = s.transfers;
-        return { transfers: rest, incomingOfferId: null };
+        const key = `t${id}`;
+        const seeded = { ...rest };
+        if (typeof id === "number" && from) {
+          seeded[key] = {
+            ...(rest[key] ?? {
+              key,
+              id,
+              dir: "in" as const,
+              name: from.name,
+              size: from.size,
+              transferred: 0,
+              status: "active" as const,
+              verified: from.verified,
+              swarmPeers: 0,
+              downloadPeers: 0,
+              firstSeen: Date.now(),
+              rank: Date.now(),
+              canPause: true,
+              copiesServed: 0,
+              bytesServed: 0,
+              lastPickup: 0,
+              fromDownload: 0,
+            }),
+            peer: from.peer,
+            peerId: from.peerId,
+            fingerprint: from.fingerprint,
+            senderName: from.senderName,
+          };
+        }
+        return { transfers: seeded, incomingOfferId: null };
       });
     },
     reject: async (offerId) => {

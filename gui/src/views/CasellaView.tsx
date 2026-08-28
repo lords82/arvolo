@@ -14,11 +14,16 @@
 
 import { useT } from "../i18n";
 import { fmtAgo, fmtBytes, pct, barClass, statusMeta, shortId } from "../format";
-import { useStore } from "../store";
+import { fire, useStore } from "../store";
 import type { UITransfer } from "../types";
 import { Avatar } from "../ui/Bits";
 import { Icon } from "../ui/Icons";
 import { Empty } from "../ui/Primitives";
+import { SwipeRow, type SwipeAction } from "../ui/SwipeRow";
+import { api } from "../ipc";
+
+/** Where a transfer goes while nobody has said who it is with. */
+export const UNKNOWN = "\u0000unknown";
 
 /** Everything that has passed between us and one correspondent. */
 export interface Thread {
@@ -40,13 +45,18 @@ export interface Thread {
 export function threadsOf(rows: UITransfer[]): Thread[] {
   const by = new Map<string, Thread>();
   for (const r of rows) {
-    // An anonymous share or a link has no correspondent. It is not "nobody" —
-    // it is a different kind of thing, and it gets its own row below.
-    const key = r.peerId || r.peer || "";
-    if (!key) continue;
+    // A share and a link have no correspondent by construction: nobody was sent
+    // them, and they get their own row below rather than a thread.
+    if (r.status === "sharing") continue;
+    // Everything else without one is a transfer whose sender is not known *yet*
+    // — a row built from events before the first snapshot carries an id, a name
+    // and a size and nothing about who. Filing it under "unknown" keeps it on
+    // screen until the snapshot says; dropping it made an accepted file vanish
+    // from the list it was accepted in.
+    const key = r.peerId || r.peer || UNKNOWN;
     const t: Thread = by.get(key) ?? {
       key,
-      who: r.peer || shortId(key),
+      who: r.peer || (key === UNKNOWN ? "" : shortId(key)),
       peerId: r.peerId,
       rows: [],
     };
@@ -81,6 +91,29 @@ function Line({ tx }: { tx: UITransfer }) {
   );
 }
 
+/** What you would actually do to this row, in the state it is in.
+ *
+ * One action, chosen by the row rather than offered as a list: a transfer that
+ * is running can be held, one that has arrived can be opened, and a deposit
+ * nobody has collected can be taken back. Anything else has no obvious verb, and
+ * a swipe that reveals a verb you did not want is worse than a swipe that
+ * reveals nothing. */
+function actionFor(tx: UITransfer | undefined, t: ReturnType<typeof useT>): SwipeAction | undefined {
+  const pause = useStore.getState().pause;
+  const cancel = useStore.getState().cancel;
+  if (!tx) return undefined;
+  if (tx.canPause && (tx.status === "active" || tx.status === "stalled")) {
+    return { label: t("row.pause"), run: () => fire(pause(tx.id)) };
+  }
+  if (tx.status === "completed" && tx.dir === "in" && tx.path) {
+    return { label: t("common.open"), run: () => void api.openPath(tx.path!) };
+  }
+  if (tx.dir === "out" && tx.offerStatus === "pending") {
+    return { label: t("row.takeBack"), danger: true, run: () => fire(cancel(tx.id)) };
+  }
+  return undefined;
+}
+
 function ThreadRow({ thread }: { thread: Thread }) {
   const t = useT();
   const open = useStore((s) => s.openThread);
@@ -96,11 +129,14 @@ function ThreadRow({ thread }: { thread: Thread }) {
   const parked = latest?.offerStatus === "pending" || latest?.offerStatus === "arrived";
 
   return (
+    <SwipeRow action={actionFor(latest, t)}>
     <button className="cs-row" onClick={() => open(thread.key)}>
       <Avatar name={thread.who} id={thread.peerId} size={36} ring={ring(latest)} />
       <span className="cs-body">
         <span className="cs-head">
-          <span className="truncate cs-who">{thread.who}</span>
+          <span className="truncate cs-who">
+            {thread.who || t("casella.unknownWho")}
+          </span>
           <span className="t-xs t-mut">{fmtAgo(latest.firstSeen / 1000)}</span>
         </span>
         <Line tx={latest} />
@@ -115,7 +151,9 @@ function ThreadRow({ thread }: { thread: Thread }) {
           </span>
         )}
       </span>
+      <Icon.ChevronRight size={15} className="ios-chev" />
     </button>
+    </SwipeRow>
   );
 }
 
@@ -151,14 +189,20 @@ export function CasellaView() {
   }
 
   return (
-    <div className="casella">
-      {threads.map((th) => (
-        <ThreadRow key={th.key} thread={th} />
-      ))}
+    <div className="ios-page casella">
+      <div className="ios-group">
+        {threads.map((th) => (
+          <ThreadRow key={th.key} thread={th} />
+        ))}
+      </div>
 
       {/* A public link belongs to nobody, so it cannot be a correspondent. It is
           still something that happened and can still be revoked, so it is here
-          rather than only two taps away under Settings. */}
+          rather than only two taps away under Settings — its own group, because
+          it is a different kind of thing and this platform says that with a gap
+          rather than with a label. */}
+      {links.length > 0 && (
+      <div className="ios-group">
       {links.map((d) => (
         <button
           key={d.id}
@@ -178,8 +222,10 @@ export function CasellaView() {
           </span>
         </button>
       ))}
+      </div>
+      )}
 
-      <div className="t-xs t-mut cs-hint">{t("casella.rowHint")}</div>
+      <div className="ios-foot">{t("casella.rowHint")}</div>
     </div>
   );
 }

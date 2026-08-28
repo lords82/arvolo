@@ -6,7 +6,7 @@
 // report the app's own health — a daemon that cannot be reached, and a daemon
 // whose version no longer matches this build.
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { enable as autostartEnable } from "@tauri-apps/plugin-autostart";
 import { onArvoloTicket, onPickedFiles } from "./ipc";
@@ -26,6 +26,7 @@ import { YouView } from "./views/YouView";
 import { AutoAcceptView } from "./views/AutoAcceptView";
 import { ThreadSheet } from "./overlays/ThreadSheet";
 import { useIsPhone } from "./phone";
+import { useEdgeBack } from "./edgeback";
 import { TransfersView } from "./views/TransfersView";
 import { PeopleView } from "./views/PeopleView";
 import { DepositsView } from "./views/DepositsView";
@@ -51,6 +52,7 @@ export function App() {
   // Whether the title is still the big one under the bar, or has been handed up
   // into it. Reset on arrival: a new screen starts at the top of itself.
   const [bigTitle, setBigTitle] = useState(true);
+  const viewRef = useRef<HTMLElement>(null);
   const t = useT();
   const init = useStore((s) => s.init);
   const connected = useStore((s) => s.connected);
@@ -63,6 +65,19 @@ export function App() {
   const route = useStore((s) => s.route);
   // A screen you have just arrived at starts at the top of itself.
   useEffect(() => setBigTitle(true), [route]);
+  // The way back a thumb actually uses.
+  //
+  // Two of them, for two platforms. On iOS the drag from the left edge is the
+  // app's to implement — the system does not take it, and a stack without it is
+  // one you have to climb by aiming at a corner. On Android that edge *is* the
+  // system's back gesture, and it arrives here as a history pop, which is why
+  // `push` leaves an entry behind for it to pop.
+  useEdgeBack(viewRef, isPhone && stack.length > 1, () => window.history.back());
+  useEffect(() => {
+    const onPop = () => back();
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, [back]);
   const go = useStore((s) => s.go);
   const search = useStore((s) => s.search);
   const setSearch = useStore((s) => s.setSearch);
@@ -463,7 +478,7 @@ export function App() {
               chevron alone is a guess, and the label is what turns a stack into
               somewhere you can read your way out of. */}
           {isPhone && stack.length > 1 && (
-            <button className="nav-back" onClick={back}>
+            <button className="nav-back" onClick={() => window.history.back()}>
               <Icon.ChevronLeft size={19} />
               <span className="truncate">
                 {t(phoneTitle(stack[stack.length - 2]))}
@@ -542,6 +557,7 @@ export function App() {
 
         {/* --- the screen ----------------------------------------------- */}
         <main
+          ref={viewRef}
           className="view"
           onScroll={
             isPhone

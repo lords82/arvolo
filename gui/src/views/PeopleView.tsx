@@ -104,9 +104,33 @@ function ContactMeta({ c }: { c: ContactDto }) {
   return <span className="t-xs t-mut truncate">{parts.join(" · ")}</span>;
 }
 
+/** The row this platform draws for a person: a face, a name, one line about
+ *  them, what is worth reading at a glance, and the way in. The verbs are not
+ *  here — they are one screen further, where each has room for its own word. */
+function PhoneRow({ c }: { c: ContactDto }) {
+  const openPerson = useStore((s) => s.openPerson);
+  return (
+    <button className="ios-row people-row" onClick={() => openPerson(c.name)}>
+      <Avatar name={c.display_name || c.name} id={c.id} size={38} />
+      <span className="grow" style={{ minWidth: 0 }}>
+        <span className="row-name hstack-sm" title={c.name}>
+          <PresenceDot id={c.id} />
+          <span className="truncate">{c.name}</span>
+        </span>
+        <span className="row-meta">
+          <ContactMeta c={c} />
+        </span>
+      </span>
+      <TrustBadges verified={c.verified} trusted={c.trusted} blocked={c.blocked} />
+      <Icon.ChevronRight size={15} className="ios-chev" />
+    </button>
+  );
+}
+
 function PersonRow({ c }: { c: ContactDto }) {
   const t = useT();
   const isPhone = useIsPhone();
+  if (isPhone) return <PhoneRow c={c} />;
   const openSheet = useStore((s) => s.openSheet);
   const openPerson = useStore((s) => s.openPerson);
   const markUnverified = useStore((s) => s.markUnverified);
@@ -882,7 +906,7 @@ export function PeopleView() {
           </Empty>
         </div>
       ) : (
-        <div className="card rows">
+        <div className={isPhone ? "ios-group" : "card rows"}>
           {shown.map((c) => (
             <PersonRow key={c.name} c={c} />
           ))}

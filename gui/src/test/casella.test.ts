@@ -4,7 +4,7 @@
 // under nobody at all and quietly missing.
 
 import { describe, expect, it } from "vitest";
-import { threadsOf } from "../views/CasellaView";
+import { threadsOf, UNKNOWN } from "../views/CasellaView";
 import type { UITransfer } from "../types";
 
 function t(over: Partial<UITransfer> = {}): UITransfer {
@@ -57,13 +57,23 @@ describe("the Casella's grouping", () => {
     expect(threads[1].rows[0].key).toBe("newest-marco");
   });
 
-  it("leaves out what has no correspondent, rather than inventing one", () => {
-    // A served ticket and a public link are not a person: they belong to the row
-    // below the list, and a thread headed by an empty name is not a thing.
+  it("leaves out a share, which is nobody's, and keeps a transfer that is somebody's", () => {
+    // A served ticket and a public link were sent to nobody: they belong to the
+    // row below the list, not to a thread.
+    //
+    // A transfer with no sender *yet* is the opposite case and the one that
+    // matters: a row built from events alone — id, direction, name, size — knows
+    // nothing about who until the next snapshot. Dropping it made a file vanish
+    // from the list it had just been accepted in, which is the worst moment for
+    // a file to be missing.
     const threads = threadsOf([
       t({ key: "share", peerId: undefined, peer: undefined, status: "sharing" }),
+      t({ key: "just-accepted", peerId: undefined, peer: undefined, dir: "in" }),
       t({ key: "with-giulia", peerId: GIULIA, peer: "Giulia" }),
     ]);
-    expect(threads.map((x) => x.key)).toEqual([GIULIA]);
+    expect(threads.map((x) => x.key).sort()).toEqual([GIULIA, UNKNOWN].sort());
+    expect(threads.find((x) => x.key === UNKNOWN)?.rows[0].key).toBe(
+      "just-accepted"
+    );
   });
 });

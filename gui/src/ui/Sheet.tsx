@@ -15,6 +15,7 @@ import {
   type ReactNode,
 } from "react";
 import { useT } from "../i18n";
+import { useIsPhone } from "../phone";
 import { Icon } from "./Icons";
 import { Button, IconButton } from "./Primitives";
 
@@ -86,6 +87,11 @@ interface SheetProps {
   placement?: "side" | "center";
   children: ReactNode;
   footer?: ReactNode;
+  /** The same decision, said the way a phone says it: one control on the left of
+   *  the top bar and one on the right, with the title between them. Given, a
+   *  phone uses this and drops the footer; a window ignores it and keeps the
+   *  footer, where a decision belongs when there is room under what it acts on. */
+  bar?: { cancel?: ReactNode; confirm?: ReactNode };
   /** Extra control in the header, left of the close button. */
   headerAction?: ReactNode;
   /** Whether clicking the backdrop closes (default: yes).
@@ -105,10 +111,12 @@ export function Sheet({
   placement = "side",
   children,
   footer,
+  bar,
   headerAction,
   dismissOnScrim = true,
 }: SheetProps) {
   const t = useT();
+  const isPhone = useIsPhone();
   const ref = useRef<HTMLDivElement>(null);
   useModal(ref, onClose, open);
   if (!open) return null;
@@ -123,18 +131,33 @@ export function Sheet({
         aria-label={typeof title === "string" ? title : undefined}
         tabIndex={-1}
       >
-        <div className="sheet-head">
-          <div className="grow">
-            <div className="t-head">{title}</div>
-            {subtitle && <div className="hint">{subtitle}</div>}
+        {/* Two heads, one for each platform's idea of where a decision lives.
+            A window puts the buttons at the bottom of the sheet, under what they
+            act on; a phone puts them in the bar at the top, one on each side,
+            and gives the middle to the title. `bar` is a sheet saying it knows
+            how to be both — without it, the footer is used on both. */}
+        {bar && isPhone ? (
+          <div className="sheet-head sheet-bar">
+            <span className="bar-left">{bar.cancel}</span>
+            <span className="t-head truncate">{title}</span>
+            <span className="bar-right">{bar.confirm}</span>
           </div>
-          {headerAction}
-          <IconButton label={t("common.close")} onClick={onClose}>
-            <Icon.Close />
-          </IconButton>
-        </div>
+        ) : (
+          <div className="sheet-head">
+            <div className="grow">
+              <div className="t-head">{title}</div>
+              {subtitle && <div className="hint">{subtitle}</div>}
+            </div>
+            {headerAction}
+            <IconButton label={t("common.close")} onClick={onClose}>
+              <Icon.Close />
+            </IconButton>
+          </div>
+        )}
         <div className="sheet-body">{children}</div>
-        {footer && <div className="sheet-foot">{footer}</div>}
+        {footer && !(bar && isPhone) && (
+          <div className="sheet-foot">{footer}</div>
+        )}
       </div>
     </>
   );

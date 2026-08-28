@@ -546,6 +546,34 @@ export function SendSheet() {
       // No subtitle once there is a result: the thing to hand over is right
       // there under it, and "Hand over what you see below" only said so again.
       subtitle={result ? undefined : t("send.subtitle")}
+      bar={{
+        cancel: result ? undefined : (
+          <button className="bar-btn" onClick={close} disabled={busy}>
+            {t("common.cancel")}
+          </button>
+        ),
+        confirm: result ? (
+          <button className="bar-btn strong" onClick={close}>
+            {t("common.done")}
+          </button>
+        ) : (
+          <button
+            className="bar-btn strong"
+            onClick={submit}
+            disabled={!canSubmit || linkTooMany || busy}
+          >
+            {pushes
+              ? asDeposit
+                ? t("send.submitDeposit")
+                : t("send.submitSend")
+              : mode === "code"
+                ? t("send.submitCode")
+                : mode === "link"
+                  ? t("send.submitLink")
+                  : t("send.submitTicket")}
+          </button>
+        ),
+      }}
       footer={
         result ? (
           <>
