@@ -45,6 +45,35 @@ import { CommandPalette } from "./overlays/CommandPalette";
  *  screens would be worse than no field. */
 const SEARCHABLE: Route[] = ["transfers"];
 
+/** Which screen a place is, on each platform.
+ *
+ *  A function rather than an expression inside the render because a push has to
+ *  draw *two* screens for the length of the animation: the one arriving and the
+ *  one being left behind. */
+function viewFor(route: Route, isPhone: boolean) {
+  return route === "transfers"
+    ? isPhone
+      ? CasellaView
+      : TransfersView
+    : route === "people"
+      ? PeopleView
+      : route === "codes"
+        ? CodesView
+        : route === "autoAccept"
+          ? AutoAcceptView
+          : route === "deposits"
+            ? DepositsView
+            : route === "history"
+              ? HistoryView
+              : route === "devices"
+                ? DevicesView
+                : // The desktop lands on its settings window; a phone lands on
+                  // *You* and reaches the window from a row inside it.
+                  route === "settings" && isPhone
+                  ? YouView
+                  : SettingsView;
+}
+
 export function App() {
   const isPhone = useIsPhone();
   const stack = useStore((s) => s.stack);
@@ -63,8 +92,31 @@ export function App() {
   const dismissActionError = useStore((s) => s.dismissActionError);
   const reload = useStore((s) => s.reload);
   const route = useStore((s) => s.route);
+  // The screen being left behind, for as long as it takes to leave it.
+  //
+  // Switching *tabs* sets nothing: this platform cross-cuts between roots with
+  // no animation at all, and a slide there would claim a depth that is not
+  // there. Only going in and coming out of a stack moves.
+  const [leaving, setLeaving] = useState<{ route: Route; dir: "push" | "pop" } | null>(
+    null
+  );
+  const seen = useRef({ route, depth: 1 });
   // A screen you have just arrived at starts at the top of itself.
   useEffect(() => setBigTitle(true), [route]);
+  useEffect(() => {
+    const was = seen.current;
+    seen.current = { route, depth: stack.length };
+    if (!isPhone || was.route === route) return;
+    const dir =
+      stack.length > was.depth ? "push" : stack.length < was.depth ? "pop" : null;
+    if (!dir) return;
+    setLeaving({ route: was.route, dir });
+    // Slightly longer than the animation: taking the old screen away a frame
+    // early is a flicker at the very end of the movement, which is the one part
+    // of it people watch.
+    const done = window.setTimeout(() => setLeaving(null), 380);
+    return () => window.clearTimeout(done);
+  }, [route, stack.length, isPhone]);
   // The way back a thumb actually uses.
   //
   // Two of them, for two platforms. On iOS the drag from the left edge is the
@@ -325,28 +377,7 @@ export function App() {
   // The desktop keeps every screen it had. Where a phone wants a different one —
   // and Transfers is the case: two columns of files against one list of people —
   // it gets its own, and the desktop never sees it.
-  const View =
-    route === "transfers"
-      ? isPhone
-        ? CasellaView
-        : TransfersView
-      : route === "people"
-        ? PeopleView
-        : route === "codes"
-          ? CodesView
-          : route === "autoAccept"
-            ? AutoAcceptView
-          : route === "deposits"
-            ? DepositsView
-            : route === "history"
-              ? HistoryView
-              : route === "devices"
-                ? DevicesView
-                : // The desktop lands on its settings window; a phone lands on
-                  // *You* and reaches the window from a row inside it.
-                  route === "settings" && isPhone
-                  ? YouView
-                  : SettingsView;
+  const View = viewFor(route, isPhone);
 
   return (
     <div className={`app${isPhone ? " app-phone" : ""}`}>
@@ -558,17 +589,27 @@ export function App() {
         {/* --- the screen ----------------------------------------------- */}
         <main
           ref={viewRef}
-          className="view"
+          className={`view${isPhone ? " staged" : ""}`}
           onScroll={
-            isPhone
+            isPhone && !leaving
               ? (e) => setBigTitle(e.currentTarget.scrollTop < 12)
               : undefined
           }
         >
-          {isPhone && stack.length === 1 && (
-            <h2 className="large-title">{t(phoneTitle(route))}</h2>
+          {leaving && (
+            <div className={`page leaving ${leaving.dir}`} aria-hidden>
+              {(() => {
+                const Gone = viewFor(leaving.route, isPhone);
+                return <Gone />;
+              })()}
+            </div>
           )}
-          <View />
+          <div className={`page${leaving ? ` entering ${leaving.dir}` : ""}`}>
+            {isPhone && stack.length === 1 && (
+              <h2 className="large-title">{t(phoneTitle(route))}</h2>
+            )}
+            <View />
+          </div>
         </main>
       </div>
 

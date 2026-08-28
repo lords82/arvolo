@@ -86,7 +86,9 @@ export function SwipeRow({
         className="swipe-face"
         style={{
           transform: `translateX(${dx}px)`,
-          transition: snap ? "transform 180ms cubic-bezier(.2,.8,.2,1)" : "none",
+          // The platform's curve and its length: a snap that takes 180ms reads as a
+          // web page reacting, not as a row settling.
+          transition: snap ? "transform 320ms cubic-bezier(0.32,0.72,0,1)" : "none",
         }}
         onTouchStart={onStart}
         onTouchMove={onMove}

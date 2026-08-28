@@ -2052,9 +2052,66 @@ select {
   .app-phone .main {
     background: var(--surface-sunk);
   }
-  .app-phone .view {
+  /* -- Motion --------------------------------------------------------------
+     A push slides in from the right while the screen it came from goes back a
+     third of the way: the parallax is what says the two are stacked rather than
+     swapped. The curve is the platform's — fast to leave, long to settle, no
+     overshoot — and it is already `--ease` here; what was wrong was the
+     duration, which was a desktop's 180ms.
+
+     Tabs do not move at all, which is also this platform: four roots side by
+     side are not a depth, and sliding between them would claim one. */
+  .app-phone .view.staged {
+    position: relative;
+    overflow: hidden;
+    padding: 0;
+    background: var(--surface-sunk);
+  }
+  .app-phone .page {
     padding: 6px 16px 18px;
     background: var(--surface-sunk);
+  }
+  .app-phone .view.staged > .page.entering,
+  .app-phone .view.staged > .page.leaving {
+    position: absolute;
+    inset: 0;
+    overflow-y: auto;
+  }
+  .page.entering.push {
+    z-index: 2;
+    animation: ios-push-in 350ms var(--ease) both;
+    box-shadow: -8px 0 24px rgba(0, 0, 0, 0.12);
+  }
+  .page.leaving.push {
+    animation: ios-push-out 350ms var(--ease) both;
+  }
+  .page.entering.pop {
+    animation: ios-pop-in 350ms var(--ease) both;
+  }
+  .page.leaving.pop {
+    z-index: 2;
+    animation: ios-pop-out 350ms var(--ease) both;
+    box-shadow: -8px 0 24px rgba(0, 0, 0, 0.12);
+  }
+  @keyframes ios-push-in {
+    from {
+      transform: translateX(100%);
+    }
+  }
+  @keyframes ios-push-out {
+    to {
+      transform: translateX(-30%);
+    }
+  }
+  @keyframes ios-pop-in {
+    from {
+      transform: translateX(-30%);
+    }
+  }
+  @keyframes ios-pop-out {
+    to {
+      transform: translateX(100%);
+    }
   }
 
   /* -- Grouped, inset lists ------------------------------------------------
@@ -2104,8 +2161,15 @@ select {
     height: 1px;
     background: var(--line);
   }
+  /* On at once, off slowly: a highlight that fades *in* is a page thinking
+     about it, and the whole point of this one is that the row answers the
+     finger before anything else happens. */
+  .ios-row {
+    transition: background 320ms var(--ease);
+  }
   .ios-row:active {
     background: var(--surface-2);
+    transition: none;
   }
   .ios-detail {
     color: var(--ink-mut);
@@ -2285,8 +2349,12 @@ select {
     height: 1px;
     background: var(--line);
   }
+  .cs-row {
+    transition: background 320ms var(--ease);
+  }
   .cs-row:active {
     background: var(--surface-2);
+    transition: none;
   }
 
   .cs-body {
@@ -2429,7 +2497,7 @@ select {
     transform: none;
     border: 0;
     border-radius: 0;
-    animation: rise-phone var(--t) var(--ease);
+    animation: ios-present 480ms var(--ease) both;
   }
   .sheet-head {
     padding: calc(env(safe-area-inset-top, 0px) + 12px) 14px 12px;
@@ -2603,10 +2671,11 @@ select {
    list of keyframes, so honouring the preference is a single block rather than
    a per-component audit. The pulsing presence dot is stopped outright — a
    perpetual animation is exactly what the preference is about. */
-@keyframes rise-phone {
+/* Up from the edge it came from, the whole way. A sheet that fades in ten
+   pixels is a dialog wearing a sheet's clothes. */
+@keyframes ios-present {
   from {
-    opacity: 0;
-    transform: translateY(10px);
+    transform: translateY(100%);
   }
 }
 

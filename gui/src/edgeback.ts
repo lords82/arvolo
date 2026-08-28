@@ -43,7 +43,7 @@ export function useEdgeBack(
       node.style.transition = "";
     };
     const release = (commit: boolean) => {
-      node.style.transition = "transform 180ms cubic-bezier(.2,.8,.2,1)";
+      node.style.transition = "transform 350ms cubic-bezier(0.32,0.72,0,1)";
       node.style.transform = commit ? "translateX(100%)" : "";
       if (commit) {
         // After the slide, not before: going back mid-animation swaps the
@@ -52,7 +52,7 @@ export function useEdgeBack(
           node.style.transition = "";
           node.style.transform = "";
           back.current();
-        }, 170);
+        }, 340);
       }
     };
 
