@@ -11,6 +11,7 @@ import {
 } from "./ipc";
 import { shortId } from "./format";
 import { t } from "./i18n";
+import type { Dict } from "./i18n";
 import { toast } from "./ui/Toasts";
 import * as updates from "./update";
 import type {
@@ -60,6 +61,24 @@ export const TITLE_KEY = {
   devices: "title.devices",
   settings: "title.settings",
 } as const satisfies Record<Route, string>;
+
+/** What a place is called on a phone, where it is called something else.
+ *
+ *  Two of the six are: the transfers list is a *mailbox* of correspondents
+ *  rather than two columns of files, and the settings screen is *you* — an
+ *  identity with a few switches under it, not a preferences window. Anything not
+ *  named here keeps the name it has everywhere. */
+const PHONE_TITLES = {
+  transfers: "casella.title",
+  settings: "title.you",
+} as const;
+
+/** The phone's name for a place, or the one everywhere else. */
+export function phoneTitle(route: Route): keyof Dict {
+  return route in PHONE_TITLES
+    ? PHONE_TITLES[route as keyof typeof PHONE_TITLES]
+    : TITLE_KEY[route];
+}
 
 export type ThemeChoice = "system" | "light" | "dark";
 

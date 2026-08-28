@@ -16,6 +16,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../ipc";
 import { SELF_RECIPIENT, useStore } from "../store";
+import { useIsPhone } from "../phone";
 import type { SendMode } from "../store";
 import { useT } from "../i18n";
 import { Icon } from "../ui/Icons";
@@ -325,6 +326,7 @@ function ContactPicker({
 }
 
 export function SendSheet() {
+  const isPhone = useIsPhone();
   const t = useT();
   const picks = useStore((s) => s.sheetPicks);
   const presetTo = useStore((s) => s.sheetTo);
@@ -616,7 +618,7 @@ export function SendSheet() {
           {/* --- files ------------------------------------------------- */}
           <Field
             label={t("send.filesLabel")}
-            hint={t("send.filesHint")}
+            hint={isPhone ? undefined : t("send.filesHint")}
           >
             {() => (
               <div className="stack-sm">

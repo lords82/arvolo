@@ -1933,10 +1933,24 @@ select {
   .app-phone .main {
     padding-top: env(safe-area-inset-top, 0px);
   }
+  /* The canvas's own app bar: a title that carries the screen, two glyphs, and
+     nothing else. 6/14/10 and a 19px title are its numbers, not a shrunk
+     version of the desktop's 56px strip. */
   .app-phone .header {
     height: auto;
-    min-height: var(--header-h);
-    padding: 6px 12px;
+    min-height: 0;
+    padding: 6px 14px 10px;
+    gap: 10px;
+  }
+  .app-phone .header h1 {
+    font-size: 19px;
+    font-weight: 640;
+    letter-spacing: -0.015em;
+    line-height: 1.2;
+  }
+  /* The view under it gets the canvas's gutters too. */
+  .app-phone .view {
+    padding: 10px 14px 16px;
   }
 
   .tabbar {
@@ -2052,7 +2066,6 @@ select {
   .casella {
     display: flex;
     flex-direction: column;
-    padding: 4px 14px 0;
   }
 
   /* A row is a whole button. The tap target is the row, not the name in it. */
@@ -2092,6 +2105,9 @@ select {
     flex: 1;
     font-size: 14px;
     font-weight: 600;
+  }
+  .cs-head {
+    gap: 8px;
   }
   .cs-line {
     display: block;
@@ -2136,6 +2152,40 @@ select {
     flex-direction: column;
     gap: 12px;
     padding-top: 14px;
+  }
+
+  /* -- Sheets are screens here ---------------------------------------------- */
+  /*
+     A dialog floating over a board is a desktop idea: it works because the board
+     is still visible around it and still means something. On a phone the board is
+     the same rectangle, so a centred sheet is a smaller rectangle inside the only
+     rectangle there is — and the part it covers is not context, it is the thing
+     it came from. So every sheet fills the screen, which is also what the design
+     of record draws.
+  */
+  .sheet.center,
+  .sheet.side {
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    width: auto;
+    max-height: none;
+    transform: none;
+    border: 0;
+    border-radius: 0;
+    animation: rise-phone var(--t) var(--ease);
+  }
+  .sheet-head {
+    padding: calc(env(safe-area-inset-top, 0px) + 12px) 14px 12px;
+  }
+  .sheet-body,
+  .sheet-foot {
+    padding-left: 14px;
+    padding-right: 14px;
+  }
+  .sheet-foot {
+    padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 12px);
   }
 
   /* -- A thread, full screen ------------------------------------------------ */
@@ -2196,6 +2246,13 @@ select {
    list of keyframes, so honouring the preference is a single block rather than
    a per-component audit. The pulsing presence dot is stopped outright — a
    perpetual animation is exactly what the preference is about. */
+@keyframes rise-phone {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   :root {
     --t-fast: 0ms;

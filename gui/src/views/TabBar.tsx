@@ -10,7 +10,7 @@
 // control that is not navigation, and on a phone the middle of the bottom edge is
 // the easiest place on the screen to reach with a thumb.
 
-import { TITLE_KEY, useStore, type Route } from "../store";
+import { phoneTitle, useStore, type Route } from "../store";
 import { useT } from "../i18n";
 import { Icon } from "../ui/Icons";
 
@@ -30,8 +30,7 @@ export function TabBar() {
 
   const place = (route_: Route, icon: JSX.Element, badge?: number) => {
     // One name for one place: the header says it too.
-    const label =
-      route_ === "transfers" ? t("casella.title") : t(TITLE_KEY[route_]);
+    const label = t(phoneTitle(route_));
     return (
       <button
         className="tab"
@@ -59,12 +58,12 @@ export function TabBar() {
       <button
         className="tab tab-send"
         onClick={() => openSheet([])}
-        title={t("rail.send")}
+        title={t("tab.send")}
       >
         <span className="ico">
           <Icon.Send />
         </span>
-        <span className="truncate">{t("rail.send")}</span>
+        <span className="truncate">{t("tab.send")}</span>
       </button>
       {place("codes", <Icon.Qr />)}
       {place("settings", <Icon.Settings />)}

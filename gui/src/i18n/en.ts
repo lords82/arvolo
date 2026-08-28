@@ -234,6 +234,8 @@ export const en = {
   "codes.scanAction": "Open the camera",
   "codes.pasteAction": "Paste one instead",
   "codes.scanNothing": "Nothing read",
+  "title.you": "You",
+  "tab.send": "Send",
   "casella.title": "Mailbox",
   "casella.notTakenYet": "Not picked up yet",
   "casella.saved": "Saved",

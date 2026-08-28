@@ -200,6 +200,8 @@ export const de: Dict = {
   "codes.scanAction": "Kamera öffnen",
   "codes.pasteAction": "Oder einen einfügen",
   "codes.scanNothing": "Nichts gelesen",
+  "title.you": "Du",
+  "tab.send": "Senden",
   "casella.title": "Postfach",
   "casella.notTakenYet": "Noch nicht abgeholt",
   "casella.saved": "Gespeichert",

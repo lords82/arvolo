@@ -11,7 +11,7 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { enable as autostartEnable } from "@tauri-apps/plugin-autostart";
 import { onArvoloTicket, onPickedFiles } from "./ipc";
 import { api } from "./ipc";
-import { fire, TITLE_KEY, useStore, type Route } from "./store";
+import { fire, phoneTitle, TITLE_KEY, useStore, type Route } from "./store";
 import { isBusy, shouldAnnounce } from "./update";
 import { fmtBytes } from "./format";
 import { useT } from "./i18n";
@@ -443,11 +443,7 @@ export function App() {
           {/* The phone calls this place what the design calls it: the mailbox is
               the thing you open to see who has written, and on that screen the
               rows are people rather than files. */}
-          <h1>
-            {isPhone && route === "transfers"
-              ? t("casella.title")
-              : t(TITLE_KEY[route])}
-          </h1>
+          <h1>{t(isPhone ? phoneTitle(route) : TITLE_KEY[route])}</h1>
           <div className="spacer" />
 
           {/* A 240px field is a third of a phone. The same search is a tap away
@@ -465,7 +461,10 @@ export function App() {
             </div>
           )}
 
-          {route === "transfers" && finishedCount > 0 && (
+          {/* A desktop toolbar's leftover. On a phone the bar is a title and two
+              glyphs; clearing what has finished is a thing you go and do, not
+              something that stands between the title and the search. */}
+          {!isPhone && route === "transfers" && finishedCount > 0 && (
             <Button size="sm" onClick={() => fire(clearFinished())}>
               <Icon.Trash size={13} />
               {t("app.clearFinished", finishedCount)}

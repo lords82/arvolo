@@ -196,6 +196,8 @@ export const it: Dict = {
   "codes.scanAction": "Apri la fotocamera",
   "codes.pasteAction": "Oppure incollane uno",
   "codes.scanNothing": "Non ho letto niente",
+  "title.you": "Tu",
+  "tab.send": "Invia",
   "casella.title": "Casella",
   "casella.notTakenYet": "Non ancora ritirato",
   "casella.saved": "Salvato",
