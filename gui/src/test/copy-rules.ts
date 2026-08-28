@@ -49,6 +49,9 @@ export const LANG_SLACK: Record<string, number> = {
  *  generous hides real cases, a wrong default that is strict shows up at once. */
 const CATEGORY: Record<string, Cat> = {
   // Body text under a heading, or a whole explanatory block on its own.
+  // The build line at the foot of *You*: a whole sentence, read once, by
+  // somebody who went looking for it.
+  "you.footer": "secondary",
   "send.pickerEmpty": "secondary",
   "send.noRelay": "secondary",
   "send.linkTooMany": "secondary",

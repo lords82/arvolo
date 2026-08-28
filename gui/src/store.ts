@@ -47,7 +47,10 @@ export type Route =
   | "deposits"
   | "history"
   | "devices"
-  | "settings";
+  | "settings"
+  /** Phone only: everything the desktop's settings window has, reached from a
+   *  row inside *You* rather than being the screen you land on. */
+  | "advanced";
 
 /** What each place is called, as a dictionary key rather than as words. The rail,
  *  the header and the command palette all name the same six places; a second
@@ -60,6 +63,7 @@ export const TITLE_KEY = {
   history: "title.history",
   devices: "title.devices",
   settings: "title.settings",
+  advanced: "title.settings",
 } as const satisfies Record<Route, string>;
 
 /** What a place is called on a phone, where it is called something else.

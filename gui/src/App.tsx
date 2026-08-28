@@ -22,6 +22,7 @@ import { Rail } from "./views/Rail";
 import { TabBar } from "./views/TabBar";
 import { CasellaView } from "./views/CasellaView";
 import { CodesView } from "./views/CodesView";
+import { YouView } from "./views/YouView";
 import { ThreadSheet } from "./overlays/ThreadSheet";
 import { useIsPhone } from "./phone";
 import { TransfersView } from "./views/TransfersView";
@@ -316,7 +317,11 @@ export function App() {
               ? HistoryView
               : route === "devices"
                 ? DevicesView
-                : SettingsView;
+                : // The desktop lands on its settings window; a phone lands on
+                  // *You* and reaches the window from a row inside it.
+                  route === "settings" && isPhone
+                  ? YouView
+                  : SettingsView;
 
   return (
     <div className={`app${isPhone ? " app-phone" : ""}`}>

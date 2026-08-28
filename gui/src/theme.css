@@ -2146,6 +2146,35 @@ select {
     opacity: 0.6;
   }
 
+  /* You: an identity, a decision, a few doors, a line about the build. */
+  .you {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding-top: 4px;
+  }
+  .you-me {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+    text-align: left;
+    cursor: pointer;
+  }
+  .you-name {
+    display: block;
+    font-size: 15px;
+    font-weight: 600;
+  }
+  .you-me .ico,
+  .you-me svg {
+    color: var(--ink-mut);
+    flex: none;
+  }
+  .you-foot {
+    padding: 2px 2px 10px;
+  }
+
   /* Codes: the segmented control, then whichever half it chose. */
   .codes {
     display: flex;
