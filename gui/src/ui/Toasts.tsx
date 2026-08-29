@@ -9,6 +9,7 @@ import { useEffect } from "react";
 import { create } from "zustand";
 import { useT } from "../i18n";
 import { isPhoneNow } from "../phone";
+import { haptic } from "../haptics";
 import { Icon } from "./Icons";
 import { IconButton } from "./Primitives";
 
@@ -64,8 +65,13 @@ export const toast = {
   },
   info: (title: string, detail?: string) =>
     useToasts.getState().push({ kind: "info", title, detail }),
-  bad: (title: string, detail?: string, action?: Toast["action"]) =>
-    useToasts.getState().push({ kind: "bad", title, detail, action }),
+  bad: (title: string, detail?: string, action?: Toast["action"]) => {
+    // A refusal is the one thing worth interrupting for, and on a phone the
+    // interruption that works is the one you feel: the banner may be under a
+    // thumb, and it is the message you most need to not miss.
+    haptic.refused();
+    useToasts.getState().push({ kind: "bad", title, detail, action });
+  },
 };
 
 const AUTO_DISMISS_MS = 4200;

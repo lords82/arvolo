@@ -37,6 +37,7 @@ import { Avatar, ClaimedName, ExtChip, Fingerprint } from "../ui/Bits";
 import { nameCollision, SaveSenderFields } from "../ui/SaveSenderFields";
 import { Sheet } from "../ui/Sheet";
 import { useIsPhone } from "../phone";
+import { haptic } from "../haptics";
 import { toast } from "../ui/Toasts";
 
 /** Reads which offer is on screen, and gives the body a fresh mount per offer.
@@ -107,6 +108,7 @@ function IncomingBody({ offerId }: { offerId: string }) {
       // with nothing on screen still able to explain the difference.
       if (willSave) await addContact(chosenName, tx.peerId!);
       await accept(offerId, out?.id ?? null, password || null);
+      haptic.did();
       toast.echo(t("incoming.started"), tx.name);
     } catch (e) {
       // The store already reported it. The one refusal worth reacting to here is

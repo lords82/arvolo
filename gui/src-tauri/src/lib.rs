@@ -259,7 +259,9 @@ pub fn run() {
     // Reading a code off another screen is something only a device with a camera
     // in your hand does.
     #[cfg(mobile)]
-    let builder = builder.plugin(tauri_plugin_barcode_scanner::init());
+    let builder = builder
+        .plugin(tauri_plugin_barcode_scanner::init())
+        .plugin(tauri_plugin_haptics::init());
     #[cfg(desktop)]
     let builder = builder
         .plugin(tauri_plugin_autostart::init(

@@ -12,6 +12,7 @@ import {
 import { shortId } from "./format";
 import { t } from "./i18n";
 import type { Dict } from "./i18n";
+import { haptic } from "./haptics";
 import { toast } from "./ui/Toasts";
 import * as updates from "./update";
 import type {
@@ -1191,6 +1192,9 @@ export const useStore = create<State>((set, get) => {
           if (ev.type === "pairing_code") {
             set({ pairing: { ...p, code: ev.code, phase: "waiting" } });
           } else if (ev.type === "pairing_done") {
+            // Two people looking at two screens, waiting. Whichever of them is
+            // holding a phone gets told without having to be looking at it.
+            haptic.did();
             set({
               pairing: {
                 ...p,

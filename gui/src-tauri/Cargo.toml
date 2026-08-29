@@ -43,6 +43,13 @@ tokio-util = "0.7"
 # every sense: the plugin has no desktop implementation, and a desktop has the
 # code in its clipboard rather than in front of a lens.
 tauri-plugin-barcode-scanner = "2"
+# The small knock a phone gives when something lands. It is not decoration:
+# this platform answers "it worked" with a tap you feel rather than a banner
+# you have to read, which is half of why a system app feels like one — and it
+# is the half that costs no pixels. Mobile only, in every sense: a desktop has
+# nothing to knock, and `navigator.vibrate` does nothing at all on iOS, which
+# is why this is a plugin and not three lines of JavaScript.
+tauri-plugin-haptics = "2"
 
 [dependencies]
 # `image-png` decodes the menu-bar template glyph baked in with `include_bytes!`.

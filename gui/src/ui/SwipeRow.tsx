@@ -17,6 +17,7 @@
 // because there would be no saying which of them you meant.
 
 import { useRef, useState, type ReactNode } from "react";
+import { haptic } from "../haptics";
 
 export interface SwipeAction {
   label: string;
@@ -75,6 +76,10 @@ export function SwipeRow({
     setSnap(true);
     if (dx <= -commitAt) {
       setDx(0);
+      // The one gesture in the app that acts without a button being pressed:
+      // it has to say so through the finger, because the eye is on the row and
+      // the row is what disappears.
+      haptic.pressed();
       list[0].run();
       return;
     }
@@ -91,6 +96,7 @@ export function SwipeRow({
             style={{ width: OPEN_PX }}
             onClick={() => {
               setDx(0);
+              haptic.pressed();
               a.run();
             }}
             tabIndex={dx ? 0 : -1}
