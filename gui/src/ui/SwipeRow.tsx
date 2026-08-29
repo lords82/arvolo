@@ -29,8 +29,26 @@ export interface SwipeAction {
 
 /** How far the row opens per action revealed. */
 const OPEN_PX = 96;
-/** Past this, letting go runs the action without aiming at it. One action only. */
+/** Past this, letting go runs the action without aiming at it. One action only.
+ *  Measured on the finger, not on the row: past `open` the row moves less than
+ *  the finger does (see `RESIST`), and a commit point measured on the row would
+ *  drift away as the resistance grew. */
 const COMMIT_PX = 190;
+/** How far the finger goes before the row does.
+ *
+ *  Without it the row started moving on the first pixel, which is a row with no
+ *  weight: it slid out from under a thumb that was on its way to a tap, and a
+ *  list scrolled at a slight angle came apart. This is the same slop the
+ *  platform's own rows have — enough to say "I meant sideways", little enough
+ *  that meaning it costs nothing. */
+const SLOP_PX = 12;
+/** How much of the finger's travel the row keeps, once it is fully open.
+ *
+ *  Past the actions there is nothing more to reveal, so the row stops being
+ *  dragged and starts being *pulled*: it follows at a third of the speed, which
+ *  is what a rubber band feels like and what tells a thumb it has reached the
+ *  end without a line having to be drawn there. */
+const RESIST = 0.32;
 
 export function SwipeRow({
   action,
@@ -45,8 +63,14 @@ export function SwipeRow({
 }) {
   const [dx, setDx] = useState(0);
   const [snap, setSnap] = useState(true);
-  const start = useRef(0);
-  const vertical = useRef(false);
+  const start = useRef({ x: 0, y: 0 });
+  /** Which way this gesture turned out to be about. Decided once, on the first
+   *  movement big enough to have a direction, and then held: a gesture that
+   *  changes its mind halfway is a row that jitters while somebody scrolls. */
+  const axis = useRef<"?" | "x" | "y">("?");
+  /** How far the finger has gone, before any resistance is applied. What the
+   *  commit is measured against. */
+  const pulled = useRef(0);
 
   const list = (actions ?? (action ? [action] : [])).slice(0, 2);
   if (list.length === 0) return <>{children}</>;
@@ -57,24 +81,44 @@ export function SwipeRow({
   const commitAt = list.length === 1 ? COMMIT_PX : Infinity;
 
   const onStart = (e: React.TouchEvent) => {
-    start.current = (e.touches[0]?.clientX ?? 0) - dx;
-    vertical.current = false;
+    const t = e.touches[0];
+    // Where the row already is, so a second pull continues rather than restarts.
+    start.current = { x: (t?.clientX ?? 0) + dx, y: t?.clientY ?? 0 };
+    axis.current = "?";
+    pulled.current = dx;
     setSnap(false);
   };
   const onMove = (e: React.TouchEvent) => {
-    if (vertical.current) return;
+    if (axis.current === "y") return;
     const t = e.touches[0];
     if (!t) return;
-    const moved = t.clientX - start.current;
-    // A scroll starts as a vertical move; taking it would make the list feel
-    // stuck the moment somebody drags at a slight angle.
-    if (Math.abs(moved - dx) < 6 && dx === 0) return;
+    const moved = t.clientX - start.current.x;
+    const lifted = t.clientY - start.current.y;
+
+    if (axis.current === "?") {
+      // Not yet either. A scroll starts as a vertical move and must keep the
+      // gesture; a swipe has to have gone further sideways than up or down, and
+      // further than the slop, before it takes it.
+      if (Math.abs(lifted) > SLOP_PX && Math.abs(lifted) > Math.abs(moved)) {
+        axis.current = "y";
+        return;
+      }
+      if (Math.abs(moved) < SLOP_PX) return;
+      axis.current = "x";
+    }
+
+    // The slop is given back, so the row starts from where it was rather than
+    // jumping the twelve pixels that decided the gesture.
+    const raw = Math.min(0, moved + SLOP_PX);
+    pulled.current = raw;
     // Only leftwards: a right swipe on this platform belongs to the stack.
-    setDx(Math.max(-commitAt - 40, Math.min(0, moved)));
+    const over = -raw - open;
+    const next = over > 0 ? -(open + over * RESIST) : raw;
+    setDx(Math.max(-(open + 90), next));
   };
   const onEnd = () => {
     setSnap(true);
-    if (dx <= -commitAt) {
+    if (pulled.current <= -commitAt) {
       setDx(0);
       // The one gesture in the app that acts without a button being pressed:
       // it has to say so through the finger, because the eye is on the row and

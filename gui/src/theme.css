@@ -1155,6 +1155,12 @@ select {
 /* -- Progress -------------------------------------------------------------- */
 
 .prog {
+  /* A block, or the height below is ignored: `.prog` is a `<span>`, and an
+     inline box has no height to set. It looked right on the board only because
+     a flex parent was blockifying it there — inside the mailbox row, whose body
+     is an ordinary block, the bar collapsed to nothing and every transfer in
+     flight drew no progress at all. */
+  display: block;
   height: 4px;
   border-radius: var(--r-pill);
   background: var(--track);
@@ -2064,11 +2070,31 @@ select {
     padding-top: calc(env(safe-area-inset-top, 0px) + 4px);
     gap: 6px;
     border-bottom-color: transparent;
-    transition: border-color var(--t) var(--ease);
+    /* The material fades in with the line, rather than appearing between one
+       frame and the next: the handoff is a movement, and half of it snapping is
+       what makes a web page out of it. */
+    transition:
+      border-color var(--t) var(--ease),
+      background var(--t) var(--ease);
   }
   /* The bar takes the title over, and grows a hairline to sit on. */
   .app-phone .header.nav:not(.big) {
     border-bottom-color: var(--line);
+  }
+  /* And at the top of a screen it is not there at all.
+     
+     This is the half that was missing, and it is what made the large title
+     look like it belonged to something else: the bar kept its material from the
+     first frame, so a strip of a different grey sat across the top with the
+     title *underneath* it rather than the title being the top of the screen.
+     On this platform the bar at rest is glass with nothing behind it — no
+     blur, no fill, no line — and the material appears only when content
+     starts passing under it, which is the same moment the small title arrives.
+     One state, two things saying it. */
+  .app-phone .header.big {
+    background: transparent;
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
   }
   /* Centred in the bar, not centred in what is left of it: the title belongs to
      the screen, and the back button belongs to the stack. Absolute, so a long
@@ -2143,11 +2169,24 @@ select {
     background: var(--surface-sunk);
   }
   /* The glass above and the glass below, given back as space. A page that set
-     no inset would begin its first row underneath the title. */
+     no inset would begin its first row underneath the title.
+     
+     52 and not 50: the bar is 44 of content with 4 above and 4 below, and the
+     two pixels missing put the top of the first row *under* its lower edge. On
+     a root screen the large title absorbed it and nobody saw; one screen in,
+     where a group is the first thing there is, the first row arrived with its
+     rounded corner shaved off. */
   .app-phone .page {
-    padding: calc(env(safe-area-inset-top, 0px) + 50px) 16px
+    padding: calc(env(safe-area-inset-top, 0px) + 52px) 16px
       calc(env(safe-area-inset-bottom, 0px) + 64px);
     background: var(--surface-sunk);
+  }
+  /* One screen in there is no large title to open with, and a list that starts
+     against the bar reads as having been cut rather than as beginning. This
+     platform leaves air there; the large title *is* that air on a root screen,
+     which is why only the pushed ones need it said. */
+  .app-phone .page.stacked {
+    padding-top: calc(env(safe-area-inset-top, 0px) + 52px + 18px);
   }
   /* The page is the scroller, always — not just while a transition is running.
      The frame around it is clipped (that is what stages the slide), so a page
@@ -2156,17 +2195,18 @@ select {
   .app-phone .view.staged > .page {
     position: absolute;
     inset: 0;
-    overflow-y: auto;
+    /* `scroll`, not `auto`. They differ here in a way they do not on a desktop:
+       an `auto` box is only given a scroller when it turns out to need one, and
+       what it is given is the plainer kind. `scroll` says up front that this box
+       *is* a scroller, which is what WebKit wants to hear before it hands over
+       the whole behaviour — the momentum and the rubber band at the ends.
+       Nothing is drawn either way: the indicator is hidden a few rules down. */
+    overflow-y: scroll;
     overflow-x: hidden;
   }
   /* -- Scrolling ------------------------------------------------------------
-     What can be asked of a scroller, asked everywhere one exists.
-     `-webkit-overflow-scrolling: touch` is what turns a WebView's scroll from
-     a drag into a throw; `overscroll-behavior: contain` keeps a list that has
-     hit its end from handing the gesture to whatever is behind it — the
-     scroll-chaining that made a sheet drag the screen underneath — and takes
-     the platform's own overscroll glow off, which is the one bit of this that
-     is visibly not Apple.
+     `-webkit-overflow-scrolling: touch` is what turns a WebView's scroll from a
+     drag into a throw, and it is wanted on every scroller there is.
 
      The physics themselves belong to the engine and cannot be replaced from
      here: on the iPhone build they are already the platform's, and on Android
@@ -2178,6 +2218,20 @@ select {
   .app-phone .sheet-full-body,
   .app-phone .menu {
     -webkit-overflow-scrolling: touch;
+  }
+  /* `contain` where something is *behind*: a sheet dragged past its end used to
+     scroll the screen underneath it, and a menu did the same to the page.
+     Deliberately **not** on the page itself.
+     
+     That is where it was, and it was the bug: `overscroll-behavior: contain`
+     does not only stop the chaining, it stops the overscroll *effect* — which on
+     this platform is the rubber band. The page had nothing behind it to chain
+     to, so all the property did there was take away the one piece of feedback
+     that says a list has ended. It was written for Android's glow, which is a
+     real thing to remove, and it took the bounce with it. */
+  .app-phone .sheet-body,
+  .app-phone .sheet-full-body,
+  .app-phone .menu {
     overscroll-behavior: contain;
   }
   /* This platform's scroll indicator appears while you scroll and fades; the
@@ -2287,7 +2341,20 @@ select {
     color: var(--ink-mut);
     font-size: 17px;
     letter-spacing: -0.01em;
-    flex: none;
+    /* Holds its natural width, but *yields* when there is not enough for both:
+       a value longer than the row would otherwise squeeze the label it belongs
+       to down to nothing, and a row with no label is a row that says nothing.
+       `min-width` is what lets the truncation actually happen inside a flex
+       item. */
+    flex: 0 1 auto;
+    min-width: 0;
+  }
+  /* A switch row's label wraps rather than truncating. There is no second line
+     of explanation inside these rows — it lives under the group — so a clipped
+     label is the whole of what the switch is for, cut off. */
+  .ios-row .wrap-label {
+    white-space: normal;
+    line-height: 1.25;
   }
   /* Thin, tertiary, and small: a chevron says "there is more", and a chevron
      you can read at a glance is one that is competing with the row. */
@@ -2326,6 +2393,39 @@ select {
   .ios-row.destructive {
     justify-content: center;
     color: var(--red);
+  }
+  /* A row you type in. The label keeps its natural width and the field takes
+     the rest, right-aligned into where a detail would be — which is what makes
+     a column of these still read as a list rather than as a form. Every reset
+     here is deliberate: a bare input inherits a border, a background and a
+     smaller font from the desktop sheet, and any one of them turns the row back
+     into a field with a box around it. */
+  .ios-row-label {
+    flex: none;
+  }
+  .ios-value {
+    flex: 1;
+    min-width: 0;
+    height: auto;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--ink);
+    font: 400 17px var(--font);
+    letter-spacing: -0.01em;
+    text-align: right;
+    outline: none;
+  }
+  .ios-value::placeholder {
+    color: var(--ink-faint);
+  }
+  .ios-value:disabled {
+    color: var(--ink-mut);
+    /* iOS greys a field it will not take rather than fading the whole row: the
+       label still has to be readable, because it is the thing explaining why. */
+    -webkit-text-fill-color: var(--ink-mut);
+    opacity: 1;
   }
 
   /* -- Controls, at this platform's sizes ----------------------------------
@@ -2886,11 +2986,30 @@ select {
     font-size: 15px;
     color: var(--ink-mut);
   }
-  .cs-who {
+  /* The name and its count, together, taking what is left after the time. */
+  .cs-name {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
     flex: 1;
+    min-width: 0;
+  }
+  .cs-who {
+    flex: 0 1 auto;
     font-size: 17px;
     font-weight: 600;
     letter-spacing: -0.015em;
+  }
+  /* Grey, small, and beside the name — this platform's own way of saying how
+     many messages a conversation holds. Not a coloured badge: a badge means
+     *unread*, which is a state this list does not have, and inventing one to
+     carry a count would be saying something untrue in a louder voice. */
+  .cs-count {
+    flex: none;
+    font-size: 15px;
+    font-weight: 400;
+    color: var(--ink-mut);
+    font-variant-numeric: tabular-nums;
   }
   .cs-head {
     gap: 8px;

@@ -20,8 +20,7 @@ import {
 } from "@tauri-apps/plugin-autostart";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { api } from "../ipc";
-import { fire, TITLE_KEY, useStore, type ThemeChoice } from "../store";
-import { useIsPhone } from "../phone";
+import { fire, useStore, type ThemeChoice } from "../store";
 import { isBusy } from "../update";
 import {
   langNames,
@@ -52,8 +51,6 @@ const SOURCE_KEY = {
 } as const;
 
 export function SettingsView() {
-  const isPhone = useIsPhone();
-  const go = useStore((s) => s.go);
   const t = useT();
   const lang = useLangChoice();
   const config = useStore((s) => s.config);
@@ -237,57 +234,12 @@ export function SettingsView() {
         </Field>
       </div>
 
-      {/* ---- what arrives on its own ----------------------------------- */}
-      {/* A phone is why this is a setting. On a desktop the window is usually
-          open and a question costs a glance; here the same question is a
-          notification, a walk back to the app and a tap before anything moves —
-          and the opposite want is just as real, because a device you carry is a
-          device somebody else can be holding.
-
-          Three answers, so a segmented control rather than a switch: "trusted
-          only" is a real position and not the halfway point between the other
-          two, and a two-state control would have had to drop one of them. */}
-      {isPhone && (
-        <div className="card card-pad stack">
-          <div className="t-head">{t("settings.autoAcceptTitle")}</div>
-          <Segmented
-            block
-            label={t("settings.autoAcceptTitle")}
-            value={config.auto_accept || "trusted"}
-            onChange={(v) => fire(save({ auto_accept: { set: v } }))}
-            options={[
-              { value: "never", label: t("settings.autoAcceptNever") },
-              { value: "trusted", label: t("settings.autoAcceptTrusted") },
-              { value: "everyone", label: t("settings.autoAcceptEveryone") },
-            ]}
-          />
-          <div className="t-xs t-mut">
-            {t(
-              config.auto_accept === "never"
-                ? "settings.autoAcceptHintNever"
-                : config.auto_accept === "everyone"
-                  ? "settings.autoAcceptHintEveryone"
-                  : "settings.autoAcceptHintTrusted"
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* ---- the places the bottom bar has no room for ----------------- */}
-      {/* Five tabs is what a thumb can hit; six places and two verbs is what
-          the app has. The three that did not fit are here rather than gone —
-          the phone reaches everything the desktop does, by one more tap. */}
-      {isPhone && (
-        <div className="card">
-          <div className="card-pad t-head">{t("settings.morePlaces")}</div>
-          {(["deposits", "history", "devices"] as const).map((r) => (
-            <button key={r} className="place-link" onClick={() => go(r)}>
-              <span className="grow truncate">{t(TITLE_KEY[r])}</span>
-              <Icon.ChevronRight size={15} />
-            </button>
-          ))}
-        </div>
-      )}
+      {/* Two blocks that used to live here — what arrives on its own, and the
+          places the bottom bar had no room for — are gone rather than moved:
+          this screen is now only ever drawn on a desktop, and there they were
+          `isPhone` from the day they were written. Their phone homes are
+          `YouView` and `AutoAcceptView`; everything else this window holds has
+          been redrawn as lists in `AdvancedView`. */}
 
       {/* ---- appearance ----------------------------------------------- */}
       <div className="card card-pad stack">

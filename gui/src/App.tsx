@@ -24,6 +24,8 @@ import { CasellaView } from "./views/CasellaView";
 import { CodesView } from "./views/CodesView";
 import { YouView } from "./views/YouView";
 import { AutoAcceptView } from "./views/AutoAcceptView";
+import { AppearanceView } from "./views/AppearanceView";
+import { AdvancedView } from "./views/AdvancedView";
 import { ThreadSheet } from "./overlays/ThreadSheet";
 import { useIsPhone } from "./phone";
 import { tookBack } from "./backstack";
@@ -62,6 +64,8 @@ function viewFor(route: Route, isPhone: boolean) {
         ? CodesView
         : route === "autoAccept"
           ? AutoAcceptView
+        : route === "appearance"
+          ? AppearanceView
           : route === "deposits"
             ? DepositsView
             : route === "history"
@@ -69,10 +73,13 @@ function viewFor(route: Route, isPhone: boolean) {
               : route === "devices"
                 ? DevicesView
                 : // The desktop lands on its settings window; a phone lands on
-                  // *You* and reaches the window from a row inside it.
+                  // *You*, and the window it reaches from there is the phone's
+                  // own — lists, not a page of captioned fields.
                   route === "settings" && isPhone
                   ? YouView
-                  : SettingsView;
+                  : route === "advanced" && isPhone
+                    ? AdvancedView
+                    : SettingsView;
 }
 
 export function App() {
@@ -681,7 +688,9 @@ export function App() {
             </div>
           )}
           <div
-            className={`page${leaving ? ` entering ${leaving.dir}` : ""}`}
+            className={`page${stack.length > 1 ? " stacked" : ""}${
+              leaving ? ` entering ${leaving.dir}` : ""
+            }`}
             onScroll={
               // On the page, because the page is what scrolls here. The bar
               // takes the title over as the large one passes under the glass,

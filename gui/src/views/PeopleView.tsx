@@ -127,7 +127,26 @@ function PhoneRow({ c }: { c: ContactDto }) {
           : {
               label: t("people.menuBlock"),
               danger: true,
-              run: () => fire(blockContact(c.name)),
+              // Blocking takes the person off every list but *Blocked*, so from
+              // where the finger is it looks exactly like a delete: the row is
+              // there, then it is not, and nothing says why or where it went.
+              // A long pull commits without a button being pressed, which makes
+              // the two together a destruction nobody confirmed.
+              //
+              // So the act says its own name and carries its own way back. Not
+              // a confirmation dialog in front of it: this platform answers a
+              // reversible act with an undo *after* it, and a question in front
+              // of every block would make the fast path — which is the whole
+              // reason the swipe exists — slower than the menu it replaced.
+              run: () =>
+                fire(
+                  blockContact(c.name).then(() =>
+                    toast.info(t("people.blocked", c.name), t("people.blockedWhere"), {
+                      label: t("common.undo"),
+                      run: () => fire(unblockContact(c.name)),
+                    })
+                  )
+                ),
             },
       ]}
     >

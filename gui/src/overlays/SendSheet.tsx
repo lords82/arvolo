@@ -384,6 +384,8 @@ export function SendSheet() {
   const [password, setPassword] = useState("");
   const [keepCode, setKeepCode] = useState(false);
   const [busy, setBusy] = useState(false);
+  /** A file has been chosen and is still on its way in. */
+  const [picking, setPicking] = useState(false);
   const [result, setResult] = useState<Result | null>(null);
   /** Which of our machines to aim at; `null` is "whichever is awake", which is
    *  what every send did before there was a register to choose from. */
@@ -465,11 +467,20 @@ export function SendSheet() {
     // picking a file on a phone looked exactly like changing your mind. A
     // refusal has to be as visible here as it is everywhere else.
     let picked: PickedItem[];
+    // Between choosing and appearing there is real work, and on a phone it is
+    // not small: the system hands a picked file over by *copying* it into this
+    // app's sandbox, and a video is a video. The call covers both the picker
+    // being on screen and that copy, so the sheet sat unchanged, with the send
+    // button dead, for as long as the copy took — which read as the app having
+    // ignored the tap.
+    setPicking(true);
     try {
       picked = await api.pickFiles(directory, media);
     } catch (e) {
       toast.bad(t("send.pickFailed"), String(e));
       return;
+    } finally {
+      setPicking(false);
     }
     if (picked.length === 0) return;
     setFiles((f) => {
@@ -481,7 +492,7 @@ export function SendSheet() {
   // Only "a un contatto" has a recipient left to choose: every other mode either
   // names one by being itself, or hands the file to whoever turns up.
   const canSubmit =
-    files.length > 0 && (mode !== "contact" || to !== "") && !busy;
+    files.length > 0 && (mode !== "contact" || to !== "") && !busy && !picking;
   // A link is deposited from a single payload; the daemon's CreateLink takes one
   // path. Packing several into an archive first is a send-side job the link path
   // does not do, so the sheet says so rather than silently sending only the first.
@@ -741,7 +752,7 @@ export function SendSheet() {
           >
             {() => (
               <div className="stack-sm">
-                {files.length > 0 && (
+                {(files.length > 0 || picking) && (
                   <div className="card rows" style={{ maxHeight: 160, overflowY: "auto" }}>
                     {files.map((p) => (
                       <div
@@ -764,6 +775,18 @@ export function SendSheet() {
                         </button>
                       </div>
                     ))}
+                    {/* Where the file being copied will land, saying so while it
+                        is. Indeterminate on purpose: the copy is the system's
+                        and it reports nothing, and a bar that invented a
+                        percentage would be worse than a sentence that is true. */}
+                    {picking && (
+                      <div className="hstack" style={{ padding: "8px 11px" }}>
+                        <span className="spinner" aria-hidden />
+                        <span className="grow truncate t-sm t-mut">
+                          {t("send.preparing")}
+                        </span>
+                      </div>
+                    )}
                   </div>
                 )}
                 <div className="hstack-sm">
@@ -854,7 +877,11 @@ export function SendSheet() {
                       history.pushState({ arvolo: "sendstep" }, "");
                     }}
                   >
-                    <span className="grow truncate">{t("send.noteLabel")}</span>
+                    {/* A row's label is a word, not the field's caption: "Two
+                        lines for whoever receives it (optional)" is what to
+                        write above a text box, and on a row it became "Due
+                        righe per chi riceve (facolta…". */}
+                    <span className="grow truncate">{t("send.noteRow")}</span>
                     <span className="ios-detail truncate">
                       {note.trim() || t("send.noteNone")}
                     </span>

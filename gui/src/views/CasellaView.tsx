@@ -135,12 +135,36 @@ function actionsFor(
       { label: t("row.cancel"), danger: true, run: () => fire(cancel(tx.id)) },
     ];
   }
-  if (tx.status === "completed" && tx.dir === "in" && tx.path) {
-    return [{ label: t("common.open"), run: () => void api.openPath(tx.path!) }];
-  }
   if (tx.dir === "out" && tx.offerStatus === "pending") {
     return [
       { label: t("row.takeBack"), danger: true, run: () => fire(cancel(tx.id)) },
+    ];
+  }
+  // Anything that is over. Every one of these rows used to return nothing, and
+  // a row that reveals nothing is indistinguishable from a gesture that is not
+  // implemented — which is what a mailbox full of finished sends looked like:
+  // the swipe was "broken" everywhere, having been written and working.
+  //
+  // Removing is the verb this platform puts on the end of every row of a list
+  // of things that have happened, and it is the one that is always true. What
+  // arrived also opens, and that goes first because it is what you swiped for.
+  if (
+    tx.status === "completed" ||
+    tx.status === "failed" ||
+    tx.status === "cancelled"
+  ) {
+    const removeRow = useStore.getState().removeRow;
+    const open =
+      tx.dir === "in" && tx.path
+        ? [{ label: t("common.open"), run: () => void api.openPath(tx.path!) }]
+        : [];
+    return [
+      ...open,
+      {
+        label: t("row.remove"),
+        danger: true,
+        run: () => fire(removeRow(`t${tx.id}`)),
+      },
     ];
   }
   return [];
@@ -150,11 +174,12 @@ function ThreadRow({ thread }: { thread: Thread }) {
   const t = useT();
   const open = useStore((s) => s.openThread);
   const latest = thread.rows[0];
+  // What has a *proportion* to draw. Preparing has none — nothing has left this
+  // machine yet — and an empty bar sitting there for a minute is exactly the
+  // "stuck at zero" reading that state exists to avoid; the line above it says
+  // what is happening instead.
   const busy =
-    latest &&
-    (latest.status === "active" ||
-      latest.status === "preparing" ||
-      latest.status === "stalled");
+    latest && (latest.status === "active" || latest.status === "stalled");
   // Only what the line above does not already say. A deposited send that nobody
   // has picked up yet is the case the design draws a badge for; repeating the
   // status the line just gave is not.
@@ -166,8 +191,25 @@ function ThreadRow({ thread }: { thread: Thread }) {
       <Avatar name={thread.who} id={thread.peerId} size={36} ring={ring(latest)} />
       <span className="cs-body">
         <span className="cs-head">
-          <span className="truncate cs-who">
-            {thread.who || t("casella.unknownWho")}
+          {/* The name and its count are one thing and have to sit together:
+              left to itself the name took the whole line and pushed the number
+              against the clock, where "2  21 minuti fa" reads as a time and not
+              as a count. This platform puts it immediately after the name, and
+              the name is what truncates when there is no room. */}
+          <span className="cs-name">
+            <span className="truncate cs-who">
+              {thread.who || t("casella.unknownWho")}
+            </span>
+          {/* How many things are in here, when it is more than one.
+              A mailbox row shows the latest and only the latest, which is right
+              — and leaves no way to tell one file from five. Two files sent one
+              after the other produced a single row naming the second, and the
+              first was nowhere on the screen it had arrived on: not lost, not
+              late, just silent. A conversation says how long it is; this is the
+              same number, in the same place this platform puts it. */}
+            {thread.rows.length > 1 && (
+              <span className="cs-count">{thread.rows.length}</span>
+            )}
           </span>
           <span className="t-xs t-mut">{fmtAgo(latest.firstSeen / 1000)}</span>
         </span>

@@ -13,6 +13,7 @@ import { shortId } from "./format";
 import { t } from "./i18n";
 import type { Dict } from "./i18n";
 import { haptic } from "./haptics";
+import { isPhoneNow } from "./phone";
 import { toast } from "./ui/Toasts";
 import * as updates from "./update";
 import type {
@@ -55,7 +56,9 @@ export type Route =
   /** Phone only: choosing what arrives without asking. Its own screen, because
    *  three exclusive answers with a consequence each is what a platform draws as
    *  a list with a checkmark, not as three words in a strip. */
-  | "autoAccept";
+  | "autoAccept"
+  /** Phone only: theme and language, one list each. Same reason. */
+  | "appearance";
 
 /** What each place is called, as a dictionary key rather than as words. The rail,
  *  the header and the command palette all name the same six places; a second
@@ -70,6 +73,7 @@ export const TITLE_KEY = {
   settings: "title.settings",
   advanced: "title.settings",
   autoAccept: "settings.autoAcceptTitle",
+  appearance: "settings.appearance",
 } as const satisfies Record<Route, string>;
 
 /** What a place is called on a phone, where it is called something else.
@@ -117,6 +121,20 @@ export const SELF_RECIPIENT = "me";
  *  react with: the failure has already been recorded and raised as a toast by
  *  the time the promise settles, so the only thing left for the rejection to do
  *  is become an unhandled one. `void p` is not enough for that; the catch is. */
+/** One snapshot, however many rows arrive without a person attached.
+ *
+ *  A burst — several files taken at once — should cost one question, not one
+ *  each, and a moment's delay is nothing against a row that would otherwise say
+ *  "Somebody" until the next time anything reloaded. */
+let askWhoTimer: ReturnType<typeof setTimeout> | null = null;
+function askWhoSoon(get: () => State): void {
+  if (askWhoTimer) return;
+  askWhoTimer = setTimeout(() => {
+    askWhoTimer = null;
+    void get().reload();
+  }, 400);
+}
+
 export function fire(p: Promise<unknown>): void {
   void p.catch(() => {});
 }
@@ -826,6 +844,12 @@ export const useStore = create<State>((set, get) => {
     },
 
     checkForUpdate: async (manual) => {
+      // A phone cannot replace its own binary — an app there is whatever the
+      // store or the sideload put on it — so there is nothing for an answer to
+      // do, and the phone's settings screen offers no button to ask. Without
+      // this the weekly timer would still reach github once a week from every
+      // phone, to be told something it cannot act on.
+      if (isPhoneNow()) return;
       // The automatic triggers ask the cadence; the button never does. An
       // explicit request that silently declines to do anything is worse than a
       // slow one.
@@ -1078,6 +1102,15 @@ export const useStore = create<State>((set, get) => {
             size: ev.total_size,
             status: "active",
           }));
+          // An event says a transfer exists; it does not say who it is with,
+          // and the engine often does not know yet when it fires — the sender
+          // identifies itself a moment later, inside the fetch. A row the user
+          // accepted carries the person over from the offer, but one the engine
+          // took by itself (a trusted contact, your own other machine) has no
+          // offer to carry anything from, and used to sit in the mailbox as
+          // "Somebody" with a question mark until something else happened to
+          // ask. So it asks.
+          if (!get().transfers[`t${ev.id}`]?.peerId) askWhoSoon(get);
           break;
         case "progress":
           patch(ev.id, (tx) => ({

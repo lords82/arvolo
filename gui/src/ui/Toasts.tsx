@@ -63,8 +63,8 @@ export const toast = {
     if (isPhoneNow()) return;
     useToasts.getState().push({ kind: "ok", title, detail });
   },
-  info: (title: string, detail?: string) =>
-    useToasts.getState().push({ kind: "info", title, detail }),
+  info: (title: string, detail?: string, action?: Toast["action"]) =>
+    useToasts.getState().push({ kind: "info", title, detail, action }),
   bad: (title: string, detail?: string, action?: Toast["action"]) => {
     // A refusal is the one thing worth interrupting for, and on a phone the
     // interruption that works is the one you feel: the banner may be under a

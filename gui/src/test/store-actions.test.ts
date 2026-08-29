@@ -653,6 +653,28 @@ describe("the way back, on a phone", () => {
   // The entry the system's back pops is left by whatever is open, not by the
   // store — see `backstack`, and the tests for it in backstack.test.ts.
 
+  it("106. a transfer the engine took by itself asks who it is from", async () => {
+    // Accepting by hand carries the person over from the offer. Nothing does
+    // that for a file the engine takes on its own — a trusted contact's, or one
+    // of your own machines' — and the event that announces it says only id,
+    // name and size. The row sat there as "Somebody", with a question mark for
+    // a face, until something else happened to reload.
+    harness.snapshot.contacts = [dto.contact({ name: "giulia", id: PEER_ID })];
+    await boot();
+    // What the daemon would say if asked: this transfer is from Giulia.
+    harness.snapshot.transfers = [
+      dto.transfer({ id: 77, direction: "recv", peer: PEER_ID }),
+    ];
+    // What the event says: id, name, size. Nothing about who.
+    harness.emit({
+      started: { id: 77, direction: "recv", name: "da-me.bin", total_size: 10 },
+    });
+    expect(row("t77").peerId, "the event carried nobody").toBeUndefined();
+    await vi.waitFor(() => expect(row("t77").peer).toBe("giulia"), {
+      timeout: 3000,
+    });
+  });
+
   it("105. pushing to a screen fetches what that screen shows", async () => {
     // A phone reaches every inner screen by pushing and never by `go`, so for
     // as long as only `go` fetched, those screens opened and stayed empty:

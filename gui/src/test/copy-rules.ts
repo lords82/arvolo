@@ -56,6 +56,9 @@ const CATEGORY: Record<string, Cat> = {
   "send.noRelay": "secondary",
   "send.linkTooMany": "secondary",
   "settings.relayLocked": "secondary",
+  // The sentence under a group in the phone's settings, which is where this
+  // platform puts the explanation that a desktop puts beside the field.
+  "adv.copyHint": "secondary",
   "settings.downloadDirEnv": "secondary",
   // A toast's second line. `common.*` is otherwise all micro-labels, which is
   // why the prefix alone reads it as one.
@@ -64,6 +67,13 @@ const CATEGORY: Record<string, Cat> = {
   "pair.captionDevice": "secondary",
   "pair.captionContact": "secondary",
   "pair.needsRestart": "secondary",
+  "pair.needsReopen": "secondary",
+  // The line under the code that says the exchange works from either side.
+  "pair.orScanTheirs": "secondary",
+  // What to do about a camera the system will not hand over.
+  "scan.noPermissionHow": "secondary",
+  // Where a blocked person went, said in the toast that says they were blocked.
+  "people.blockedWhere": "secondary",
   // A consent checkbox: its label is the sentence being agreed to, so it is one.
   "pair.understood": "secondary",
   // States, not headings.

@@ -14,27 +14,7 @@ import { useT } from "../i18n";
 import { useStore } from "../store";
 import { Avatar, ShortId } from "../ui/Bits";
 import { Icon } from "../ui/Icons";
-
-/** A row that pushes, with what is behind it said on the right — the detail
- *  text and the chevron this platform has always used to mean "there is more of
- *  this, one screen in". */
-function Place({
-  label,
-  note,
-  onClick,
-}: {
-  label: string;
-  note?: string;
-  onClick: () => void;
-}) {
-  return (
-    <button className="ios-row" onClick={onClick}>
-      <span className="grow truncate">{label}</span>
-      {note ? <span className="ios-detail">{note}</span> : null}
-      <Icon.ChevronRight size={15} className="ios-chev" />
-    </button>
-  );
-}
+import { Place } from "../ui/Rows";
 
 export function YouView() {
   const t = useT();
