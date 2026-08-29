@@ -272,7 +272,21 @@ impl PairPayload {
 
     /// Inverse of [`PairPayload::encode`].
     pub fn decode(bytes: &[u8]) -> Result<Self> {
-        postcard::from_bytes(bytes).context("deserialize pair payload")
+        // The identity secret is fixed-width and first, so it reads the same in
+        // every shape; the snapshot after it is what moved. Reading them apart
+        // is what lets a device join from a machine on either side of the
+        // change — the failure this replaces was a phone saying "Found an
+        // Option discriminant that wasn't 0 or 1" while the other machine
+        // reported success.
+        if let Ok(p) = postcard::from_bytes::<Self>(bytes) {
+            return Ok(p);
+        }
+        let (identity_secret, rest): ([u8; 32], &[u8]) =
+            postcard::take_from_bytes(bytes).context("deserialize pair payload")?;
+        Ok(PairPayload {
+            identity_secret,
+            snapshot: decode_snapshot(rest)?,
+        })
     }
 }
 
@@ -697,10 +711,14 @@ pub fn encode_snapshot(snap: &SyncSnapshot) -> Result<Vec<u8>> {
 /// swallows a failure here and rebuilds from the TOML ledgers, which silently
 /// costs every Lamport clock and every tombstone this device was holding.
 pub fn decode_snapshot(bytes: &[u8]) -> Result<SyncSnapshot> {
-    // Newest first: postcard ignores trailing bytes, so the older shape would
-    // happily read a current sidecar and drop the relays without a word.
+    // Newest first: postcard ignores trailing bytes, so an older shape would
+    // happily read a current snapshot and drop what it does not know about
+    // without a word.
     if let Ok(snap) = postcard::from_bytes::<SyncSnapshot>(bytes) {
         return Ok(snap);
+    }
+    if let Ok(v0) = postcard::from_bytes::<SyncSnapshotV0>(bytes) {
+        return Ok(v0.into());
     }
     let v1: SyncSnapshotV1 = postcard::from_bytes(bytes).context("deserialize sync snapshot")?;
     Ok(SyncSnapshot {
@@ -715,6 +733,64 @@ pub fn decode_snapshot(bytes: &[u8]) -> Result<SyncSnapshot> {
         devices: v1.devices,
         relays: Vec::new(),
     })
+}
+
+/// [`SyncSnapshot`] as it was written before [`SeenEntry::last`] existed.
+///
+/// Postcard is positional and **not** self-describing: `#[serde(default)]` does
+/// nothing for it, whatever a field's attribute says. So adding `last` in the
+/// middle of `seen` moved every byte after it, and a build from either side of
+/// that change cannot read the other's snapshot at all — which is not a stale
+/// field, it is a pairing that fails and an address book that stops syncing.
+///
+/// Reading both shapes is the half of that which can still be fixed. The other
+/// half cannot: a build that shipped before the field will never read a
+/// snapshot written after it, and the version number did not change when the
+/// format did, so neither side can even tell. That is a release decision, and
+/// it is written down in `docs/` rather than papered over here.
+#[derive(Deserialize)]
+struct SeenEntryV0 {
+    pubkey: String,
+    count: u64,
+}
+
+#[derive(Deserialize)]
+struct SyncSnapshotV0 {
+    lamport: u64,
+    device: DeviceId,
+    contacts: Vec<ContactEntry>,
+    verified: Vec<MarkEntry>,
+    trusted: Vec<MarkEntry>,
+    seen: Vec<SeenEntryV0>,
+    names: Vec<NameEntry>,
+    blocked: Vec<MarkEntry>,
+    devices: Vec<DeviceEntry>,
+}
+
+impl From<SyncSnapshotV0> for SyncSnapshot {
+    fn from(v: SyncSnapshotV0) -> Self {
+        SyncSnapshot {
+            lamport: v.lamport,
+            device: v.device,
+            contacts: v.contacts,
+            verified: v.verified,
+            trusted: v.trusted,
+            // `0` is the honest answer for a peer that never recorded it.
+            seen: v
+                .seen
+                .into_iter()
+                .map(|e| SeenEntry {
+                    pubkey: e.pubkey,
+                    count: e.count,
+                    last: 0,
+                })
+                .collect(),
+            names: v.names,
+            blocked: v.blocked,
+            devices: v.devices,
+            relays: Vec::new(),
+        }
+    }
 }
 
 /// [`SyncSnapshot`] as the local sidecar was written before it tracked relays.
@@ -815,7 +891,10 @@ pub fn encrypt_snapshot(key: &[u8; crypto::CHUNK_KEY_LEN], snap: &SyncSnapshot) 
 /// tampering (AEAD).
 pub fn decrypt_snapshot(key: &[u8; crypto::CHUNK_KEY_LEN], blob: &[u8]) -> Result<SyncSnapshot> {
     let plain = open_under(key, blob).context("decrypt sync snapshot")?;
-    postcard::from_bytes(&plain).context("deserialize sync snapshot")
+    // The same tolerance the sidecar has always had. This is the path that
+    // meets *another machine*, so it is the one where a shape difference is not
+    // hypothetical — and it was the strict one.
+    decode_snapshot(&plain)
 }
 
 // ---- device-join authorization seam ---------------------------------------
@@ -852,6 +931,99 @@ impl DeviceJoinAuthorizer for Spake2ShortCodeAuthorizer {
 
 #[cfg(test)]
 mod tests {
+
+    /// The shape a machine wrote before `SeenEntry::last` existed, written the
+    /// way that machine wrote it — a struct with two fields where this build has
+    /// three. Serialising it is the only way to *have* those bytes here.
+    #[derive(serde::Serialize)]
+    struct SeenEntryV0Out {
+        pubkey: String,
+        count: u64,
+    }
+
+    #[derive(serde::Serialize)]
+    struct SyncSnapshotV0Out {
+        lamport: u64,
+        device: DeviceId,
+        contacts: Vec<ContactEntry>,
+        verified: Vec<MarkEntry>,
+        trusted: Vec<MarkEntry>,
+        seen: Vec<SeenEntryV0Out>,
+        names: Vec<NameEntry>,
+        blocked: Vec<MarkEntry>,
+        devices: Vec<DeviceEntry>,
+    }
+
+    fn old_shape() -> SyncSnapshotV0Out {
+        SyncSnapshotV0Out {
+            lamport: 7,
+            device: [1u8; 16],
+            contacts: Vec::new(),
+            verified: Vec::new(),
+            trusted: Vec::new(),
+            seen: vec![SeenEntryV0Out {
+                pubkey: "kseen".into(),
+                count: 3,
+            }],
+            names: Vec::new(),
+            blocked: Vec::new(),
+            devices: Vec::new(),
+        }
+    }
+
+    /// Postcard is positional and not self-describing, so a field added in the
+    /// middle moves every byte after it — `#[serde(default)]` does nothing here,
+    /// whatever it says on the field. Adding `last` therefore made two builds
+    /// unable to read each other at all: a device join reported success on one
+    /// machine and "Found an Option discriminant that wasn't 0 or 1" on the
+    /// other, and the address book stopped syncing between them.
+    #[test]
+    fn a_snapshot_from_before_the_last_field_still_reads() {
+        let bytes = postcard::to_allocvec(&old_shape()).unwrap();
+        let snap = decode_snapshot(&bytes).expect("an older machine's snapshot");
+        assert_eq!(snap.lamport, 7);
+        assert_eq!(snap.seen.len(), 1);
+        assert_eq!(snap.seen[0].pubkey, "kseen");
+        assert_eq!(snap.seen[0].count, 3);
+        // Never recorded, so: never. Not a guess, and not a crash.
+        assert_eq!(snap.seen[0].last, 0);
+    }
+
+    /// And the current shape keeps reading as itself — the fallback must not be
+    /// reachable by a snapshot that had no need of it.
+    #[test]
+    fn a_current_snapshot_is_not_read_as_an_older_one() {
+        let snap = SyncSnapshot {
+            lamport: 1,
+            device: [2u8; 16],
+            contacts: Vec::new(),
+            verified: Vec::new(),
+            trusted: Vec::new(),
+            seen: vec![SeenEntry {
+                pubkey: "k".into(),
+                count: 1,
+                last: 1_700_000_000,
+            }],
+            names: Vec::new(),
+            blocked: Vec::new(),
+            devices: Vec::new(),
+            relays: Vec::new(),
+        };
+        let back = decode_snapshot(&encode_snapshot(&snap).unwrap()).unwrap();
+        assert_eq!(back.seen[0].last, 1_700_000_000);
+    }
+
+    /// The join itself: the payload a machine on the other side of the change
+    /// sends has to open here, or the phone is left holding an error about an
+    /// Option discriminant while the other end says it worked.
+    #[test]
+    fn a_pair_payload_from_an_older_machine_opens() {
+        let mut bytes = postcard::to_allocvec(&[9u8; 32]).unwrap();
+        bytes.extend(postcard::to_allocvec(&old_shape()).unwrap());
+        let p = PairPayload::decode(&bytes).expect("an older machine's pair payload");
+        assert_eq!(p.identity_secret, [9u8; 32]);
+        assert_eq!(p.snapshot.seen[0].count, 3);
+    }
     use super::*;
 
     fn lam(counter: u64, d: u8) -> Lamport {

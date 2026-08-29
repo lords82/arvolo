@@ -135,6 +135,35 @@ contacts.
 | Relay API | HTTP/1.1; bodies are raw bytes or short text; capability tokens travel in `x-arvolo-*` headers or the path. |
 | Integers in the link container | little-endian. |
 
+### Adding a field to anything postcard writes
+
+Postcard is **positional and not self-describing**. A field added anywhere but
+the very end moves every byte after it, and a reader built on the other side of
+that change does not fail politely — it reads the following bytes as whatever it
+expected next. `#[serde(default)]` does **nothing** here, whatever the attribute
+says on the field; it is a JSON habit, and several fields in `sync.rs` carry it
+with a comment claiming a tolerance postcard never gave them.
+
+This is not theoretical. `SeenEntry::last` was added after `v0.14.1` shipped and
+before the version was bumped, so two builds both calling themselves 0.14.1
+write two different snapshots. A device joining across that line reports success
+on one machine and, on the other, `deserialize pair payload: Found an Option
+discriminant that wasn't 0 or 1`; address-book sync between them stops with the
+same error. `decode_snapshot` now reads both shapes, so a current build can
+still take an older machine's snapshot — but the reverse is not fixable from
+here, because the older build is already out.
+
+So, when a synced or persisted struct grows a field:
+
+1. **Bump the version** in the same commit. A format change that keeps the old
+   version number is one neither side can detect.
+2. **Add a `…V<n>` mirror of the old shape and a fallback read**, newest first —
+   see `SyncSnapshotV0`. Postcard ignores trailing bytes, so an older shape will
+   happily read a current snapshot and silently drop what it does not know
+   about: the order of the attempts is load-bearing.
+3. **Test it by writing the old shape**, not by describing it. The only way to
+   have those bytes is to serialise a struct with the old fields.
+
 ---
 
 ## 4. Capability & ticket formats
