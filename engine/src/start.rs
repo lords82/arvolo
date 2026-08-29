@@ -44,6 +44,14 @@ pub struct Options {
     /// The platform's say in where finished downloads come to rest. `None` on
     /// every desktop — see [`arvolo_core::manager::SavePublisher`].
     pub publisher: Option<Arc<dyn arvolo_core::manager::SavePublisher>>,
+    /// How many finished transfers to put back on the list at startup, out of the
+    /// history log.
+    ///
+    /// `0` on every desktop, where the daemon outlives the window and its list is
+    /// already the answer. A phone's engine dies with the app, so without this
+    /// the mailbox is empty every time it is opened — see
+    /// [`crate::history::restore_board`].
+    pub restore_board: usize,
     /// How many front-ends hold an event subscription open.
     ///
     /// The embedder's to make and to maintain, because the embedder is what
@@ -88,6 +96,7 @@ pub async fn start(opts: Options) -> Result<Running> {
         announce,
         shutdown,
         publisher,
+        restore_board,
         front_ends,
     } = opts;
 
@@ -153,6 +162,14 @@ pub async fn start(opts: Options) -> Result<Running> {
     // Downloads that were in flight when we last stopped — each continues from its
     // partial file on disk, no re-accept needed.
     let resumed = manager.resume_incomplete();
+
+    // And, where the engine is not the thing that remembers, what already
+    // happened. After the resume so that a transfer still in flight is the live
+    // row and not a duplicate of its own history entry.
+    if restore_board > 0 {
+        let n = history::restore_board(&manager, restore_board);
+        tracing::debug!("put {n} finished transfer(s) back on the list");
+    }
 
     let daemon = Daemon::new(
         manager,

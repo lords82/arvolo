@@ -157,6 +157,19 @@ pub(crate) async fn daemon(
         // The desktop writes downloads where they belong the first time; only a
         // phone has to move them afterwards.
         publisher: None,
+        // The board picks up where it left off, here too.
+        //
+        // This daemon outlives the window it serves (see the GUI's `daemon.rs`),
+        // so most of the time there is nothing to put back — the list was never
+        // lost. What this answers is the case where it *was*: a reboot, an
+        // update, a `restart`. Before it, the board came back empty and the
+        // morning's transfers were only in the history screen, which reads as
+        // having lost them.
+        //
+        // Runs once, at start, against an empty list, so it cannot duplicate a
+        // live row; `resume_incomplete` above has already claimed anything still
+        // unfinished, and the log only holds what ended.
+        restore_board: 300,
         front_ends,
     })
     .await?;

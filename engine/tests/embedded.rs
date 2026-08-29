@@ -23,6 +23,15 @@ use tokio_util::sync::CancellationToken;
 /// background and none of what is asserted here goes near it. What matters is
 /// that `start` returns something that answers.
 async fn engine(dir: &std::path::Path) -> (Running, CancellationToken) {
+    engine_restoring(dir, 0).await
+}
+
+/// The same, for an embedder whose engine does not outlive its window — which is
+/// what `restore_board` exists for.
+async fn engine_restoring(
+    dir: &std::path::Path,
+    restore_board: usize,
+) -> (Running, CancellationToken) {
     std::env::set_var("ARVOLO_CONFIG_DIR", dir);
     std::env::remove_var("ARVOLO_IDENTITY");
     let shutdown = CancellationToken::new();
@@ -33,6 +42,7 @@ async fn engine(dir: &std::path::Path) -> (Running, CancellationToken) {
         announce: Arc::new(Silent),
         shutdown: shutdown.clone(),
         publisher: None,
+        restore_board,
         front_ends: Arc::new(AtomicUsize::new(0)),
     })
     .await
@@ -99,6 +109,80 @@ async fn events_arrive_without_a_connection_to_carry_them() {
     assert!(ev.is_some(), "the stream did not end");
 
     running.stop();
+    shutdown.cancel();
+    std::env::remove_var("ARVOLO_CONFIG_DIR");
+}
+
+/// The phone's mailbox, after the phone has put the app away.
+///
+/// A desktop daemon holds its list for weeks, so nobody noticed that the list
+/// *is* the memory: on iOS the engine dies with the window, and the screen that
+/// had shown a morning of transfers came back empty every time — with the files
+/// themselves sitting in Documents, saying otherwise.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_phone_opens_its_mailbox_and_finds_what_arrived_before() {
+    let dir = tempfile::tempdir().unwrap();
+    std::env::set_var("ARVOLO_CONFIG_DIR", dir.path());
+    std::env::remove_var("ARVOLO_IDENTITY");
+
+    // What the last run left behind. Written through the real writer, because the
+    // shape on disk is the thing under test.
+    arvolo_engine::history::record(
+        "recv",
+        None,
+        "ciao.txt",
+        9,
+        9,
+        "completed",
+        Some("/tmp/Documents/ciao.txt".into()),
+        None,
+    )
+    .expect("a record is written");
+    arvolo_engine::history::record("send", None, "gone.bin", 4, 0, "cancelled", None, None)
+        .expect("a record is written");
+
+    let (running, shutdown) = engine_restoring(dir.path(), 300).await;
+    let mut c = DaemonClient::embedded(Arc::new(running.daemon.clone()));
+    let rows = c.list().await.expect("the list answers");
+
+    let arrived = rows
+        .iter()
+        .find(|t| t.name == "ciao.txt")
+        .expect("what arrived last time is still in the mailbox");
+    assert_eq!(arrived.status, "completed");
+    assert_eq!(
+        arrived.path.as_deref(),
+        Some("/tmp/Documents/ciao.txt"),
+        "and it still knows where the file went, or the row cannot offer to open it"
+    );
+    assert!(
+        rows.iter().any(|t| t.name == "gone.bin"),
+        "a transfer that did not finish is still something that happened"
+    );
+
+    shutdown.cancel();
+    std::env::remove_var("ARVOLO_CONFIG_DIR");
+}
+
+/// `restore_board: 0` still means what it says — the engine puts nothing back
+/// unless it is asked to. Both callers now ask (a daemon restarts rarely, but
+/// when it does its board was just as empty), so this is the seam itself under
+/// test rather than a platform's choice.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn nothing_comes_back_unless_the_embedder_asks() {
+    let dir = tempfile::tempdir().unwrap();
+    std::env::set_var("ARVOLO_CONFIG_DIR", dir.path());
+    std::env::remove_var("ARVOLO_IDENTITY");
+    arvolo_engine::history::record("recv", None, "old.txt", 1, 1, "completed", None, None)
+        .expect("a record is written");
+
+    let (running, shutdown) = engine(dir.path()).await;
+    let mut c = DaemonClient::embedded(Arc::new(running.daemon.clone()));
+    assert!(
+        c.list().await.expect("the list answers").is_empty(),
+        "nothing is put back where the process that remembers is still running"
+    );
+
     shutdown.cancel();
     std::env::remove_var("ARVOLO_CONFIG_DIR");
 }

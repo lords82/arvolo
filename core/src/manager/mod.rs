@@ -307,6 +307,24 @@ impl std::fmt::Display for AcceptRefusal {
 
 impl std::error::Error for AcceptRefusal {}
 
+/// What [`TransferManager::adopt_finished`] needs to put a past transfer back on
+/// the list: everything a finished row shows, and nothing a live one would need.
+#[derive(Clone, Debug)]
+pub struct FinishedRow {
+    pub direction: Direction,
+    pub peer: Option<PublicId>,
+    pub name: String,
+    pub total_size: u64,
+    pub transferred: u64,
+    pub status: TransferStatus,
+    /// Unix seconds when it happened — not when it was restored. A mailbox sorted
+    /// by "now" would put every past transfer at the top of today, every launch.
+    pub created: u64,
+    /// Where a received file came to rest, so the row can still offer to open it.
+    pub path: Option<PathBuf>,
+    pub saved_uri: Option<String>,
+}
+
 /// A snapshot of one transfer, for a UI list.
 #[derive(Clone, Debug)]
 pub struct Transfer {
@@ -706,6 +724,92 @@ impl TransferManager {
     /// A snapshot of one transfer by id, if still tracked.
     pub fn get(&self, id: u64) -> Option<Transfer> {
         self.inner.transfers.lock().unwrap().get(&id).cloned()
+    }
+
+    /// Every file a send would still need if it were resumed.
+    ///
+    /// For an embedder that **made** those files and has to know which of them it
+    /// may throw away. On a phone the picker does not hand over the file the
+    /// person chose: it hands over a copy, in the app's own storage, and that
+    /// copy is the send's payload for as long as the send exists — across app
+    /// restarts, since a send resumes from its record. Nobody was deleting them,
+    /// and two videos were 146 MB of an app's storage doing nothing.
+    ///
+    /// Read from the records on disk rather than from the live list, because the
+    /// question is asked at startup, before anything is live, and because it is
+    /// the records that decide what comes back.
+    pub fn sources_still_needed(&self) -> Vec<PathBuf> {
+        let Some(dir) = self.inner.state_dir.clone() else {
+            return Vec::new();
+        };
+        let mut out: Vec<PathBuf> = Vec::new();
+        out.extend(load_sendtos(&dir).into_iter().map(|r| PathBuf::from(r.payload)));
+        out.extend(load_sends(&dir).into_iter().map(|r| PathBuf::from(r.path)));
+        // A preparation is a send that has been hashed and not yet handed over;
+        // its payload is the same file, and a restart in that window is exactly
+        // when the sweep would run.
+        out.extend(load_preps(&dir).into_iter().map(|r| PathBuf::from(r.payload)));
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// Put a transfer that is already over back on the list.
+    ///
+    /// For an embedder whose engine does not outlive the window. A desktop daemon
+    /// runs for weeks, so "what the manager holds" and "what has happened
+    /// recently" are the same list; on a phone the engine dies with the app, and
+    /// a mailbox rebuilt only from the resume records — which exist for
+    /// *unfinished* work — comes back empty. Every file the person received was
+    /// still there on disk and the screen said nothing had ever happened.
+    ///
+    /// The record it is rebuilt from is the embedder's ([`crate`] has no history
+    /// log), so this takes the fields rather than a path to read them from. It
+    /// allocates a fresh id like any other row: the ids are per-run and nothing
+    /// outside the run refers to them.
+    ///
+    /// Refuses anything that is not over — a row restored as Active would be a
+    /// transfer nobody is driving, with a progress bar that never moves.
+    pub fn adopt_finished(&self, row: FinishedRow) -> Option<u64> {
+        if !matches!(
+            row.status,
+            TransferStatus::Completed | TransferStatus::Failed(_) | TransferStatus::Cancelled
+        ) {
+            return None;
+        }
+        let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
+        let mut transfers = self.inner.transfers.lock().unwrap();
+        transfers.insert(
+            id,
+            Transfer {
+                id,
+                created: row.created,
+                direction: row.direction,
+                peer: row.peer,
+                name: row.name,
+                total_size: row.total_size,
+                transferred: row.transferred,
+                status: row.status,
+                swarm_peers: 0,
+                pieces_from_peers: 0,
+                download_peers: 0,
+                code: None,
+                copies_served: 0,
+                bytes_served: 0,
+                last_pickup: 0,
+                from_download: 0,
+                share_started: 0,
+                offer_status: String::new(),
+                sender_name: String::new(),
+                path: row.path,
+                saved_uri: row.saved_uri,
+                waiting_code: String::new(),
+                waiting_detail: String::new(),
+                can_pause: false,
+            },
+        );
+        prune_finished(&mut transfers, MAX_FINISHED_RETAINED);
+        Some(id)
     }
 
     /// Drop every finished (completed/failed/cancelled) transfer from the list and
@@ -3287,6 +3391,82 @@ mod waiting_reason_tests {
         // The other two have nothing quoted, so a client has nothing to splice in.
         assert_eq!(WaitingReason::Offered.detail(), None);
         assert_eq!(WaitingReason::TooLarge.detail(), None);
+    }
+
+    /// What the phone may throw away, and what it must not.
+    ///
+    /// The picker on a phone hands over a *copy* of the file somebody chose, and
+    /// that copy is the send's payload for as long as the send could still
+    /// resume — which is across app restarts, because a send resumes from the
+    /// record naming this path. The embedder deletes the rest; this is the list
+    /// that stops it deleting the wrong one.
+    #[test]
+    fn a_send_still_on_disk_claims_the_file_it_would_resume_from() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        let m = TransferManager::with_state_dir(
+            Identity::generate(),
+            None,
+            dir.path().to_path_buf(),
+            Some(state.clone()),
+        );
+        assert!(
+            m.sources_still_needed().is_empty(),
+            "nothing is claimed before anything is sent"
+        );
+
+        persist_sendto(
+            &state,
+            &SendToRecord {
+                id: 7,
+                recipient: vec![0; 32],
+                payload: "/app/picked/IMG_5629.mov".into(),
+                name: "IMG_5629.mov".into(),
+                archive: false,
+                paused: true,
+                reason: String::new(),
+                note: String::new(),
+                target: None,
+                relay: None,
+            },
+        );
+
+        let needed = m.sources_still_needed();
+        assert!(
+            needed.contains(&PathBuf::from("/app/picked/IMG_5629.mov")),
+            "a paused send still needs the copy it would resume from: {needed:?}"
+        );
+    }
+
+    /// And once the record is gone, so is the claim — which is what makes the
+    /// sweep a rule rather than a timer.
+    #[test]
+    fn a_send_that_is_over_claims_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        let m = TransferManager::with_state_dir(
+            Identity::generate(),
+            None,
+            dir.path().to_path_buf(),
+            Some(state.clone()),
+        );
+        persist_sendto(
+            &state,
+            &SendToRecord {
+                id: 8,
+                recipient: vec![0; 32],
+                payload: "/app/picked/gone.mov".into(),
+                name: "gone.mov".into(),
+                archive: false,
+                paused: false,
+                reason: String::new(),
+                note: String::new(),
+                target: None,
+                relay: None,
+            },
+        );
+        remove_sendto(&state, 8);
+        assert!(m.sources_still_needed().is_empty());
     }
 
     /// A code must not outlive the wait it explains. The row goes active, the

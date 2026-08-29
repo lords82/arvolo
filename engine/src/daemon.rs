@@ -247,7 +247,13 @@ pub async fn dispatch(d: &Daemon, cmd: Request) -> Response {
         // a UI that dropped the row on a bare Ok would show a list that no longer
         // matches the engine.
         Request::Remove { id } => {
+            // Read before removing: after it the row is gone and there is nothing
+            // left to match the log entry against.
+            let row = d.manager.get(id);
             if d.manager.remove(id) {
+                if let Some(t) = row {
+                    crate::history::hide(&t);
+                }
                 Response::Ok
             } else {
                 Response::Error(
@@ -255,7 +261,25 @@ pub async fn dispatch(d: &Daemon, cmd: Request) -> Response {
                 )
             }
         }
-        Request::ClearFinished => Response::Cleared(d.manager.clear_finished()),
+        Request::ClearFinished => {
+            // Same reason, in bulk: whatever the sweep is about to drop has to
+            // be marked before it is dropped, or the next launch puts all of it
+            // back.
+            let going: Vec<_> = d
+                .manager
+                .list()
+                .into_iter()
+                .filter(|t| {
+                    use arvolo_core::manager::TransferStatus as S;
+                    matches!(t.status, S::Completed | S::Failed(_) | S::Cancelled)
+                })
+                .collect();
+            let n = d.manager.clear_finished();
+            for t in going {
+                crate::history::hide(&t);
+            }
+            Response::Cleared(n)
+        }
         Request::MarkVerified { name } => match crate::book::mark_verified(&name) {
             Ok(_) => Response::Ok,
             Err(e) => Response::Error(format!("{e:#}")),
