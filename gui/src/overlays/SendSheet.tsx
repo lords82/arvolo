@@ -435,7 +435,18 @@ export function SendSheet() {
   const pick = async (directory: boolean) => {
     // The dialog is native and Rust-side; what comes back are registered ids
     // plus display names — never paths (see `bridge::PickedFiles`).
-    const picked = await api.pickFiles(directory);
+    //
+    // The catch is not a formality. This was the one action in the app whose
+    // failure went nowhere: the promise rejected, nobody was awaiting it, and
+    // picking a file on a phone looked exactly like changing your mind. A
+    // refusal has to be as visible here as it is everywhere else.
+    let picked: PickedItem[];
+    try {
+      picked = await api.pickFiles(directory);
+    } catch (e) {
+      toast.bad(t("send.pickFailed"), String(e));
+      return;
+    }
     if (picked.length === 0) return;
     setFiles((f) => {
       const seen = new Set(f.map((x: PickedItem) => x.id));

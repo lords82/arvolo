@@ -12,6 +12,7 @@
 import { useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { fire, useStore } from "../store";
+import { useIsPhone } from "../phone";
 import { depositMeta, fmtBytes } from "../format";
 import { useT } from "../i18n";
 import { Icon } from "../ui/Icons";
@@ -28,6 +29,7 @@ function DepositRow({ d }: { d: DepositDto }) {
   const peerLabel = useStore((s) => s.peerLabel);
   const [confirm, setConfirm] = useState(false);
   const [share, setShare] = useState(false);
+  const isPhone = useIsPhone();
 
   const m = depositMeta(d);
   const isLink = d.kind === "link";
@@ -40,7 +42,13 @@ function DepositRow({ d }: { d: DepositDto }) {
 
   return (
     <>
-      <div className="row" style={{ gridTemplateColumns: "38px 1fr auto" }}>
+      {/* Beside the name on a desktop, under it on a phone. A badge and two
+          buttons in the third column leave a name three characters wide —
+          which is what this row looked like on a phone: "re…", "Attiv". */}
+      <div
+        className={`row ${isPhone ? "row-stacked" : ""}`}
+        style={isPhone ? undefined : { gridTemplateColumns: "38px 1fr auto" }}
+      >
         <ExtChip name={d.name} />
         <div className="row-main">
           <div className="row-name truncate" title={d.name}>
@@ -64,7 +72,7 @@ function DepositRow({ d }: { d: DepositDto }) {
             </span>
           </div>
         </div>
-        <div className="hstack-sm">
+        <div className="hstack-sm dep-actions">
           <Badge kind={isLink ? "dev" : "info"}>
             {isLink ? (
               <>
@@ -194,12 +202,22 @@ export function DepositsView() {
   const error = useStore((s) => s.depositsError);
   const reload = useStore((s) => s.loadDeposits);
   const openSheet = useStore((s) => s.openSheet);
+  const isPhone = useIsPhone();
 
   const links = deposits.filter((d) => d.kind === "link");
   const sealed = deposits.filter((d) => d.kind !== "link");
 
   return (
     <div className="stack">
+      {/* A sentence and two buttons abreast is a desktop toolbar; on a phone it
+          squeezed the sentence into a three-word column. Here the sentence is
+          just a sentence, refreshing happens on arriving, and the one verb is a
+          row of its own — at the end, where this platform puts "add". */}
+      {isPhone ? (
+        <div className="ios-foot" style={{ marginTop: 0 }}>
+          {t("deposits.intro")}
+        </div>
+      ) : (
       <div className="hstack">
         <div className="grow t-sm t-sec">{t("deposits.intro")}</div>
         <Button size="sm" onClick={() => fire(reload())} busy={loading}>
@@ -215,6 +233,7 @@ export function DepositsView() {
           <Icon.Send size={13} /> {t("deposits.createLink")}
         </Button>
       </div>
+      )}
 
       {error && (
         <div className="card card-pad card-err t-sm">
@@ -265,6 +284,21 @@ export function DepositsView() {
             </div>
           )}
         </>
+      )}
+
+      {/* The verb, where this platform puts one when the screen is a list: a
+          row at the end, not a filled button over the top of it. */}
+      {isPhone && deposits.length > 0 && (
+        <div className="ios-group">
+          <button
+            className="ios-row"
+            onClick={() => openSheet([], undefined, "link")}
+          >
+            <span className="grow" style={{ color: "var(--out-strong)" }}>
+              {t("deposits.createLink")}
+            </span>
+          </button>
+        </div>
       )}
     </div>
   );

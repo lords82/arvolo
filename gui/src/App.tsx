@@ -155,6 +155,7 @@ export function App() {
   const setPaletteOpen = useStore((s) => s.setPaletteOpen);
   const clearFinished = useStore((s) => s.clearFinished);
   const transfers = useStore((s) => s.transfers);
+  const peerLabel = useStore((s) => s.peerLabel);
   const update = useStore((s) => s.update);
   const startUpdate = useStore((s) => s.startUpdate);
   const dismissUpdate = useStore((s) => s.dismissUpdate);
@@ -195,6 +196,28 @@ export function App() {
     [transfers]
   );
   const announceUpdate = shouldAnnounce(update.info, update.dismissed, busy);
+
+  // Read the board again whenever the app comes back to the front.
+  //
+  // The store seeds one snapshot at boot and then lives on events. A window
+  // that is only ever hidden behind another window keeps receiving them, so on
+  // a desktop this changes nothing. A phone does not: the system suspends the
+  // process, and every event emitted while it slept is emitted to nobody. What
+  // came back was the screen exactly as it was left — a transfer frozen at the
+  // percentage it had when the app went away, an arrival that never appeared.
+  // Nothing was broken underneath; there was simply no one listening, and no
+  // one asking either.
+  useEffect(() => {
+    const onWake = () => {
+      if (!document.hidden) fire(reload());
+    };
+    document.addEventListener("visibilitychange", onWake);
+    window.addEventListener("focus", onWake);
+    return () => {
+      document.removeEventListener("visibilitychange", onWake);
+      window.removeEventListener("focus", onWake);
+    };
+  }, [reload]);
 
   // Boot the store (snapshot + event subscription) once. `init` is async, so an
   // unmount can land before it resolves — track that and dispose the listeners
@@ -501,9 +524,19 @@ export function App() {
           <div className="banner" role="status">
             <Icon.Receive size={14} className="tone-in" />
             <span className="grow">
-              {pendingOffers.length === 1
-                ? t("app.offerWaiting")
-                : t("app.offersWaiting", pendingOffers.length)}
+              {pendingOffers.length !== 1
+                ? t("app.offersWaiting", pendingOffers.length)
+                : // Name them when we know the name. "Somebody wants to send you
+                  // a file" about a contact you verified last week reads as a
+                  // warning about a stranger — and the one thing this banner is
+                  // for is deciding whether to open it.
+                  (() => {
+                    const who = pendingOffers[0];
+                    const name = who.peer || peerLabel(who.peerId ?? null, who.senderName);
+                    return name && name !== "unknown"
+                      ? t("app.offerWaitingFrom", name)
+                      : t("app.offerWaiting");
+                  })()}
             </span>
             <Button
               size="sm"

@@ -52,6 +52,7 @@ export const fr: Dict = {
   "app.updateDevices":
     "Mettez aussi à jour vos autres appareils, sinon ils cessent de se synchroniser.",
   "app.offerWaiting": "Quelqu'un veut vous envoyer un fichier.",
+  "app.offerWaitingFrom": (who: string) => `${who} veut vous envoyer un fichier.`,
   "app.offersWaiting": (n) => `${n} fichiers attendent votre confirmation.`,
   "app.seeOffers": "Voir",
   "app.searchPlaceholder": "Filtrer par nom ou par personne…",
@@ -633,6 +634,7 @@ export const fr: Dict = {
     "Vous pouvez aussi glisser fichiers et dossiers dans la fenêtre.",
   "send.filesRemove": (name) => `Retirer ${name}`,
   "send.pickFiles": "Fichiers…",
+  "send.pickFailed": "Ce fichier n'a pas pu être ouvert.",
   "send.pickFolder": "Dossier…",
   "send.whoLabel": "À qui ça va",
   "send.modeLabel": "Mode d'envoi",

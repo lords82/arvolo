@@ -1275,6 +1275,32 @@ async fn adopt_source(
     single_plain_file: bool,
     payload: PathBuf,
 ) -> arvolo_core::source::SendSource {
+    // The phone's hand-off: same two fields, same one-shot collection, but the
+    // engine is inside the app that opened the file, so there is no socket to
+    // cross. See `fdpass::IN_PROCESS` — and note this arm is not unix-gated,
+    // because what it answers is a `content://` URI, which has no path to fall
+    // back to on any platform.
+    if fd_socket.as_deref() == Some(arvolo_ipc::fdpass::IN_PROCESS) {
+        let Some(token) = &fd_token else {
+            return payload.into();
+        };
+        if !single_plain_file {
+            return payload.into();
+        }
+        return match arvolo_ipc::fdpass::take_stashed(token) {
+            Ok(mut files) if !files.is_empty() => {
+                arvolo_core::source::SendSource::handle(files.remove(0), payload.to_string_lossy())
+            }
+            // Nothing to degrade to: the payload is a display name here, not a
+            // path anything could open. Say so where it will be read.
+            other => {
+                if let Err(e) = other {
+                    tracing::error!("in-process descriptor hand-off failed: {e:#}");
+                }
+                payload.into()
+            }
+        };
+    }
     #[cfg(unix)]
     {
         let (Some(sock), Some(token)) = (&fd_socket, &fd_token) else {

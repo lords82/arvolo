@@ -140,7 +140,21 @@ pub struct PickedItemDto {
     pub is_dir: bool,
 }
 
-/// The id → path registry behind [`PickedItemDto`]. Bounded FIFO: entries are
+/// What a picked id stands for.
+///
+/// A desktop picks paths. A phone picks `content://` URIs, which are not paths
+/// and never become one: the app resolves them to an open descriptor at the
+/// moment of picking — while the picker's grant is live — and the send reads
+/// through that. `SendSource::Handle`, built for macOS folder consent, is the
+/// same idea and takes this without a change.
+enum Picked {
+    Path(PathBuf),
+    /// `name` is what the receiver will see the file called; a descriptor has
+    /// no path to derive one from.
+    Handle { file: std::fs::File, name: String },
+}
+
+/// The id → source registry behind [`PickedItemDto`]. Bounded FIFO: entries are
 /// dropped oldest-first past the cap, which only matters to a session that picks
 /// thousands of files without ever sending them.
 pub struct PickedFiles {
@@ -150,7 +164,26 @@ pub struct PickedFiles {
 #[derive(Default)]
 struct PickedInner {
     order: std::collections::VecDeque<String>,
-    by_id: std::collections::HashMap<String, PathBuf>,
+    by_id: std::collections::HashMap<String, Picked>,
+}
+
+/// What a set of picked ids resolves to for the daemon: the payload strings it
+/// names, and — when the payload is a descriptor rather than a path — the
+/// hand-off that carries it. See `fdpass::IN_PROCESS`.
+pub struct Resolved {
+    pub paths: Vec<String>,
+    pub fds: Option<arvolo_ipc::client::FdHandoff>,
+}
+
+impl Resolved {
+    /// Give back a hand-off nobody collected. A send that failed before the
+    /// engine read it would otherwise hold the descriptor for the whole
+    /// session.
+    fn abandon(fds: &Option<arvolo_ipc::client::FdHandoff>) {
+        if let Some(h) = fds {
+            arvolo_ipc::fdpass::drop_stashed(&h.token);
+        }
+    }
 }
 
 const PICKED_CAP: usize = 2048;
@@ -165,13 +198,9 @@ impl PickedFiles {
     /// Register one path and mint its id. The id is random, not derived: a
     /// predictable id would let the webview mint ids for paths nobody picked.
     fn register(&self, path: PathBuf) -> PickedItemDto {
-        let id = {
-            let b: [u8; 16] = rand::random();
-            data_encoding::HEXLOWER.encode(&b)
-        };
         let meta = std::fs::metadata(&path).ok();
         let dto = PickedItemDto {
-            id: id.clone(),
+            id: String::new(), // filled by `keep`
             name: path
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
@@ -179,9 +208,29 @@ impl PickedFiles {
             size: meta.as_ref().map(|m| m.len()).unwrap_or(0),
             is_dir: meta.map(|m| m.is_dir()).unwrap_or(false),
         };
+        self.keep(Picked::Path(path), dto)
+    }
+
+    /// Register an already-open file under the name it should travel as.
+    fn register_handle(&self, file: std::fs::File, name: String) -> PickedItemDto {
+        let dto = PickedItemDto {
+            id: String::new(),
+            name: name.clone(),
+            size: file.metadata().map(|m| m.len()).unwrap_or(0),
+            is_dir: false,
+        };
+        self.keep(Picked::Handle { file, name }, dto)
+    }
+
+    fn keep(&self, picked: Picked, mut dto: PickedItemDto) -> PickedItemDto {
+        let id = {
+            let b: [u8; 16] = rand::random();
+            data_encoding::HEXLOWER.encode(&b)
+        };
+        dto.id = id.clone();
         let mut inner = self.inner.lock().unwrap();
         inner.order.push_back(id.clone());
-        inner.by_id.insert(id, path);
+        inner.by_id.insert(id, picked);
         while inner.order.len() > PICKED_CAP {
             if let Some(old) = inner.order.pop_front() {
                 inner.by_id.remove(&old);
@@ -190,19 +239,66 @@ impl PickedFiles {
         dto
     }
 
-    /// The paths behind `ids`, in order. Any unknown id fails the whole call: a
+    /// What `ids` stand for, in order. Any unknown id fails the whole call: a
     /// partial send the user did not ask for is worse than an error they can see.
-    fn resolve(&self, ids: &[String]) -> Result<Vec<String>, String> {
-        let inner = self.inner.lock().unwrap();
-        ids.iter()
-            .map(|id| {
+    ///
+    /// A selection of paths resolves to paths, exactly as it always did. One
+    /// picked descriptor resolves to its *name* plus a hand-off — which is what
+    /// the engine's `resolve_payload_for` was already written for: with a
+    /// hand-off present it takes the name from the string and never stats it.
+    /// More than one descriptor has no such route (several files are packed
+    /// into an archive, and the packer reads paths), so those are spooled into
+    /// the app's own storage first and sent from there.
+    fn resolve(&self, ids: &[String], spool: Option<&std::path::Path>) -> Result<Resolved, String> {
+        let mut inner = self.inner.lock().unwrap();
+        let mut picked = Vec::with_capacity(ids.len());
+        for id in ids {
+            picked.push(
                 inner
                     .by_id
-                    .get(id)
-                    .map(|p| p.to_string_lossy().into_owned())
-                    .ok_or_else(|| "stale file selection — pick the files again".to_string())
-            })
-            .collect()
+                    .remove(id)
+                    .ok_or_else(|| "stale file selection — pick the files again".to_string())?,
+            );
+        }
+        drop(inner);
+
+        let handles = picked
+            .iter()
+            .filter(|p| matches!(p, Picked::Handle { .. }))
+            .count();
+        // One file, one descriptor: the whole point — nothing is copied.
+        if handles == 1 && picked.len() == 1 {
+            let Some(Picked::Handle { file, name }) = picked.pop() else {
+                unreachable!("counted one handle")
+            };
+            let token = arvolo_ipc::fdpass::stash_files(vec![file]);
+            return Ok(Resolved {
+                paths: vec![name],
+                fds: Some(arvolo_ipc::client::FdHandoff {
+                    socket: arvolo_ipc::fdpass::IN_PROCESS.to_string(),
+                    token,
+                }),
+            });
+        }
+        let mut paths = Vec::with_capacity(picked.len());
+        for p in picked {
+            match p {
+                Picked::Path(path) => paths.push(path.to_string_lossy().into_owned()),
+                Picked::Handle { mut file, name } => {
+                    let dir = spool.ok_or_else(|| {
+                        "several files from the picker need somewhere to be gathered".to_string()
+                    })?;
+                    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+                    let out = dir.join(&name);
+                    let mut w = std::fs::File::create(&out).map_err(|e| e.to_string())?;
+                    // Streamed, not read into memory: a picked video is as big
+                    // as the phone's storage allows.
+                    std::io::copy(&mut file, &mut w).map_err(|e| e.to_string())?;
+                    paths.push(out.to_string_lossy().into_owned());
+                }
+            }
+        }
+        Ok(Resolved { paths, fds: None })
     }
 }
 
@@ -245,34 +341,147 @@ pub async fn pick_files(
             let _ = tx.send(p);
         });
     }
-    let Some(picked) = rx.await.map_err(|e| e.to_string())? else {
+    let picked = rx.await.map_err(|e| e.to_string())?;
+    // Worth saying out loud on a phone: the plugin reports a refusal, a
+    // deserialisation failure and a genuine "changed my mind" as the same
+    // `None`, and the difference between them is the difference between a bug
+    // and a person tapping Back.
+    tracing::info!(
+        "picker returned {}",
+        match &picked {
+            None => "nothing (cancelled, or the plugin could not read the result)".to_string(),
+            Some(v) => format!("{} item(s): {v:?}", v.len()),
+        }
+    );
+    let Some(picked) = picked else {
         return Ok(Vec::new()); // cancelled
     };
     let mut out = Vec::with_capacity(picked.len());
     for fp in picked {
-        let path = fp.into_path().map_err(|e| e.to_string())?;
-        out.push(state.register(path));
+        // A `content://` is not a path and `into_path` cannot make one — it
+        // tries `to_file_path()` and fails, which is how picking a file on a
+        // phone used to end in nothing at all. Resolve it to a descriptor here,
+        // where the picker's grant is still live.
+        match fp {
+            tauri_plugin_dialog::FilePath::Url(u) if u.scheme() != "file" => {
+                let file = open_content_uri(&app, u.clone())?;
+                let name = handed_name(&file, &u);
+                out.push(state.register_handle(file, name));
+            }
+            other => {
+                let path = other.into_path().map_err(|e| e.to_string())?;
+                out.push(state.register(path));
+            }
+        }
     }
     Ok(out)
 }
 
+/// Open what the platform gave us instead of a path.
+fn open_content_uri(
+    app: &tauri::AppHandle,
+    url: tauri::Url,
+) -> Result<std::fs::File, String> {
+    use tauri_plugin_fs::FsExt;
+    app.fs()
+        .open(
+            tauri_plugin_fs::FilePath::Url(url),
+            tauri_plugin_fs::OpenOptions::new().read(true).to_owned(),
+        )
+        .map_err(|e| format!("cannot open the file you picked: {e}"))
+}
+
+/// What to call a file we only ever saw as a descriptor.
+///
+/// The picker hands over a URI whose last segment is sometimes the name
+/// (`primary:Download/report.pdf`) and sometimes an opaque row id
+/// (`document:1000000033`). The descriptor knows better: on Linux — and Android
+/// is Linux — `/proc/self/fd/N` links to the real file whenever the provider is
+/// backed by one, which covers everything on the device itself. A provider that
+/// streams (a cloud drive) leaves a pipe there, and then the URI's own guess is
+/// all there is.
+fn handed_name(file: &std::fs::File, url: &tauri::Url) -> String {
+    #[cfg(target_os = "android")]
+    {
+        use std::os::fd::AsRawFd;
+        if let Ok(real) = std::fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd())) {
+            if let Some(n) = real.file_name() {
+                let n = n.to_string_lossy();
+                if !n.is_empty() && !n.starts_with("pipe:") && !n.starts_with("socket:") {
+                    return n.into_owned();
+                }
+            }
+        }
+    }
+    let _ = file;
+    let guess = url
+        .path_segments()
+        .and_then(|s| s.last())
+        .unwrap_or_default();
+    let decoded = percent_decode(guess);
+    let tail = decoded
+        .rsplit(['/', ':'])
+        .next()
+        .unwrap_or_default()
+        .trim();
+    if tail.is_empty() {
+        "file".to_string()
+    } else {
+        tail.to_string()
+    }
+}
+
+/// Enough of one to read a picker's URI segment; the general case is a
+/// dependency this crate does not need.
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 #[tauri::command]
 pub async fn send_to(
+    app: tauri::AppHandle,
     state: tauri::State<'_, PickedFiles>,
     to: String,
     items: Vec<String>,
     note: String,
     device: Option<String>,
 ) -> Result<u64, String> {
-    let paths = state.resolve(&items)?;
+    let r = state.resolve(&items, spool(&app).as_deref())?;
     let mut c = client().await?;
     // The GUI's live send carries no mailbox options: its mailbox mode goes
     // through `deposit` below, which has always carried them.
-    // No descriptor hand-off from the GUI: its daemon is a child of the app
-    // and inherits the app's own file-access grants.
-    c.push(to, paths, note, None, None, None, device, None)
-        .await
-        .or_else(err)
+    // On a desktop the daemon is a child of this app and inherits its
+    // file-access grants, so there is nothing to hand over; on a phone the
+    // payload IS a descriptor, and `r.fds` is how it travels.
+    let out = c
+        .push(to, r.paths, note, None, None, None, device, r.fds.clone())
+        .await;
+    if out.is_err() {
+        Resolved::abandon(&r.fds);
+    }
+    out.or_else(err)
+}
+
+/// Where several picked descriptors are gathered so the archive packer can read
+/// them as files. Inside the app's own storage, and only ever written by
+/// [`PickedFiles::resolve`].
+fn spool(app: &tauri::AppHandle) -> Option<PathBuf> {
+    use tauri::Manager as _;
+    app.path().app_cache_dir().ok().map(|d| d.join("outgoing"))
 }
 
 /// `send --deposit`: straight to the recipient's mailbox, with the options that
@@ -281,6 +490,7 @@ pub async fn send_to(
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn deposit_to(
+    app: tauri::AppHandle,
     state: tauri::State<'_, PickedFiles>,
     to: String,
     items: Vec<String>,
@@ -290,14 +500,17 @@ pub async fn deposit_to(
     password: Option<String>,
     device: Option<String>,
 ) -> Result<ServedDto, String> {
-    let paths = state.resolve(&items)?;
+    let r = state.resolve(&items, spool(&app).as_deref())?;
     let mut c = client().await?;
     match c
-        .deposit(to, paths, note, ttl, max, password, device, None)
+        .deposit(to, r.paths, note, ttl, max, password, device, r.fds.clone())
         .await
     {
         Ok((id, ticket)) => Ok(ServedDto { id, ticket }),
-        Err(e) => err(e),
+        Err(e) => {
+            Resolved::abandon(&r.fds);
+            err(e)
+        }
     }
 }
 
@@ -376,28 +589,39 @@ pub async fn cancel_pairing(session: String) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn serve_ticket(
+    app: tauri::AppHandle,
     state: tauri::State<'_, PickedFiles>,
     items: Vec<String>,
     seed_relay: Option<String>,
 ) -> Result<ServedDto, String> {
-    let paths = state.resolve(&items)?;
+    let r = state.resolve(&items, spool(&app).as_deref())?;
     let mut c = client().await?;
-    match c.serve_ticket(paths, seed_relay, None).await {
+    match c.serve_ticket(r.paths, seed_relay, r.fds.clone()).await {
         Ok((id, ticket)) => Ok(ServedDto { id, ticket }),
-        Err(e) => err(e),
+        Err(e) => {
+            Resolved::abandon(&r.fds);
+            err(e)
+        }
     }
 }
 
 #[tauri::command]
 pub async fn create_link(
+    app: tauri::AppHandle,
     state: tauri::State<'_, PickedFiles>,
     item: String,
     ttl: Option<u64>,
     max: Option<u32>,
 ) -> Result<String, String> {
-    let path = state.resolve(std::slice::from_ref(&item))?.remove(0);
+    let mut r = state.resolve(std::slice::from_ref(&item), spool(&app).as_deref())?;
     let mut c = client().await?;
-    c.create_link(path, ttl, max, None).await.or_else(err)
+    let out = c
+        .create_link(r.paths.remove(0), ttl, max, r.fds.clone())
+        .await;
+    if out.is_err() {
+        Resolved::abandon(&r.fds);
+    }
+    out.or_else(err)
 }
 
 #[tauri::command]
@@ -408,7 +632,14 @@ pub async fn accept_offer(
     password: Option<String>,
 ) -> Result<u64, AcceptFailed> {
     let out = match out_item {
-        Some(id) => Some(state.resolve(std::slice::from_ref(&id))?.remove(0)),
+        Some(id) => Some(
+            // A destination, not a source: always a real path, so no hand-off
+            // and nowhere to spool.
+            state
+                .resolve(std::slice::from_ref(&id), None)?
+                .paths
+                .remove(0),
+        ),
         None => None,
     };
     let mut c = client().await?;
@@ -464,16 +695,20 @@ pub async fn remove(id: u64) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn serve_code(
+    app: tauri::AppHandle,
     state: tauri::State<'_, PickedFiles>,
     items: Vec<String>,
     relay: Option<String>,
     keep: bool,
 ) -> Result<CodeDto, String> {
-    let paths = state.resolve(&items)?;
+    let r = state.resolve(&items, spool(&app).as_deref())?;
     let mut c = client().await?;
-    match c.serve_code(paths, relay, keep, None).await {
+    match c.serve_code(r.paths, relay, keep, r.fds.clone()).await {
         Ok((id, code)) => Ok(CodeDto { id, code }),
-        Err(e) => err(e),
+        Err(e) => {
+            Resolved::abandon(&r.fds);
+            err(e)
+        }
     }
 }
 
@@ -488,7 +723,14 @@ pub async fn recv(
     // webview could name freely is the same hole as a readable path, pointed the
     // other way (drop an attacker-sent file into any directory).
     let out = match out_item {
-        Some(id) => Some(state.resolve(std::slice::from_ref(&id))?.remove(0)),
+        Some(id) => Some(
+            // A destination, not a source: always a real path, so no hand-off
+            // and nowhere to spool.
+            state
+                .resolve(std::slice::from_ref(&id), None)?
+                .paths
+                .remove(0),
+        ),
         None => None,
     };
     let mut c = client().await?;

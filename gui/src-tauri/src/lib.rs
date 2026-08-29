@@ -167,6 +167,25 @@ const GUI_LOG_MAX_BYTES: u64 = 2 * 1024 * 1024;
 /// `fmt::init` also installs the `log` bridge, which is the half that matters
 /// here: the updater's own failure paths inside Tauri use `log`, not `tracing`.
 fn init_logging() {
+    // A phone has no log file to write to — not yet, anyway: this runs before
+    // anything knows where the app's own storage is (the engine settles that a
+    // moment later), so the open below fails and every line the app ever logs
+    // goes nowhere. It went unnoticed because nothing looked for them until
+    // something went wrong on the device. Stdout is the answer there: on
+    // Android it *is* the log, and `adb logcat` reads it.
+    #[cfg(mobile)]
+    {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::try_from_env("ARVOLO_LOG")
+                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+            )
+            .with_ansi(false)
+            .try_init();
+        return;
+    }
+    #[cfg(desktop)]
+    {
     arvolo_ipc::rotate_log_at(&arvolo_ipc::gui_log_path(), GUI_LOG_MAX_BYTES);
     let Ok(file) = std::fs::OpenOptions::new()
         .create(true)
@@ -185,6 +204,7 @@ fn init_logging() {
         .with_writer(std::sync::Mutex::new(file))
         .with_ansi(false)
         .try_init();
+    }
 }
 
 /// Build the app and run it. The whole of the backend's life.
@@ -219,6 +239,15 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build());
     let app = builder
         .plugin(tauri_plugin_dialog::init())
+        // Registered for its Rust side alone — `Fs::open`, the only thing that
+        // turns a picked `content://` into an open file (see
+        // `bridge::open_content_uri`). The webview is granted none of its
+        // commands: nothing in the capabilities names them, and a filesystem
+        // the webview could call directly would undo the whole point of
+        // `PickedFiles`. It has to be registered even so, because asking Tauri
+        // for a plugin's state that was never managed is a *panic* — which is
+        // exactly how this arrived, as a picked file that vanished.
+        .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
@@ -315,6 +344,29 @@ pub fn run() {
             // wanted to see. No-op when there is no bundle to ask for.
             #[cfg(target_os = "macos")]
             notify_mac::request_authorization();
+            // The same, for the platforms that also gate it — and where nobody
+            // was asking at all. A phone that is not asked simply drops every
+            // notification the app posts (Android reports the app's importance
+            // as NONE and counts them enqueued-but-never-posted), which is the
+            // whole of "a file arrived while I wasn't looking and nothing told
+            // me". Asked once, at launch, away from the arrival it is for.
+            #[cfg(mobile)]
+            {
+                use tauri_plugin_notification::NotificationExt;
+                let handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    match handle.notification().permission_state() {
+                        Ok(tauri_plugin_notification::PermissionState::Prompt)
+                        | Ok(tauri_plugin_notification::PermissionState::PromptWithRationale) => {
+                            if let Err(e) = handle.notification().request_permission() {
+                                tracing::warn!("could not ask about notifications: {e}");
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(e) => tracing::warn!("could not read notification permission: {e}"),
+                    }
+                });
+            }
             // No daemon to dial here, so there is one to start: the engine runs
             // inside this process and the bridge asks it directly. Before the
             // event pump, which subscribes to whatever is answering.

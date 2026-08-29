@@ -69,6 +69,7 @@ export const en = {
   "app.updateDevices":
     "Update your other machines too, or they stop syncing.",
   "app.offerWaiting": "Someone wants to send you a file.",
+  "app.offerWaitingFrom": (who: string) => `${who} wants to send you a file.`,
   "app.offersWaiting": (n: number) => `${n} files waiting for you to confirm.`,
   "app.seeOffers": "See",
   "app.searchPlaceholder": "Filter by name or person…",
@@ -711,6 +712,7 @@ export const en = {
   "send.filesHint": "You can also drag files and folders into the window.",
   "send.filesRemove": (name: string) => `Remove ${name}`,
   "send.pickFiles": "Files…",
+  "send.pickFailed": "That file could not be opened.",
   "send.pickFolder": "Folder…",
   "send.whoLabel": "Who it goes to",
   "send.modeLabel": "Way of sending",

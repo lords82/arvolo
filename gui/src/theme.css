@@ -1997,6 +1997,14 @@ select {
     display: flex;
     flex-direction: column;
     gap: 8px;
+    /* It hangs over the screen; it must not take the screen's taps with it.
+       Floating clear of the edges was right, but it sat over the first row of
+       every list underneath — the filter chips on People were unreachable
+       whenever a file was waiting. */
+    pointer-events: none;
+  }
+  .app-phone .banners > * {
+    pointer-events: auto;
   }
   .app-phone .banners:empty {
     display: none;
@@ -2006,6 +2014,12 @@ select {
     border-radius: 12px;
     box-shadow: var(--shadow-1);
     font-size: 13px;
+  }
+  /* And the screen starts below it. Hanging clear of the edges stopped the
+     banner pushing the whole app down, but it still landed on the first row of
+     whatever was underneath. */
+  .app-phone .main:has(.banners > *) .page {
+    padding-top: calc(env(safe-area-inset-top, 0px) + 126px);
   }
   /* -- The two materials ---------------------------------------------------
      The bars on this platform are not opaque strips: they are frosted panes
@@ -2526,8 +2540,32 @@ select {
     font-weight: 500;
     letter-spacing: -0.015em;
   }
+  /* A row whose actions moved underneath it: the third column is gone, so the
+     name gets the width back. Without this a badge and two buttons left three
+     characters for the filename. */
+  .app-phone .row.row-stacked {
+    grid-template-columns: 38px 1fr;
+  }
+  .app-phone .row.row-stacked .dep-actions {
+    grid-column: 2;
+    flex-wrap: wrap;
+    margin-top: 10px;
+  }
   .app-phone .row .row-meta {
     font-size: 13px;
+    /* Wrap the line instead of shaving its end off: a desktop has the width to
+       keep "active · 43 B · 0/10000 · expires in 7 days" on one line and a
+       phone does not, and the half that got cut was the half that says when it
+       stops working. */
+    flex-wrap: wrap;
+    row-gap: 2px;
+    /* The base rule clips; wrapping only works if it is allowed to be taller. */
+    overflow: visible;
+  }
+  /* And never inside a measurement: "43 B" broken across two lines reads as
+     two numbers. */
+  .app-phone .row .row-meta .tnum {
+    white-space: nowrap;
   }
   /* The label over a group, in the ground's own colour: this platform titles a
      list from outside it. */
@@ -3071,7 +3109,11 @@ select {
   }
   .sheet-full-bar {
     display: grid;
-    grid-template-columns: 1fr auto 1fr;
+    /* The sides keep a floor and the title gives way, not the other way round:
+       with a plain `auto` in the middle a long name ate both edges and the way
+       back read "‹ Ca…". A title you can only half read is a nuisance; a way
+       back you cannot read is a screen you are stuck on. */
+    grid-template-columns: minmax(84px, 1fr) minmax(0, max-content) minmax(84px, 1fr);
     align-items: center;
     gap: 10px;
     flex: none;

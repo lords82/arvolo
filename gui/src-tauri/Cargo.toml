@@ -49,6 +49,11 @@ tauri-plugin-barcode-scanner = "2"
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-autostart = "2"
 tauri-plugin-dialog = "2"
+# Not for the webview — it is granted nothing here. This is the only API that
+# turns Android's `content://` into an open file: the picker hands back a URI
+# that no `open()` can ever resolve, and `Fs::open` asks the platform for the
+# descriptor behind it. Already in the tree (the dialog plugin pulls it).
+tauri-plugin-fs = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-opener = "2"
 # In-app updates. Registered for the plugin state alone: every call goes through
