@@ -2159,6 +2159,34 @@ select {
     overflow-y: auto;
     overflow-x: hidden;
   }
+  /* -- Scrolling ------------------------------------------------------------
+     What can be asked of a scroller, asked everywhere one exists.
+     `-webkit-overflow-scrolling: touch` is what turns a WebView's scroll from
+     a drag into a throw; `overscroll-behavior: contain` keeps a list that has
+     hit its end from handing the gesture to whatever is behind it — the
+     scroll-chaining that made a sheet drag the screen underneath — and takes
+     the platform's own overscroll glow off, which is the one bit of this that
+     is visibly not Apple.
+
+     The physics themselves belong to the engine and cannot be replaced from
+     here: on the iPhone build they are already the platform's, and on Android
+     they are Android's. Reimplementing momentum in JavaScript would trade a
+     small difference for a large one. */
+  .app-phone .page,
+  .app-phone .view,
+  .app-phone .sheet-body,
+  .app-phone .sheet-full-body,
+  .app-phone .menu {
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
+  }
+  /* This platform's scroll indicator appears while you scroll and fades; the
+     WebView's is a permanent grey bar down the edge of the content. Neither is
+     ours to draw, so the one that is always there goes. */
+  .app-phone ::-webkit-scrollbar {
+    width: 0;
+    height: 0;
+  }
   .page.entering.push {
     z-index: 2;
     animation: ios-push-in 350ms var(--ease) both;
@@ -2272,6 +2300,25 @@ select {
   .ios-check {
     color: var(--out-strong);
     flex: none;
+  }
+  /* A row that carries a second line: the choice, and what it costs. This
+     platform sets the explanation grey and small directly under the label,
+     inside the same row, rather than in a caption beside it. */
+  .ios-sub {
+    display: block;
+    margin-top: 2px;
+    font-size: 13px;
+    line-height: 1.3;
+    color: var(--ink-mut);
+    white-space: normal;
+  }
+  .mode-row {
+    align-items: flex-start;
+    padding-top: 12px;
+    padding-bottom: 12px;
+  }
+  .mode-row .ios-check {
+    margin-top: 2px;
   }
   /* A whole row, centred, red, and at the bottom of what it destroys. This
      platform never puts an emptying button above the list it empties: up there
@@ -2424,11 +2471,26 @@ select {
     padding: 0 18px;
     font-size: 17px;
   }
-  /* A field wrapped in a labelled `.field` keeps its label at footnote size
-     above the row, which is where this platform writes what a field is when
-     the placeholder is already saying what goes in it. */
-  .app-phone .field label {
+  /* A field's label is a group header here — footnote size, in capitals, in the
+     ground's colour — the same thing the grouped lists use. A 12px semibold
+     dark label is a web form's; this platform has one way of titling a section
+     and uses it everywhere. */
+  .app-phone .field > label {
     font-size: 13px;
+    font-weight: 400;
+    color: var(--ink-mut);
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    padding: 0 4px;
+  }
+  .app-phone .field {
+    gap: 7px;
+  }
+  /* And its hint is the footnote under the group, not a caption glued to it. */
+  .app-phone .field .hint {
+    padding: 0 4px;
+    font-size: 13px;
+    line-height: 1.35;
   }
   /* The one field drawn on a white card rather than on the ground: without its
      own tone it disappears into the card entirely. The system's fields inside
@@ -2438,6 +2500,53 @@ select {
   .app-phone .sheet .input,
   .app-phone .sheet .textarea {
     background: var(--fill-quiet);
+  }
+
+  /* A switch and its sentence, as a row of a grouped list rather than a band of
+     text with a control floating at the end of it: white, inset, rounded, with
+     the explanation under the title in the grey this platform explains in. */
+  .app-phone .switch-row {
+    padding: 12px 16px;
+    background: var(--surface);
+    border-radius: 11px;
+    align-items: flex-start;
+  }
+  .app-phone .switch-row + .switch-row {
+    border-top: 0;
+    margin-top: 8px;
+  }
+  .app-phone .switch-row .switch {
+    margin-top: 2px;
+  }
+
+  /* -- The switch -----------------------------------------------------------
+     This platform's switch is a fixed object: 51×31, a knob nearly the full
+     height of the track with a soft shadow under it, green when on and the
+     system's plain grey when off. A 38×22 pill with a hairline border is a
+     web toggle, and next to a 44pt row it reads as one. */
+  .app-phone .switch {
+    width: 51px;
+    height: 31px;
+    border: 0;
+    background: var(--fill-quiet);
+    transition: background 200ms var(--ease);
+  }
+  .app-phone .switch::after {
+    top: 2px;
+    left: 2px;
+    width: 27px;
+    height: 27px;
+    box-shadow: 0 3px 8px rgba(0, 0, 0, 0.15), 0 1px 1px rgba(0, 0, 0, 0.16);
+    transition: transform 200ms var(--ease);
+  }
+  .app-phone .switch[aria-checked="true"] {
+    /* The system green, not the app's — a switch is the platform's control and
+       people read its colour before they read the label beside it. */
+    background: #34c759;
+    border-color: transparent;
+  }
+  .app-phone .switch[aria-checked="true"]::after {
+    transform: translateX(20px);
   }
 
   /* -- The pull-down menu ---------------------------------------------------
@@ -2576,11 +2685,13 @@ select {
     letter-spacing: 0;
     color: var(--ink-mut);
   }
-  /* The sentence under a group: what the choice above actually costs. Close
-     under it — the footnote belongs to the group, not to the space between. */
+  /* The sentence under a group: what the choice above actually costs. It
+     belongs to the group, not to the space between groups — so it sits close
+     under it. The closing-up is done by *cancelling the parent's gap*, which
+     means it can only be written where that gap is known: see `.ios-page`
+     below. Everywhere else this is a plain footnote and spaces itself. */
   .ios-foot {
-    padding: 0 16px;
-    margin-top: -24px;
+    padding: 8px 16px 0;
     color: var(--ink-mut);
     font-size: 13px;
     line-height: 1.35;
@@ -2590,12 +2701,23 @@ select {
      platform tells a section title from a sentence. */
   .ios-head {
     padding: 0 16px 7px;
-    margin-bottom: -25px;
     color: var(--ink-mut);
     font-size: 13px;
     line-height: 1.3;
     text-transform: uppercase;
     letter-spacing: 0.03em;
+  }
+  /* A header and its group are one thing with 7px between them, and two things
+     with 32px between them. Inside the page that spaces groups apart, the extra
+     has to be taken back — and *only* there. Written unscoped, this margin
+     followed the class into a sheet whose rows are 8px apart and closed the gap
+     to nothing: the title sat on the first row. A number that depends on a
+     parent belongs in a rule that names the parent. */
+  .ios-page > .ios-head {
+    margin-bottom: calc(7px - 32px);
+  }
+  .ios-page > .ios-foot {
+    margin-top: calc(8px - 32px);
   }
 
   .tabbar {
@@ -2993,8 +3115,28 @@ select {
       transform: translate(-50%, -50%) scale(1);
     }
   }
+  /* A full-screen sheet is a screen, and a screen made of grouped lists needs
+     the ground they are grouped against. On white, a white card is invisible:
+     the rows below read as a run of hairlines rather than as one object, which
+     is exactly how the destination list looked. */
+  .app-phone .sheet:not(.alert) {
+    background: var(--surface-sunk);
+  }
+  .app-phone .sheet:not(.alert) .sheet-body {
+    background: var(--surface-sunk);
+  }
+  /* And a field on that ground goes back to white — it is the raised thing
+     now, the same way a grouped row is. */
+  .app-phone .sheet .input,
+  .app-phone .sheet .textarea {
+    background: var(--surface);
+  }
   .sheet-head {
     padding: calc(env(safe-area-inset-top, 0px) + 12px) 14px 12px;
+    background: var(--bar);
+    -webkit-backdrop-filter: saturate(180%) blur(20px);
+    backdrop-filter: saturate(180%) blur(20px);
+    border-bottom: 1px solid var(--line);
   }
   /* The bar a phone puts a decision in: one control each side, the title
      between them, and the title is not what you press. */
@@ -3074,21 +3216,71 @@ select {
     background: var(--surface);
     will-change: transform;
   }
-  .swipe-action {
+  /* The actions lie still under the row and the row slides off them, which is
+     what makes the gesture feel like uncovering something rather than dragging
+     a button along. Two of them sit side by side, in the order they come out
+     from the edge. */
+  .swipe-actions {
     position: absolute;
     top: 0;
     right: 0;
     bottom: 0;
-    width: 116px;
+    display: flex;
+  }
+  .swipe-action {
     border: 0;
     background: var(--surface-3);
     color: var(--ink);
     font: 500 15px var(--font);
     cursor: pointer;
   }
-  .swipe.danger .swipe-action {
+  .swipe-action.danger {
     background: var(--red);
     color: #fff;
+  }
+
+  /* The transfer that is happening, in the shape this platform gives one: the
+     file's kind, its name, and one line that answers "how far, how fast, how
+     long" — then the bar, then the counts and the single control that applies. */
+  .th-now-head {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .th-now-name {
+    display: block;
+    font-size: 17px;
+    font-weight: 600;
+    letter-spacing: -0.015em;
+  }
+  .th-now-meta {
+    display: block;
+    margin-top: 2px;
+    font-size: 13px;
+    color: var(--ink-mut);
+  }
+  .th-now-bytes {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    font-size: 13px;
+    color: var(--ink);
+  }
+  .th-now-act,
+  .th-past-act {
+    margin-left: auto;
+    min-height: 34px;
+    padding: 0 14px;
+    border: 0;
+    border-radius: 17px;
+    background: var(--fill-quiet);
+    color: var(--out-strong);
+    font: 590 15px var(--font);
+    cursor: pointer;
+  }
+  .th-past-act:active,
+  .th-now-act:active {
+    opacity: 0.6;
   }
 
   /* -- A thread, full screen ------------------------------------------------ */

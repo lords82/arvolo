@@ -2302,6 +2302,74 @@ impl TransferManager {
         });
     }
 
+    /// Stop everything that is moving, because this process is about to be put
+    /// to sleep and would otherwise be frozen mid-transfer.
+    ///
+    /// A phone suspends an app that goes to the background; what happens to a
+    /// transfer that is running at that moment is that its connection dies
+    /// somewhere the app cannot see, and it comes back as a failure — with the
+    /// partial kept but its resume record gone, so the only way on is for the
+    /// sender to offer it again. Pausing first turns that into a stop this app
+    /// can undo: the partial *and* the record stay, and the marker says the
+    /// machine did it, so both [`resume_suspended`](Self::resume_suspended) and
+    /// the next launch know to pick it back up.
+    ///
+    /// Returns the ids it stopped.
+    pub fn suspend_running(&self) -> Vec<u64> {
+        let running: Vec<u64> = self
+            .inner
+            .transfers
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|t| {
+                // What is actually in flight. A send that is only *waiting* on a
+                // relay is not burning a connection and has its own retry;
+                // stopping it would be stopping nothing.
+                matches!(t.status, TransferStatus::Active | TransferStatus::Preparing)
+            })
+            .map(|t| t.id)
+            .collect();
+        let mut stopped = Vec::new();
+        for id in running {
+            if self.pause(id) {
+                // `pause` wrote the marker as a person's; say who it really was,
+                // now that it exists.
+                if let Some(dir) = &self.inner.state_dir {
+                    if paused_marker_path(dir, id).exists() {
+                        mark_paused_by(dir, id, PausedBy::System);
+                    }
+                }
+                stopped.push(id);
+            }
+        }
+        stopped
+    }
+
+    /// Start again everything [`suspend_running`](Self::suspend_running) stopped
+    /// — and nothing a person stopped.
+    ///
+    /// Returns the ids it restarted.
+    pub fn resume_suspended(&self) -> Vec<u64> {
+        let Some(dir) = self.inner.state_dir.clone() else {
+            return Vec::new();
+        };
+        let paused: Vec<u64> = self
+            .inner
+            .transfers
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|t| matches!(t.status, TransferStatus::Paused(_)))
+            .map(|t| t.id)
+            .collect();
+        paused
+            .into_iter()
+            .filter(|id| paused_by(&dir, *id) == Some(PausedBy::System))
+            .filter(|id| self.resume(*id))
+            .collect()
+    }
+
     /// Re-start every persisted, not-yet-finished chunked download (called once at
     /// daemon startup). Each resumes from its partial file on disk — no re-accept.
     /// Returns how many were resumed.
@@ -2348,10 +2416,13 @@ impl TransferManager {
             self.restore_sendto(rec, prep);
         }
         for rec in downloads {
-            // A download the user paused comes back Paused (awaiting them); an active
-            // one resumes fetching. Read the marker before dropping the stale record —
-            // `remove_download` clears the marker too.
-            let was_paused = is_paused_marked(&dir, rec.id);
+            // A download **the user** paused comes back Paused, awaiting them; one
+            // the system stopped on its way to sleep, and one that was simply
+            // interrupted, resume fetching. That difference is the whole of what a
+            // person means by "it should pick up where it left off, except the one
+            // I stopped on purpose". Read the marker before dropping the stale
+            // record — `remove_download` clears the marker too.
+            let was_paused = paused_by(&dir, rec.id) == Some(PausedBy::User);
             remove_download(&dir, rec.id);
             if was_paused {
                 self.restore_paused_download(rec);
@@ -2881,6 +2952,46 @@ mod pause_download_tests {
     /// pause marker is set. A real user cancel (no marker) and every terminal outcome
     /// stay terminal. Getting this wrong either loses a paused download or leaves a
     /// cancelled one un-droppable.
+    /// The difference a phone depends on: a stop the machine made on its way to
+    /// sleep is undone on the way back, and a stop a person made is not. Both
+    /// are the same marker file, so the thing that tells them apart has to
+    /// survive a restart — which is why it is written *in* the marker rather
+    /// than remembered in memory that a suspended app does not keep.
+    #[test]
+    fn a_pause_remembers_who_made_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+
+        mark_paused(d, 1);
+        assert_eq!(paused_by(d, 1), Some(PausedBy::User));
+
+        mark_paused_by(d, 2, PausedBy::System);
+        assert_eq!(paused_by(d, 2), Some(PausedBy::System));
+
+        // Nothing paused reads as nobody, not as a person.
+        assert_eq!(paused_by(d, 3), None);
+    }
+
+    /// Markers written before this existed are empty files, and an empty marker
+    /// has to keep meaning what it used to: a person's pause. Reading it as the
+    /// system's would silently restart, on the next launch, a download somebody
+    /// deliberately stopped.
+    #[test]
+    fn an_old_empty_marker_still_means_a_person() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(paused_marker_path(dir.path(), 9), []).unwrap();
+        assert_eq!(paused_by(dir.path(), 9), Some(PausedBy::User));
+    }
+
+    /// And clearing still clears, whoever wrote it.
+    #[test]
+    fn resuming_removes_the_mark_whoever_left_it() {
+        let dir = tempfile::tempdir().unwrap();
+        mark_paused_by(dir.path(), 4, PausedBy::System);
+        clear_paused(dir.path(), 4);
+        assert_eq!(paused_by(dir.path(), 4), None);
+    }
+
     #[test]
     fn a_download_parks_as_paused_exactly_when_it_should() {
         let p = PathBuf::from("/tmp/x");

@@ -121,3 +121,28 @@ time = "=0.3.51"
 # where the unix-socket client is absent until the named-pipe phase.
 [lints.rust]
 unexpected_cfgs = { level = "allow" }
+
+# Publishing a finished download into the user's Downloads, which on Android is
+# MediaStore and nothing else — see `publish_android`. `jni` speaks to it and
+# `tao` is where the VM and the activity already live (the windowing layer holds
+# both; this only borrows them). Same versions the graph already resolves, so
+# neither adds anything to the build.
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+tao = "0.35"
+
+# The background-time request, which is the only way a transfer survives the app
+# being put away — see `ios_background`. Same objc2 family the macOS side
+# already uses.
+[target.'cfg(target_os = "ios")'.dependencies]
+objc2 = "0.6"
+block2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSString",
+] }
+objc2-ui-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "UIApplication",
+    "UIResponder",
+] }

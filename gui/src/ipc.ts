@@ -43,8 +43,8 @@ export const api = {
   listPending: () => invoke<OfferDto[]>("list_pending"),
   listContacts: () => invoke<ContactDto[]>("list_contacts"),
   /** Open the native picker; resolves to registered items (empty = cancelled). */
-  pickFiles: (directory: boolean) =>
-    invoke<PickedItem[]>("pick_files", { directory }),
+  pickFiles: (directory: boolean, media = false) =>
+    invoke<PickedItem[]>("pick_files", { directory, media }),
   /** `device` aims it at one of our own machines; only meaningful when `to` is
    *  the reserved self recipient, and refused by the daemon otherwise. */
   sendTo: (
@@ -107,6 +107,11 @@ export const api = {
     invoke<void>("reject_offer", { offerId }),
   pause: (id: number) => invoke<void>("pause", { id }),
   resume: (id: number) => invoke<void>("resume", { id }),
+  /** Going to sleep, and coming back. See `bridge::suspend_transfers`. */
+  suspendTransfers: () => invoke<void>("suspend_transfers"),
+  resumeSuspendedTransfers: () => invoke<void>("resume_suspended_transfers"),
+  /** The window went away, or came back — see `window_hidden` in the backend. */
+  windowHidden: (hidden: boolean) => invoke<void>("window_hidden", { hidden }),
   cancel: (id: number) => invoke<void>("cancel", { id }),
   remove: (id: number) => invoke<void>("remove", { id }),
   clearFinished: () => invoke<number>("clear_finished"),

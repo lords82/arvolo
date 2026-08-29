@@ -219,6 +219,32 @@ export function App() {
     };
   }, [reload]);
 
+  // Coming back from sleep.
+  //
+  // Going *to* sleep is not decided here, and deliberately: leaving the app is
+  // not the moment to stop working. Android keeps the process alive and a
+  // transfer simply carries on — a 40 MB file finishes while the phone is in a
+  // pocket. iOS gives the app a stretch of time and then freezes it, and the
+  // native side spends that stretch transferring and stops cleanly at the end
+  // of it (see `ios_background`). Either way, what is stopped is stopped with a
+  // mark saying the machine did it.
+  //
+  // This is the other half: on the way back, start again exactly what that
+  // stopping stopped — and nothing a person paused on purpose. Cheap and quiet
+  // when there is nothing to resume, which is the common case.
+  useEffect(() => {
+    if (!isPhone) return;
+    const onVisible = () => {
+      // Tell the native side either way: on iOS it is what asks for the time
+      // that keeps a transfer alive past the moment you leave, and what gives
+      // that time back on the way in.
+      fire(api.windowHidden(document.hidden));
+      if (!document.hidden) fire(api.resumeSuspendedTransfers());
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, [isPhone]);
+
   // Boot the store (snapshot + event subscription) once. `init` is async, so an
   // unmount can land before it resolves — track that and dispose the listeners
   // it hands back, or they'd leak (and double up under StrictMode's re-mount).
@@ -606,23 +632,20 @@ export function App() {
               `PeopleBarMenu`), everywhere else it starts a send. One glyph,
               the screen's own meaning, which is how this platform's bars
               work — Mail's compose and Contacts' add are the same corner. */}
-          {isPhone && (
-            <>
-              <IconButton
-                label={t("app.searchLabel")}
-                onClick={() => setPaletteOpen(true)}
-              >
-                <Icon.Search size={17} />
+          {/* No magnifier. A command palette is a keyboard's idea — it exists
+              to reach a thing without leaving the keys, and a phone has no keys
+              to leave. What it searched for is two taps away regardless: people
+              have their own tab with a search field in it, and the places are
+              four rows deep at most. A glyph that opens a search across an app
+              this small is chrome standing in for navigation. */}
+          {isPhone &&
+            (route === "people" ? (
+              <PeopleBarMenu />
+            ) : (
+              <IconButton label={t("app.send")} onClick={() => openSheet([])}>
+                <Icon.Plus size={17} />
               </IconButton>
-              {route === "people" ? (
-                <PeopleBarMenu />
-              ) : (
-                <IconButton label={t("app.send")} onClick={() => openSheet([])}>
-                  <Icon.Plus size={17} />
-                </IconButton>
-              )}
-            </>
-          )}
+            ))}
 
           {/* Both are already in the bottom bar on a phone, and one of them is
               named after a key combination nobody can press there. */}

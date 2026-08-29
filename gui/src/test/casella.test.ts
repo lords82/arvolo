@@ -47,6 +47,26 @@ describe("the Casella's grouping", () => {
     expect(threads[0].who).toBe("Giulia");
   });
 
+  it("puts what is arriving above what is going out, whatever the clock says", () => {
+    // Recency alone is right for a list of conversations and wrong for one that
+    // mixes a decision with a receipt: a file coming *to* you can need an
+    // answer, and an answer does not belong under something you sent an hour
+    // ago. Direction first, time second.
+    const threads = threadsOf([
+      t({ key: "sent-now", peerId: MARCO, peer: "Marco", dir: "out", firstSeen: 9_000 }),
+      t({ key: "arrived-earlier", peerId: GIULIA, peer: "Giulia", dir: "in", firstSeen: 1_000 }),
+    ]);
+    expect(threads.map((x) => x.who)).toEqual(["Giulia", "Marco"]);
+  });
+
+  it("still puts the newest first inside each direction", () => {
+    const threads = threadsOf([
+      t({ key: "old-in", peerId: MARCO, peer: "Marco", dir: "in", firstSeen: 1_000 }),
+      t({ key: "new-in", peerId: GIULIA, peer: "Giulia", dir: "in", firstSeen: 5_000 }),
+    ]);
+    expect(threads.map((x) => x.who)).toEqual(["Giulia", "Marco"]);
+  });
+
   it("puts the newest exchange first, in the list and inside a row", () => {
     const threads = threadsOf([
       t({ key: "old", peerId: MARCO, peer: "Marco", firstSeen: 1_000 }),

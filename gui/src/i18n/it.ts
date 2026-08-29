@@ -13,6 +13,7 @@ export const it: Dict = {
   "common.save": "Salva",
   "common.done": "Fatto",
   "common.close": "Chiudi",
+  "common.back": "Indietro",
   "common.confirm": "Conferma",
   "common.retry": "Riprova",
   "common.open": "Apri",
@@ -207,6 +208,8 @@ export const it: Dict = {
   "title.you": "Tu",
   "tab.send": "Invia",
   "row.pause": "Pausa",
+  "row.resume": "Riprendi",
+  "row.cancel": "Annulla",
   "row.takeBack": "Ritira",
   "casella.title": "Casella",
   "casella.notTakenYet": "Non ancora ritirato",
@@ -585,6 +588,7 @@ export const it: Dict = {
     "Aggiungi qualcuno da Persone. Lo scambio con codice è il modo più rapido: vi salva a vicenda, già verificati.",
   "send.pickerSearch": "Cerca un contatto…",
   "send.pickerRecipient": "Destinatario",
+  "send.whoNobody": "Nessuno",
   "send.selfUnpairedHint":
     "Nessun'altra macchina ha ancora questa identità: collegane una da Dispositivi. Quello che mandi ora resta sul relay.",
   "send.selfDepositHint":
@@ -629,6 +633,7 @@ export const it: Dict = {
   "send.filesHint": "Puoi anche trascinare file e cartelle nella finestra.",
   "send.filesRemove": (name) => `Togli ${name}`,
   "send.pickFiles": "File…",
+  "send.pickMedia": "Foto e video…",
   "send.pickFailed": "Non sono riuscito ad aprire quel file.",
   "send.pickFolder": "Cartella…",
   "send.whoLabel": "A chi va",

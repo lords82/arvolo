@@ -171,6 +171,17 @@ pub enum Request {
     RevokeDeposit { id: String },
     /// Pause an in-progress `send --to` by id → [`Response::Ok`].
     Pause { id: u64 },
+    /// Stop everything in flight because this process is about to be suspended,
+    /// and start again what was stopped that way → [`Response::Ok`].
+    ///
+    /// Only a phone sends these. An app that goes to the background there is
+    /// frozen, and a transfer frozen mid-flight comes back as a failure whose
+    /// resume record is gone; stopping first turns it into something the app can
+    /// pick up again. `ResumeSuspended` restarts exactly what `Suspend` stopped
+    /// — never what a person paused, which is the point of telling the two apart
+    /// (see `PausedBy` in the core).
+    Suspend,
+    ResumeSuspended,
     /// Stop waiting for the recipient to accept and park the file on the relay
     /// now → [`Response::Ok`], or [`Response::Error`] if the send is not waiting.
     ///

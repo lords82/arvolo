@@ -66,9 +66,43 @@ pub(super) fn paused_marker_path(dir: &Path, id: u64) -> PathBuf {
     dir.join(format!("dl-paused-{id}"))
 }
 
+/// Who stopped it. The difference decides what a restart does: a person who
+/// paused something meant it to stay paused, and the machine that paused it
+/// because the phone was about to be put to sleep meant the opposite.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PausedBy {
+    /// A person pressed pause. It stays paused until they say otherwise.
+    User,
+    /// The app was going to be suspended and stopped cleanly first, so the
+    /// partial and its record survive. Resumed on the way back.
+    System,
+}
+
 pub(super) fn mark_paused(dir: &Path, id: u64) {
+    mark_paused_by(dir, id, PausedBy::User)
+}
+
+/// The marker file's *contents* say who: it was empty before this, and an empty
+/// marker still reads as a person's pause — which is the safe way round for
+/// anything already on disk at an upgrade. A file that exists is paused; what is
+/// in it only decides whether a restart picks it back up.
+pub(super) fn mark_paused_by(dir: &Path, id: u64, by: PausedBy) {
     let _ = std::fs::create_dir_all(dir);
-    let _ = std::fs::write(paused_marker_path(dir, id), []);
+    let body: &[u8] = match by {
+        PausedBy::User => b"",
+        PausedBy::System => b"system",
+    };
+    let _ = std::fs::write(paused_marker_path(dir, id), body);
+}
+
+/// Who paused the download with this id, if anyone did.
+pub(super) fn paused_by(dir: &Path, id: u64) -> Option<PausedBy> {
+    let body = std::fs::read(paused_marker_path(dir, id)).ok()?;
+    Some(if body == b"system" {
+        PausedBy::System
+    } else {
+        PausedBy::User
+    })
 }
 
 pub(super) fn clear_paused(dir: &Path, id: u64) {

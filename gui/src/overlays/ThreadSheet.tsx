@@ -11,11 +11,12 @@
 
 import { useT } from "../i18n";
 import { useBackDismiss } from "../backstack";
-import { barClass, fmtAgo, fmtBytes, pct, statusMeta } from "../format";
+import { barClass, fmtAgo, fmtBytes, metaLine, pct, statusMeta } from "../format";
 import { fire, useStore } from "../store";
 import type { UITransfer } from "../types";
 import { threadsOf } from "../views/CasellaView";
-import { Avatar } from "../ui/Bits";
+import { api } from "../ipc";
+import { Avatar, ExtChip } from "../ui/Bits";
 import { Icon } from "../ui/Icons";
 import { Button } from "../ui/Primitives";
 
@@ -39,6 +40,8 @@ export function ThreadSheet() {
   const openIncoming = useStore((s) => s.openIncoming);
   const openSheet = useStore((s) => s.openSheet);
   const reject = useStore((s) => s.reject);
+  const pause = useStore((s) => s.pause);
+  const resume = useStore((s) => s.resume);
   // Not a `Sheet`, so it registers for the back gesture itself — see
   // `backstack`. This is the screen the gesture is used on most.
   useBackDismiss(!!key, close);
@@ -67,7 +70,23 @@ export function ThreadSheet() {
           <span className="truncate">{t("casella.title")}</span>
         </button>
         <h2 className="truncate">{thread.who}</h2>
-        <span className="bar-pad" />
+        {/* Sending them something belongs in the bar, as this platform's compose
+            button — not as a filled bar across the bottom of a screen you came
+            to *read*. It was the loudest thing here, it repeated the "+" the
+            app already has, and it named a person in a button, which is a
+            sentence pretending to be a control. */}
+        <span className="bar-pad">
+          <button
+            className="bar-btn"
+            aria-label={t("thread.sendBack", thread.who)}
+            onClick={() => {
+              close();
+              openSheet([], thread.peerId || thread.who);
+            }}
+          >
+            <Icon.Plus size={19} />
+          </button>
+        </span>
       </div>
 
       <div className="sheet-full-body">
@@ -82,19 +101,55 @@ export function ThreadSheet() {
         </div>
 
         {now.map((tx) => (
-          <div className="card card-pad stack" key={tx.key}>
-            <div className="section-head">
-              <span className="t-head grow">{t("thread.now")}</span>
-              <span className="badge">{fmtBytes(tx.size)}</span>
-            </div>
-            <div className="truncate" style={{ fontWeight: 600 }}>
-              {tx.name}
-            </div>
-            <div className="t-xs t-mut">{statusMeta(tx.status).text}</div>
-            {tx.status !== "incoming" && (
-              <span className={barClass(tx)}>
-                <span style={{ width: `${pct(tx)}%` }} />
+          <div className="card card-pad stack th-now" key={tx.key}>
+            <div className="th-now-head">
+              <ExtChip name={tx.name} />
+              <span className="grow" style={{ minWidth: 0 }}>
+                <span className="truncate th-now-name">{tx.name}</span>
+                {/* What is actually happening, in the words the board uses:
+                    a percentage while it moves, with the rate and what is left
+                    of it when the engine knows them. The old card said
+                    "downloading" and drew a bar, which answers neither "how far"
+                    nor "how long" — the two questions a person watching a
+                    transfer is asking. */}
+                <span className="th-now-meta">{metaLine(tx)}</span>
               </span>
+            </div>
+            {tx.status !== "incoming" && (
+              <>
+                <span className={barClass(tx)}>
+                  <span style={{ width: `${pct(tx)}%` }} />
+                </span>
+                <div className="th-now-bytes">
+                  <span className="tnum">{fmtBytes(tx.transferred)}</span>
+                  <span className="t-mut"> / </span>
+                  <span className="tnum t-mut">{fmtBytes(tx.size)}</span>
+                  {/* One control, and the one that applies: hold what is
+                      running, take back what nobody has collected. */}
+                  {tx.canPause &&
+                    (tx.status === "active" || tx.status === "stalled") && (
+                      <button
+                        className="th-now-act"
+                        onClick={() => fire(pause(tx.id))}
+                      >
+                        {t("row.pause")}
+                      </button>
+                    )}
+                  {tx.status === "paused" && (
+                    <button
+                      className="th-now-act"
+                      onClick={() => fire(resume(tx.id))}
+                    >
+                      {t("row.resume")}
+                    </button>
+                  )}
+                </div>
+              </>
+            )}
+            {tx.status === "incoming" && (
+              <div className="th-now-bytes">
+                <span className="tnum t-mut">{fmtBytes(tx.size)}</span>
+              </div>
             )}
             {/* An offer is the one row here with a decision on it. Accepting goes
                 through the same dialog the desktop uses — it is where the
@@ -136,27 +191,27 @@ export function ThreadSheet() {
                       {fmtAgo(tx.firstSeen / 1000)}
                     </span>
                   </span>
-                  <span className={`badge ${tx.status === "completed" ? "ok" : ""}`}>
-                    {statusMeta(tx.status).text}
-                  </span>
+                  {/* A file that arrived and is still here is a file you can
+                      open. The badge said "completed" and stopped there, which
+                      is a receipt where an action belongs. */}
+                  {tx.status === "completed" && tx.dir === "in" && tx.path ? (
+                    <button
+                      className="th-past-act"
+                      onClick={() => void api.openPath(tx.path!)}
+                    >
+                      {t("common.open")}
+                    </button>
+                  ) : (
+                    <span className={`badge ${tx.status === "completed" ? "ok" : ""}`}>
+                      {statusMeta(tx.status).text}
+                    </span>
+                  )}
                 </div>
               ))}
             </div>
           </>
         )}
 
-        <div className="grow" />
-        <Button
-          variant="primary"
-          block
-          onClick={() => {
-            close();
-            openSheet([], thread.peerId || thread.who);
-          }}
-        >
-          <Icon.Send size={14} />
-          {t("thread.sendBack", thread.who)}
-        </Button>
       </div>
     </div>
   );

@@ -17,6 +17,7 @@ import { useEffect, useMemo, useState } from "react";
 import { api } from "../ipc";
 import { SELF_RECIPIENT, useStore } from "../store";
 import { useIsPhone } from "../phone";
+import { useBackDismiss } from "../backstack";
 import type { SendMode } from "../store";
 import { useT } from "../i18n";
 import { Icon } from "../ui/Icons";
@@ -236,6 +237,7 @@ function ContactPicker({
   onChange: (to: string) => void;
 }) {
   const t = useT();
+  const isPhone = useIsPhone();
   const [q, setQ] = useState("");
   const shown = useMemo(() => {
     const needle = q.trim().toLowerCase();
@@ -309,9 +311,16 @@ function ContactPicker({
                   <span className="truncate">{c.name}</span>
                   <ClaimedName c={c} />
                 </span>
-                <span className="row-meta mono" style={{ fontSize: 10.5 }}>
-                  {c.fingerprint}
-                </span>
+                {/* Not on a phone. Eight words of fingerprint under every name
+                    is two lines of noise per row on a screen that fits four
+                    rows: it answers a question nobody asks while *sending*
+                    (comparing a key is done once, on the person's own page),
+                    and it pushed the thing being chosen off the line. */}
+                {!isPhone && (
+                  <span className="row-meta mono" style={{ fontSize: 10.5 }}>
+                    {c.fingerprint}
+                  </span>
+                )}
               </span>
               <span className="hstack-sm">
                 <TrustBadges verified={c.verified} trusted={c.trusted} />
@@ -327,6 +336,15 @@ function ContactPicker({
 
 export function SendSheet() {
   const isPhone = useIsPhone();
+  // Where in the sheet you are, on a phone.
+  //
+  // The whole thing used to be one screen that rewrote itself: choosing a
+  // destination changed everything below the choice, and one of those things was
+  // a list of people that scrolled inside a screen that already scrolled. Asking
+  // one question per screen is what this platform does with a form, and it costs
+  // a tap to answer something you were going to answer anyway.
+  const [step, setStep] = useState<"main" | "mode" | "who">("main");
+  useBackDismiss(isPhone && step !== "main", () => setStep("main"));
   const t = useT();
   const picks = useStore((s) => s.sheetPicks);
   const presetTo = useStore((s) => s.sheetTo);
@@ -432,7 +450,7 @@ export function SendSheet() {
    *  keystroke, so text typed for a contact survives a look at another mode. */
   const outgoingNote = toSelf ? "" : note;
 
-  const pick = async (directory: boolean) => {
+  const pick = async (directory: boolean, media = false) => {
     // The dialog is native and Rust-side; what comes back are registered ids
     // plus display names — never paths (see `bridge::PickedFiles`).
     //
@@ -442,7 +460,7 @@ export function SendSheet() {
     // refusal has to be as visible here as it is everywhere else.
     let picked: PickedItem[];
     try {
-      picked = await api.pickFiles(directory);
+      picked = await api.pickFiles(directory, media);
     } catch (e) {
       toast.bad(t("send.pickFailed"), String(e));
       return;
@@ -558,12 +576,20 @@ export function SendSheet() {
       // there under it, and "Hand over what you see below" only said so again.
       subtitle={result ? undefined : t("send.subtitle")}
       bar={{
-        cancel: result ? undefined : (
+        // A sub-screen borrows the bar: the way back on the left, what it is
+        // asking in the middle, nothing on the right. Answering *is* going back,
+        // so there is no button that means "done" — the same reason a Settings
+        // chooser has none.
+        cancel: isPhone && step !== "main" ? (
+          <button className="bar-btn" onClick={() => window.history.back()}>
+            ‹ {t("common.back")}
+          </button>
+        ) : result ? undefined : (
           <button className="bar-btn" onClick={close} disabled={busy}>
             {t("common.cancel")}
           </button>
         ),
-        confirm: result ? (
+        confirm: isPhone && step !== "main" ? undefined : result ? (
           <button className="bar-btn strong" onClick={close}>
             {t("common.done")}
           </button>
@@ -652,6 +678,40 @@ export function SendSheet() {
             </Button>
           )}
         </div>
+      ) : isPhone && step !== "main" ? (
+        // ---- the sub-screens: one question each ------------------------
+        <div className="stack">
+          {step === "mode" && (
+            <div className="ios-group">
+              {MODE_ORDER.map((m) => (
+                <button
+                  key={m}
+                  className="ios-row mode-row"
+                  onClick={() => {
+                    setMode(m);
+                    window.history.back();
+                  }}
+                >
+                  <span className="grow" style={{ minWidth: 0 }}>
+                    <span className="truncate">{t(MODE_KEY[m])}</span>
+                    <span className="ios-sub">{t(BLURB[m])}</span>
+                  </span>
+                  {mode === m && <Icon.Check size={16} className="ios-check" />}
+                </button>
+              ))}
+            </div>
+          )}
+          {step === "who" && (
+            <ContactPicker
+              contacts={contacts}
+              value={to}
+              onChange={(v) => {
+                setTo(v);
+                window.history.back();
+              }}
+            />
+          )}
+        </div>
       ) : (
         <div className="stack">
           {/* --- files ------------------------------------------------- */}
@@ -687,18 +747,78 @@ export function SendSheet() {
                   </div>
                 )}
                 <div className="hstack-sm">
+                  {/* Two ways in, because a phone has two kinds of thing to
+                      send and only one of them lives in a folder. */}
+                  {isPhone && (
+                    <Button size="sm" onClick={() => pick(false, true)}>
+                      <Icon.Image size={13} /> {t("send.pickMedia")}
+                    </Button>
+                  )}
                   <Button size="sm" onClick={() => pick(false)}>
                     <Icon.Plus size={13} /> {t("send.pickFiles")}
                   </Button>
-                  <Button size="sm" onClick={() => pick(true)}>
-                    <Icon.Folder size={13} /> {t("send.pickFolder")}
-                  </Button>
+                  {/* Not on a phone: there is no folder picker on mobile —
+                      the plugin has no such call, and the button opened the
+                      *file* picker instead, which is a control that lies about
+                      what it does. Sending a folder from a phone is the share
+                      sheet's job, and it is not this button. */}
+                  {!isPhone && (
+                    <Button size="sm" onClick={() => pick(true)}>
+                      <Icon.Folder size={13} /> {t("send.pickFolder")}
+                    </Button>
+                  )}
                 </div>
               </div>
             )}
           </Field>
 
           {/* --- mode -------------------------------------------------- */}
+          {/* Five destinations, each a phrase. A segmented control holds two to
+              five *short* labels; at this width the five wrapped onto a second
+              line at 13px and every one of them was a guess. On a phone the
+              same five choices are a group of rows with the chosen one ticked,
+              and each says underneath what the recipient will need — which is
+              the only thing that decides between them. */}
+          {isPhone ? (
+            /* Two rows, and each of them a question answered somewhere else.
+               What used to be here — five choices open at once, and under them
+               a list of people that scrolled inside a screen that scrolls — is
+               why the screen rewrote itself under the reader's hands. */
+            <div className="stack-sm">
+              <div className="ios-head">{t("send.whoLabel")}</div>
+              <div className="ios-group">
+                <button
+                  className="ios-row"
+                  onClick={() => {
+                    setStep("mode");
+                    history.pushState({ arvolo: "sendstep" }, "");
+                  }}
+                >
+                  <span className="grow truncate">{t("send.modeLabel")}</span>
+                  <span className="ios-detail">{t(MODE_KEY[mode])}</span>
+                  <Icon.ChevronRight size={15} className="ios-chev" />
+                </button>
+                {mode === "contact" && (
+                  <button
+                    className="ios-row"
+                    onClick={() => {
+                      setStep("who");
+                      history.pushState({ arvolo: "sendstep" }, "");
+                    }}
+                  >
+                    <span className="grow truncate">
+                      {t("send.pickerRecipient")}
+                    </span>
+                    <span className="ios-detail truncate">
+                      {to || t("send.whoNobody")}
+                    </span>
+                    <Icon.ChevronRight size={15} className="ios-chev" />
+                  </button>
+                )}
+              </div>
+              <div className="ios-foot">{t(BLURB_MORE[mode])}</div>
+            </div>
+          ) : (
           <Field label={t("send.whoLabel")}>
             {() => (
               <div className="stack-sm">
@@ -720,8 +840,12 @@ export function SendSheet() {
               </div>
             )}
           </Field>
+          )}
 
-          {mode === "contact" && (
+          {/* On a phone this is a screen of its own, reached from the row
+              above: a list of people inside a screen that already scrolls is
+              two scrollers fighting over one thumb. */}
+          {mode === "contact" && !isPhone && (
             <ContactPicker contacts={contacts} value={to} onChange={setTo} />
           )}
 

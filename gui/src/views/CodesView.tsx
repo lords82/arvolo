@@ -13,26 +13,11 @@
 import { useState } from "react";
 import { useT } from "../i18n";
 import { useStore } from "../store";
+import { scanOne } from "../scan";
 import { CodeHero } from "../ui/Bits";
 import { Icon } from "../ui/Icons";
 import { Button, Empty, Segmented } from "../ui/Primitives";
 import { toast } from "../ui/Toasts";
-
-/** Read one code off another device's screen.
- *
- * Loaded only when asked for: the plugin exists on phones and nowhere else, and
- * a desktop bundle should not carry a camera it has no way to open. A refusal —
- * no permission, no camera, the sheet dismissed — is not an error worth a red
- * banner, so it comes back as `null` and the paste field is still right there. */
-async function scanOne(): Promise<string | null> {
-  try {
-    const { scan, Format } = await import("@tauri-apps/plugin-barcode-scanner");
-    const res = await scan({ windowed: false, formats: [Format.QRCode] });
-    return res?.content?.trim() || null;
-  } catch {
-    return null;
-  }
-}
 
 export function CodesView() {
   const t = useT();

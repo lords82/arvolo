@@ -214,7 +214,7 @@ export function DepositsView() {
           just a sentence, refreshing happens on arriving, and the one verb is a
           row of its own — at the end, where this platform puts "add". */}
       {isPhone ? (
-        <div className="ios-foot" style={{ marginTop: 0 }}>
+        <div className="ios-foot">
           {t("deposits.intro")}
         </div>
       ) : (

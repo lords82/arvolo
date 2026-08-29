@@ -19,6 +19,8 @@
 import { useEffect, useState } from "react";
 import { useStore } from "../store";
 import { useT } from "../i18n";
+import { useIsPhone } from "../phone";
+import { scanOne } from "../scan";
 import { Icon } from "../ui/Icons";
 import { Button, Field, TextInput } from "../ui/Primitives";
 import { CodeHero } from "../ui/Bits";
@@ -42,6 +44,7 @@ const SUB = {
 
 export function PairSheet() {
   const t = useT();
+  const isPhone = useIsPhone();
   const pairing = useStore((s) => s.pairing);
   const start = useStore((s) => s.startPairing);
   const cancel = useStore((s) => s.cancelPairing);
@@ -225,19 +228,36 @@ export function PairSheet() {
                 hint={t("pair.codeHint")}
               >
                 {({ id, describedBy }) => (
-                  <TextInput
-                    id={id}
-                    data-autofocus
-                    aria-describedby={describedBy}
-                    className="mono"
-                    big
-                    spellCheck={false}
-                    autoCapitalize="off"
-                    autoCorrect="off"
-                    value={code}
-                    onChange={(e) => setCode(e.currentTarget.value)}
-                    placeholder="4821-crater-mango"
-                  />
+                  <div className="hstack-sm">
+                    <TextInput
+                      id={id}
+                      data-autofocus
+                      aria-describedby={describedBy}
+                      className="mono"
+                      big
+                      spellCheck={false}
+                      autoCapitalize="off"
+                      autoCorrect="off"
+                      value={code}
+                      onChange={(e) => setCode(e.currentTarget.value)}
+                      placeholder="4821-crater-mango"
+                    />
+                    {/* The other side is showing a QR. On a phone the way to
+                        read one is to point at it — typing a code off a screen
+                        held up in front of you is the fallback, not the
+                        method. */}
+                    {isPhone && (
+                      <Button
+                        size="sm"
+                        onClick={async () => {
+                          const got = await scanOne();
+                          if (got) setCode(got);
+                        }}
+                      >
+                        <Icon.Qr size={15} /> {t("codes.scan")}
+                      </Button>
+                    )}
+                  </div>
                 )}
               </Field>
 

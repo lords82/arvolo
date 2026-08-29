@@ -471,6 +471,16 @@ impl DaemonClient {
         expect_ok(self.request(Request::Resume { id }).await?)
     }
 
+    /// Going to sleep: stop what is in flight so it can be picked up again.
+    pub async fn suspend(&mut self) -> Result<()> {
+        expect_ok(self.request(Request::Suspend).await?)
+    }
+
+    /// Awake: pick up exactly what the suspension stopped.
+    pub async fn resume_suspended(&mut self) -> Result<()> {
+        expect_ok(self.request(Request::ResumeSuspended).await?)
+    }
+
     /// Park a waiting send on the relay instead of waiting longer for an accept.
     pub async fn deposit_now(&mut self, id: u64) -> Result<()> {
         expect_ok(self.request(Request::DepositNow { id }).await?)

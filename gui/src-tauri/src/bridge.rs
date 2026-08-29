@@ -317,10 +317,24 @@ pub async fn pick_files(
     app: tauri::AppHandle,
     state: tauri::State<'_, PickedFiles>,
     directory: bool,
+    media: bool,
 ) -> Result<Vec<PickedItemDto>, String> {
     use tauri_plugin_dialog::DialogExt;
     let (tx, rx) = tokio::sync::oneshot::channel();
     let dialog = app.dialog().file();
+    // Photos and videos do not live in a file system a person recognises, and
+    // hunting for one through a document browser — Photos, then a date, then a
+    // filename nobody chose — is not how anybody looks for a picture. Both
+    // platforms have a picker made for it: a grid of what the pictures actually
+    // look like. The plugin has always been able to ask for it; nothing did.
+    #[cfg(mobile)]
+    let dialog = if media {
+        dialog.set_picker_mode(tauri_plugin_dialog::PickerMode::Media)
+    } else {
+        dialog
+    };
+    #[cfg(desktop)]
+    let _ = media;
     // Picking a *folder* is a desktop idea, and the plugin says so: there is no
     // such call on mobile, where what you get is a document picker over files.
     // Sending a folder from a phone is the share sheet's job, not this one's.
@@ -449,6 +463,26 @@ fn percent_decode(s: &str) -> String {
         i += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+/// The app is going to sleep, or has just woken.
+///
+/// A phone freezes an app it puts in the background, and a transfer frozen in
+/// flight comes back as a failure with its resume record already dropped —
+/// which is why the only thing that used to survive backgrounding was a
+/// transfer that had finished first. Stopping cleanly on the way down keeps the
+/// partial *and* the record, and marks who stopped it, so coming back restarts
+/// exactly that and never what a person paused on purpose.
+#[tauri::command]
+pub async fn suspend_transfers() -> Result<(), String> {
+    let mut c = client().await?;
+    c.suspend().await.or_else(err)
+}
+
+#[tauri::command]
+pub async fn resume_suspended_transfers() -> Result<(), String> {
+    let mut c = client().await?;
+    c.resume_suspended().await.or_else(err)
 }
 
 #[tauri::command]
@@ -1037,9 +1071,9 @@ mod picked_tests {
     fn an_unknown_id_fails_the_whole_resolve() {
         let reg = PickedFiles::new();
         let a = reg.register(PathBuf::from("/tmp/a.txt"));
-        assert!(reg.resolve(std::slice::from_ref(&a.id)).is_ok());
+        assert!(reg.resolve(std::slice::from_ref(&a.id), None).is_ok());
         assert!(
-            reg.resolve(&[a.id, "no-such-id".into()]).is_err(),
+            reg.resolve(&[a.id, "no-such-id".into()], None).is_err(),
             "one bad id must sink the call, not shrink it"
         );
     }
@@ -1054,7 +1088,7 @@ mod picked_tests {
         let two = reg.register(PathBuf::from("/tmp/same.txt"));
         assert_ne!(one.id, two.id);
         // And both resolve — a re-pick of the same file is not an error.
-        assert!(reg.resolve(&[one.id, two.id]).is_ok());
+        assert!(reg.resolve(&[one.id, two.id], None).is_ok());
     }
 
     /// The registry is bounded: past the cap the oldest entry is evicted, and a
@@ -1067,7 +1101,7 @@ mod picked_tests {
             reg.register(PathBuf::from(format!("/tmp/f{i}")));
         }
         assert!(
-            reg.resolve(std::slice::from_ref(&first.id)).is_err(),
+            reg.resolve(std::slice::from_ref(&first.id), None).is_err(),
             "the oldest registration must be gone"
         );
     }

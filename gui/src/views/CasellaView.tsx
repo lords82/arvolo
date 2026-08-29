@@ -65,7 +65,21 @@ export function threadsOf(rows: UITransfer[]): Thread[] {
   }
   const threads = [...by.values()];
   for (const t of threads) t.rows.sort((a, b) => b.firstSeen - a.firstSeen);
-  threads.sort((a, b) => (b.rows[0]?.firstSeen ?? 0) - (a.rows[0]?.firstSeen ?? 0));
+  // Arriving first, then the newest.
+  //
+  // Recency alone is the right order for a list of conversations, and the wrong
+  // one for a list that mixes something waiting on you with something you have
+  // already dealt with: a file being sent *to* you can need a decision, and a
+  // decision does not belong under a record of what you sent this morning. So
+  // direction is the first key and time is the second — which leaves the order
+  // inside each half exactly as it was.
+  threads.sort((a, b) => {
+    const arriving = (t: Thread) => (t.rows[0]?.dir === "in" ? 0 : 1);
+    return (
+      arriving(a) - arriving(b) ||
+      (b.rows[0]?.firstSeen ?? 0) - (a.rows[0]?.firstSeen ?? 0)
+    );
+  });
   return threads;
 }
 
@@ -98,20 +112,38 @@ function Line({ tx }: { tx: UITransfer }) {
  * nobody has collected can be taken back. Anything else has no obvious verb, and
  * a swipe that reveals a verb you did not want is worse than a swipe that
  * reveals nothing. */
-function actionFor(tx: UITransfer | undefined, t: ReturnType<typeof useT>): SwipeAction | undefined {
+function actionsFor(
+  tx: UITransfer | undefined,
+  t: ReturnType<typeof useT>
+): SwipeAction[] {
   const pause = useStore.getState().pause;
+  const resume = useStore.getState().resume;
   const cancel = useStore.getState().cancel;
-  if (!tx) return undefined;
+  if (!tx) return [];
+  // Something moving has two answers and they are different answers: hold it,
+  // meaning come back to it — and give it up, meaning do not. Offering only the
+  // first left the second a trip into the row, into the person, into a menu.
   if (tx.canPause && (tx.status === "active" || tx.status === "stalled")) {
-    return { label: t("row.pause"), run: () => fire(pause(tx.id)) };
+    return [
+      { label: t("row.pause"), run: () => fire(pause(tx.id)) },
+      { label: t("row.cancel"), danger: true, run: () => fire(cancel(tx.id)) },
+    ];
+  }
+  if (tx.status === "paused") {
+    return [
+      { label: t("row.resume"), run: () => fire(resume(tx.id)) },
+      { label: t("row.cancel"), danger: true, run: () => fire(cancel(tx.id)) },
+    ];
   }
   if (tx.status === "completed" && tx.dir === "in" && tx.path) {
-    return { label: t("common.open"), run: () => void api.openPath(tx.path!) };
+    return [{ label: t("common.open"), run: () => void api.openPath(tx.path!) }];
   }
   if (tx.dir === "out" && tx.offerStatus === "pending") {
-    return { label: t("row.takeBack"), danger: true, run: () => fire(cancel(tx.id)) };
+    return [
+      { label: t("row.takeBack"), danger: true, run: () => fire(cancel(tx.id)) },
+    ];
   }
-  return undefined;
+  return [];
 }
 
 function ThreadRow({ thread }: { thread: Thread }) {
@@ -129,7 +161,7 @@ function ThreadRow({ thread }: { thread: Thread }) {
   const parked = latest?.offerStatus === "pending" || latest?.offerStatus === "arrived";
 
   return (
-    <SwipeRow action={actionFor(latest, t)}>
+    <SwipeRow actions={actionsFor(latest, t)}>
     <button className="cs-row" onClick={() => open(thread.key)}>
       <Avatar name={thread.who} id={thread.peerId} size={36} ring={ring(latest)} />
       <span className="cs-body">

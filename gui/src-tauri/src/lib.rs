@@ -22,8 +22,15 @@ mod bridge;
 mod compat;
 #[cfg(desktop)]
 mod daemon;
+#[cfg(target_os = "ios")]
+mod ios_background;
 #[cfg(target_os = "macos")]
 mod notify_mac;
+// Where a finished download goes to live, on the one platform that has an
+// opinion about it. Declared everywhere so its one table — what type a file is,
+// which decides whether tapping it opens a viewer or a chooser — is compiled and
+// tested on the machine this is developed on; the platform half inside is gated.
+mod publish_android;
 mod update;
 
 use arvolo_ipc::protocol::EventDto;
@@ -119,6 +126,27 @@ fn set_ui_language(app: AppHandle, state: tauri::State<'_, UiLang>, lang: String
     let _ = (app, lang);
 }
 
+/// The window has gone away, or come back.
+///
+/// Only iOS does anything with this, and only because only iOS freezes an app
+/// for going to the background — see `ios_background` for what the time is for
+/// and why it ends in a pause rather than a freeze. Android keeps the process
+/// running and needs nothing; a desktop window that is merely covered is not
+/// going anywhere at all.
+#[tauri::command]
+fn window_hidden(app: AppHandle, hidden: bool) {
+    #[cfg(target_os = "ios")]
+    {
+        if hidden {
+            ios_background::entered_background(&app);
+        } else {
+            ios_background::left_background(&app);
+        }
+    }
+    #[cfg(not(target_os = "ios"))]
+    let _ = (app, hidden);
+}
+
 /// Rewrite the tray menu in the language the webview just settled on.
 #[cfg(desktop)]
 fn rebuild_tray_menu(app: &AppHandle, lang: &str) {
@@ -152,7 +180,9 @@ fn ui_lang(app: &AppHandle) -> String {
 struct HasTray(bool);
 
 /// Keep the app's log to one readable file. Same bound and same one-generation
-/// policy the daemon's log uses.
+/// policy the daemon's log uses. Desktop only: a phone has no log file to bound
+/// — its diagnostics go to the system log, which the system rotates.
+#[cfg(desktop)]
 const GUI_LOG_MAX_BYTES: u64 = 2 * 1024 * 1024;
 
 /// Send this process's diagnostics somewhere a person can read them.
@@ -264,6 +294,8 @@ pub fn run() {
             bridge::reject_offer,
             bridge::pause,
             bridge::resume,
+            bridge::suspend_transfers,
+            bridge::resume_suspended_transfers,
             bridge::deposit_now,
             bridge::cancel,
             bridge::remove,
@@ -301,6 +333,7 @@ pub fn run() {
             bridge::save_ticket,
             bridge::take_pending_ticket,
             set_ui_language,
+            window_hidden,
             bridge::pick_files,
             bridge::gui_version,
             bridge::open_path,
@@ -449,6 +482,22 @@ pub fn run() {
     });
 }
 
+/// The platform's say in where a finished download comes to rest.
+///
+/// Android has one and it is MediaStore; everywhere else the engine's own
+/// behaviour is already right, and `None` leaves it untouched.
+#[cfg(mobile)]
+fn publisher() -> Option<std::sync::Arc<dyn arvolo_core::manager::SavePublisher>> {
+    #[cfg(target_os = "android")]
+    {
+        Some(std::sync::Arc::new(publish_android::MediaStorePublisher))
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        None
+    }
+}
+
 /// Bring the engine up inside this app, and point the bridge at it.
 ///
 /// This is what `daemon.rs` does for a desktop, in one process instead of two.
@@ -485,13 +534,26 @@ fn start_embedded_engine(app: &AppHandle) -> anyhow::Result<String> {
             // app for a deposit — is a later phase.
             announce: std::sync::Arc::new(arvolo_engine::announce::Silent),
             shutdown,
-            // Files stay in the app's storage until there is a publisher to move
-            // them out of it. That is the next thing this file needs.
-            publisher: None,
+            // Out of the app's storage and into the user's Downloads, once the
+            // download is whole. Android only: iOS publishes by renaming into
+            // the app's own `Documents`, which is a folder in Files, and that
+            // needs the plist keys before it needs code.
+            publisher: publisher(),
             front_ends: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         },
     ))?;
     bridge::use_embedded(std::sync::Arc::new(running.daemon.clone()));
+    // What to do with the last moment of borrowed time, when the system takes
+    // it back. Synchronous on purpose: the expiry handler has to finish before
+    // it returns the task, and `suspend_running` is a pause, not a wait.
+    #[cfg(target_os = "ios")]
+    {
+        let mgr = running.daemon.manager.clone();
+        ios_background::set_on_expiry(move || {
+            let n = mgr.suspend_running().len();
+            println!("arvolo: background time is up — stopped {n} transfer(s)");
+        });
+    }
     let where_it_lives = dir.display().to_string();
     // Held for the life of the app: dropping it would take the inbox with it.
     app.manage(running);

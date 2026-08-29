@@ -819,7 +819,8 @@ describe("the send panel", () => {
       .mockResolvedValue([pick("scelto.txt")]);
     await openSend();
     fireEvent.click(screen.getByText("Files…"));
-    await waitFor(() => expect(spy).toHaveBeenCalledWith(false));
+    // Not a folder, and not the photo library: this is the document picker.
+    await waitFor(() => expect(spy).toHaveBeenCalledWith(false, false));
     expect(await screen.findByText("scelto.txt")).toBeDefined();
   });
 

@@ -30,6 +30,7 @@ export const en = {
   "common.save": "Save",
   "common.done": "Done",
   "common.close": "Close",
+  "common.back": "Back",
   "common.confirm": "Confirm",
   "common.retry": "Retry",
   "common.open": "Open",
@@ -245,6 +246,8 @@ export const en = {
   "title.you": "You",
   "tab.send": "Send",
   "row.pause": "Hold",
+  "row.resume": "Resume",
+  "row.cancel": "Cancel",
   "row.takeBack": "Take back",
   "casella.title": "Mailbox",
   "casella.notTakenYet": "Not picked up yet",
@@ -661,6 +664,7 @@ export const en = {
     "Add somebody from People. Swapping codes is quickest — it saves you both, already verified.",
   "send.pickerSearch": "Search a contact…",
   "send.pickerRecipient": "Recipient",
+  "send.whoNobody": "Nobody yet",
   // The machines that share this identity. Never "me": the destination is a set
   // of computers, and one of them is the one being typed on.
   "send.selfUnpairedHint":
@@ -712,6 +716,7 @@ export const en = {
   "send.filesHint": "You can also drag files and folders into the window.",
   "send.filesRemove": (name: string) => `Remove ${name}`,
   "send.pickFiles": "Files…",
+  "send.pickMedia": "Photos and videos…",
   "send.pickFailed": "That file could not be opened.",
   "send.pickFolder": "Folder…",
   "send.whoLabel": "Who it goes to",

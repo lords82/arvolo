@@ -15,6 +15,7 @@ export const de: Dict = {
   "common.save": "Speichern",
   "common.done": "Fertig",
   "common.close": "Schließen",
+  "common.back": "Zurück",
   "common.confirm": "Bestätigen",
   "common.retry": "Erneut versuchen",
   "common.open": "Öffnen",
@@ -211,6 +212,8 @@ export const de: Dict = {
   "title.you": "Du",
   "tab.send": "Senden",
   "row.pause": "Pause",
+  "row.resume": "Fortsetzen",
+  "row.cancel": "Abbrechen",
   "row.takeBack": "Zurückholen",
   "casella.title": "Postfach",
   "casella.notTakenYet": "Noch nicht abgeholt",
@@ -587,6 +590,7 @@ export const de: Dict = {
     "Fügen Sie unter Personen jemanden hinzu. Am schnellsten geht der Code-Tausch: er speichert Sie beide, gleich verifiziert.",
   "send.pickerSearch": "Kontakt suchen…",
   "send.pickerRecipient": "Empfänger",
+  "send.whoNobody": "Niemand",
   "send.selfUnpairedHint":
     "Noch trägt keine andere Maschine diese Identität — verbinden Sie eine unter Geräte. Was Sie jetzt senden, wartet auf dem Relay.",
   "send.selfDepositHint":
@@ -632,6 +636,7 @@ export const de: Dict = {
     "Sie können Dateien und Ordner auch ins Fenster ziehen.",
   "send.filesRemove": (name) => `${name} entfernen`,
   "send.pickFiles": "Dateien…",
+  "send.pickMedia": "Fotos und Videos…",
   "send.pickFailed": "Diese Datei ließ sich nicht öffnen.",
   "send.pickFolder": "Ordner…",
   "send.whoLabel": "An wen es geht",

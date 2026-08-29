@@ -648,8 +648,13 @@ export function TransfersView() {
         alignItems: "start",
       }}
     >
-      <Column dir="out" sections={out} title={t("transfers.outgoing")} />
+      {/* Arriving first, in both readings of "first": leftmost on a wide window
+          and topmost on a narrow one, where the grid stacks. What arrives asks
+          something of you — accept it, refuse it, watch it land — and what you
+          sent is a thing you already decided. The one that waits on a person
+          goes where a person looks first. */}
       <Column dir="in" sections={inc} title={t("transfers.incoming")} />
+      <Column dir="out" sections={out} title={t("transfers.outgoing")} />
     </div>
   );
 }

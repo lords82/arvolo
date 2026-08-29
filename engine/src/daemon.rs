@@ -266,6 +266,18 @@ pub async fn dispatch(d: &Daemon, cmd: Request) -> Response {
         // pick up again — a mailbox pickup, a share — and resuming for one that is
         // not paused, which is what the play button on a *stalled* row used to ask
         // for and never got.
+        Request::Suspend => {
+            let n = d.manager.suspend_running().len();
+            tracing::info!("suspending: stopped {n} transfer(s) before sleep");
+            Response::Ok
+        }
+        Request::ResumeSuspended => {
+            let n = d.manager.resume_suspended().len();
+            if n > 0 {
+                tracing::info!("back from sleep: resumed {n} transfer(s)");
+            }
+            Response::Ok
+        }
         Request::Pause { id } => {
             if d.manager.pause(id) {
                 Response::Ok

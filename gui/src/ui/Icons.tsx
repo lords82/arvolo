@@ -196,6 +196,14 @@ export const Icon = {
       <path d="M1.9 4.4a1.2 1.2 0 0 1 1.2-1.2h2.6l1.4 1.8h5a1.2 1.2 0 0 1 1.2 1.2v5.6a1.2 1.2 0 0 1-1.2 1.2H3.1a1.2 1.2 0 0 1-1.2-1.2z" />
     </Svg>
   ),
+  /** Photos and videos: the mountain-and-sun every picker uses for a library. */
+  Image: (p: Props) => (
+    <Svg {...p}>
+      <rect x="2" y="3.2" width="12" height="9.6" rx="1.6" />
+      <circle cx="5.6" cy="6.4" r="1.1" />
+      <path d="M2.4 11.4 6 8.2l2.3 2.1 2.4-2.6 2.9 3" />
+    </Svg>
+  ),
   Refresh: (p: Props) => (
     <Svg {...p}>
       <path d="M13.4 7a5.5 5.5 0 0 0-9.6-2.4L2.4 6" />
