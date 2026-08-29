@@ -152,4 +152,24 @@ objc2-ui-kit = { version = "0.3", default-features = false, features = [
     "std",
     "UIApplication",
     "UIResponder",
+    # Handing a received file to the rest of the phone — see `ios_open`.
+    "UIActivity",
+    "UIActivityViewController",
+    "UIPopoverPresentationController",
+    "UIPresentationController",
+    "UIView",
+    "UIViewController",
+    "UIWindow",
+    # The ends of a scroll — see `ios_bounce`.
+    "UIScrollView",
 ] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "CFCGTypes",
+] }
+
+# Only the publisher's naming rule is tested here — the one decision in this
+# crate that is not a call into a platform, and the one that can therefore run
+# on the machine this is developed on. See `publish_ios`.
+[dev-dependencies]
+tempfile = "3"

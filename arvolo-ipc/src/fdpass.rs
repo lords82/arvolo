@@ -291,7 +291,7 @@ mod tests {
 #[cfg(test)]
 mod in_process_tests {
     use super::*;
-    use std::io::{Seek as _, SeekFrom, Write as _};
+    use std::io::{Seek as _, SeekFrom};
 
     /// The phone's whole send depends on this: a file the app opened has to
     /// reach the engine in the same process, once, and be readable there.

@@ -81,6 +81,18 @@ static EMBEDDED: std::sync::OnceLock<std::sync::Arc<dyn arvolo_ipc::client::Answ
 /// commands below are what has to stop caring where the answers come from, and
 /// they now do.
 #[allow(dead_code)]
+/// The engine's manager, for the two questions that are not requests: which
+/// picked copies are still needed, and what to stop when the system takes the
+/// app's time back. Set beside [`use_embedded`], from the same `Running`.
+#[cfg(mobile)]
+static MANAGER: std::sync::OnceLock<arvolo_core::manager::TransferManager> =
+    std::sync::OnceLock::new();
+
+#[cfg(mobile)]
+pub fn use_manager(m: arvolo_core::manager::TransferManager) {
+    let _ = MANAGER.set(m);
+}
+
 pub fn use_embedded(engine: std::sync::Arc<dyn arvolo_ipc::client::Answer>) {
     let _ = EMBEDDED.set(engine);
 }
@@ -302,6 +314,53 @@ impl PickedFiles {
     }
 }
 
+/// Where a picked file is kept while it is being sent.
+///
+/// The phone's picker does not hand over the file somebody chose — it hands over
+/// a **copy**, which iOS puts in `Library/Caches` and Android's document picker
+/// makes on its own. That copy is the send's payload until the send is over,
+/// including across app restarts, because a send resumes from a record naming
+/// this path.
+///
+/// Moved here first, out of whichever directory the platform used, so that this
+/// directory can be swept by the simple rule that everything in it is ours. A
+/// move inside the container is a rename: instant, whatever the file weighs.
+#[cfg(mobile)]
+pub fn picked_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
+    use tauri::Manager as _;
+    let dir = app.path().app_data_dir().ok()?.join("picked");
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir)
+}
+
+/// Throw away every picked copy no send would still need.
+///
+/// Run at startup and whenever the app comes back to the front — a directory
+/// listing and a set lookup, against a list the engine reads from the records
+/// that decide what resumes. Nothing here guesses at an age: a copy is kept
+/// exactly as long as something claims it.
+#[cfg(mobile)]
+pub fn sweep_picked(app: &tauri::AppHandle) {
+    let Some(dir) = picked_dir(app) else { return };
+    let Some(mgr) = MANAGER.get() else { return };
+    let needed: std::collections::HashSet<PathBuf> =
+        mgr.sources_still_needed().into_iter().collect();
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let path = e.path();
+        if needed.contains(&path) {
+            continue;
+        }
+        let _ = if path.is_dir() {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+    }
+}
+
 /// Register externally-arrived paths (the window drop handler in `main.rs`).
 pub fn register_paths(
     state: &tauri::State<'_, PickedFiles>,
@@ -384,11 +443,53 @@ pub async fn pick_files(
             }
             other => {
                 let path = other.into_path().map_err(|e| e.to_string())?;
+                #[cfg(mobile)]
+                let path = adopt_copy(&app, path);
                 out.push(state.register(path));
             }
         }
     }
     Ok(out)
+}
+
+/// Take a picked copy into the folder this app sweeps.
+///
+/// What the picker returns on a phone is not the person's file: it is a copy the
+/// system made, in a directory it chose — `Library/Caches` on iOS, the document
+/// picker's own on Android. Nobody owns those copies afterwards, and nobody was
+/// deleting them.
+///
+/// Moving them somewhere this app can reason about is what makes
+/// [`sweep_picked`] a rule rather than a guess. A rename inside the container is
+/// instant whatever the file weighs; if it fails — a different volume, a name
+/// already there — the original path is used unchanged, which is exactly the
+/// behaviour that existed before this. Nothing is lost by failing here.
+#[cfg(mobile)]
+fn adopt_copy(app: &tauri::AppHandle, path: PathBuf) -> PathBuf {
+    let Some(dir) = picked_dir(app) else {
+        return path;
+    };
+    // Already ours (a second pick of the same file in one session).
+    if path.starts_with(&dir) {
+        return path;
+    }
+    let Some(name) = path.file_name() else {
+        return path;
+    };
+    let dest = dir.join(name);
+    if dest.exists() {
+        // The same picture picked twice: the copy on disk is the same bytes, and
+        // the send that may still hold the first one keeps its path.
+        let _ = std::fs::remove_file(&path);
+        return dest;
+    }
+    match std::fs::rename(&path, &dest) {
+        Ok(()) => dest,
+        Err(e) => {
+            tracing::warn!("keeping the picked copy where it is: {e}");
+            path
+        }
+    }
 }
 
 /// Open what the platform gave us instead of a path.
@@ -1056,9 +1157,19 @@ pub async fn open_path(app: tauri::AppHandle, path: String) -> Result<(), String
     if !known {
         return Err(format!("path not open-able from here: {path}"));
     }
-    tauri_plugin_opener::OpenerExt::opener(&app)
-        .open_path(&path, None::<&str>)
-        .map_err(|e| format!("{path}: {e}"))
+    // iOS has nothing to shell out to, and the plugin's `open_path` goes through
+    // the `open` crate, which does exactly that: it returned Ok and nothing
+    // happened. The sheet is what "open" means there — see `ios_open`.
+    #[cfg(target_os = "ios")]
+    {
+        return crate::ios_open::share(&app, &path);
+    }
+    #[cfg(not(target_os = "ios"))]
+    {
+        tauri_plugin_opener::OpenerExt::opener(&app)
+            .open_path(&path, None::<&str>)
+            .map_err(|e| format!("{path}: {e}"))
+    }
 }
 
 #[cfg(test)]

@@ -24,6 +24,10 @@ mod compat;
 mod daemon;
 #[cfg(target_os = "ios")]
 mod ios_background;
+#[cfg(target_os = "ios")]
+mod ios_bounce;
+#[cfg(target_os = "ios")]
+mod ios_open;
 #[cfg(target_os = "macos")]
 mod notify_mac;
 // Where a finished download goes to live, on the one platform that has an
@@ -31,6 +35,10 @@ mod notify_mac;
 // which decides whether tapping it opens a viewer or a chooser — is compiled and
 // tested on the machine this is developed on; the platform half inside is gated.
 mod publish_android;
+// The same seam on the other phone. Also declared everywhere: the naming rule
+// inside it — what a second file of the same name is called — is a decision, and
+// decisions are tested on a laptop.
+mod publish_ios;
 mod update;
 
 use arvolo_ipc::protocol::EventDto;
@@ -489,13 +497,24 @@ pub fn run() {
 /// Android has one and it is MediaStore; everywhere else the engine's own
 /// behaviour is already right, and `None` leaves it untouched.
 #[cfg(mobile)]
-fn publisher() -> Option<std::sync::Arc<dyn arvolo_core::manager::SavePublisher>> {
+fn publisher(app: &AppHandle) -> Option<std::sync::Arc<dyn arvolo_core::manager::SavePublisher>> {
     #[cfg(target_os = "android")]
     {
+        let _ = app;
         Some(std::sync::Arc::new(publish_android::MediaStorePublisher))
     }
-    #[cfg(not(target_os = "android"))]
+    #[cfg(target_os = "ios")]
     {
+        // `Documents`, which the bundle's plist keys turn into "Arvolo" under
+        // *On My iPhone* in Files. Asked of the platform rather than assembled
+        // from the data dir: the two are siblings today and that is Apple's
+        // arrangement to change, not ours.
+        let dir = app.path().document_dir().ok()?;
+        Some(std::sync::Arc::new(publish_ios::DocumentsPublisher { dir }))
+    }
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        let _ = app;
         None
     }
 }
@@ -540,11 +559,22 @@ fn start_embedded_engine(app: &AppHandle) -> anyhow::Result<String> {
             // download is whole. Android only: iOS publishes by renaming into
             // the app's own `Documents`, which is a folder in Files, and that
             // needs the plist keys before it needs code.
-            publisher: publisher(),
+            publisher: publisher(app),
+            // The mailbox, rebuilt. This engine dies every time the app is put
+            // away, so without it the phone's home screen says nothing has ever
+            // happened — with the files sitting in Documents saying otherwise.
+            // A few hundred rows is a mailbox; the whole log has its own screen.
+            restore_board: 300,
             front_ends: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         },
     ))?;
     bridge::use_embedded(std::sync::Arc::new(running.daemon.clone()));
+    bridge::use_manager(running.daemon.manager.clone());
+    // Whatever the last run left in the picked-copies folder and no send still
+    // claims. Here rather than on a timer: the copies are only made while the
+    // app is in front, and this is the moment after the engine has read the
+    // records that say which ones are spoken for.
+    bridge::sweep_picked(app);
     // What to do with the last moment of borrowed time, when the system takes
     // it back. Synchronous on purpose: the expiry handler has to finish before
     // it returns the task, and `suspend_running` is a pause, not a wait.
@@ -643,6 +673,9 @@ fn show_main_window(app: &AppHandle) {
         #[cfg(desktop)]
         let _ = w.unminimize();
         let _ = w.set_focus();
+        // The ends of a scroll, which the layer under us turns off for everyone.
+        #[cfg(target_os = "ios")]
+        ios_bounce::restore(&w);
     }
 }
 
