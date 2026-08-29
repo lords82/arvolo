@@ -8,6 +8,7 @@
 import { useEffect } from "react";
 import { create } from "zustand";
 import { useT } from "../i18n";
+import { isPhoneNow } from "../phone";
 import { Icon } from "./Icons";
 import { IconButton } from "./Primitives";
 
@@ -45,6 +46,22 @@ export const useToasts = create<ToastState>((set) => ({
 export const toast = {
   ok: (title: string, detail?: string) =>
     useToasts.getState().push({ kind: "ok", title, detail }),
+  /// A confirmation of something the screen is already showing.
+  ///
+  /// "Transfer started" while the row appears with its progress bar; "renamed"
+  /// while the name changes under your eyes. On a desktop that is a courtesy —
+  /// the window is large and the change may be in a column you were not looking
+  /// at. On a phone it is noise, and expensive noise: it covers the bottom of a
+  /// screen that is all there is, over the very change it is announcing.
+  ///
+  /// This platform's answer to "it worked" is that you can see it worked, so
+  /// here that is the answer too — and where the result is *not* visible (a file
+  /// written elsewhere, a person blocked from a screen that does not show them)
+  /// the call stays `ok`, because then there is something to say.
+  echo: (title: string, detail?: string) => {
+    if (isPhoneNow()) return;
+    useToasts.getState().push({ kind: "ok", title, detail });
+  },
   info: (title: string, detail?: string) =>
     useToasts.getState().push({ kind: "info", title, detail }),
   bad: (title: string, detail?: string, action?: Toast["action"]) =>

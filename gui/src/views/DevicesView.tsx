@@ -66,7 +66,7 @@ function DeviceList() {
     setEditing(null);
     fire(
       rename(name).then(() =>
-        toast.ok(t("devices.renamed"), t("devices.renamedDetail"))
+        toast.echo(t("devices.renamed"), t("devices.renamedDetail"))
       )
     );
   };
@@ -200,7 +200,7 @@ function DeviceList() {
           if (who)
             fire(
               forget(who.name).then(() =>
-                toast.ok(t("devices.forgotten"), who.name)
+                toast.echo(t("devices.forgotten"), who.name)
               )
             );
         }}

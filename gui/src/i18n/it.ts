@@ -639,6 +639,8 @@ export const it: Dict = {
   "send.whoLabel": "A chi va",
   "send.modeLabel": "Modo di invio",
   "send.noteLabel": "Due righe per chi riceve (facoltativo)",
+  "send.options": "Opzioni",
+  "send.noteNone": "Nessuno",
   "send.noteHint": "Viaggia dentro l'offerta sigillata.",
   "send.notePlaceholder": "Ecco i file di cui parlavamo.",
   "send.keepCodeTitle": "Vale per più persone",

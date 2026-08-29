@@ -8,6 +8,7 @@ import { useT, type TFn } from "../i18n";
 import { Icon } from "./Icons";
 import { IconButton } from "./Primitives";
 import { barClass, extOf, extTint, pct, shortId } from "../format";
+import { useIsPhone } from "../phone";
 import type { ContactDto, UITransfer } from "../types";
 
 // ---- Avatar ---------------------------------------------------------------
@@ -143,9 +144,24 @@ export function CopyField({
   wrap?: boolean;
   mono?: boolean;
 }) {
+  // Four lines of base32 is not something anybody reads; it is something they
+  // copy. A window has the width to print it and be done, and a phone does not
+  // — there it becomes the ends of it, which is what a person checks against
+  // another screen anyway, with the whole of it a tap away in the clipboard.
+  // Tapping the shortened form opens it out, for the one time in a hundred
+  // somebody wants to see all of it.
+  const [full, setFull] = useState(false);
+  const isPhone = useIsPhone();
+  const short = isPhone && !full && value.length > 24;
   return (
-    <div className={`copyfield ${wrap ? "wrap" : ""}`}>
-      <code className={mono ? "mono" : ""}>{value}</code>
+    <div className={`copyfield ${wrap && !short ? "wrap" : ""}`}>
+      {short ? (
+        <code className="mono" onClick={() => setFull(true)}>
+          {shortId(value)}
+        </code>
+      ) : (
+        <code className={mono ? "mono" : ""}>{value}</code>
+      )}
       <CopyButton value={value} />
     </div>
   );

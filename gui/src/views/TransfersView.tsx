@@ -429,7 +429,7 @@ function SaveSenderSheet({
     setBusy(true);
     try {
       await addContact(chosen, tx.peerId);
-      toast.ok(t("incoming.savedAs", chosen), t("incoming.savedAsDetail"));
+      toast.echo(t("incoming.savedAs", chosen), t("incoming.savedAsDetail"));
       onClose();
     } catch {
       // reported by the store

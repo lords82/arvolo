@@ -722,6 +722,8 @@ export const en = {
   "send.whoLabel": "Who it goes to",
   "send.modeLabel": "Way of sending",
   "send.noteLabel": "A couple of lines for the recipient (optional)",
+  "send.options": "Options",
+  "send.noteNone": "None",
   "send.noteHint": "It travels inside the sealed offer.",
   "send.notePlaceholder": "Here are the files we talked about.",
   "send.keepCodeTitle": "Good for several people",

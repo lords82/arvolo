@@ -343,7 +343,13 @@ export function SendSheet() {
   // a list of people that scrolled inside a screen that already scrolled. Asking
   // one question per screen is what this platform does with a form, and it costs
   // a tap to answer something you were going to answer anyway.
-  const [step, setStep] = useState<"main" | "mode" | "who">("main");
+  const [step, setStep] = useState<"main" | "mode" | "who" | "note" | "options">(
+    "main"
+  );
+  /// Which part of the form this screen is showing. A desktop shows all of it
+  /// at once, because it has the room and because a form you can see the whole
+  /// of is easier to check than one you have to remember.
+  const part = (p: "main" | "note" | "options") => !isPhone || step === p;
   useBackDismiss(isPhone && step !== "main", () => setStep("main"));
   const t = useT();
   const picks = useStore((s) => s.sheetPicks);
@@ -508,14 +514,14 @@ export function SendSheet() {
           // The outcome as a toast, the way the live send already reports it;
           // the caption under the ticket then only has to answer "why am I
           // being shown this at all", which is the part that is not obvious.
-          toast.ok(
+          toast.echo(
             toSelf
               ? t("send.depositResultSelf")
               : t("send.depositResult", toLabel)
           );
         } else {
           await send(recipient, files.map((f) => f.id), outgoingNote, device);
-          toast.ok(
+          toast.echo(
             toSelf ? t("send.onItsWaySelf") : t("send.onItsWay", toLabel),
             // Sending to yourself has a different "and now?": no one has to
             // accept it, but a machine has to be awake to take it.
@@ -571,7 +577,20 @@ export function SendSheet() {
     <Sheet
       open={open}
       onClose={close}
-      title={result ? t("send.titleReady") : t("send.title")}
+      // A pushed screen says what it is asking, not what the flow is called.
+      title={
+        result
+          ? t("send.titleReady")
+          : isPhone && step === "mode"
+            ? t("send.modeLabel")
+            : isPhone && step === "who"
+              ? t("send.pickerRecipient")
+              : isPhone && step === "note"
+                ? t("send.noteLabel")
+                : isPhone && step === "options"
+                  ? t("send.options")
+                  : t("send.title")
+      }
       // No subtitle once there is a result: the thing to hand over is right
       // there under it, and "Hand over what you see below" only said so again.
       subtitle={result ? undefined : t("send.subtitle")}
@@ -678,7 +697,7 @@ export function SendSheet() {
             </Button>
           )}
         </div>
-      ) : isPhone && step !== "main" ? (
+      ) : isPhone && (step === "mode" || step === "who") ? (
         // ---- the sub-screens: one question each ------------------------
         <div className="stack">
           {step === "mode" && (
@@ -715,6 +734,7 @@ export function SendSheet() {
       ) : (
         <div className="stack">
           {/* --- files ------------------------------------------------- */}
+          {part("main") && (
           <Field
             label={t("send.filesLabel")}
             hint={isPhone ? undefined : t("send.filesHint")}
@@ -772,6 +792,8 @@ export function SendSheet() {
             )}
           </Field>
 
+          )}
+
           {/* --- mode -------------------------------------------------- */}
           {/* Five destinations, each a phrase. A segmented control holds two to
               five *short* labels; at this width the five wrapped onto a second
@@ -779,7 +801,7 @@ export function SendSheet() {
               same five choices are a group of rows with the chosen one ticked,
               and each says underneath what the recipient will need — which is
               the only thing that decides between them. */}
-          {isPhone ? (
+          {!part("main") ? null : isPhone ? (
             /* Two rows, and each of them a question answered somewhere else.
                What used to be here — five choices open at once, and under them
                a list of people that scrolled inside a screen that scrolls — is
@@ -817,6 +839,41 @@ export function SendSheet() {
                 )}
               </div>
               <div className="ios-foot">{t(BLURB_MORE[mode])}</div>
+
+              {/* And the two rare ones, behind their own rows. A message is
+                  written on the screen that is for writing it; expiry, pickups
+                  and a password are things most sends never touch, and a form
+                  that shows every option it has is a form that asks you to read
+                  all of them to find the one you came for. */}
+              <div className="ios-group">
+                {(mode === "contact" || mode === "code") && (
+                  <button
+                    className="ios-row"
+                    onClick={() => {
+                      setStep("note");
+                      history.pushState({ arvolo: "sendstep" }, "");
+                    }}
+                  >
+                    <span className="grow truncate">{t("send.noteLabel")}</span>
+                    <span className="ios-detail truncate">
+                      {note.trim() || t("send.noteNone")}
+                    </span>
+                    <Icon.ChevronRight size={15} className="ios-chev" />
+                  </button>
+                )}
+                {(pushes || mode === "code" || mode === "link") && (
+                  <button
+                    className="ios-row"
+                    onClick={() => {
+                      setStep("options");
+                      history.pushState({ arvolo: "sendstep" }, "");
+                    }}
+                  >
+                    <span className="grow truncate">{t("send.options")}</span>
+                    <Icon.ChevronRight size={15} className="ios-chev" />
+                  </button>
+                )}
+              </div>
             </div>
           ) : (
           <Field label={t("send.whoLabel")}>
@@ -849,7 +906,7 @@ export function SendSheet() {
             <ContactPicker contacts={contacts} value={to} onChange={setTo} />
           )}
 
-          {toSelf && self && (
+          {toSelf && self && part("main") && (
             <SelfPanel
               self={self}
               devices={devices}
@@ -862,7 +919,7 @@ export function SendSheet() {
               only screen that ever shows one is the accept/reject dialog — which
               never opens for your own identity, because an offer from it is
               auto-accepted. The field would have collected words nobody reads. */}
-          {(mode === "contact" || mode === "code") && (
+          {(mode === "contact" || mode === "code") && part("note") && (
             <Field
               label={t("send.noteLabel")}
               hint={t("send.noteHint")}
@@ -880,7 +937,7 @@ export function SendSheet() {
             </Field>
           )}
 
-          {mode === "code" && (
+          {mode === "code" && part("options") && (
             <div className="switch-row">
               <div className="grow">
                 <div style={{ fontWeight: 570 }}>{t("send.keepCodeTitle")}</div>
@@ -894,7 +951,7 @@ export function SendSheet() {
             </div>
           )}
 
-          {pushes && (
+          {pushes && part("options") && (
             <>
               <div className="switch-row">
                 <div className="grow">
@@ -983,7 +1040,7 @@ export function SendSheet() {
             </>
           )}
 
-          {mode === "link" && (
+          {mode === "link" && part("options") && (
             <div className="stack">
               {linkTooMany && (
                 <div className="card card-pad t-sm" style={{ borderColor: "var(--amber)" }}>

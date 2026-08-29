@@ -591,6 +591,17 @@ interface State {
   clearFinished: () => Promise<void>;
 }
 
+/** What opening a screen fetches.
+ *
+ *  Every one of these is a snapshot the daemon does not push: it is only ever
+ *  as fresh as the last time somebody asked, so arriving is when to ask. */
+function arrive(s: State, r: Route): void {
+  if (r === "deposits") void s.loadDeposits();
+  if (r === "history") void s.loadHistory();
+  if (r === "devices") void s.loadSync();
+  if (r === "settings" || r === "advanced") void s.loadConfig();
+}
+
 export const useStore = create<State>((set, get) => {
   /** Run a daemon action, surfacing any refusal. The UI fires these from click
    *  handlers that cannot await, so without this a rejection is swallowed by the
@@ -1231,10 +1242,7 @@ export const useStore = create<State>((set, get) => {
         configError: null,
         syncError: null,
       });
-      if (r === "deposits") void get().loadDeposits();
-      if (r === "history") void get().loadHistory();
-      if (r === "devices") void get().loadSync();
-      if (r === "settings") void get().loadConfig();
+      arrive(get(), r);
     },
     setTheme: (choice) => {
       applyTheme(choice);
@@ -1268,6 +1276,13 @@ export const useStore = create<State>((set, get) => {
         // the button and nothing else.
       }
       set((st) => ({ route: r, stack: [...st.stack, r], personOpen: null }));
+      // The same arrival, because it is the same arrival. A phone reaches every
+      // inner screen through here and never through `go`, so for as long as this
+      // line was missing those screens were opened and never asked for their
+      // contents: "Devices" said "loading…" for as long as you cared to look at
+      // it. One place to say what arriving somewhere means, called from both
+      // ways of getting there.
+      arrive(get(), r);
     },
     back: () =>
       set((st) => {
@@ -1442,7 +1457,7 @@ export const useStore = create<State>((set, get) => {
         if (sync.last_error) {
           toast.bad(t("store.syncFailed"), sync.last_error);
         } else {
-          toast.ok(
+          toast.echo(
             t("store.syncOk"),
             sync.last_merged
               ? t("store.syncMerged", sync.last_merged)
@@ -1612,7 +1627,7 @@ export const useStore = create<State>((set, get) => {
       });
       // Declining used to succeed in silence: no toast, no undo, no trace —
       // rejecting the wrong offer looked exactly like rejecting the right one.
-      toast.ok(t("store.declined", who ?? ""));
+      toast.echo(t("store.declined", who ?? ""));
     },
     pause: async (id) => {
       await act(t("store.errPause"), () => api.pause(id));

@@ -154,7 +154,7 @@ export function SettingsView() {
           // Only on success: a field still marked clean after a refused write
           // would disable Save and strand the edit.
           setDirty((d) => ({ ...d, name: false }));
-          toast.ok(t("settings.nameSaved"), t("settings.nameSavedDetail"));
+          toast.echo(t("settings.nameSaved"), t("settings.nameSavedDetail"));
         })
         .finally(() => setBusy(false))
     );

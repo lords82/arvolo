@@ -107,7 +107,7 @@ function IncomingBody({ offerId }: { offerId: string }) {
       // with nothing on screen still able to explain the difference.
       if (willSave) await addContact(chosenName, tx.peerId!);
       await accept(offerId, out?.id ?? null, password || null);
-      toast.ok(t("incoming.started"), tx.name);
+      toast.echo(t("incoming.started"), tx.name);
     } catch (e) {
       // The store already reported it. The one refusal worth reacting to here is
       // the missing password: it is recoverable, and the user has nowhere else

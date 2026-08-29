@@ -42,6 +42,7 @@ import { fmtAgo, relayHost } from "../format";
 import { MenuButton, type MenuItem } from "../ui/Menu";
 import { nameCollision } from "../ui/SaveSenderFields";
 import { Confirm, Sheet } from "../ui/Sheet";
+import { SwipeRow } from "../ui/SwipeRow";
 import { toast } from "../ui/Toasts";
 import type { ContactDto } from "../types";
 
@@ -108,8 +109,28 @@ function ContactMeta({ c }: { c: ContactDto }) {
  *  them, what is worth reading at a glance, and the way in. The verbs are not
  *  here — they are one screen further, where each has room for its own word. */
 function PhoneRow({ c }: { c: ContactDto }) {
+  const t = useT();
   const openPerson = useStore((s) => s.openPerson);
+  const blockContact = useStore((s) => s.blockContact);
+  const unblockContact = useStore((s) => s.unblockContact);
   return (
+    // The one thing you do *to* a person rather than with them. Blocking used
+    // to be four taps in — row, menu, item, confirm — for something whose whole
+    // point is that you want it done now.
+    <SwipeRow
+      actions={[
+        c.blocked
+          ? {
+              label: t("people.menuUnblock"),
+              run: () => fire(unblockContact(c.name)),
+            }
+          : {
+              label: t("people.menuBlock"),
+              danger: true,
+              run: () => fire(blockContact(c.name)),
+            },
+      ]}
+    >
     <button className="ios-row people-row" onClick={() => openPerson(c.name)}>
       <Avatar name={c.display_name || c.name} id={c.id} size={38} />
       <span className="grow" style={{ minWidth: 0 }}>
@@ -124,6 +145,7 @@ function PhoneRow({ c }: { c: ContactDto }) {
       <TrustBadges verified={c.verified} trusted={c.trusted} blocked={c.blocked} />
       <Icon.ChevronRight size={15} className="ios-chev" />
     </button>
+    </SwipeRow>
   );
 }
 
@@ -367,7 +389,7 @@ function AddPersonSheet({
   const clash = nameCollision(contacts, name, undefined);
 
   const done = (label: string, detail: string) => {
-    toast.ok(label, detail);
+    toast.echo(label, detail);
     setName("");
     setId("");
     setConfirmRebind(false);

@@ -25,6 +25,13 @@ async function boot(expectConnected = true) {
     pauseAll: false,
     sheetPicks: null,
     incomingOfferId: null,
+    // Where the app opens. Left out, every test inherited whatever screen the
+    // one before it had navigated to — which is fine until a test pushes, and
+    // then the next one starts one screen deep with no way to know it.
+    route: "transfers",
+    stack: ["transfers"],
+    threadKey: null,
+    personOpen: null,
   });
   const dispose = await useStore.getState().init();
   disposers.push(dispose);
@@ -645,6 +652,18 @@ describe("the way back, on a phone", () => {
 
   // The entry the system's back pops is left by whatever is open, not by the
   // store — see `backstack`, and the tests for it in backstack.test.ts.
+
+  it("105. pushing to a screen fetches what that screen shows", async () => {
+    // A phone reaches every inner screen by pushing and never by `go`, so for
+    // as long as only `go` fetched, those screens opened and stayed empty:
+    // "Your devices" said "loading…" for as long as anybody cared to look.
+    await boot();
+    const before = harness.recorder.listHistory;
+    s().push("history");
+    await vi.waitFor(() =>
+      expect(harness.recorder.listHistory).toBe(before + 1)
+    );
+  });
 
   it("104. a person's page goes before a thread, which goes before the stack", async () => {
     // The palette can open a person over anything — including over an open

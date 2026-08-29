@@ -15,6 +15,12 @@ import { useEffect, useState } from "react";
 /** Wider than any phone in portrait, narrower than any window worth a rail. */
 export const PHONE_QUERY = "(max-width: 560px)";
 
+/** Is this a phone, asked once rather than watched. For the places that need
+ *  the answer outside a component — where a hook cannot go. */
+export function isPhoneNow(): boolean {
+  return query()?.matches ?? false;
+}
+
 function query(): MediaQueryList | null {
   // Absent under some test renderers, and "no" is the safe answer there: the
   // desktop layout is the one every existing test was written against.

@@ -78,7 +78,7 @@ export function ReceiveSheet() {
     setBusy(true);
     try {
       await receive(value.trim(), out?.id ?? null, password || null);
-      toast.ok(t("receive.started"), t("receive.startedDetail"));
+      toast.echo(t("receive.started"), t("receive.startedDetail"));
     } catch {
       // The store's `act` already reported it.
     } finally {

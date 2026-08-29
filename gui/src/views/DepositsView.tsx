@@ -13,6 +13,7 @@ import { useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { fire, useStore } from "../store";
 import { useIsPhone } from "../phone";
+import { SwipeRow } from "../ui/SwipeRow";
 import { depositMeta, fmtBytes } from "../format";
 import { useT } from "../i18n";
 import { Icon } from "../ui/Icons";
@@ -45,6 +46,19 @@ function DepositRow({ d }: { d: DepositDto }) {
       {/* Beside the name on a desktop, under it on a phone. A badge and two
           buttons in the third column leave a name three characters wide —
           which is what this row looked like on a phone: "re…", "Attiv". */}
+      <SwipeRow
+        actions={
+          isPhone
+            ? [
+                {
+                  label: m.revocable ? t("deposits.revoke") : t("common.remove"),
+                  danger: true,
+                  run: () => setConfirm(true),
+                },
+              ]
+            : []
+        }
+      >
       <div
         className={`row ${isPhone ? "row-stacked" : ""}`}
         style={isPhone ? undefined : { gridTemplateColumns: "38px 1fr auto" }}
@@ -114,6 +128,7 @@ function DepositRow({ d }: { d: DepositDto }) {
           </Button>
         </div>
       </div>
+      </SwipeRow>
 
       {/* The panel that produced it, brought back. Same address, same QR, same
           caption — something handed out twice must look identical both times, or
