@@ -403,20 +403,33 @@ fn from_of(own_device: bool, who: &str) -> Sender<'_> {
     Sender { own_device, who }
 }
 
-/// Poll the address book so an attached front-end is nudged to refetch.
+/// Poll the address book so an attached front-end is nudged to refetch, and keep
+/// the advertised display name in step with it.
 ///
 /// `arvolo contacts add/remove/verify/trust/name` runs in its own process and
 /// edits the book files directly — the engine never sees the call, and a window
 /// would show a stale grid until it happened to reconnect. This also covers the
 /// engine's own writes (a `MarkVerified`, an approved advertised name).
+///
+/// The name is here rather than beside the request that changes it because it is
+/// no longer only a request that changes it: it belongs to the identity, so it
+/// also arrives by *merge*, from a machine in another room. Seeding the manager
+/// once at startup — which is all this used to need — would leave a name set on
+/// the phone missing from every offer this desktop sent until it was restarted.
 fn spawn_book_watcher(manager: TransferManager) {
     tokio::spawn(async move {
         let mut last = book::book_stamp();
+        let mut last_name = book::my_display_name();
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             let now = book::book_stamp();
             if now != last {
                 last = now;
+                let name = book::my_display_name();
+                if name != last_name {
+                    manager.set_display_name(name.clone());
+                    last_name = name;
+                }
                 manager.notify_contacts_changed();
             }
         }

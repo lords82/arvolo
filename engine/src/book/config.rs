@@ -35,24 +35,18 @@ pub struct Config {
     pub auto_accept: Option<String>,
 }
 
-/// The local user's self-chosen display name, advertised inside every outgoing
-/// offer (`arvolo me name "…"`). Empty string when unset — meaning "don't advertise a
-/// name", the pre-existing behavior. It is a petname claim, never an authenticated
-/// identity.
-pub fn my_display_name() -> String {
+/// The display name as it was stored before it belonged to the identity rather
+/// than to the machine: a key in `config.toml`.
+///
+/// Read in exactly two places and never written — [`my_display_name`] while
+/// `me.toml` does not exist yet, and the migration in `build_local_snapshot` that
+/// seeds the sync register from it once. See `book::me` for why it moved.
+pub(crate) fn legacy_display_name() -> String {
     load_config()
         .display_name
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_default()
-}
-
-/// Persist the local user's display name into `config.toml` (creating the file if
-/// missing). An empty/blank value clears it.
-pub fn set_my_display_name(name: &str) -> Result<()> {
-    let name = name.trim();
-    let value = (!name.is_empty()).then(|| toml::Value::String(name.to_string()));
-    set_config_value("display_name", value)
 }
 
 /// Set one key in `config.toml`, in place.
@@ -367,9 +361,10 @@ pub fn write_default_config(relay: Option<&str>) -> Result<()> {
 # Automatically sync your address book across your linked devices (see `device`).
 #sync = true
 
-# Your display name, advertised to recipients inside each sealed offer (a petname
-# claim, never a verified identity). Set with `arvolo me name "…"`; empty = none.
-#display_name = ""
+# Your display name is no longer kept here: it belongs to the identity, not to
+# this machine, so it lives in me.toml and travels to your other devices. Set it
+# with `arvolo me name "…"`. A value left below from an older version is read once
+# and then moved for you.
 "#,
         relay_line = relay_line,
         downloads = downloads.display(),

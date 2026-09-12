@@ -3,8 +3,8 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use arvolo_core::sync::{
-    self, ContactReg, DeviceId, DeviceReg, Lamport, MarkReg, NameReg, RelayReg, SyncSnapshot,
-    SyncState,
+    self, ContactReg, DeviceId, DeviceReg, Lamport, MarkReg, NameReg, RelayReg, SelfName,
+    SyncSnapshot, SyncState,
 };
 
 use super::*;
@@ -309,9 +309,88 @@ pub fn build_local_snapshot() -> Result<SyncSnapshot> {
     }
 
     register_this_device(&mut state, &mut lamport, device);
+    register_my_name(&mut state, &mut lamport, device);
 
     save_meta(&state, lamport, device)?;
     Ok(state.to_snapshot(lamport, device))
+}
+
+/// Stamp this identity's display name into the sync register, so a change made
+/// here reaches the other machines on their next round.
+///
+/// The travelling half of [`set_my_display_name`], split out for the same reason
+/// [`tombstone_device`] is: so the doc on the caller can say why it is never the
+/// whole job.
+pub(crate) fn stamp_my_name(name: &str) -> Result<()> {
+    let (mut state, mut lamport, device) = load_meta();
+    if matches!(&state.self_name, Some(r) if r.name == name) {
+        return Ok(());
+    }
+    lamport += 1;
+    state.self_name = Some(SelfName {
+        name: name.to_string(),
+        clock: Lamport {
+            counter: lamport,
+            device,
+        },
+    });
+    save_meta(&state, lamport, device)
+}
+
+/// Reconcile the identity's name between `me.toml` and the register, and — once,
+/// for an install that predates the register — adopt the one left in
+/// `config.toml`.
+///
+/// The migration is guarded on the register being *absent*, not on a marker file
+/// or a version stamp: absence is what "no machine of this identity has ever set
+/// a name" means, it is the same condition on every device, and it clears itself
+/// by being satisfied. An empty name seeds nothing, which is what keeps the
+/// ordinary case free of contest — a freshly paired phone has no name to offer
+/// and simply receives the desktop's.
+///
+/// Where two machines *do* each arrive with a name of their own, the higher
+/// Lamport counter wins and the loser's user sees their name change on the next
+/// round. There is no better rule available: neither name is more authentic, and
+/// wall-clock times cannot be compared between machines — the reason
+/// `MarkEntry::since` is kept out of the merge as well.
+fn register_my_name(state: &mut SyncState, lamport: &mut u64, device: DeviceId) {
+    let ledger = load_me().display_name.trim().to_string();
+
+    let name = match &state.self_name {
+        // Already agreed — nothing to say.
+        Some(cur) if cur.name == ledger => return,
+        // The ledger is what a user edits, so the ledger wins over the sidecar,
+        // exactly as it does for a contact renamed with `arvolo contacts`.
+        Some(_) => ledger,
+        None if !ledger.is_empty() => ledger,
+        // Never set here and never set anywhere: the one moment `config.toml` is
+        // still allowed to speak.
+        None => {
+            let legacy = legacy_display_name();
+            if legacy.is_empty() {
+                return;
+            }
+            // Best effort, and deliberately not retried: the guard above is the
+            // register, which exists from here on, so a refusal (a `[table]`
+            // header, a duplicated key) leaves a stale commented line and nothing
+            // worse. Tying the migration to this write instead is what would make
+            // it a loop.
+            let _ = save_me(&Me {
+                display_name: legacy.clone(),
+            });
+            let _ = set_config_value("display_name", None);
+            legacy
+        }
+    };
+
+    *lamport += 1;
+    state.self_name = Some(SelfName {
+        name,
+        clock: Lamport {
+            counter: *lamport,
+            device,
+        },
+    });
 }
 
 /// Forget a device: out of the ledger here, tombstoned in the sidecar so the
@@ -564,5 +643,18 @@ pub fn project_to_ledgers(state: &SyncState) -> Result<()> {
         }
     }
     save_relays(&rl)?;
+
+    // The identity's own name, which unlike everything above can arrive from a
+    // machine sitting in another room. Written only when it actually moved: this
+    // file is in `book_stamp`, and rewriting it every round would wake the
+    // watcher — and every attached window — for nothing.
+    if let Some(r) = &state.self_name {
+        if load_me().display_name.trim() != r.name {
+            tracing::info!(name = %r.name, "display name updated from another device");
+            save_me(&Me {
+                display_name: r.name.clone(),
+            })?;
+        }
+    }
     Ok(())
 }

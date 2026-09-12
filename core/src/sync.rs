@@ -160,6 +160,33 @@ pub struct RelayEntry {
     pub deleted: bool,
 }
 
+/// The name this identity calls itself by — one register for every machine
+/// holding it, and the only name that ever leaves for a stranger's screen.
+///
+/// It is the answer to the confusion that produced it: a device row names a
+/// *machine* and never travels past the user's own devices, while this names the
+/// *person* and rides inside every sealed offer. Before it existed the display
+/// name sat in `config.toml`, which does not sync — so a phone paired to a named
+/// desktop introduced itself as nobody, and a recipient watching offers arrive
+/// from both saw one identity that kept changing what it called itself. That is
+/// precisely what the advertised-name warning is built to flag, and it was
+/// flagging a person owning two computers.
+///
+/// Unkeyed, so it needs no map and no tombstone: "cleared" is the empty string
+/// with a clock like any other value, and absence means only "no device of this
+/// identity has ever set one" — the condition the config migration tests.
+///
+/// Merged last-writer-wins by [`Lamport`], **without** the self-authorship rule
+/// that guards [`DeviceEntry`]. That rule exists because a device row describes
+/// one machine; this describes the identity, which every machine equally *is*, so
+/// restricting writes to one of them would rebuild the original bug — a name the
+/// phone could display and never change.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SelfName {
+    pub name: String,
+    pub clock: Lamport,
+}
+
 /// One machine holding this identity, as it describes itself.
 ///
 /// The register that is **not** like the others: a contact is something you write
@@ -232,15 +259,21 @@ pub struct SyncSnapshot {
     #[serde(default)]
     pub devices: Vec<DeviceEntry>,
     /// Where each contact listens, when it is not wherever you do.
+    #[serde(default)]
+    pub relays: Vec<RelayEntry>,
+    /// What this identity calls itself, on all of its machines at once. `None`
+    /// when no device has ever set one — which is not the same as a name that was
+    /// cleared, and the difference is what the merge and the migration both read.
     ///
     /// Last field, and that placement is the only thing keeping the local sidecar
     /// readable across the upgrade: postcard decodes positionally, so
     /// [`decode_snapshot`] reads a sidecar written without it by falling back to
-    /// the shape that had none. On the wire it needs no such care — the sealed
-    /// form changed at the same time (see `seal_under`), so a build old enough to
-    /// lack this field cannot open a note carrying it in the first place.
+    /// the shape that had none. The same applies on the wire in the one direction
+    /// that can be fixed from here — a snapshot from an older device arrives one
+    /// field short and reads as `None`, which merges as "no information" and so
+    /// never erases a name the newer devices hold.
     #[serde(default)]
-    pub relays: Vec<RelayEntry>,
+    pub self_name: Option<SelfName>,
 }
 
 /// The sealed inbox payload carrying a snapshot to the user's other devices.
@@ -357,6 +390,8 @@ pub struct SyncState {
     pub relays: BTreeMap<String, RelayReg>,
     /// [`device_key`] → what that machine says about itself.
     pub devices: BTreeMap<String, DeviceReg>,
+    /// What this identity calls itself. `None` = never set by any device.
+    pub self_name: Option<SelfName>,
 }
 
 impl SyncState {
@@ -380,10 +415,15 @@ impl SyncState {
         // A device row authored by somebody else is the least circumstantial
         // evidence of the lot: it is another machine saying so itself.
         let devices = self.devices.values().map(|r| &r.clock);
+        // Evidence of the same kind as a foreign contact clock: a name this
+        // machine did not write can only have come from one that shares the
+        // identity.
+        let self_name = self.self_name.iter().map(|r| &r.clock);
         contacts
             .chain(names)
             .chain(marks)
             .chain(devices)
+            .chain(self_name)
             .any(|c| &c.device != mine)
     }
 
@@ -472,6 +512,7 @@ impl SyncState {
                 },
             );
         }
+        state.self_name = s.self_name.clone();
         state
     }
 
@@ -564,6 +605,7 @@ impl SyncState {
                     deleted: r.deleted,
                 })
                 .collect(),
+            self_name: self.self_name.clone(),
         }
     }
 
@@ -606,6 +648,18 @@ impl SyncState {
             }
         }
         merge_devices(&mut self.devices, &other.devices);
+        // Last-writer-wins from *any* of the identity's machines — see
+        // [`SelfName`] for why this one deliberately lacks the authorship rule
+        // above it. `None` is skipped rather than assigned: an older device sends
+        // no register at all, and reading that as "the name was cleared" would let
+        // a machine that has never heard of the field wipe the name on every round
+        // of a mixed fleet.
+        if let Some(incoming) = &other.self_name {
+            match &self.self_name {
+                Some(cur) if cur.clock >= incoming.clock => {}
+                _ => self.self_name = Some(incoming.clone()),
+            }
+        }
     }
 
     /// The highest Lamport counter observed anywhere in this state — used to
@@ -631,6 +685,12 @@ impl SyncState {
             m = m.max(r.clock.counter);
         }
         for r in self.devices.values() {
+            m = m.max(r.clock.counter);
+        }
+        // Without this a device whose only edit was its own display name keeps
+        // minting counters the others have long passed, and its next write loses
+        // to a merge it should have beaten.
+        if let Some(r) = &self.self_name {
             m = m.max(r.clock.counter);
         }
         m
@@ -705,34 +765,29 @@ pub fn encode_snapshot(snap: &SyncSnapshot) -> Result<Vec<u8>> {
 
 /// Inverse of [`encode_snapshot`].
 ///
-/// Falls back to the shape written before [`SyncSnapshot::relays`] existed. Only
-/// the *local* sidecar needs this — a wire note carrying relays is sealed in a
-/// form older builds cannot open at all — and it matters because the caller
-/// swallows a failure here and rebuilds from the TOML ledgers, which silently
-/// costs every Lamport clock and every tombstone this device was holding.
+/// Falls back through every shape this sidecar has had — before
+/// [`SyncSnapshot::self_name`], before [`SyncSnapshot::relays`], before
+/// [`SeenEntry::last`]. It matters because the caller swallows a failure here and
+/// rebuilds from the TOML ledgers, which silently costs every Lamport clock and
+/// every tombstone this device was holding.
 pub fn decode_snapshot(bytes: &[u8]) -> Result<SyncSnapshot> {
-    // Newest first: postcard ignores trailing bytes, so an older shape would
-    // happily read a current snapshot and drop what it does not know about
-    // without a word.
+    // Newest first, and the order is load-bearing rather than tidy: postcard
+    // ignores trailing bytes, so an older shape happily reads a current snapshot
+    // and drops what it does not know about without a word. Trying V0 before V1
+    // (as this did until the self-name register was added) was latent only
+    // because those two differ inside `seen` alone; every further field makes an
+    // out-of-order attempt a silent truncation.
     if let Ok(snap) = postcard::from_bytes::<SyncSnapshot>(bytes) {
         return Ok(snap);
     }
-    if let Ok(v0) = postcard::from_bytes::<SyncSnapshotV0>(bytes) {
-        return Ok(v0.into());
+    if let Ok(v2) = postcard::from_bytes::<SyncSnapshotV2>(bytes) {
+        return Ok(v2.into());
     }
-    let v1: SyncSnapshotV1 = postcard::from_bytes(bytes).context("deserialize sync snapshot")?;
-    Ok(SyncSnapshot {
-        lamport: v1.lamport,
-        device: v1.device,
-        contacts: v1.contacts,
-        verified: v1.verified,
-        trusted: v1.trusted,
-        seen: v1.seen,
-        names: v1.names,
-        blocked: v1.blocked,
-        devices: v1.devices,
-        relays: Vec::new(),
-    })
+    if let Ok(v1) = postcard::from_bytes::<SyncSnapshotV1>(bytes) {
+        return Ok(v1.into());
+    }
+    let v0: SyncSnapshotV0 = postcard::from_bytes(bytes).context("deserialize sync snapshot")?;
+    Ok(v0.into())
 }
 
 /// [`SyncSnapshot`] as it was written before [`SeenEntry::last`] existed.
@@ -789,6 +844,7 @@ impl From<SyncSnapshotV0> for SyncSnapshot {
             blocked: v.blocked,
             devices: v.devices,
             relays: Vec::new(),
+            self_name: None,
         }
     }
 }
@@ -805,6 +861,61 @@ struct SyncSnapshotV1 {
     names: Vec<NameEntry>,
     blocked: Vec<MarkEntry>,
     devices: Vec<DeviceEntry>,
+}
+
+impl From<SyncSnapshotV1> for SyncSnapshot {
+    fn from(v: SyncSnapshotV1) -> Self {
+        SyncSnapshot {
+            lamport: v.lamport,
+            device: v.device,
+            contacts: v.contacts,
+            verified: v.verified,
+            trusted: v.trusted,
+            seen: v.seen,
+            names: v.names,
+            blocked: v.blocked,
+            devices: v.devices,
+            relays: Vec::new(),
+            self_name: None,
+        }
+    }
+}
+
+/// [`SyncSnapshot`] as it was written before the identity had a name of its own —
+/// when the display name lived in `config.toml` and therefore on one machine.
+#[derive(Deserialize)]
+struct SyncSnapshotV2 {
+    lamport: u64,
+    device: DeviceId,
+    contacts: Vec<ContactEntry>,
+    verified: Vec<MarkEntry>,
+    trusted: Vec<MarkEntry>,
+    seen: Vec<SeenEntry>,
+    names: Vec<NameEntry>,
+    blocked: Vec<MarkEntry>,
+    devices: Vec<DeviceEntry>,
+    relays: Vec<RelayEntry>,
+}
+
+impl From<SyncSnapshotV2> for SyncSnapshot {
+    fn from(v: SyncSnapshotV2) -> Self {
+        SyncSnapshot {
+            lamport: v.lamport,
+            device: v.device,
+            contacts: v.contacts,
+            verified: v.verified,
+            trusted: v.trusted,
+            seen: v.seen,
+            names: v.names,
+            blocked: v.blocked,
+            devices: v.devices,
+            relays: v.relays,
+            // `None`, never `Some("")`: the writer knew nothing of the register,
+            // which is not the same as having cleared the name — and encoding it
+            // as a clear is exactly how an un-upgraded device would wipe it.
+            self_name: None,
+        }
+    }
 }
 
 // ---- snapshot encryption --------------------------------------------------
@@ -1008,6 +1119,7 @@ mod tests {
             blocked: Vec::new(),
             devices: Vec::new(),
             relays: Vec::new(),
+            self_name: None,
         };
         let back = decode_snapshot(&encode_snapshot(&snap).unwrap()).unwrap();
         assert_eq!(back.seen[0].last, 1_700_000_000);
@@ -1054,6 +1166,7 @@ mod tests {
             names: vec![],
             devices: vec![],
             relays: vec![],
+            self_name: None,
         })
     }
 
@@ -1075,6 +1188,7 @@ mod tests {
             names: vec![],
             devices: vec![],
             relays: vec![],
+            self_name: None,
         };
         let blob = encrypt_snapshot(&key, &snap).unwrap();
         assert_ne!(blob, postcard::to_allocvec(&snap).unwrap());
@@ -1105,6 +1219,7 @@ mod tests {
             names: vec![],
             devices: vec![],
             relays: vec![],
+            self_name: None,
         };
         let (a, b) = (mk(1), mk(2));
         let (ca, cb) = (
@@ -1154,6 +1269,7 @@ mod tests {
             names: vec![],
             devices: vec![],
             relays: vec![],
+            self_name: None,
         };
         // Exactly what the old `encrypt_snapshot` wrote.
         let legacy =
@@ -1174,6 +1290,7 @@ mod tests {
             names: vec![],
             devices: vec![],
             relays: vec![],
+            self_name: None,
         };
         let blob = encrypt_snapshot(&snapshot_key(b"secret-one"), &snap).unwrap();
         assert!(decrypt_snapshot(&snapshot_key(b"secret-two"), &blob).is_err());
@@ -1235,6 +1352,7 @@ mod tests {
             names: vec![],
             devices: vec![],
             relays: vec![],
+            self_name: None,
         });
         let b = SyncState::from_snapshot(&SyncSnapshot {
             lamport: 0,
@@ -1256,6 +1374,7 @@ mod tests {
             names: vec![],
             devices: vec![],
             relays: vec![],
+            self_name: None,
         });
         a.merge(&b);
         assert!(a.verified["k"].deleted, "later remove wins the 2P-set");
@@ -1320,6 +1439,7 @@ mod tests {
             }],
             devices: vec![],
             relays: vec![],
+            self_name: None,
         })
     }
 
@@ -1362,6 +1482,7 @@ mod tests {
             }],
             devices: vec![],
             relays: vec![],
+            self_name: None,
         })
     }
 
@@ -1431,6 +1552,7 @@ mod tests {
             names: vec![],
             devices: vec![],
             relays: rows,
+            self_name: None,
         })
     }
 
@@ -1536,6 +1658,7 @@ mod tests {
             names: vec![],
             devices: rows,
             relays: vec![],
+            self_name: None,
         })
     }
 

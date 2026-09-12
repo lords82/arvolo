@@ -176,6 +176,19 @@ pub fn relays_path() -> PathBuf {
     config_dir().join("relays.toml")
 }
 
+/// What this identity says about *itself* — the display name every one of its
+/// machines advertises.
+///
+/// A ledger of its own rather than a key in `config.toml`, and the distinction is
+/// the whole point: `config.toml` holds what is true of this *machine* (its
+/// relay, its download folder, its log level), while this holds what is true of
+/// the *identity* and therefore arrives by sync like a contact does. Keeping the
+/// display name next to `download_dir` is what made it per-machine, which is what
+/// made a phone introduce itself as nobody.
+pub fn me_path() -> PathBuf {
+    config_dir().join("me.toml")
+}
+
 /// A content fingerprint of the address book — the ledgers that shape what a
 /// front-end shows in "Persone". Any `arvolo contacts …` run is a *separate process*
 /// writing these files behind the daemon's back, so the daemon polls this stamp to
@@ -197,6 +210,11 @@ pub fn book_stamp() -> u64 {
         trusted_path(),
         blocked_path(),
         relays_path(),
+        // Your own name belongs here for the same reason a petname does: it moves
+        // when somebody changes something, never on traffic or on a timer. It is
+        // also the only entry a *merge* can change without this machine having
+        // asked — which is what the watcher reads it for.
+        me_path(),
     ] {
         // A missing file is a state like any other (hashes as the empty vec), so
         // creating or deleting one moves the stamp.
