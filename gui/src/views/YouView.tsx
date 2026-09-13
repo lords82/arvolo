@@ -7,8 +7,11 @@
 // actually changes (what arrives without asking), then the places the bottom bar
 // had no room for, then a line saying which build this is.
 //
-// Everything else the desktop offers is still here, one row down, under "all
-// settings". A phone that could not reach a setting would not be the same app.
+// Everything else the desktop offers is one row in, behind the identity at the
+// top: that row *is* the way to the settings, and it opens on the name and the
+// id it was tapped for. There used to be a second row saying the same thing at
+// the bottom — two doors onto one screen, which is a menu describing itself
+// rather than a screen you can find your way around.
 
 import { useT } from "../i18n";
 import { useStore } from "../store";
@@ -37,14 +40,26 @@ export function YouView() {
       {/* The identity, first and whole. It is what the person on the other end
           checks, and burying it three taps into a settings screen would be
           saying it is a preference. */}
-      <button className="ios-group you-me" onClick={() => push("advanced")}>
-        <Avatar name={name} id={status?.public_id} size={44} />
-        <span className="grow" style={{ minWidth: 0 }}>
-          <span className="truncate you-name">{name}</span>
-          {status?.public_id ? <ShortId value={status.public_id} /> : null}
-        </span>
-        <Icon.ChevronRight size={16} />
-      </button>
+      <div className="ios-group">
+        <button className="you-me" onClick={() => push("advanced")}>
+          <Avatar name={name} id={status?.public_id} size={44} />
+          <span className="grow" style={{ minWidth: 0 }}>
+            <span className="truncate you-name">{name}</span>
+            {status?.public_id ? <ShortId value={status.public_id} /> : null}
+          </span>
+          <Icon.ChevronRight size={16} />
+        </button>
+        {/* Directly under the identity, and not filed under "elsewhere", because
+            it is not somewhere else: your other machines are the same person as
+            the name above them — one id, one mailbox — and the row that adds one
+            hands over this device's identity secret. It belongs to the identity
+            it changes. */}
+        <Place
+          label={t("title.devices")}
+          note={devices.length ? String(devices.length) : undefined}
+          onClick={() => push("devices")}
+        />
+      </div>
 
       {/* The one decision that is different on a phone. A row saying what is in
           force, pushing to where the three answers are — see `AutoAccept` in the
@@ -67,21 +82,11 @@ export function YouView() {
       <div className="ios-head">{t("you.elsewhere")}</div>
       <div className="ios-group">
         <Place
-          label={t("title.devices")}
-          note={devices.length ? String(devices.length) : undefined}
-          onClick={() => push("devices")}
-        />
-        <Place
           label={t("title.deposits")}
           note={live ? t("you.liveCount", live) : undefined}
           onClick={() => push("deposits")}
         />
         <Place label={t("title.history")} onClick={() => push("history")} />
-        <Place
-          label={t("you.allSettings")}
-          note={status?.relay ? t("you.relaySet") : undefined}
-          onClick={() => push("advanced")}
-        />
       </div>
 
       {/* Not "in the keychain": the identity is a file in this app's private

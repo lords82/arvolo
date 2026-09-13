@@ -347,6 +347,7 @@ pub fn run() {
             bridge::pick_files,
             bridge::gui_version,
             bridge::open_path,
+            bridge::note,
             update::check_update,
             update::install_update,
         ])

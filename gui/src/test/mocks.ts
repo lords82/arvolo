@@ -300,6 +300,7 @@ export function makeIpcMock() {
         // a test assert on a state that cannot exist.
         return guard("installUpdate", undefined, new Promise<void>(() => {}));
       },
+      note: () => guard("note", undefined),
       openPath: (path: string) => {
         harness.recorder.openPath.push(path);
         return guard("openPath", undefined);

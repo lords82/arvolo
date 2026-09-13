@@ -210,8 +210,6 @@ export const de: Dict = {
   "you.receiving": "Empfang",
   "you.elsewhere": "Anderswo",
   "you.unnamed": "Noch kein Name",
-  "you.allSettings": "Alle Einstellungen",
-  "you.relaySet": "gesetzt",
   "you.liveCount": (n: number) => `${n} aktiv`,
   "you.footer": (v: string) => `Arvolo ${v} · deine Identität bleibt auf diesem Gerät`,
   "title.you": "Du",

@@ -197,6 +197,8 @@ export const api = {
   // download folder, a received file, `config.toml` — are only known at runtime.
   // The Rust side checks the path against the daemon before opening it.
   openPath: (path: string) => invoke<void>("open_path", { path }),
+  /** A line to the device console, for what a phone cannot otherwise be asked. */
+  note: (msg: string) => invoke<void>("note", { msg }),
   // The ticket of a .arvolo the app was LAUNCHED with (double click before the
   // window existed). One-shot: the backend hands it over once.
   takePendingTicket: () => invoke<string | null>("take_pending_ticket"),

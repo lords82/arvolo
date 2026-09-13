@@ -244,8 +244,6 @@ export const en = {
   "you.receiving": "Receiving",
   "you.elsewhere": "Elsewhere",
   "you.unnamed": "No name yet",
-  "you.allSettings": "All settings",
-  "you.relaySet": "set",
   "you.liveCount": (n: number) => `${n} live`,
   "you.footer": (v: string) => `Arvolo ${v} · your identity is kept on this device`,
   "title.you": "You",

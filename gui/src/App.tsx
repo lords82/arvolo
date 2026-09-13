@@ -95,6 +95,8 @@ export function App() {
     return () => document.documentElement.classList.remove("app-phone");
   }, [isPhone]);
   const stack = useStore((s) => s.stack);
+  const personOpen = useStore((s) => s.personOpen);
+  const threadKey = useStore((s) => s.threadKey);
   const back = useStore((s) => s.back);
   // Whether the title is still the big one under the bar, or has been handed up
   // into it. Reset on arrival: a new screen starts at the top of itself.
@@ -142,7 +144,14 @@ export function App() {
   // one you have to climb by aiming at a corner. On Android that edge *is* the
   // system's back gesture, and it arrives here as a history pop, which is why
   // `push` leaves an entry behind for it to pop.
-  useEdgeBack(viewRef, isPhone && stack.length > 1, () => window.history.back());
+  // Anywhere there is a way back, and not only one screen in. A person's card
+  // and a mailbox thread are layers rather than routes — the stack does not grow
+  // for them — but they are screens you were taken *to*, they carry a back
+  // button, and `back()` already knows to close the topmost one first. A gesture
+  // that worked on four screens and not on the two you reach most often reads as
+  // a gesture that does not work.
+  const canGoBack = stack.length > 1 || !!personOpen || !!threadKey;
+  useEdgeBack(viewRef, isPhone && canGoBack, () => window.history.back());
   useEffect(() => {
     // Layers first — a sheet, an alert, a menu, a thread — and only then the
     // stack. `backstack` holds what is open and knows which pops are its own.
@@ -701,10 +710,14 @@ export function App() {
                 : undefined
             }
           >
-            {isPhone && stack.length === 1 && (
-              <h2 className="large-title">{t(phoneTitle(route))}</h2>
-            )}
-            <View />
+            {/* One box holding the screen, so there is something for the pull
+                at the top and the bottom to stretch — see `.page-fill`. */}
+            <div className={isPhone ? "page-fill" : undefined}>
+              {isPhone && stack.length === 1 && (
+                <h2 className="large-title">{t(phoneTitle(route))}</h2>
+              )}
+              <View />
+            </div>
           </div>
         </main>
       </div>

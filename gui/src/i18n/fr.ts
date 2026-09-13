@@ -211,8 +211,6 @@ export const fr: Dict = {
   "you.receiving": "Réception",
   "you.elsewhere": "Ailleurs",
   "you.unnamed": "Pas encore de nom",
-  "you.allSettings": "Tous les réglages",
-  "you.relaySet": "défini",
   "you.liveCount": (n: number) => `${n} actifs`,
   "you.footer": (v: string) => `Arvolo ${v} · votre identité reste sur cet appareil`,
   "title.you": "Vous",

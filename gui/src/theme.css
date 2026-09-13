@@ -2192,6 +2192,25 @@ select {
      The frame around it is clipped (that is what stages the slide), so a page
      that did not scroll for itself would leave a long list unreachable below
      the fold. */
+  /* A scroller with nothing to scroll has no ends, and a rubber band is what the
+     ends feel like: on the mailbox and the address book — the two that are
+     often short — the pull answered with nothing, while the longer screens
+     sprang back. The same gesture answering on one screen and not the next is
+     worse than it never answering.
+
+     So the content is made one pixel taller than the box it is in. `.page` is
+     inset to its frame and therefore has a *definite* height, which is what
+     lets a percentage inside it resolve at all — `min-height: 100%` against an
+     auto-height parent is zero, which is why the obvious version of this does
+     nothing. One pixel is enough to be scrollable, and little enough that there
+     is nothing down there to reach.
+
+     `alwaysBounceVertical` is the same idea on the native side and it is set,
+     but on the web view's own scroll view — which is not the box under the
+     finger. */
+  .app-phone .view.staged > .page > .page-fill {
+    min-height: calc(100% + 1px);
+  }
   .app-phone .view.staged > .page {
     position: absolute;
     inset: 0;
@@ -3074,15 +3093,33 @@ select {
   }
 
   /* You: an identity, a decision, a few doors, a line about the build. */
+  /* The identity, as the first row of its own group rather than as the group.
+     It used to *be* the `.ios-group`, and took its display and its fill from it;
+     now that your other machines sit under it — the same person, one row down —
+     it is a row like the others and has to say both for itself. */
   .you-me {
+    display: flex;
     flex-direction: row;
     align-items: center;
     gap: 12px;
     width: 100%;
     padding: 14px 16px;
     border: 0;
+    background: none;
+    color: var(--ink);
     text-align: left;
     cursor: pointer;
+  }
+  /* The same hairline the rows draw between themselves, inset to where the text
+     starts — which here is where the name starts, not the avatar. */
+  .you-me + .ios-row::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    left: 16px;
+    right: 0;
+    height: 1px;
+    background: var(--line);
   }
   .you-me:active {
     background: var(--surface-2);

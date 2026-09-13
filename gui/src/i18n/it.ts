@@ -206,8 +206,6 @@ export const it: Dict = {
   "you.receiving": "In arrivo",
   "you.elsewhere": "Altrove",
   "you.unnamed": "Ancora senza nome",
-  "you.allSettings": "Tutte le impostazioni",
-  "you.relaySet": "impostato",
   "you.liveCount": (n: number) => `${n} attivi`,
   "you.footer": (v: string) => `Arvolo ${v} · la tua identità è tenuta su questo dispositivo`,
   "title.you": "Tu",

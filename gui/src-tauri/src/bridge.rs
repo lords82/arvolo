@@ -1130,6 +1130,18 @@ pub fn gui_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
+/// A line from the window to wherever this build's output goes.
+///
+/// On a desktop `console.log` lands in a devtools panel that is one keystroke
+/// away. On a phone it lands nowhere anybody can reach: there is no inspector on
+/// the device, and the webview's own log does not reach the process output.
+/// Which means a gesture that does not fire cannot be *asked* what it did — and
+/// three rounds of guessing at one is what this is here to stop.
+#[tauri::command]
+pub fn note(msg: String) {
+    println!("arvolo/web: {msg}");
+}
+
 /// Hand a path to the system opener (`open` on macOS, `xdg-open` on Linux).
 ///
 /// The opener plugin's own `open_path` command is not used: its ACL wants a
