@@ -97,7 +97,8 @@ pub enum AutoAccept {
     /// somebody else holding an unlocked phone of yours.
     Never,
     /// Contacts you marked trusted, and your own devices. What every version
-    /// before this setting did, and the default.
+    /// before this setting did, and what a desktop still starts on — see
+    /// [`AutoAccept::default_here`].
     Trusted,
     /// Everything, from anybody who can reach you. Convenient, and worth being
     /// plain about: a stranger who has your public id can then put a file on
@@ -113,7 +114,32 @@ impl AutoAccept {
         match book::load_config().auto_accept.as_deref() {
             Some("never") | Some("ask") => AutoAccept::Never,
             Some("everyone") | Some("always") => AutoAccept::Everyone,
-            _ => AutoAccept::Trusted,
+            Some("trusted") => AutoAccept::Trusted,
+            None | Some(_) => Self::default_here(),
+        }
+    }
+
+    /// What "nothing configured" means, which is not the same thing on a desk as
+    /// in a pocket.
+    ///
+    /// A computer is somewhere you are sitting: a file that lands on it lands in
+    /// a folder, in front of you, on a machine nobody else is holding. A phone is
+    /// none of those. It travels, it is handed to people, and a file arriving on
+    /// it without a question is a file on a device that may not be in your hands
+    /// at that moment — and the question there costs a notification and a tap,
+    /// which is little enough to be worth asking every time until somebody says
+    /// otherwise.
+    ///
+    /// So the phone asks and the desktop takes what it trusts. Both are one row
+    /// away from the other, and the row says what each one costs.
+    fn default_here() -> Self {
+        #[cfg(any(target_os = "ios", target_os = "android"))]
+        {
+            AutoAccept::Never
+        }
+        #[cfg(not(any(target_os = "ios", target_os = "android")))]
+        {
+            AutoAccept::Trusted
         }
     }
 

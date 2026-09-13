@@ -26,7 +26,10 @@ export function YouView() {
   const guiVersion = useStore((s) => s.guiVersion);
 
   const name = status?.display_name || t("you.unnamed");
-  const policy = config?.auto_accept || "trusted";
+  // What the engine falls back to here, said again on this side: a row that
+  // showed "Fidati" while a phone was in fact asking would be the screen
+  // disagreeing with the app. See `AutoAccept::default_here`.
+  const policy = config?.auto_accept || "never";
   const live = deposits.filter((d) => !d.expired).length;
 
   return (

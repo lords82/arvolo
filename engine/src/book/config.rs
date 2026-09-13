@@ -284,7 +284,7 @@ pub fn write_default_config(relay: Option<&str>) -> Result<()> {
 #   "trusted"  — contacts you marked trusted, and your own devices (the default)
 #   "never"    — nothing: every arrival waits for you, trusted or not
 #   "everyone" — anything from anybody who has your public id
-#auto_accept = "trusted"
+#auto_accept = "trusted"   # "never" on a phone, unless set here
 
 # Scratch dir for temporary artifacts (packed tars, staged archives).
 #temp_dir = "{tmp}"

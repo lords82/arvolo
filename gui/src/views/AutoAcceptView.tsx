@@ -32,7 +32,8 @@ export function AutoAcceptView() {
   const t = useT();
   const config = useStore((s) => s.config);
   const save = useStore((s) => s.saveConfig);
-  const current = config?.auto_accept || "trusted";
+  // Only ever drawn on a phone, where nothing configured means asking.
+  const current = config?.auto_accept || "never";
 
   return (
     <div className="ios-page">
