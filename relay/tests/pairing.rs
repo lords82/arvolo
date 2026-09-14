@@ -506,6 +506,7 @@ async fn device_pair_payload_roundtrips() {
             names: vec![],
             devices: vec![],
             relays: vec![],
+            self_name: None,
         },
     };
     let bytes = payload.encode().unwrap();
