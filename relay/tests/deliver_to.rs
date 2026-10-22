@@ -77,6 +77,7 @@ async fn held_when_relay_unavailable() {
             false,
             String::new(),
             None,
+            false,
             None,
         )
         .await
@@ -111,6 +112,7 @@ async fn held_when_file_too_large() {
             false,
             String::new(),
             None,
+            false,
             None,
         )
         .await
@@ -148,6 +150,7 @@ async fn pause_then_resume() {
             false,
             String::new(),
             None,
+            false,
             None,
         )
         .await
@@ -198,6 +201,7 @@ async fn paused_send_survives_restart() {
                 false,
                 String::new(),
                 None,
+                false,
                 None,
             )
             .await
@@ -257,6 +261,7 @@ async fn a_collected_deposit_completes() {
             false,
             String::new(),
             None,
+            false,
             None,
         )
         .await

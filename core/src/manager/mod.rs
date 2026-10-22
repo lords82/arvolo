@@ -2337,6 +2337,7 @@ impl TransferManager {
     /// [`start_download`](Self::start_download) for a password-protected offline
     /// (`arvm…`) ticket: the password unwraps the content key on fetch. Ignored for
     /// a chunked ticket, whose key travels in the ticket itself.
+    #[allow(clippy::too_many_arguments)]
     pub fn start_download_with_password(
         &self,
         ticket: String,

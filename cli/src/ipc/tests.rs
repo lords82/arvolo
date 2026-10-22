@@ -292,7 +292,18 @@ async fn history_and_display_name_over_the_socket() {
     let mut client = DaemonClient::connect().await.expect("connect");
 
     assert!(client.list_history().await.expect("history").is_empty());
-    crate::history::record("send", None, "done.bin", 10, 10, "completed", None, None).unwrap();
+    crate::history::record(
+        "send",
+        None,
+        "done.bin",
+        10,
+        10,
+        "completed",
+        None,
+        None,
+        String::new(),
+    )
+    .unwrap();
     let hist = client.list_history().await.expect("history");
     assert_eq!(hist.len(), 1);
     assert_eq!(hist[0].name, "done.bin");
@@ -423,7 +434,18 @@ async fn clearing_finished_transfers_leaves_the_history_alone() {
         .unwrap_or_else(|e| e.into_inner());
     let (shutdown, _dir) = spawn_test_daemon().await;
 
-    crate::history::record("send", None, "done.txt", 10, 10, "completed", None, None).unwrap();
+    crate::history::record(
+        "send",
+        None,
+        "done.txt",
+        10,
+        10,
+        "completed",
+        None,
+        None,
+        String::new(),
+    )
+    .unwrap();
     assert_eq!(crate::history::list().len(), 1);
 
     let mut client = DaemonClient::connect().await.expect("connect");

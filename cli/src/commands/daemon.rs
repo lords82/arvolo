@@ -942,6 +942,8 @@ mod share_line_tests {
             waiting_code: None,
             waiting_detail: None,
             can_pause: None,
+            fail_code: None,
+            fail_detail: None,
         }
     }
 

@@ -109,15 +109,6 @@ impl From<String> for LinkFailed {
 static EMBEDDED: std::sync::OnceLock<std::sync::Arc<dyn arvolo_ipc::client::Answer>> =
     std::sync::OnceLock::new();
 
-/// Hand the window an engine to talk to instead of a daemon. Call once, before
-/// the first command. A second call is ignored: two engines on one address book
-/// is not a thing to do quietly.
-///
-/// Unused until there is a shell that calls it — the mobile entry point, which is
-/// the next phase. Kept here and not there because the seam is this file's: the
-/// commands below are what has to stop caring where the answers come from, and
-/// they now do.
-#[allow(dead_code)]
 /// The engine's manager, for the two questions that are not requests: which
 /// picked copies are still needed, and what to stop when the system takes the
 /// app's time back. Set beside [`use_embedded`], from the same `Running`.
@@ -130,6 +121,14 @@ pub fn use_manager(m: arvolo_core::manager::TransferManager) {
     let _ = MANAGER.set(m);
 }
 
+/// Hand the window an engine to talk to instead of a daemon. Call once, before
+/// the first command. A second call is ignored: two engines on one address book
+/// is not a thing to do quietly.
+///
+/// Only the mobile shell calls it. Kept here and not there because the seam is
+/// this file's: the commands below are what has to stop caring where the answers
+/// come from, and they now do.
+#[cfg_attr(not(mobile), allow(dead_code))]
 pub fn use_embedded(engine: std::sync::Arc<dyn arvolo_ipc::client::Answer>) {
     let _ = EMBEDDED.set(engine);
 }
@@ -629,7 +628,7 @@ fn handed_name(file: &std::fs::File, url: &tauri::Url) -> String {
     let _ = file;
     let guess = url
         .path_segments()
-        .and_then(|s| s.last())
+        .and_then(|mut s| s.next_back())
         .unwrap_or_default();
     let decoded = percent_decode(guess);
     let tail = decoded.rsplit(['/', ':']).next().unwrap_or_default().trim();

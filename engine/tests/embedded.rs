@@ -136,10 +136,21 @@ async fn a_phone_opens_its_mailbox_and_finds_what_arrived_before() {
         "completed",
         Some("/tmp/Documents/ciao.txt".into()),
         None,
+        String::new(),
     )
     .expect("a record is written");
-    arvolo_engine::history::record("send", None, "gone.bin", 4, 0, "cancelled", None, None)
-        .expect("a record is written");
+    arvolo_engine::history::record(
+        "send",
+        None,
+        "gone.bin",
+        4,
+        0,
+        "cancelled",
+        None,
+        None,
+        String::new(),
+    )
+    .expect("a record is written");
 
     let (running, shutdown) = engine_restoring(dir.path(), 300).await;
     let mut c = DaemonClient::embedded(Arc::new(running.daemon.clone()));
@@ -173,8 +184,18 @@ async fn nothing_comes_back_unless_the_embedder_asks() {
     let dir = tempfile::tempdir().unwrap();
     std::env::set_var("ARVOLO_CONFIG_DIR", dir.path());
     std::env::remove_var("ARVOLO_IDENTITY");
-    arvolo_engine::history::record("recv", None, "old.txt", 1, 1, "completed", None, None)
-        .expect("a record is written");
+    arvolo_engine::history::record(
+        "recv",
+        None,
+        "old.txt",
+        1,
+        1,
+        "completed",
+        None,
+        None,
+        String::new(),
+    )
+    .expect("a record is written");
 
     let (running, shutdown) = engine(dir.path()).await;
     let mut c = DaemonClient::embedded(Arc::new(running.daemon.clone()));

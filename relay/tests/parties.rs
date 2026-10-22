@@ -142,6 +142,7 @@ async fn send_to(m: &TransferManager, to: &Identity, src: &std::path::Path) -> u
         false,
         String::new(),
         None,
+        false,
         None,
     )
     .await
