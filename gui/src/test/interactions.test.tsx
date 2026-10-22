@@ -1100,6 +1100,52 @@ describe("the send panel", () => {
     ).toBeTruthy();
   });
 
+  it("130b. a link still uploading shows how far it has got, then its address", async () => {
+    harness.uploadAs = 77;
+    useStore.setState({ sheetPicks: [pick("a.txt")] });
+    render(<App />);
+    fireEvent.click(await screen.findByText("Link"));
+    fireEvent.click(screen.getByText(en["send.submitLink"]));
+    // No address yet — the relay does not have the file — and the panel says
+    // so, rather than sitting on a spinner that reads like a stuck daemon.
+    expect(await screen.findByText(en["send.uploadingNote"])).toBeTruthy();
+    act(() => {
+      harness.emit({
+        started: { id: 77, direction: "send", name: "a.txt", total_size: 1000 },
+      });
+      harness.emit({ progress: { id: 77, transferred: 400, total_size: 1000 } });
+    });
+    expect(
+      await screen.findByText(en["send.uploadingTitle"]("400 B", "1000 B"))
+    ).toBeTruthy();
+    act(() => {
+      harness.emit({ link_ready: { id: 77, link: "https://relay.test/dl/xyz#k" } });
+    });
+    expect(await screen.findByText("https://relay.test/dl/xyz#k")).toBeTruthy();
+    expect(screen.queryByText(en["send.uploadingNote"])).toBeNull();
+  });
+
+  it("a deposit still uploading turns into its ticket when it lands", async () => {
+    harness.uploadAs = 78;
+    harness.snapshot.contacts = [dto.contact({ name: "proj" })];
+    useStore.setState({ sheetPicks: [pick("a.txt")] });
+    render(<App />);
+    fireEvent.click(await screen.findByText("proj"));
+    fireEvent.click(screen.getByLabelText(en["send.depositLabel"]));
+    fireEvent.click(await screen.findByText(en["send.submitDeposit"]));
+    expect(await screen.findByText(en["send.uploadingNote"])).toBeTruthy();
+    // The event says only that it landed; the ticket is read off the row.
+    harness.snapshot.transfers = [
+      dto.transfer({ id: 78, status: "deposited", ticket: MAILBOX_TICKET }),
+    ];
+    act(() => {
+      harness.emit({ deposited: { id: 78 } });
+    });
+    await waitFor(() =>
+      expect(screen.queryByText(en["send.uploadingNote"])).toBeNull()
+    );
+  });
+
   it("131. a relay that refuses links says so instead of showing nothing", async () => {
     harness.fail = new Set(["createLink"]);
     useStore.setState({ sheetPicks: [pick("a.txt")] });

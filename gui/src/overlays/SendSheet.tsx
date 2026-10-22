@@ -31,12 +31,19 @@ import {
   Textarea,
   TrustBadges,
 } from "../ui/Primitives";
-import { Avatar, ClaimedName, CodeHero, ExtChip, useCopy } from "../ui/Bits";
+import {
+  Avatar,
+  ClaimedName,
+  CodeHero,
+  ExtChip,
+  Progress,
+  useCopy,
+} from "../ui/Bits";
 import { ValueRow } from "../ui/Rows";
-import { fmtBytes } from "../format";
+import { failText, fmtBytes, waitingText } from "../format";
 import { Sheet } from "../ui/Sheet";
 import { toast } from "../ui/Toasts";
-import type { ContactDto, DeviceDto, PickedItem } from "../types";
+import type { ContactDto, DeviceDto, PickedItem, UITransfer } from "../types";
 
 /** Re-exported name for the store's `SendMode`, so the switch below and the
  *  callers that preselect it can never drift apart. */
@@ -84,8 +91,64 @@ const TTL_CHOICES = [
 
 interface Result {
   kind: "code" | "link" | "ticket" | "deposit" | "sent";
+  /** What to hand over. Empty while `transfer` is still uploading it: a link's
+   *  URL and a deposit's ticket only exist once the relay has the file. */
   value: string;
   detail?: string;
+  /** The transfer uploading a link or a deposit, whose row the value is read
+   *  off when it lands. */
+  transfer?: number;
+}
+
+/** What the sheet shows while a link or a deposit is still going up: the file,
+ *  how far it has got, and what it is doing — said once, then left to the bar.
+ *
+ *  The upload belongs to the daemon, not to this sheet: closing it changes
+ *  nothing, and the note says so, because "keep this open" is what a spinner
+ *  in a dialog usually means. */
+function Uploading({
+  tx,
+  name,
+  size,
+  onStop,
+}: {
+  tx: UITransfer | undefined;
+  name: string;
+  size: number;
+  onStop: () => void;
+}) {
+  const t = useT();
+  const failed = tx?.status === "failed" || tx?.status === "cancelled";
+  const line = !tx
+    ? t("send.uploadingTitle", fmtBytes(0), fmtBytes(size))
+    : tx.status === "failed"
+      ? failText(tx.failCode, tx.failDetail, tx.reason)
+      : tx.status === "stalled"
+        ? waitingText(tx)
+        : t("send.uploadingTitle", fmtBytes(tx.transferred), fmtBytes(tx.size || size));
+  return (
+    <div className="stack">
+      <div className="link-file">
+        <ExtChip name={name} />
+        <span className="grow" style={{ minWidth: 0 }}>
+          <span className="link-file-name">{name}</span>
+          <span className="link-file-size tnum">{fmtBytes(size)}</span>
+        </span>
+      </div>
+      {tx && !failed && <Progress t={tx} />}
+      <div className="t-sm" role="status" aria-live="polite">
+        {failed && tx?.status === "failed" ? t("send.uploadFailedTitle") : line}
+      </div>
+      {failed ? (
+        tx?.status === "failed" && <div className="t-sm t-sec">{line}</div>
+      ) : (
+        <>
+          <div className="t-sm t-sec">{t("send.uploadingNote")}</div>
+          <Button onClick={onStop}>{t("send.uploadStopAction")}</Button>
+        </>
+      )}
+    </div>
+  );
 }
 
 /** The two "quanti download" fields accept exactly two things: empty, or a whole
@@ -393,6 +456,21 @@ export function SendSheet() {
   const { state: copyState, copy: copyLink } = useCopy();
   const copied = copyState === "ok";
   const [result, setResult] = useState<Result | null>(null);
+  const transfers = useStore((s) => s.transfers);
+  const cancelTransfer = useStore((s) => s.cancel);
+  /** The upload behind the result, while there is one. */
+  const liveTx =
+    result?.transfer != null ? transfers[`t${result.transfer}`] : undefined;
+  /** The result as it stands now: the URL or the ticket read off the row once
+   *  the upload has landed, which is when there is something to hand over. */
+  const shown: Result | null =
+    result && !result.value && liveTx
+      ? {
+          ...result,
+          value: (result.kind === "link" ? liveTx.link : liveTx.ticket) ?? "",
+        }
+      : result;
+  const uploading = !!shown && !shown.value && shown.transfer != null;
   /** Which of our machines to aim at; `null` is "whichever is awake", which is
    *  what every send did before there was a register to choose from. */
   const [device, setDevice] = useState<string | null>(null);
@@ -527,6 +605,7 @@ export function SendSheet() {
           setResult({
             kind: "deposit",
             value: r.ticket,
+            transfer: r.id,
             detail: toSelf
               ? t("send.depositResultSelfDetail")
               : t("send.depositResultDetail", toLabel),
@@ -534,11 +613,14 @@ export function SendSheet() {
           // The outcome as a toast, the way the live send already reports it;
           // the caption under the ticket then only has to answer "why am I
           // being shown this at all", which is the part that is not obvious.
-          toast.echo(
-            toSelf
-              ? t("send.depositResultSelf")
-              : t("send.depositResult", toLabel)
-          );
+          // Only once it is true: a deposit still uploading has not been left
+          // anywhere yet, and the sheet shows how far it has got instead.
+          if (r.ticket)
+            toast.echo(
+              toSelf
+                ? t("send.depositResultSelf")
+                : t("send.depositResult", toLabel)
+            );
         } else {
           await send(recipient, files.map((f) => f.id), outgoingNote, device);
           toast.echo(
@@ -561,14 +643,15 @@ export function SendSheet() {
       } else if (mode === "link") {
         // Empty here is the deliberate "illimitati" the placeholder promises,
         // and now the *only* way to ask for it.
-        const url = await link(
+        const started = await link(
           files[0].id,
           ttl,
           maxDlLink === "" ? null : Number(maxDlLink)
         );
         setResult({
           kind: "link",
-          value: url,
+          value: started.url,
+          transfer: started.id ?? undefined,
           detail: t("send.linkDetail"),
         });
       } else {
@@ -689,14 +772,23 @@ export function SendSheet() {
         )
       }
     >
-      {result ? (
+      {shown && uploading ? (
+        <Uploading
+          tx={liveTx}
+          name={files[0]?.name ?? ""}
+          size={files.reduce((n, f) => n + (f.size ?? 0), 0)}
+          onStop={() => {
+            if (shown.transfer != null) void cancelTransfer(shown.transfer);
+          }}
+        />
+      ) : shown ? (
         <div className="stack">
           {/* A link is not a code and the design draws it as what it is: an
               address, whole, in a box you can read across — never a square and
               never an ellipsis. The square is for things a camera reads; a URL
               gets copied, and what the reader needs is the certainty that what
               they are copying is all of it. */}
-          {isPhone && result.kind === "link" ? (
+          {isPhone && shown.kind === "link" ? (
             <>
               {files[0] && (
                 <div className="link-file">
@@ -713,10 +805,10 @@ export function SendSheet() {
                 <div className="t-label" style={{ padding: "0 4px" }}>
                   {t("send.linkPublic")}
                 </div>
-                <div className="link-box mono">{result.value}</div>
+                <div className="link-box mono">{shown.value}</div>
               </div>
               <div className="link-actions">
-                <Button size="lg" onClick={() => copyLink(result.value)}>
+                <Button size="lg" onClick={() => copyLink(shown.value)}>
                   <Icon.Copy size={15} />
                   {copied ? t("common.copied") : t("common.copy")}
                 </Button>
@@ -734,7 +826,7 @@ export function SendSheet() {
                           share: (d: { text: string }) => Promise<void>;
                         }
                       )
-                        .share({ text: result.value })
+                        .share({ text: shown.value })
                         .catch(() => {
                           /* dismissed, or refused: the link is still on screen */
                         });
@@ -765,29 +857,29 @@ export function SendSheet() {
             </>
           ) : (
             <>
-              {result.kind === "sent" ? null : (
+              {shown.kind === "sent" ? null : (
                 <CodeHero
-                  value={result.value}
-                  small={result.kind !== "code"}
-                  qrSize={isPhone && result.kind === "code" ? 212 : 148}
-                  caption={result.detail}
+                  value={shown.value}
+                  small={shown.kind !== "code"}
+                  qrSize={isPhone && shown.kind === "code" ? 212 : 148}
+                  caption={shown.detail}
                 />
               )}
-              {result.kind === "link" && (
+              {shown.kind === "link" && (
                 <div className="t-sm t-sec">{t("send.linkKeyNote")}</div>
               )}
             </>
           )}
           {/* A ticket is a blob nobody retypes: offer it as a `.arvolo` file —
               the CLI's own default artefact — shareable over any channel. */}
-          {result.kind === "ticket" && (
+          {shown.kind === "ticket" && (
             <Button
               onClick={async () => {
                 const base =
                   files[0]?.name?.replace(/[/\\]/g, "_") || "ticket";
                 const saved = await api.saveTicket(
                   `${base}.arvolo`,
-                  result.value
+                  shown.value
                 );
                 if (saved)
                   toast.ok(t("send.arvoloSaved", saved), t("send.arvoloSavedDetail"));

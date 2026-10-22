@@ -42,6 +42,21 @@ type Write = Box<dyn AsyncWrite + Unpin + Send>;
 /// relay it knows, in turn), short enough to be a bounded wait.
 const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// The answer to a request that a daemon may carry out in the background.
+///
+/// Uploading a whole file can take longer than any client should wait on one
+/// answer, so a current daemon starts it as a transfer and answers with its id.
+/// An older one does the work inside the request and answers with the result.
+/// Both are correct answers to the same request; the type makes the caller say
+/// what it does with each.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Background<T> {
+    /// Under way as this transfer; the result arrives as an event.
+    Running(u64),
+    /// Already done (an older daemon), with the result.
+    Done(T),
+}
+
 /// Something that answers requests with no socket in between.
 ///
 /// The desktop has a daemon at the other end of a pipe. A phone has neither:
@@ -286,6 +301,7 @@ impl DaemonClient {
                 paths,
                 note,
                 deposit: false,
+                detach: false,
                 live_only,
                 ttl,
                 max,
@@ -302,7 +318,11 @@ impl DaemonClient {
     }
 
     /// Deposit straight to the recipient's mailbox — `arvolo send --deposit`.
-    /// Returns the transfer id and the `arvm…` ticket for hand-delivery.
+    ///
+    /// A current daemon answers at once with the transfer id,
+    /// [`Background::Running`]; the `arvm…` ticket for hand-delivery is filed
+    /// with the deposit's receipt when the upload lands. A daemon from before
+    /// that answers at the end with both, [`Background::Done`].
     #[allow(clippy::too_many_arguments)]
     pub async fn deposit(
         &mut self,
@@ -314,7 +334,7 @@ impl DaemonClient {
         password: Option<String>,
         device: Option<String>,
         fds: Option<FdHandoff>,
-    ) -> Result<(u64, String)> {
+    ) -> Result<Background<(u64, String)>> {
         let (fd_socket, fd_token) = split(fds);
         match self
             .request(Request::Push {
@@ -322,6 +342,7 @@ impl DaemonClient {
                 paths,
                 note,
                 deposit: true,
+                detach: true,
                 live_only: false,
                 ttl,
                 max,
@@ -332,7 +353,8 @@ impl DaemonClient {
             })
             .await?
         {
-            Response::Served { id, ticket } => Ok((id, ticket)),
+            Response::TransferId(id) => Ok(Background::Running(id)),
+            Response::Served { id, ticket } => Ok(Background::Done((id, ticket))),
             other => unexpected(other),
         }
     }
@@ -407,15 +429,22 @@ impl DaemonClient {
         }
     }
 
-    /// Deposit a public browser download link for `path` (on the daemon's
-    /// filesystem); returns the shareable URL.
+    /// Start a public browser download link for `path` (on the daemon's
+    /// filesystem).
+    ///
+    /// A current daemon answers at once with the transfer that uploads it —
+    /// [`Background::Running`] — and the URL follows as
+    /// [`crate::protocol::EventDto::LinkReady`]. A daemon from before that
+    /// uploads inside the request and answers with the URL itself,
+    /// [`Background::Done`]: which one came back is the daemon's choice, and a
+    /// caller handles both.
     pub async fn create_link(
         &mut self,
         path: String,
         ttl: Option<u64>,
         max: Option<u32>,
         fds: Option<FdHandoff>,
-    ) -> Result<String> {
+    ) -> Result<Background<String>> {
         let (fd_socket, fd_token) = split(fds);
         match self
             .request(Request::CreateLink {
@@ -425,10 +454,12 @@ impl DaemonClient {
                 fd_socket,
                 fd_token,
                 typed_refusal: true,
+                detach: true,
             })
             .await?
         {
-            Response::Link(url) => Ok(url),
+            Response::TransferId(id) => Ok(Background::Running(id)),
+            Response::Link(url) => Ok(Background::Done(url)),
             // The refusal as itself, as on `accept_with_password`: a window reads
             // the code and the limit off it, everyone else prints the sentence.
             // `size` is not on the wire — the sentence already names it — so the

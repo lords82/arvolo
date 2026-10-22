@@ -682,7 +682,13 @@ interface State {
   ticket: (items: string[]) => Promise<{ id: number; ticket: string }>;
   /** Host a short pairing code in the daemon (keep = serve every receiver). */
   code: (items: string[], keep: boolean) => Promise<{ id: number; code: string }>;
-  link: (path: string, ttl: number | null, max: number | null) => Promise<string>;
+  /** Starts a link. `id` is the transfer uploading it — the URL lands on its
+   *  row as `link` — and `url` is already there only against an older daemon. */
+  link: (
+    path: string,
+    ttl: number | null,
+    max: number | null
+  ) => Promise<{ id: number | null; url: string }>;
   /** Receive from a pasted arvc… ticket, pairing code or arvm… offline ticket. */
   receive: (ticket: string, out: string | null, password: string | null) => Promise<number>;
   /** Accept a parked offer. `password` is only needed when the offer points at a
@@ -823,6 +829,8 @@ export const useStore = create<State>((set, get) => {
       // A daemon that predates the field says nothing; keep the button, which is
       // what that daemon has always done.
       canPause: d.can_pause ?? true,
+      link: d.link ?? prev?.link,
+      ticket: d.ticket ?? prev?.ticket,
       peer: get().peerLabel(d.peer, prev?.peer),
       peerId: d.peer ?? prev?.peerId,
       // The sender's own claim about their name, kept so "save the sender" can
@@ -1310,8 +1318,27 @@ export const useStore = create<State>((set, get) => {
           }
           break;
         }
-        case "deposited":
+        case "deposited": {
           patch(ev.id, (tx) => ({ ...tx, status: "deposited" }));
+          // The event carries nothing but the id (the receipt behind it holds
+          // a withdrawal secret), so the `arvm…` ticket a waiting panel wants is
+          // read off the row, where the daemon put it.
+          const id = ev.id;
+          void api
+            .listTransfers()
+            .then((rows) => {
+              const ticket = rows.find((r) => r.id === id)?.ticket;
+              if (ticket) patch(id, (tx) => ({ ...tx, ticket }));
+            })
+            .catch(() => {});
+          refreshDeposits();
+          break;
+        }
+        case "link_ready":
+          patch(ev.id, (tx) => ({ ...tx, link: ev.link }));
+          // The receipt is filed by now: the list is where the link lives once
+          // the panel that started it is closed.
+          refreshDeposits();
           break;
         // Reading and encrypting the payload: nothing on the wire, and the
         // recipient has not been offered anything yet. Its own status because
@@ -1839,11 +1866,13 @@ export const useStore = create<State>((set, get) => {
     code: async (items, keep) =>
       act(t("store.errCode"), () => api.serveCode(items, null, keep)),
     link: async (item, ttl, max) => {
-      const url = await act(t("store.errLink"), () =>
+      const started = await act(t("store.errLink"), () =>
         api.createLink(item, ttl, max)
       );
-      refreshDeposits();
-      return url;
+      // Against an older daemon the link already exists; otherwise its receipt
+      // is filed when `link_ready` arrives, and the list is re-read then.
+      if (started.url) refreshDeposits();
+      return started;
     },
     receive: async (ticket, out, password) => {
       const id = await act(t("store.errReceive"), () =>

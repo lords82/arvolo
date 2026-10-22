@@ -120,6 +120,7 @@ export const it: Dict = {
   "waiting.offered": "offerto — in attesa che accettino",
   "waiting.tooLarge": "troppo grande per il relay — si invierà diretto",
   "waiting.relayRetry": (why: string) => `${why} — si riprova, diretto quando sono online`,
+  "waiting.uploadRetry": (why: string) => `${why} — riprende quando il relay risponde`,
   "waiting.parked": "parcheggiato sul relay — finisce senza di te",
   "waiting.relayCapped": (cap: string) => `il relay si ferma a ${cap} — da qui diretto`,
   "waiting.offloadFailed": (why: string) => `non si è potuto parcheggiarlo: ${why}`,
@@ -727,6 +728,10 @@ export const it: Dict = {
   "send.submitTicket": "Crea ticket",
   "send.linkKeyNote":
     "La chiave sta dopo il `#`, che i browser non mandano mai al server.",
+  "send.uploadingTitle": (done: string, total: string) => `Sul relay: ${done} di ${total}`,
+  "send.uploadingNote": "Puoi chiudere: il caricamento continua in Attività, e se la connessione cade riprende da dove si era fermato.",
+  "send.uploadStopAction": "Annulla il caricamento",
+  "send.uploadFailedTitle": "Il caricamento non è riuscito",
   "send.filesLabel": "Cosa mandi",
   "send.whatNothing": "Non hai ancora scelto",
   "send.whatPick": "Tocca per scegliere",

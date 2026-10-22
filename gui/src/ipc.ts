@@ -78,7 +78,9 @@ export const api = {
     liveOnly = false
   ) => invoke<number>("send_to", { to, items, note, device, liveOnly }),
   /** `send --deposit`: skip the live attempt, leave it in their mailbox. Returns
-   *  the `arvm…` ticket too, so it can also be handed over by other means. */
+   *  the transfer id at once; the `arvm…` ticket — for handing it over by other
+   *  means — lands on the transfer row with the upload. `ticket` is already
+   *  filled only against a daemon that uploads inside the call. */
   depositTo: (
     to: string,
     items: string[],
@@ -104,10 +106,18 @@ export const api = {
     }),
   serveCode: (items: string[], relay: string | null, keep: boolean) =>
     invoke<{ id: number; code: string }>("serve_code", { items, relay, keep }),
-  /** Rejects with a `Refusal`: the relay's size cap arrives as `tooLarge` with
+  /** Starts the link as a transfer and answers with its id at once; the URL
+   *  follows as a `link_ready` event. `url` is already filled only against a
+   *  daemon from before links were transfers, which uploads inside the call.
+   *
+   *  Rejects with a `Refusal`: the relay's size cap arrives as `tooLarge` with
    *  `limitBytes`, so the notice can say how large is too large. */
   createLink: (item: string, ttl: number | null, max: number | null) =>
-    invoke<string>("create_link", { item, ttl, max }).catch((e) => {
+    invoke<{ id: number | null; url: string }>("create_link", {
+      item,
+      ttl,
+      max,
+    }).catch((e) => {
       throw asRefusal(e);
     }),
   recv: (ticket: string, outItem: string | null, password: string | null) =>

@@ -33,6 +33,7 @@ use crate::transfer::RelayChoice;
 mod publish;
 mod records;
 mod state;
+mod uploads;
 mod work;
 
 pub use publish::{SavePublisher, SavedLocation};
@@ -164,6 +165,12 @@ pub enum WaitingReason {
     /// is never spent. Its own reason rather than silence, because a row that
     /// says nothing for an hour looks stuck rather than patient.
     ForThem,
+    /// An upload to the relay — a link, or a deposit asked for explicitly —
+    /// lost its connection, and will carry on from where it stopped once the
+    /// relay answers again. Carries the transport's own words, like
+    /// [`Self::RelayRetry`]; a different reason because there is no recipient
+    /// to fall back to and nothing starts over.
+    UploadRetry(String),
 }
 
 impl WaitingReason {
@@ -179,6 +186,7 @@ impl WaitingReason {
             WaitingReason::OffloadFailed(_) => "offloadFailed",
             WaitingReason::NoRoute => "noRoute",
             WaitingReason::ForThem => "forThem",
+            WaitingReason::UploadRetry(_) => "uploadRetry",
         }
     }
 
@@ -208,6 +216,9 @@ impl WaitingReason {
             WaitingReason::ForThem => {
                 "waiting for them to be online — direct only, nothing on the relay".into()
             }
+            WaitingReason::UploadRetry(why) => format!(
+                "{why} — the upload carries on from where it stopped once the relay answers"
+            ),
         }
     }
 
@@ -218,7 +229,8 @@ impl WaitingReason {
         match self {
             WaitingReason::RelayRetry(why)
             | WaitingReason::RelayCapped(why)
-            | WaitingReason::OffloadFailed(why) => Some(why),
+            | WaitingReason::OffloadFailed(why)
+            | WaitingReason::UploadRetry(why) => Some(why),
             _ => None,
         }
     }
@@ -554,6 +566,18 @@ pub struct Transfer {
     pub fail_code: String,
     /// The words from elsewhere inside that reason — see [`FailReason::detail`].
     pub fail_detail: String,
+    /// The browser URL of a link transfer, once its upload has finished. `None`
+    /// for everything else, and for a link still uploading.
+    ///
+    /// On the row, and not only in [`ManagerEvent::LinkReady`], for the reason
+    /// `path` is: a window that opens after the upload finished rebuilds its
+    /// rows from the list, and a link row that forgot its URL is useless.
+    pub link: Option<String>,
+    /// The sender's own `arvm…` ticket for a mailbox deposit, once it is on the
+    /// relay — what a person hands over when the inbox route is not wanted. Not
+    /// a secret the way the revoke token is (see [`DepositInfo::ticket`]), and
+    /// on the row for the same reason as `link`.
+    pub ticket: Option<String>,
     /// Whether [`TransferManager::pause`] would actually do something.
     ///
     /// Not every transfer can be held: a pickup from the mailbox is one fetch that
@@ -627,6 +651,9 @@ pub struct DepositInfo {
     /// only in the front-end's receipt — which is why an empty one here must
     /// never overwrite a stored one).
     pub ticket: String,
+    /// The browser URL, for a link deposit; `None` for a mailbox one. A link's
+    /// receipt is filed under its own kind, and this is what tells them apart.
+    pub link: Option<String>,
 }
 
 /// Events emitted as transfers and offers progress. Cloneable for [`broadcast`].
@@ -709,6 +736,12 @@ pub enum ManagerEvent {
     },
     /// A transfer was cancelled.
     Cancelled { id: u64 },
+    /// A link upload finished: the file is on the relay and `info.link` is the
+    /// URL to share. Followed by [`Completed`](ManagerEvent::Completed) for the
+    /// same id. Carries the whole receipt for the same reason
+    /// [`Deposited`](ManagerEvent::Deposited) does — and like it, crosses the
+    /// IPC boundary as no more than what is safe to hand any subscriber.
+    LinkReady { id: u64, info: DepositInfo },
     /// A short pairing code is live and listening for receivers. Raised on the
     /// first claim and again after a restart, so a front-end can show the code
     /// without having to have seen the command that created it.
@@ -786,6 +819,7 @@ impl TransferManager {
                 display_name: Mutex::new(String::new()),
                 publisher: std::sync::OnceLock::new(),
                 device_id: Mutex::new(None),
+                uploads: Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -959,6 +993,8 @@ impl TransferManager {
                 waiting_detail: String::new(),
                 fail_code: String::new(),
                 fail_detail: String::new(),
+                link: None,
+                ticket: None,
                 can_pause: false,
             },
         );
@@ -1062,6 +1098,8 @@ impl TransferManager {
                     waiting_detail: String::new(),
                     fail_code: String::new(),
                     fail_detail: String::new(),
+                    link: None,
+                    ticket: None,
                     // Answered per snapshot in `list`, where the record on disk and
                     // the held sends can be read; the stored row never carries a
                     // stale yes.
@@ -1252,11 +1290,15 @@ impl TransferManager {
     ///
     /// This is `send --mailbox`: send-and-forget. It differs from
     /// [`send_to`](Self::send_to) in more than the presence check — there is no
-    /// held record and no retry loop, so the attempt either lands or fails, once.
-    /// That is deliberate. A held send is restored from disk after a restart, and
-    /// restoring one carrying a password would mean writing that password into the
-    /// state directory; retrying without it would silently deposit unprotected.
-    /// Neither is acceptable, so an explicit deposit simply doesn't become held.
+    /// held record, so it does not come back after a restart. That is deliberate.
+    /// A held send is restored from disk, and restoring one carrying a password
+    /// would mean writing that password into the state directory; retrying
+    /// without it would silently deposit unprotected. Neither is acceptable, so
+    /// an explicit deposit simply doesn't become held.
+    ///
+    /// Within one run it does wait out a dropped connection, and carries the
+    /// upload on from where it stopped: the password is already sealed into the
+    /// upload's key by then, so nothing has to be asked again or written down.
     ///
     /// With a cross-relay recipient the two halves come apart: the blob goes to
     /// **our** relay (we pay for that storage, and the `arvm…` names it, so they
@@ -1272,7 +1314,46 @@ impl TransferManager {
         opts: MailboxOpts,
         relay: Option<String>,
     ) -> Result<(u64, String)> {
-        let payload = payload.into();
+        let (id, run) = self.start_deposit(recipient, payload.into(), name, note, opts, relay)?;
+        run.await
+            .map(|ticket| (id, ticket))
+            .map_err(|msg| anyhow::anyhow!("{msg}"))
+    }
+
+    /// [`deposit_to`](Self::deposit_to) without waiting for it: returns the
+    /// transfer id at once and lets the upload run as a transfer. The `arvm…`
+    /// ticket arrives with [`ManagerEvent::Deposited`].
+    ///
+    /// What a front-end calls. Waiting on the whole upload inside one request is
+    /// what made a large deposit look like a stuck daemon: the client gave up on
+    /// the answer long before the relay had the file.
+    pub fn deposit_to_detached(
+        &self,
+        recipient: &PublicId,
+        payload: impl Into<crate::source::SendSource>,
+        name: String,
+        note: String,
+        opts: MailboxOpts,
+        relay: Option<String>,
+    ) -> Result<u64> {
+        let (id, run) = self.start_deposit(recipient, payload.into(), name, note, opts, relay)?;
+        tokio::spawn(run);
+        Ok(id)
+    }
+
+    /// Register a deposit's row and build the task that carries it out.
+    fn start_deposit(
+        &self,
+        recipient: &PublicId,
+        payload: crate::source::SendSource,
+        name: String,
+        note: String,
+        opts: MailboxOpts,
+        relay: Option<String>,
+    ) -> Result<(
+        u64,
+        impl std::future::Future<Output = std::result::Result<String, String>> + Send + 'static,
+    )> {
         let mine = self.inner.relay.clone();
         let deposit_relay = mine
             .clone()
@@ -1282,47 +1363,23 @@ impl TransferManager {
         let size = payload.len().unwrap_or(0);
         let (id, cancel) =
             self.register(Direction::Send, Some(recipient.clone()), name.clone(), size);
-
-        // No local TTL is computed here on purpose: the deadline comes back from the
-        // deposit (`DepositOutcome::ttl_secs`), because only the relay knows how much
-        // of `opts.ttl` it agreed to keep.
-        // Selected against the row's own token, or `cancel(id)` would fire a
-        // token nothing awaits: the upload would run to completion and the row
-        // would flip to Deposited — blob on the relay, offer in the recipient's
-        // inbox — after the user had been shown "annullamento in corso".
-        let deposit = deposit_offline_and_offer(
-            &self.inner,
-            &deposit_relay,
-            &offer_relay,
-            recipient,
-            &payload,
-            &name,
-            &note,
-            &opts,
+        // No local TTL is computed here on purpose: the deadline comes back from
+        // the deposit (`DepositOutcome::ttl_secs`), because only the relay knows
+        // how much of `opts.ttl` it agreed to keep. The row's own token goes in,
+        // or `cancel(id)` would fire a token nothing awaits.
+        let run = uploads::run_deposit(
+            self.inner.clone(),
+            id,
+            cancel,
+            deposit_relay,
+            offer_relay,
+            recipient.clone(),
+            payload,
+            name,
+            note,
+            opts,
         );
-        let outcome = tokio::select! {
-            _ = cancel.cancelled() => {
-                finish(&self.inner, id, true, Ok(None));
-                anyhow::bail!("deposit cancelled");
-            }
-            r = deposit => r,
-        };
-        match outcome {
-            Ok(out) => {
-                let ticket = out.ticket.clone();
-                // The relay's granted TTL, not the one `opts` asked for: it clamps to
-                // its own maximum, and a record deadlined off the request would keep
-                // watching (and keep telling the user about) a blob already reaped.
-                let expires = unix_now().saturating_add(out.ttl_secs);
-                spawn_offline_confirm(&self.inner, id, deposit_relay, offer_relay, out, expires);
-                Ok((id, ticket))
-            }
-            Err(e) => {
-                let msg = format!("{e}");
-                finish(&self.inner, id, false, Err(anyhow::anyhow!("{msg}")));
-                Err(anyhow::anyhow!("{msg}"))
-            }
-        }
+        Ok((id, run))
     }
 
     /// Stop waiting for the recipient to accept and park the file on the relay now.
@@ -1641,6 +1698,7 @@ impl TransferManager {
         if let Some(rec) = &prep {
             *slot.lock().unwrap() = work::rebuild_prep(rec, &source);
         }
+        let upload = uploads::take_upload_record(&self.inner, rec.id, &rec.payload);
         self.inner.held.lock().unwrap().insert(
             id,
             Held {
@@ -1658,6 +1716,11 @@ impl TransferManager {
                 prep: slot.clone(),
             },
         );
+        // The mailbox upload it had under way, re-filed under the id it now has —
+        // after the held entry, which is what makes it worth writing down again.
+        if let Some(r) = upload {
+            uploads::remember(&self.inner, id, r, &source);
+        }
         // Re-key the preparation onto the id it now belongs to, or the next restart
         // finds an orphan and sweeps it — losing across two restarts what survived
         // one. Only when it actually survived the guard.
@@ -2717,6 +2780,17 @@ impl TransferManager {
             remove_sendto(&dir, rec.id);
             self.restore_sendto(rec, prep);
         }
+        // Links still uploading when the last run ended: carried on, from where
+        // the relay says they stand when the file is unchanged.
+        let links = uploads::load_link_records(&dir);
+        let n = n + links.len();
+        for rec in links {
+            uploads::remove_link_record(&dir, rec.id);
+            self.restore_link(rec);
+        }
+        // Whatever upload state is left belonged to a transfer that did not come
+        // back. It holds a content key, and its relay session holds space.
+        uploads::sweep_upload_records(&dir);
         for rec in downloads {
             // A download **the user** paused comes back Paused, awaiting them; one
             // the system stopped on its way to sleep, and one that was simply

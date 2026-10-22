@@ -122,6 +122,7 @@ export const fr: Dict = {
   "waiting.offered": "proposé — en attente de leur acceptation",
   "waiting.tooLarge": "trop gros pour le relais — envoi direct prévu",
   "waiting.relayRetry": (why: string) => `${why} — nouvel essai, direct dès qu'ils sont là`,
+  "waiting.uploadRetry": (why: string) => `${why} — reprend quand le relais répond`,
   "waiting.parked": "déposé sur le relais — se termine sans vous",
   "waiting.relayCapped": (cap: string) => `le relais s'arrête à ${cap} — direct ensuite`,
   "waiting.offloadFailed": (why: string) => `impossible de le déposer : ${why}`,
@@ -728,6 +729,10 @@ export const fr: Dict = {
   "send.submitTicket": "Créer le ticket",
   "send.linkKeyNote":
     "La clé est après le `#`, que les navigateurs n'envoient jamais au serveur.",
+  "send.uploadingTitle": (done: string, total: string) => `Sur le relais : ${done} sur ${total}`,
+  "send.uploadingNote": "Vous pouvez fermer : l'envoi continue dans Activité et, si la connexion tombe, il reprend là où il s'était arrêté.",
+  "send.uploadStopAction": "Annuler l'envoi",
+  "send.uploadFailedTitle": "L'envoi n'a pas abouti",
   "send.filesLabel": "Ce que vous envoyez",
   "send.whatNothing": "Rien de choisi",
   "send.whatPick": "Touchez pour choisir",

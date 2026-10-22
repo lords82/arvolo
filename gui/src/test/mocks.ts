@@ -121,6 +121,11 @@ export interface Harness {
   updateProgress: (p: UpdateProgress) => void;
   /** What `check_update` will answer. `null` — the default — is "nothing new". */
   update: UpdateInfo | null;
+  /** The transfer id `create_link` and `deposit_to` answer with, as a current
+   *  daemon does: the upload runs as that transfer, and the URL or ticket comes
+   *  later. `null` — the default — is an older daemon, which uploads inside the
+   *  call and answers with the URL or ticket itself. */
+  uploadAs: number | null;
   /** What `reload()` will find on the daemon. */
   /** What `photos_recent` answers; empty means "no library to read". */
   photos: RecentPhoto[];
@@ -269,6 +274,7 @@ export const harness: Harness = {
   arvoloTicket: () => {},
   updateProgress: () => {},
   update: null,
+  uploadAs: null,
   snapshot: freshSnapshot(),
   fail: new Set(),
   refuse: {},
@@ -283,6 +289,7 @@ export function resetHarness() {
   harness.fail = new Set();
   harness.refuse = {};
   harness.update = null;
+  harness.uploadAs = null;
   // The update cadence remembers itself in localStorage, which outlives a test.
   // Leaving it would let the first test that runs a check buy the next one a
   // week of silence — the same state leak the zustand reset below exists for.
@@ -370,7 +377,12 @@ export function makeIpcMock() {
         password: string | null
       ) => {
         harness.recorder.depositTo.push([to, paths, ttl, max, password]);
-        return guard("depositTo", { id: 2, ticket: MAILBOX_TICKET });
+        return guard(
+          "depositTo",
+          harness.uploadAs != null
+            ? { id: harness.uploadAs, ticket: "" }
+            : { id: 2, ticket: MAILBOX_TICKET }
+        );
       },
       getConfig: () => guard("getConfig", harness.snapshot.config),
       setConfig: (patch: ConfigPatch) => {
@@ -423,7 +435,12 @@ export function makeIpcMock() {
       },
       createLink: (_path: string, ttl: number | null, max: number | null) => {
         harness.recorder.createLink.push([ttl, max]);
-        return guard("createLink", "https://relay.test/dl/abc#key");
+        return guard(
+          "createLink",
+          harness.uploadAs != null
+            ? { id: harness.uploadAs, url: "" }
+            : { id: null, url: "https://relay.test/dl/abc#key" }
+        );
       },
       recv: (ticket: string, out: string | null, password: string | null) => {
         harness.recorder.recv.push([ticket, out, password]);

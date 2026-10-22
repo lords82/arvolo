@@ -240,9 +240,13 @@ const WAITING_PLAIN: Record<
  *  ones so the type system knows which entries take an argument. */
 const WAITING_QUOTED: Record<
   string,
-  "waiting.relayRetry" | "waiting.relayCapped" | "waiting.offloadFailed"
+  | "waiting.relayRetry"
+  | "waiting.relayCapped"
+  | "waiting.offloadFailed"
+  | "waiting.uploadRetry"
 > = {
   relayRetry: "waiting.relayRetry",
+  uploadRetry: "waiting.uploadRetry",
   relayCapped: "waiting.relayCapped",
   offloadFailed: "waiting.offloadFailed",
 };

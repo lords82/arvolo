@@ -804,6 +804,7 @@ async fn deliver_to_inner(
             let deposit_relay = inner.relay.as_deref().unwrap_or(relay);
             let attempt = deposit_offline_and_offer(
                 inner,
+                id,
                 deposit_relay,
                 relay,
                 recipient,
@@ -1390,7 +1391,11 @@ pub(super) struct ParkOutcome {
 /// relay it was uploaded to, so a cross-relay deposit needs both.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn deposit_offline_and_offer(
-    inner: &Inner,
+    inner: &Arc<Inner>,
+    // The transfer this deposit belongs to: its upload state — the seal and the
+    // relay session — is kept under this id, so a retry carries on from what
+    // the relay already has instead of starting the file over.
+    id: u64,
     deposit_relay: &str,
     offer_relay: &str,
     recipient: &PublicId,
@@ -1402,17 +1407,33 @@ pub(super) async fn deposit_offline_and_offer(
     let size = payload.len().unwrap_or(0);
     let ttl = opts.ttl.unwrap_or(OFFLINE_TTL_SECS);
     let max = opts.max.unwrap_or(OFFLINE_MAX_DOWNLOADS);
-    let deposited = flow::deposit_offline(
+    let (seal, session) =
+        uploads::mailbox_seal(inner, id, payload, recipient, opts.password.as_deref())
+            .map_err(flow::DepositError::Fatal)?;
+    let cipher_len =
+        crate::upload::SealedLayout::mailbox(payload.clone(), seal.key, seal.size).len();
+    let hooks = uploads::TransferHooks::new(inner, id, payload, cipher_len, seal.size);
+    let deposited = flow::deposit_offline_with(
         payload,
         name,
-        recipient,
+        &seal,
         &inner.me,
         deposit_relay,
         ttl,
         max,
-        opts.password.as_deref(),
+        session,
+        &hooks.hooks(),
     )
-    .await?;
+    .await;
+    // Whatever the relay said, the upload is either done or will never be: only
+    // a dropped connection, or a relay with no room right now, is worth coming
+    // back to with the same seal and session.
+    match &deposited {
+        Err(flow::DepositError::Unavailable(_)) | Err(flow::DepositError::Busy) => {}
+        Ok(_) => uploads::forget(inner, id, false),
+        Err(_) => uploads::forget(inner, id, true),
+    }
+    let deposited = deposited?;
     let claim = deposited.ticket.claim.clone();
     let ticket = deposited.ticket.encode();
     // From here on the relay's answer replaces our request. Posting the offer with
@@ -1753,6 +1774,7 @@ pub(super) fn spawn_offline_confirm(
         ttl_secs: _,
     } = out;
     inner.set_progress(id, size);
+    inner.set_ticket(id, ticket.clone());
     inner.set_status(id, TransferStatus::Deposited);
 
     // Read the row once, for the event and the record both.
@@ -1790,6 +1812,7 @@ pub(super) fn spawn_offline_confirm(
             offer_id: offer_id.clone(),
             poster_token: poster_token.clone(),
             ticket,
+            link: None,
         },
     });
 
@@ -2181,6 +2204,11 @@ pub(super) fn finish(inner: &Inner, id: u64, cancelled: bool, result: Result<Opt
     }
     // Drop any held `send --to` delivery state (memory + its durable record).
     drop_held(inner, id);
+    // And any upload it was making: a relay session left open would hold the
+    // relay's space until its idle deadline for a file nobody will finish.
+    // After a success there is no session left, so this only ever abandons
+    // what a cancel or a failure interrupted.
+    uploads::forget(inner, id, true);
     // Terminal: this download stops answering for its content. A completed one
     // deliberately included — the file may since have been deleted, and telling
     // somebody "you already have this" is a different feature with a different way

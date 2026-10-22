@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### Added
+
+- **Deposits and links resume instead of starting over.** A file going up to the
+  relay — a browser link, a mailbox deposit, the mailbox fallback of a held
+  send — now travels as an upload session (`/v1/upload`): the relay keeps every
+  byte that reaches it, and when the connection drops the client asks where it
+  stands and sends only the rest. It works across a restart of the daemon too,
+  for the transfers that come back after one, as long as the file has not
+  changed. The encryption makes this sound rather than hopeful: every chunk's
+  nonce is its index, so the bytes made for a retry are the bytes the relay is
+  missing. A relay without sessions gets the single request it always got;
+  `ARVOLO_DISABLE_UPLOAD_SESSIONS=1` turns them off on purpose. See
+  `docs/PROTOCOL.md` §7.4.1. **Update the relay before the clients**, or they
+  keep using the single request.
+
 ### Changed
 
 - **The address book says when you last dealt with someone, instead of eight
@@ -19,6 +34,17 @@
   answered rather than ignored.
 
 ### Fixed
+
+- **A large link was reported as a stuck daemon while it was still uploading.**
+  Creating a link uploaded the whole file inside one request to the daemon, and
+  every client gives up on an answer after 60 seconds — so the window said "the
+  daemon is not responding, restart it" about a daemon that was working, and
+  restarting it is what would actually have lost the upload. The command line
+  went further and, on that error, started a second upload of its own. A link is
+  now a transfer like any other: the request answers with its id at once, the
+  row shows the progress, a dropped connection waits and resumes, and the URL
+  arrives when the relay has the file. An explicit mailbox deposit from a window
+  works the same way, and both no longer read the whole file into memory first.
 
 - **A file the relay would not hold was refused as "413 Payload Too Large", after
   all of it had been uploaded.** The status said neither how large is too large

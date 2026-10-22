@@ -70,6 +70,11 @@ export interface TransferDto {
    *  that predates the field, where the fallback is to keep offering the button:
    *  the worst case is that daemon's own behaviour. */
   can_pause?: boolean | null;
+  /** A link transfer's browser URL, once its upload has landed. Absent for
+   *  everything else, and from an older daemon. */
+  link?: string | null;
+  /** A mailbox deposit's `arvm…` ticket, once it is on the relay. */
+  ticket?: string | null;
   /** What the sender of an incoming transfer calls themselves, carried over from
    *  the offer. Absent from a send, a pasted ticket, and an older daemon — and a
    *  claim either way, never evidence. */
@@ -343,6 +348,8 @@ export type EngineEvent =
   | { type: "progress"; id: number; transferred: number; total_size: number }
   | { type: "completed"; id: number; path: string | null }
   | { type: "deposited"; id: number }
+  /** A link's upload landed: here is the URL to share. */
+  | { type: "link_ready"; id: number; link: string }
   /** Reading and encrypting the payload: nothing on the wire yet, and the
    *  recipient has not been offered anything. */
   | { type: "preparing"; id: number }
@@ -457,6 +464,10 @@ export interface UITransfer {
   /** Whether this row can be held. False for a mailbox pickup and a share, where
    *  the button would ask for something the daemon refuses. */
   canPause: boolean;
+  /** A link's URL, once uploaded — what the panel that started it shows. */
+  link?: string;
+  /** A deposit's `arvm…` ticket, once it is on the relay. */
+  ticket?: string;
   /** Completed-receive path (for "open folder"). */
   path?: string;
   /** E dove è finito quando il posto non ha un percorso: su Android MediaStore

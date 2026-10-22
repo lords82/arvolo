@@ -138,6 +138,11 @@ async fn main() -> Result<()> {
     tracing::info!(%blobstore, "blob-store node ready (backfill)");
     let mut state = AppState::new(mailbox.clone(), blob_node);
     state.links_enabled = !arvolo_relay::links_disabled_from_env();
+    state.uploads_enabled = !arvolo_relay::upload_sessions_disabled_from_env();
+    tracing::info!(
+        uploads_enabled = state.uploads_enabled,
+        "resumable upload sessions"
+    );
     tracing::info!(
         links_enabled = state.links_enabled,
         "browser download links"
@@ -174,6 +179,12 @@ async fn main() -> Result<()> {
                 // Expired (unaccepted) inbox offers.
                 match state.mailbox.inbox_reap(now) {
                     n if n > 0 => tracing::info!(removed = n, "reaped expired inbox offers"),
+                    _ => {}
+                }
+                // Upload sessions left idle past their deadline, partial files
+                // and reserved space with them.
+                match state.mailbox.upload_reap(now) {
+                    n if n > 0 => tracing::info!(removed = n, "reaped idle upload sessions"),
                     _ => {}
                 }
                 // Stale presence beacons.

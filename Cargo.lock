@@ -248,6 +248,7 @@ dependencies = [
  "der 0.8.0-rc.9",
  "ed25519",
  "ed25519-dalek",
+ "futures-util",
  "hpke",
  "iroh",
  "iroh-quinn-proto",

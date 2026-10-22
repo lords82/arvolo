@@ -74,7 +74,16 @@ pub fn check_proxy(url: &str) -> Result<(), String> {
 /// falls back to `Client::new()` — which only happens when there is no proxy to
 /// honour, so it cannot leak past one.
 pub fn build_client(proxy: Option<&str>, timeout: Option<Duration>) -> reqwest::Client {
-    let mut builder = reqwest::Client::builder();
+    let mut builder = apply_proxy(reqwest::Client::builder(), proxy);
+    if let Some(t) = timeout {
+        builder = builder.timeout(t);
+    }
+    builder.build().unwrap_or_else(|_| reqwest::Client::new())
+}
+
+/// Route `builder` through `proxy` by [`build_client`]'s rules: an unusable
+/// proxy URL becomes [`BLACKHOLE_PROXY`], never a direct connection.
+fn apply_proxy(mut builder: reqwest::ClientBuilder, proxy: Option<&str>) -> reqwest::ClientBuilder {
     if let Some(url) = proxy {
         let p = reqwest::Proxy::all(url).or_else(|e| {
             // Once per process: `client_with_timeout` builds a fresh client per
@@ -93,10 +102,7 @@ pub fn build_client(proxy: Option<&str>, timeout: Option<Duration>) -> reqwest::
             Err(_) => builder = builder.no_proxy(),
         }
     }
-    if let Some(t) = timeout {
-        builder = builder.timeout(t);
-    }
-    builder.build().unwrap_or_else(|_| reqwest::Client::new())
+    builder
 }
 
 /// The shared client: pooled, no request timeout (callers that need one use
@@ -110,6 +116,21 @@ pub fn client() -> reqwest::Client {
     SHARED
         .get_or_init(|| build_client(configured_proxy().as_deref(), None))
         .clone()
+}
+
+/// The client resumable uploads go through: routed like [`client`], plus a
+/// bounded connect and TCP keepalive.
+///
+/// No request timeout of any kind. reqwest's `read_timeout` counts from the
+/// start of the request to its response, *including* the time spent sending
+/// the body, so it would cut off every segment slower than itself; the
+/// uploader watches for a stall on its own instead (see `crate::upload`).
+pub fn upload_client() -> reqwest::Client {
+    apply_proxy(reqwest::Client::builder(), configured_proxy().as_deref())
+        .connect_timeout(Duration::from_secs(20))
+        .tcp_keepalive(Duration::from_secs(30))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
 }
 
 /// A client with a total-request timeout, honouring [`PROXY_ENV`] like [`client`].

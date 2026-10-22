@@ -112,7 +112,7 @@ describe("the deposits list", () => {
     // The URL is the whole point of the call and it is already in hand; a list
     // that could not be re-read must not turn that into a failed creation.
     harness.fail = new Set(["listDeposits"]);
-    const url = await s().link("/a.pdf", null, null);
+    const { url } = await s().link("/a.pdf", null, null);
     expect(url).toContain("/dl/");
     await waitFor(() => expect(s().depositsError).toBeTruthy());
   });

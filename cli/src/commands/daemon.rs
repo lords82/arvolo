@@ -944,6 +944,8 @@ mod share_line_tests {
             can_pause: None,
             fail_code: None,
             fail_detail: None,
+            link: None,
+            ticket: None,
         }
     }
 

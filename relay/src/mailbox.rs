@@ -11,6 +11,11 @@ use crate::state::{
 };
 use crate::util::{constant_time_eq, random_claim, sweep_orphan_files};
 
+mod upload;
+pub use upload::{
+    UploadInfo, UploadOpen, DEFAULT_MAX_OPEN_UPLOADS, UPLOAD_COMMITTED_GRACE_SECS, UPLOAD_IDLE_SECS,
+};
+
 /// What the sender deposits: an opaque, end-to-end-encrypted blob.
 #[derive(Clone)]
 pub struct Deposit {
@@ -113,6 +118,9 @@ fn backend<E: std::fmt::Display>(e: E) -> MailboxError {
 pub struct Mailbox {
     conn: Mutex<Connection>,
     blob_dir: PathBuf,
+    /// Upload sessions a request is appending to right now — see
+    /// [`Mailbox::begin_append`].
+    uploads_busy: Mutex<HashSet<String>>,
 }
 
 impl Mailbox {
@@ -203,9 +211,11 @@ impl Mailbox {
         // Migrate entries that predate the size column (backs the aggregate
         // stored-bytes cap; pre-existing rows count as 0 until they expire).
         let _ = conn.execute("ALTER TABLE entries ADD COLUMN size INTEGER", []);
+        Self::init_uploads(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
             blob_dir,
+            uploads_busy: Mutex::new(HashSet::new()),
         })
     }
 
@@ -217,8 +227,12 @@ impl Mailbox {
 
     /// Whether the store is at its entry cap (disk-fill guard) — checked before a
     /// streaming deposit starts writing.
+    ///
+    /// An open upload counts as an entry: it becomes one when it is committed,
+    /// and a cap that only saw finished deposits could be overrun by uploads
+    /// that were all admitted while it still had room.
     pub fn at_capacity(&self) -> bool {
-        self.len() as i64 >= max_entries()
+        (self.len() + self.open_uploads()) as i64 >= max_entries()
     }
 
     /// Aggregate bytes of all stored blobs (per the metadata rows; rows that
@@ -256,8 +270,14 @@ impl Mailbox {
     /// (50k) stood for roughly 800 GB at the nominal chunk size, which is not a
     /// disk guard on any ordinary machine. Whichever path asks for room now asks
     /// against the whole of it.
+    ///
+    /// Open uploads count at their full declared length, not at what has arrived:
+    /// the space is promised the moment a session is admitted, and a budget that
+    /// only counted bytes on disk would admit more promises than the disk can keep.
     pub fn disk_bytes(&self) -> u64 {
-        self.stored_bytes().saturating_add(self.seeded_bytes())
+        self.stored_bytes()
+            .saturating_add(self.seeded_bytes())
+            .saturating_add(self.reserved_upload_bytes())
     }
 
     /// A fresh, random claim token to write a blob under.
@@ -560,12 +580,20 @@ impl Mailbox {
         let Some(claims) = self.claims() else {
             return 0;
         };
+        let Some(uploads) = self.open_upload_ids() else {
+            return 0;
+        };
         sweep_orphan_files(&self.blob_dir, grace_secs, |name| {
-            match name.strip_suffix(".bin") {
-                Some(claim) => claims.contains(claim),
-                // Not something this mailbox wrote — leave it alone.
-                None => true,
+            if let Some(claim) = name.strip_suffix(".bin") {
+                return claims.contains(claim);
             }
+            // A partial upload whose session is gone: the reaper deletes the
+            // file with the row, so one left behind lost its row some other way.
+            if let Some(id) = name.strip_suffix(".part") {
+                return uploads.contains(id);
+            }
+            // Not something this mailbox wrote — leave it alone.
+            true
         })
     }
 
