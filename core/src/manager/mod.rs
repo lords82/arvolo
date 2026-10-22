@@ -159,6 +159,11 @@ pub enum WaitingReason {
     /// having a moment", this one is "you are on a network that lets nothing
     /// through".
     NoRoute,
+    /// The sender asked for a direct transfer and nothing else (`live_only`),
+    /// and the recipient is not online: the send waits for them, and the relay
+    /// is never spent. Its own reason rather than silence, because a row that
+    /// says nothing for an hour looks stuck rather than patient.
+    ForThem,
 }
 
 impl WaitingReason {
@@ -173,6 +178,7 @@ impl WaitingReason {
             WaitingReason::RelayCapped(_) => "relayCapped",
             WaitingReason::OffloadFailed(_) => "offloadFailed",
             WaitingReason::NoRoute => "noRoute",
+            WaitingReason::ForThem => "forThem",
         }
     }
 
@@ -199,6 +205,9 @@ impl WaitingReason {
             WaitingReason::NoRoute => "this network reaches no relay — sending on the \
                  local network only, and waiting for a better connection"
                 .into(),
+            WaitingReason::ForThem => {
+                "waiting for them to be online — direct only, nothing on the relay".into()
+            }
         }
     }
 
@@ -214,6 +223,130 @@ impl WaitingReason {
         }
     }
 }
+
+/// Why a transfer failed: a stable code, and the sentence that goes with it.
+///
+/// The same arrangement as [`WaitingReason`], for the same reader. A failure
+/// used to be whatever `anyhow` chain ended the transfer, printed as it came:
+/// right for the CLI, which is English by design, and raw English in a window
+/// that had translated everything around it. The code is what a client looks
+/// up; the sentence is what it falls back to, and what an older client — which
+/// knows nothing of the code — still shows.
+///
+/// Not every failure has a code. The engine fails in more ways than a person
+/// can act on, and a code is only worth minting where the next thing to do is
+/// different: pick the file again, ask the sender again, free some space, find
+/// a connection. Everything else is [`Self::Other`], carrying the engine's own
+/// words, and a client shows those as they are.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FailReason {
+    /// The file to send is no longer where it was when it was picked.
+    SourceMissing(String),
+    /// They said no, on the wire and on purpose.
+    RecipientCancelled,
+    /// A deposit nobody collected before the relay let it go.
+    ExpiredOnRelay,
+    /// The relay no longer holds what this was taking: collected already,
+    /// expired, or withdrawn. The sentence is ours, not the relay's.
+    DepositGone(String),
+    /// No room left on this device to write what was arriving.
+    NoSpace,
+    /// The connection went away mid-transfer. Carries the transport's own
+    /// words, which are not ours to translate.
+    Network(String),
+    /// Everything else, as the engine put it.
+    Other(String),
+}
+
+impl FailReason {
+    /// The stable code a client translates. Empty for [`Self::Other`], which has
+    /// nothing to look up: a client shows the sentence.
+    pub fn code(&self) -> &'static str {
+        match self {
+            FailReason::SourceMissing(_) => "sourceMissing",
+            FailReason::RecipientCancelled => "recipientCancelled",
+            FailReason::ExpiredOnRelay => "expiredOnRelay",
+            FailReason::DepositGone(_) => "depositGone",
+            FailReason::NoSpace => "noSpace",
+            FailReason::Network(_) => "network",
+            FailReason::Other(_) => "",
+        }
+    }
+
+    /// The English sentence: what the CLI prints and a client falls back to.
+    pub fn text(&self) -> String {
+        match self {
+            FailReason::SourceMissing(p) => {
+                format!("the file is no longer where it was picked ({p})")
+            }
+            FailReason::RecipientCancelled => {
+                "the recipient cancelled the transfer on their side".to_string()
+            }
+            FailReason::ExpiredOnRelay => {
+                "expired on the relay — the recipient never collected it".to_string()
+            }
+            FailReason::DepositGone(why) | FailReason::Other(why) => why.clone(),
+            FailReason::NoSpace => "no space left on this device".to_string(),
+            FailReason::Network(why) => format!("the connection dropped: {why}"),
+        }
+    }
+
+    /// The words from elsewhere inside the sentence, for a client that
+    /// translates the frame around them.
+    pub fn detail(&self) -> Option<&str> {
+        match self {
+            FailReason::SourceMissing(p) => Some(p),
+            FailReason::Network(why) => Some(why),
+            _ => None,
+        }
+    }
+
+    /// Read a reason off the error that ended a transfer.
+    ///
+    /// Walks the chain for the typed causes the engine plants on purpose
+    /// (`NotAFile`, a `FailReason` used as context) and for the two the
+    /// standard library and the HTTP client already type for us: a file that
+    /// is not there, a disk that is full, a connection that went. Anything
+    /// else is [`Self::Other`] with the whole chain, which is what was shown
+    /// before any of this existed.
+    pub fn classify(e: &anyhow::Error) -> FailReason {
+        for cause in e.chain() {
+            if let Some(r) = cause.downcast_ref::<FailReason>() {
+                return r.clone();
+            }
+            if let Some(n) = cause.downcast_ref::<crate::source::NotAFile>() {
+                return FailReason::SourceMissing(n.0.display().to_string());
+            }
+            if let Some(io) = cause.downcast_ref::<std::io::Error>() {
+                match io.kind() {
+                    std::io::ErrorKind::NotFound => {
+                        return FailReason::SourceMissing(io.to_string());
+                    }
+                    std::io::ErrorKind::StorageFull => return FailReason::NoSpace,
+                    _ => {}
+                }
+                // `StorageFull` is unstable on some toolchains' classification;
+                // ENOSPC is the number that never changes.
+                if io.raw_os_error() == Some(28) {
+                    return FailReason::NoSpace;
+                }
+            }
+            if let Some(r) = cause.downcast_ref::<reqwest::Error>() {
+                if r.is_connect() || r.is_timeout() || r.is_request() || r.is_body() {
+                    return FailReason::Network(r.to_string());
+                }
+            }
+        }
+        FailReason::Other(format!("{e:#}"))
+    }
+}
+
+impl std::fmt::Display for FailReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.text())
+    }
+}
+impl std::error::Error for FailReason {}
 
 /// Why an accept did not happen, when the answer is a **refusal** rather than a
 /// failure.
@@ -416,6 +549,11 @@ pub struct Transfer {
     /// The relay's own words inside a [`WaitingReason::RelayRetry`], for a client
     /// translating the sentence around them. Empty when there are none.
     pub waiting_detail: String,
+    /// [`FailReason::code`] while the status is [`Failed`](TransferStatus::Failed);
+    /// empty otherwise, and empty for a failure that has no code.
+    pub fail_code: String,
+    /// The words from elsewhere inside that reason — see [`FailReason::detail`].
+    pub fail_detail: String,
     /// Whether [`TransferManager::pause`] would actually do something.
     ///
     /// Not every transfer can be held: a pickup from the mailbox is one fetch that
@@ -562,8 +700,13 @@ pub enum ManagerEvent {
     /// A send was paused (by the user, or automatically after a long failure to
     /// deliver). It stays put until `resume`d or `cancel`led. `reason` explains why.
     Paused { id: u64, reason: String },
-    /// A transfer failed.
-    Failed { id: u64, error: String },
+    /// A transfer failed. `code` is [`FailReason::code`] — empty where the
+    /// failure has none — and `error` the sentence.
+    Failed {
+        id: u64,
+        error: String,
+        code: String,
+    },
     /// A transfer was cancelled.
     Cancelled { id: u64 },
     /// A short pairing code is live and listening for receivers. Raised on the
@@ -629,6 +772,7 @@ impl TransferManager {
                 transfers: Mutex::new(HashMap::new()),
                 cancels: Mutex::new(HashMap::new()),
                 recv_aborts: Mutex::new(HashMap::new()),
+                deferred_acks: Mutex::new(HashMap::new()),
                 held: Mutex::new(HashMap::new()),
                 download_content: Mutex::new(HashMap::new()),
                 pending: Mutex::new(HashMap::new()),
@@ -743,12 +887,20 @@ impl TransferManager {
             return Vec::new();
         };
         let mut out: Vec<PathBuf> = Vec::new();
-        out.extend(load_sendtos(&dir).into_iter().map(|r| PathBuf::from(r.payload)));
+        out.extend(
+            load_sendtos(&dir)
+                .into_iter()
+                .map(|r| PathBuf::from(r.payload)),
+        );
         out.extend(load_sends(&dir).into_iter().map(|r| PathBuf::from(r.path)));
         // A preparation is a send that has been hashed and not yet handed over;
         // its payload is the same file, and a restart in that window is exactly
         // when the sweep would run.
-        out.extend(load_preps(&dir).into_iter().map(|r| PathBuf::from(r.payload)));
+        out.extend(
+            load_preps(&dir)
+                .into_iter()
+                .map(|r| PathBuf::from(r.payload)),
+        );
         out.sort();
         out.dedup();
         out
@@ -805,6 +957,8 @@ impl TransferManager {
                 saved_uri: row.saved_uri,
                 waiting_code: String::new(),
                 waiting_detail: String::new(),
+                fail_code: String::new(),
+                fail_detail: String::new(),
                 can_pause: false,
             },
         );
@@ -906,6 +1060,8 @@ impl TransferManager {
                     saved_uri: None,
                     waiting_code: String::new(),
                     waiting_detail: String::new(),
+                    fail_code: String::new(),
+                    fail_detail: String::new(),
                     // Answered per snapshot in `list`, where the record on disk and
                     // the held sends can be read; the stored row never carries a
                     // stale yes.
@@ -1024,6 +1180,12 @@ impl TransferManager {
     /// `relay` is the recipient's, when they listen somewhere other than we do.
     /// Everything it routes — the presence probe, the offer, the mailbox notice —
     /// has to reach *them*; the payload itself is P2P and never goes through it.
+    ///
+    /// `live_only` turns the mailbox off for this send: nothing is ever parked
+    /// on a relay, not after the grace period and not when the recipient is
+    /// away — the send waits for them (`Waiting`, [`WaitingReason::ForThem`])
+    /// and goes direct the moment they are online. For a file too big to park,
+    /// or one that must not sit on a relay even for a minute.
     #[allow(clippy::too_many_arguments)]
     pub async fn send_to(
         &self,
@@ -1033,6 +1195,7 @@ impl TransferManager {
         archive: bool,
         note: String,
         target: Option<crate::sync::DeviceId>,
+        live_only: bool,
         relay: Option<String>,
     ) -> Result<u64> {
         let source = payload.into();
@@ -1060,6 +1223,7 @@ impl TransferManager {
                 note: note.clone(),
                 target,
                 relay: theirs,
+                live_only,
                 pause_flag: pause_flag.clone(),
                 deposit_now: Default::default(),
                 attempt: Default::default(),
@@ -1077,6 +1241,7 @@ impl TransferManager {
             name,
             archive,
             note,
+            live_only,
             pause_flag,
         ));
         Ok(id)
@@ -1332,6 +1497,7 @@ impl TransferManager {
                 h.name,
                 h.archive,
                 h.note,
+                h.live_only,
                 h.pause_flag,
             ));
             return true;
@@ -1485,6 +1651,7 @@ impl TransferManager {
                 note: rec.note.clone(),
                 target: rec.target,
                 relay: rec.relay.clone(),
+                live_only: rec.live_only,
                 pause_flag: pause_flag.clone(),
                 deposit_now: Default::default(),
                 attempt: Default::default(),
@@ -1536,6 +1703,7 @@ impl TransferManager {
                 rec.name,
                 rec.archive,
                 rec.note,
+                rec.live_only,
                 pause_flag,
             ));
         }
@@ -2093,9 +2261,16 @@ impl TransferManager {
             }
         }
 
-        // Ack the offer now that we've taken ownership of it (best-effort).
-        if let Some(sub) = &self.inner.inbox {
-            let _ = sub.ack(offer_id).await;
+        // Ack the offer now that we've taken ownership of it (best-effort) — for
+        // a live offer, where the ack is what wakes the sender. A mailbox offer
+        // is acked by the fetch itself, once the file is written: acked here, an
+        // app killed mid-fetch came back to no offer and, on an older relay, no
+        // deposit either.
+        let mailbox = !crate::chunked::ChunkTicket::looks_like(&offer.offer.ticket);
+        if !mailbox {
+            if let Some(sub) = &self.inner.inbox {
+                let _ = sub.ack(offer_id).await;
+            }
         }
 
         // Already fetching this very send? Then this offer is the sender saying where
@@ -2131,6 +2306,7 @@ impl TransferManager {
             offer.offer.name.clone(),
             offer.offer.size,
             password,
+            mailbox.then(|| offer_id.to_string()),
         );
         // Carry the sender's claim about themselves onto the transfer: accepting
         // consumes the offer, and this is the last moment it exists to be copied.
@@ -2155,7 +2331,7 @@ impl TransferManager {
         name: String,
         size: u64,
     ) -> u64 {
-        self.start_download_with_password(ticket, out_path, peer, name, size, None)
+        self.start_download_with_password(ticket, out_path, peer, name, size, None, None)
     }
 
     /// [`start_download`](Self::start_download) for a password-protected offline
@@ -2169,8 +2345,15 @@ impl TransferManager {
         name: String,
         size: u64,
         password: Option<String>,
+        // The inbox offer to ack once the fetch has written the file — see
+        // `Inner::deferred_acks`. Recorded before the task exists, so it cannot
+        // finish first.
+        ack_offer: Option<String>,
     ) -> u64 {
         let (id, cancel) = self.register(Direction::Recv, peer.clone(), name.clone(), size);
+        if let Some(offer) = ack_offer {
+            self.inner.deferred_acks.lock().unwrap().insert(id, offer);
+        }
 
         // Persist a resume record for chunked downloads (offline one-shots aren't
         // worth resuming — they just re-fetch from the mailbox).
@@ -2228,6 +2411,20 @@ impl TransferManager {
                 let result =
                     flow::fetch_offline(&ticket, Some(out_path.clone()), &me, password.as_deref())
                         .await;
+                // The offer that started this is acked now — the file is here —
+                // or when there is nothing left on the relay to come back for.
+                // Any other failure leaves it in the inbox, for the next try.
+                let gone = result
+                    .as_ref()
+                    .is_err_and(|e| matches!(FailReason::classify(e), FailReason::DepositGone(_)));
+                if result.is_ok() || gone {
+                    let offer = inner.deferred_acks.lock().unwrap().remove(&id);
+                    if let (Some(offer), Some(sub)) = (offer, &inner.inbox) {
+                        let _ = sub.ack(&offer).await;
+                    }
+                } else {
+                    inner.deferred_acks.lock().unwrap().remove(&id);
+                }
                 match result {
                     Ok((path, n)) => {
                         // No per-chunk progress for a one-shot mailbox fetch — record
@@ -2764,6 +2961,7 @@ mod held_prep_tests {
                 note: String::new(),
                 target: None,
                 relay: None,
+                live_only: false,
                 pause_flag: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 deposit_now: Default::default(),
                 attempt: Default::default(),
@@ -3428,6 +3626,7 @@ mod waiting_reason_tests {
                 note: String::new(),
                 target: None,
                 relay: None,
+                live_only: false,
             },
         );
 
@@ -3463,6 +3662,7 @@ mod waiting_reason_tests {
                 note: String::new(),
                 target: None,
                 relay: None,
+                live_only: false,
             },
         );
         remove_sendto(&state, 8);

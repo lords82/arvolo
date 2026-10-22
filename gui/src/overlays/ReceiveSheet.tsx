@@ -38,7 +38,9 @@ export function shapeOf(raw: string): Shape {
   return "unknown";
 }
 
-const EXPLAIN = {
+/** What we tell the user we are about to try, per shape. Exported because the
+ *  phone's *Ricevi* screen says the same sentences about the same strings. */
+export const EXPLAIN = {
   empty: "receive.explainEmpty",
   code: "receive.explainCode",
   chunk: "receive.explainChunk",

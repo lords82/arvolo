@@ -265,6 +265,28 @@ pub(super) struct SendToRecord {
     /// a cross-relay recipient becomes unreachable precisely on the retry path
     /// built to keep reaching them. `None` means "ours", as everywhere else.
     pub(super) relay: Option<String>,
+    /// Never the mailbox (see `TransferManager::send_to`). Carried across a
+    /// restart for the same reason `target` is: a send that had to be restored
+    /// is exactly the one that has been waiting, and a restored copy that fell
+    /// back to the relay would do precisely what the sender said not to.
+    #[serde(default)]
+    pub(super) live_only: bool,
+}
+
+/// [`SendToRecord`] as written before `live_only`, under the same prefix. Read
+/// when the current shape does not decode (postcard needs the trailing byte).
+#[derive(serde::Deserialize)]
+struct SendToRecordV3 {
+    id: u64,
+    recipient: Vec<u8>,
+    payload: String,
+    name: String,
+    archive: bool,
+    paused: bool,
+    reason: String,
+    note: String,
+    target: Option<crate::sync::DeviceId>,
+    relay: Option<String>,
 }
 
 /// [`SendToRecord`] as written before it carried a relay, and before that a
@@ -324,7 +346,31 @@ pub(super) fn remove_sendto(dir: &Path, id: u64) {
 /// old files are read in the shapes they could have been written in, rewritten
 /// under the new prefix, and unlinked — so this costs one pass, once.
 pub(super) fn load_sendtos(dir: &Path) -> Vec<SendToRecord> {
-    let mut out: Vec<SendToRecord> = load_records(dir, "sendto2-");
+    // The current prefix, in its current shape or the one just before it: a
+    // record written without `live_only` is one byte short for the new shape
+    // and must not be dropped for it — it is a send still owed to somebody.
+    let mut out: Vec<SendToRecord> = record_paths(dir, "sendto2-")
+        .into_iter()
+        .filter_map(|p| std::fs::read(&p).ok())
+        .filter_map(|b| {
+            postcard::from_bytes::<SendToRecord>(&b).ok().or_else(|| {
+                let r: SendToRecordV3 = postcard::from_bytes(&b).ok()?;
+                Some(SendToRecord {
+                    id: r.id,
+                    recipient: r.recipient,
+                    payload: r.payload,
+                    name: r.name,
+                    archive: r.archive,
+                    paused: r.paused,
+                    reason: r.reason,
+                    note: r.note,
+                    target: r.target,
+                    relay: r.relay,
+                    live_only: false,
+                })
+            })
+        })
+        .collect();
 
     for path in record_paths(dir, legacy_sendto_glob()) {
         let Ok(bytes) = std::fs::read(&path) else {
@@ -357,6 +403,7 @@ fn decode_legacy_sendto(bytes: &[u8]) -> Option<SendToRecord> {
             note: r.note,
             target: r.target,
             relay: None,
+            live_only: false,
         });
     }
     let r: SendToRecordV1 = postcard::from_bytes(bytes).ok()?;
@@ -371,6 +418,7 @@ fn decode_legacy_sendto(bytes: &[u8]) -> Option<SendToRecord> {
         note: r.note,
         target: None,
         relay: None,
+        live_only: false,
     })
 }
 

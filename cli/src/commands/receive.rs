@@ -162,7 +162,7 @@ pub(crate) async fn listen(
                         }
                         record_history(&manager, id, "completed");
                     }
-                    ManagerEvent::Failed { id, error } => {
+                    ManagerEvent::Failed { id, error, .. } => {
                         eprintln!("✗ transfer failed: {error}");
                         record_history(&manager, id, &format!("failed: {error}"));
                     }

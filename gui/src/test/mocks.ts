@@ -19,10 +19,12 @@ import type {
   PairKind,
   StatusDto,
   SyncDto,
-  TransferDto, PickedItem,
+  TransferDto,
+  PickedItem,
   DeviceDto,
   UpdateInfo,
   UpdateProgress,
+  RecentPhoto,
 } from "../types";
 
 // ---- fixture values, at the size the real ones are ------------------------
@@ -91,6 +93,10 @@ export interface Recorder {
   restartDaemon: number;
   /** Paths handed to the system opener ("open file", "open the download folder"). */
   openPath: string[];
+  /** Copie messe nella Galleria del telefono, e tolte. Il percorso e poi l'id:
+   *  togliere è per id, perché è la copia che si toglie, non il file. */
+  photosAdded: string[];
+  photosRemoved: string[];
   /** How many times the app asked whether a newer release exists. The cadence
    *  rules are all about this number staying low. */
   checkUpdate: number;
@@ -116,6 +122,12 @@ export interface Harness {
   /** What `check_update` will answer. `null` — the default — is "nothing new". */
   update: UpdateInfo | null;
   /** What `reload()` will find on the daemon. */
+  /** What `photos_recent` answers; empty means "no library to read". */
+  photos: RecentPhoto[];
+  /** What another app shared and `take_pending_shared` hands over next. */
+  shared: PickedItem[];
+  /** Fires the nudge the app pulls on. */
+  sharedArrived: () => void;
   snapshot: {
     status: StatusDto | null;
     transfers: TransferDto[];
@@ -132,6 +144,9 @@ export interface Harness {
   };
   /** Make the next call to these commands reject. */
   fail: Set<string>;
+  /** Make a command reject *typed*, as the IPC layer does for a refusal the
+   *  daemon put a word to: the error carries `code` and `limitBytes`. */
+  refuse: Record<string, { code: string; limitBytes: number | null }>;
 }
 
 // Built fresh each time rather than written out twice: the initial value and the
@@ -175,6 +190,8 @@ function freshRecorder(): Recorder {
     cancelPairing: [],
     restartDaemon: 0,
     openPath: [],
+    photosAdded: [],
+    photosRemoved: [],
     checkUpdate: 0,
     installUpdate: 0,
   };
@@ -254,12 +271,17 @@ export const harness: Harness = {
   update: null,
   snapshot: freshSnapshot(),
   fail: new Set(),
+  refuse: {},
+  photos: [],
+  shared: [],
+  sharedArrived: () => {},
 };
 
 export function resetHarness() {
   harness.recorder = freshRecorder();
   harness.snapshot = freshSnapshot();
   harness.fail = new Set();
+  harness.refuse = {};
   harness.update = null;
   // The update cadence remembers itself in localStorage, which outlives a test.
   // Leaving it would let the first test that runs a check buy the next one a
@@ -276,6 +298,12 @@ export function resetHarness() {
 function guard<T>(name: string, value: T, onSuccess?: Promise<T>): Promise<T> {
   if (harness.fail.has(name)) {
     return Promise.reject(new Error(`daemon refused: ${name}`));
+  }
+  const refusal = harness.refuse[name];
+  if (refusal) {
+    return Promise.reject(
+      Object.assign(new Error(`daemon refused: ${name}`), refusal)
+    );
   }
   return onSuccess ?? Promise.resolve(value);
 }
@@ -305,6 +333,24 @@ export function makeIpcMock() {
         harness.recorder.openPath.push(path);
         return guard("openPath", undefined);
       },
+      photosAdd: (path: string) => {
+        harness.recorder.photosAdded.push(path);
+        return guard("photosAdd", `asset-${harness.recorder.photosAdded.length}`);
+      },
+      photosRemove: (id: string) => {
+        harness.recorder.photosRemoved.push(id);
+        return guard("photosRemove", undefined);
+      },
+      photosAvailable: () => guard("photosAvailable", true),
+      takePendingShared: () => guard("takePendingShared", harness.shared.splice(0)),
+      // The phone's library and clipboard, as the compose screen asks for them.
+      // Empty by default: a test that wants tiles seeds `harness.photos`.
+      photosRecent: () => guard("photosRecent", harness.photos.length ? harness.photos : null),
+      photosExport: (ids: string[]) =>
+        guard(
+          "photosExport",
+          ids.map((id) => ({ id: `exp-${id}`, name: `${id}.jpg`, size: 1000, isDir: false }))
+        ),
       sendTo: (
         to: string,
         paths: string[],
@@ -532,6 +578,12 @@ export function makeIpcMock() {
     },
     onArvoloTicket: (cb: (ticket: string) => void) => {
       harness.arvoloTicket = cb;
+      return Promise.resolve(() => {});
+    },
+    // The nudge that another app shared something; the test seeds
+    // `harness.shared` and calls this to deliver it.
+    onSharedArrived: (cb: () => void) => {
+      harness.sharedArrived = cb;
       return Promise.resolve(() => {});
     },
     onUpdateProgress: (cb: (p: UpdateProgress) => void) => {

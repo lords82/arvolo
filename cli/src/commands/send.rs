@@ -255,6 +255,7 @@ pub(crate) async fn push(
             archive,
             note.to_string(),
             None,
+            false,
             theirs,
         )
         .await
@@ -324,7 +325,7 @@ pub(crate) async fn push(
                         record_history(&manager, id, &format!("paused: {reason}"));
                         break;
                     }
-                    Ok(ManagerEvent::Failed { id: eid, error }) if eid == id => {
+                    Ok(ManagerEvent::Failed { id: eid, error, .. }) if eid == id => {
                         if let Some(p) = progress.take() { p.finish(); }
                         eprintln!("✗ failed: {error}");
                         record_history(&manager, id, &format!("failed: {error}"));

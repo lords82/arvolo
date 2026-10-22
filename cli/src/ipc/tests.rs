@@ -526,6 +526,7 @@ async fn the_reserved_word_names_our_own_devices_over_the_socket() {
             None,
             None,
             None,
+            false,
             None,
         )
         .await
@@ -548,6 +549,7 @@ async fn the_reserved_word_names_our_own_devices_over_the_socket() {
             None,
             None,
             None,
+            false,
             None,
         )
         .await

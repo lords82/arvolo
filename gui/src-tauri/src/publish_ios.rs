@@ -46,8 +46,7 @@ impl SavePublisher for DocumentsPublisher {
         // is an assumption about a layout Apple owns, not a guarantee: if it
         // ever stops holding, a slow publish beats a failed one.
         if std::fs::rename(staged, &dest).is_err() {
-            copy_across(staged, &dest)
-                .with_context(|| format!("publish {} to Documents", name))?;
+            copy_across(staged, &dest).with_context(|| format!("publish {} to Documents", name))?;
             let _ = remove(staged);
         }
         Ok(SavedLocation::Path(dest))

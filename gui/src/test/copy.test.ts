@@ -78,6 +78,13 @@ describe("the app speaks in no voice of its own", () => {
     "pair.understood", // "I understand: this device loses its identity."
     "pair.captionDevice", // quotes the button above, which is the user's words
     "people.menuUntrust", // "ask me every time" — the user setting their own terms
+    // "Show my code": the code is the user's, and the button is what they say by
+    // pressing it — "mostra il mio codice" in the design of record.
+    "exchange.showCode",
+    // "One of my devices": an answer to "who are you sending it to?", in the
+    // words of the person answering.
+    "send.toMine",
+    "send.toHere",
   ]);
 
   it("uses the first person only where the user is the one speaking", () => {

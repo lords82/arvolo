@@ -82,7 +82,9 @@ pub fn encrypt_link(
 ) -> Result<(Vec<u8>, [u8; CHUNK_KEY_LEN], String, u64)> {
     let source = source.into();
     if let crate::source::SendSource::Path(p) = &source {
-        anyhow::ensure!(p.is_file(), "{} is not a file", p.display());
+        if !p.is_file() {
+            return Err(crate::source::NotAFile(p.clone()).into());
+        }
     }
     let data = source.read_all()?;
     let size = data.len() as u64;
@@ -195,17 +197,59 @@ pub fn decrypt_link(blob: &[u8], key: &[u8; CHUNK_KEY_LEN]) -> Result<(String, V
 /// treated as **allowing** links, so we never block on a relay that predates the
 /// feature flag; a relay that explicitly reports `"links":false` disables them.
 pub async fn relay_allows_links(relay: &str) -> Result<bool> {
-    let url = format!("{}/v1/features", relay.trim_end_matches('/'));
-    let resp = match crate::http::client().get(&url).send().await {
-        Ok(r) if r.status().is_success() => r,
-        _ => return Ok(true),
+    let Some(body) = features_doc(relay).await else {
+        return Ok(true);
     };
-    let body = resp.text().await.unwrap_or_default();
     // Minimal parse (no JSON dep): only an explicit false disables.
     Ok(!body
         .split_whitespace()
         .collect::<String>()
         .contains("\"links\":false"))
+}
+
+/// The largest single file this relay will hold, in bytes — what its
+/// `/v1/features` advertises as `max_blob_bytes`. `None` for no limit, and for a
+/// relay that does not say: older, unreachable, or answering nonsense. Either
+/// way the deposit goes ahead, and a relay that does have a cap it kept quiet
+/// about still refuses with a 413, which carries the same figure in a header.
+///
+/// Asked before a deposit so a file the relay will not take is refused here, in
+/// one small round trip, instead of after all of it has been encrypted and
+/// uploaded — which is how a person first learnt of the cap, and learnt only
+/// "413", not how large is too large.
+pub async fn relay_max_blob_bytes(relay: &str) -> Option<u64> {
+    parse_max_blob_bytes(&features_doc(relay).await?)
+}
+
+/// The rule [`relay_max_blob_bytes`] applies to the document, split out from the
+/// HTTP so it can be tested against a literal. Read by hand like the other
+/// probes (see `features_handler` in the relay): the field is a bare integer, so
+/// a flattened substring match and a parse is the whole of it.
+fn parse_max_blob_bytes(body: &str) -> Option<u64> {
+    let flat: String = body.split_whitespace().collect();
+    let digits = flat.split("\"max_blob_bytes\":").nth(1)?;
+    // Digits only, from the first character: a sign, a quote or a word in that
+    // position is a relay answering nonsense, read as having said nothing.
+    let n: u64 = digits
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>()
+        .parse()
+        .ok()?;
+    // Zero is the relay's word for "no limit", not a limit of nothing.
+    (n > 0).then_some(n)
+}
+
+/// `GET /v1/features`, as text, when the relay answered it. Shared by the probes
+/// above so a deposit that asks two questions makes one round trip per question
+/// and no more — each probe reads what it needs by hand.
+async fn features_doc(relay: &str) -> Option<String> {
+    let url = format!("{}/v1/features", relay.trim_end_matches('/'));
+    let resp = crate::http::client().get(&url).send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    resp.text().await.ok()
 }
 
 /// Encrypt `path` into a link container and deposit it on the relay, returning
@@ -228,8 +272,21 @@ pub async fn deposit_link(
         "this relay has public download links disabled by its administrator — \
          send it sealed to a recipient with --to, or use a different relay"
     );
+    // And if the file is larger than the relay lets one be — the same way, and
+    // for the same reason: the refusal is certain, so it should cost one small
+    // request and say what the limit is, not a full upload and a status code.
+    let size = source.len()?;
+    if let Some(limit) = relay_max_blob_bytes(relay).await {
+        if size > limit {
+            return Err(crate::flow::TooLargeForRelay {
+                size,
+                limit: Some(limit),
+            }
+            .into());
+        }
+    }
 
-    let (blob, key, name, size) = encrypt_link(source)?;
+    let (blob, key, name, _) = encrypt_link(source)?;
 
     // Sender-held revoke secret; the relay stores only its BLAKE3 hash.
     let revoke_token = random_token();
@@ -259,6 +316,17 @@ pub async fn deposit_link(
              or use a relay of your own"
         );
     }
+    // The other refusal a person meets, typed so the daemon can hand a window the
+    // code and the number rather than a sentence (see `TooLargeForRelay`). The
+    // pre-flight above catches it on a relay that advertises its cap; this is
+    // the older relay, which only says so once it has been sent the whole file.
+    if resp.status() == reqwest::StatusCode::PAYLOAD_TOO_LARGE {
+        return Err(crate::flow::TooLargeForRelay {
+            size,
+            limit: crate::flow::blob_limit(&resp),
+        }
+        .into());
+    }
     let resp = resp.error_for_status().context("relay rejected deposit")?;
     let ttl_secs = crate::flow::granted_ttl(&resp, ttl);
     let claim = resp.text().await.context("read claim")?;
@@ -278,6 +346,27 @@ pub async fn deposit_link(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The cap is read off the document the relay actually writes — and off the
+    /// documents older relays wrote, which have no such field and must read as
+    /// "no limit known", not as a parse failure that blocks the deposit.
+    #[test]
+    fn the_blob_cap_is_read_by_hand_from_the_features_document() {
+        let current = r#"{"links":true,"rz2":true,"have":true,"hold":true,"version":"0.14.2","cors":true,"max_blob_bytes":5368709120}"#;
+        assert_eq!(parse_max_blob_bytes(current), Some(5_368_709_120));
+        // Whitespace is the client's to ignore, as for every other field.
+        let spaced = r#"{ "links": true, "max_blob_bytes": 64 }"#;
+        assert_eq!(parse_max_blob_bytes(spaced), Some(64));
+        // Zero is "no limit", not "nothing fits".
+        assert_eq!(parse_max_blob_bytes(r#"{"max_blob_bytes":0}"#), None);
+        // Older relays: no field at all.
+        let older = r#"{"links":true,"rz2":true,"version":"0.14.1","cors":true}"#;
+        assert_eq!(parse_max_blob_bytes(older), None);
+        // A relay answering nonsense is read as having said nothing.
+        assert_eq!(parse_max_blob_bytes(r#"{"max_blob_bytes":"lots"}"#), None);
+        assert_eq!(parse_max_blob_bytes(r#"{"max_blob_bytes":-5}"#), None);
+        assert_eq!(parse_max_blob_bytes("not json"), None);
+    }
 
     fn write_tmp(bytes: &[u8]) -> (tempfile::TempDir, std::path::PathBuf) {
         let dir = tempfile::tempdir().unwrap();

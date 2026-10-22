@@ -19,6 +19,34 @@
 	     up under "On My iPhone › Arvolo", and other apps open them where they
 	     are rather than taking a copy. Without the second one a received file
 	     is still visible but every app that opens it works on a duplicate. -->
+	<!-- Mettere una copia di una foto o di un video ricevuto nel rullino, quando
+	     è quello che l'utente ha scelto (Impostazioni › Ricevuti). È il permesso
+	     *add-only*: il più stretto che Apple offra, perché lascia aggiungere
+	     senza lasciar leggere la libreria. Arvolo non ha motivo di guardarci
+	     dentro, e questa chiave dice che non lo chiede nemmeno. -->
+	<!-- Le ultime foto nella griglia di «Cosa» (sezione 11 del design): per
+	     mostrarle serve leggere la libreria. Chiesto la prima volta che la
+	     griglia compare; un no lascia la schermata con «File» e «Appunti». -->
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Arvolo shows your most recent photos so you can send one in a tap. It only reads what you choose to send.</string>
+
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>Arvolo puts a copy of the photos and videos you receive into your library, when you ask it to. It never reads what is already there.</string>
+
+	<!-- `arvolo://shared`: what the share extension opens once it has put the
+	     shared files in the App Group. See mobile/ios/ShareExtension. -->
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>it.termox.arvolo</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>arvolo</string>
+			</array>
+		</dict>
+	</array>
+
 	<key>UIFileSharingEnabled</key>
 	<true/>
 	<key>LSSupportsOpeningDocumentsInPlace</key>

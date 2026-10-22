@@ -14,6 +14,7 @@ use std::path::PathBuf;
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
 
+use arvolo_core::flow::TooLargeForRelay;
 use arvolo_core::manager::{AcceptRefusal, ManagerEvent, TransferManager};
 use arvolo_ipc::protocol::{
     ConfigDto, ConfigPatch, ContactDto, EventDto, HistoryDto, OfferDto, PresenceDto, RelayInfoDto,
@@ -386,6 +387,7 @@ pub async fn dispatch(d: &Daemon, cmd: Request) -> Response {
                     Some(r) => Response::Refused {
                         code: r.code().to_string(),
                         message: r.text().to_string(),
+                        limit_bytes: None,
                     },
                     None => Response::Error(format!("{e:#}")),
                 },
@@ -396,6 +398,7 @@ pub async fn dispatch(d: &Daemon, cmd: Request) -> Response {
             paths,
             note,
             deposit,
+            live_only,
             ttl,
             max,
             password,
@@ -410,6 +413,7 @@ pub async fn dispatch(d: &Daemon, cmd: Request) -> Response {
                 note,
                 MailboxOpts {
                     deposit,
+                    live_only,
                     ttl,
                     max,
                     password,
@@ -441,7 +445,8 @@ pub async fn dispatch(d: &Daemon, cmd: Request) -> Response {
             max,
             fd_socket,
             fd_token,
-        } => create_link(d, path, ttl, max, (fd_socket, fd_token)).await,
+            typed_refusal,
+        } => create_link(d, path, ttl, max, (fd_socket, fd_token), typed_refusal).await,
         Request::Recv {
             ticket,
             out,
@@ -501,6 +506,7 @@ pub async fn dispatch(d: &Daemon, cmd: Request) -> Response {
                     transferred: r.transferred,
                     status: r.status,
                     created: r.created,
+                    fail_code: r.fail_code,
                 })
                 .collect(),
         ),
@@ -557,6 +563,8 @@ pub async fn dispatch(d: &Daemon, cmd: Request) -> Response {
 /// What a [`Request::Push`] asked for beyond "send this to them".
 struct MailboxOpts {
     deposit: bool,
+    /// Never the mailbox: see [`Request::Push::live_only`].
+    live_only: bool,
     ttl: Option<u64>,
     max: Option<u32>,
     password: Option<String>,
@@ -635,7 +643,16 @@ async fn push(
             .map(|(id, ticket)| (id, Some(ticket)))
     } else {
         d.manager
-            .send_to(&recipient, source, name, archive, note, target, theirs)
+            .send_to(
+                &recipient,
+                source,
+                name,
+                archive,
+                note,
+                target,
+                opts.live_only,
+                theirs,
+            )
             .await
             .map(|id| (id, None))
     };
@@ -1212,7 +1229,7 @@ async fn recv_ticket(
 
     let id = d
         .manager
-        .start_download_with_password(ticket, out_path, peer, name, size, password);
+        .start_download_with_password(ticket, out_path, peer, name, size, password, None);
     Response::TransferId(id)
 }
 
@@ -1226,6 +1243,7 @@ async fn create_link(
     ttl: Option<u64>,
     max: Option<u32>,
     fds: (Option<String>, Option<String>),
+    typed_refusal: bool,
 ) -> Response {
     let relay = match d.relay.as_deref() {
         Some(r) => r.to_string(),
@@ -1272,7 +1290,17 @@ async fn create_link(
             );
             Response::Link(out.link)
         }
-        Err(e) => Response::Error(format!("{e:#}")),
+        // A file the relay will not hold is a refusal, not a failure, and a
+        // client that said it can tell them apart gets the code and the cap —
+        // the sentence travels too, for one that cannot.
+        Err(e) => match TooLargeForRelay::of(&e).filter(|_| typed_refusal) {
+            Some(r) => Response::Refused {
+                code: TooLargeForRelay::CODE.to_string(),
+                message: r.to_string(),
+                limit_bytes: r.limit,
+            },
+            None => Response::Error(format!("{e:#}")),
+        },
     }
 }
 

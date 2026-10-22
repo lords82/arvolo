@@ -20,6 +20,17 @@
 
 ### Fixed
 
+- **A file the relay would not hold was refused as "413 Payload Too Large", after
+  all of it had been uploaded.** The status said neither how large is too large
+  nor whether a smaller file would do, and the desktop app, finding the word
+  "relay" in it, told the reader to go and set up the relay they already had.
+  The relay now advertises its per-file cap (`max_blob_bytes` in `/v1/features`)
+  and names it on the refusal (`x-arvolo-max-blob-bytes`); a sender compares the
+  file against it before encrypting a byte, and says, in the reader's language
+  and units, that the server does not accept files this large and what its
+  limit is. A relay that was simply full answered the same 413; it answers 507
+  now, which the client already reads as "try again later".
+
 - **Pause and resume answered "Ok" for things they did not do.** Holding a
   transfer only means something when there is something to come back to: a
   download keeps its partial and continues from it, a held send parks without

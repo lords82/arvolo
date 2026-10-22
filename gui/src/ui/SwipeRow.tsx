@@ -53,12 +53,21 @@ const RESIST = 0.32;
 export function SwipeRow({
   action,
   actions,
+  onLongPress,
   children,
 }: {
   /** The single-action shorthand, kept for the rows that have exactly one. */
   action?: SwipeAction;
   /** Two, at most, in the order they are revealed from the edge inwards. */
   actions?: SwipeAction[];
+  /** Held down rather than swiped: everything the row can do, with the
+   *  consequences written out — see `ActionSheet`. The swipe keeps the two
+   *  things worth a gesture; this is where the rest of them live.
+   *
+   *  Handled here because this component already owns the finger: a timer
+   *  started anywhere else would have to guess when the gesture turned into a
+   *  swipe, and would fire while the row was being dragged. */
+  onLongPress?: () => void;
   children: ReactNode;
 }) {
   const [dx, setDx] = useState(0);
@@ -71,9 +80,19 @@ export function SwipeRow({
   /** How far the finger has gone, before any resistance is applied. What the
    *  commit is measured against. */
   const pulled = useRef(0);
+  /** The hold, while it is still only a hold. */
+  const held = useRef<number | null>(null);
+  const dropHold = () => {
+    if (held.current !== null) {
+      window.clearTimeout(held.current);
+      held.current = null;
+    }
+  };
 
   const list = (actions ?? (action ? [action] : [])).slice(0, 2);
-  if (list.length === 0) return <>{children}</>;
+  // Nothing to swipe does not mean nothing to hold: a finished row's only verb
+  // may well be behind the long press.
+  if (list.length === 0 && !onLongPress) return <>{children}</>;
 
   const open = OPEN_PX * list.length;
   // Committing on a long pull only makes sense when there is one thing it could
@@ -87,6 +106,17 @@ export function SwipeRow({
     axis.current = "?";
     pulled.current = dx;
     setSnap(false);
+    // 500ms is the platform's own: shorter and a slow tap opens a sheet nobody
+    // asked for, longer and the gesture stops being discoverable.
+    if (onLongPress && dx === 0) {
+      dropHold();
+      held.current = window.setTimeout(() => {
+        held.current = null;
+        axis.current = "y"; // the rest of this gesture is not a swipe any more
+        haptic.lifted();
+        onLongPress();
+      }, 500);
+    }
   };
   const onMove = (e: React.TouchEvent) => {
     if (axis.current === "y") return;
@@ -94,6 +124,9 @@ export function SwipeRow({
     if (!t) return;
     const moved = t.clientX - start.current.x;
     const lifted = t.clientY - start.current.y;
+    // A hold is a finger that stays put. Any real movement — in either
+    // direction — is a swipe or a scroll, and both of them are not this.
+    if (Math.abs(moved - dx) > SLOP_PX || Math.abs(lifted) > SLOP_PX) dropHold();
 
     if (axis.current === "?") {
       // Not yet either. A scroll starts as a vertical move and must keep the
@@ -117,6 +150,7 @@ export function SwipeRow({
     setDx(Math.max(-(open + 90), next));
   };
   const onEnd = () => {
+    dropHold();
     setSnap(true);
     if (pulled.current <= -commitAt) {
       setDx(0);
@@ -153,6 +187,8 @@ export function SwipeRow({
         className="swipe-face"
         style={{
           transform: `translateX(${dx}px)`,
+          // Promoted only while it is moving — see `.swipe-face` in theme.css.
+          willChange: dx !== 0 || snap ? "transform" : undefined,
           // The platform's curve and its length: a snap that takes 180ms reads as a
           // web page reacting, not as a row settling.
           transition: snap ? "transform 320ms cubic-bezier(0.32,0.72,0,1)" : "none",

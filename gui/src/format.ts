@@ -30,6 +30,17 @@ export function extOf(name: string): string {
  *
  *  Same rule as the CLI's `slug_contact_name`, so the two surfaces propose the
  *  same name for the same sender. */
+/** Foto o video — cioè qualcosa che una Galleria di telefono indicizza.
+ *
+ *  L'elenco è corto apposta, e lo stesso che tiene il lato nativo
+ *  (`photos.rs`), che è l'autorità: lì una copia di un `.mkv` finirebbe in un
+ *  archivio che non lo mostra, e una copia invisibile è peggio di nessuna copia.
+ *  Qui serve solo per sapere *quante* ce n'erano, cioè cosa dire. */
+export function isMedia(name: string): boolean {
+  const ext = name.split(".").pop()?.toLowerCase() ?? "";
+  return /^(jpg|jpeg|png|gif|webp|heic|heif|mp4|mov|m4v|webm)$/.test(ext);
+}
+
 export function slugName(claimed: string | undefined): string {
   return (claimed ?? "")
     .trim()
@@ -214,12 +225,13 @@ export function fmtEta(tx: UITransfer): string {
  *  lists are kept in step by `waiting.test.ts`. */
 const WAITING_PLAIN: Record<
   string,
-  "waiting.offered" | "waiting.tooLarge" | "waiting.parked" | "waiting.noRoute"
+  "waiting.offered" | "waiting.tooLarge" | "waiting.parked" | "waiting.noRoute" | "waiting.forThem"
 > = {
   offered: "waiting.offered",
   tooLarge: "waiting.tooLarge",
   parked: "waiting.parked",
   noRoute: "waiting.noRoute",
+  forThem: "waiting.forThem",
 };
 
 /** The reasons that quote something from elsewhere inside them — the relay's own
@@ -249,6 +261,35 @@ export function waitingText(tx: UITransfer): string {
   if (quoted) return t(quoted, tx.waitingDetail || t("waiting.relayUnnamed"));
   const plain = WAITING_PLAIN[code];
   return plain ? t(plain) : tx.reason || t("meta.stalled");
+}
+
+/** Every failure the engine gives a code to, and the key that says it. The
+ *  codes come from `FailReason::code` in core/src/manager/mod.rs — kept in step
+ *  by `failed.test.ts`, the way `waiting.test.ts` does for the waiting ones. */
+const FAILED_PLAIN: Record<
+  string,
+  "failed.recipientCancelled" | "failed.expiredOnRelay" | "failed.depositGone" | "failed.noSpace"
+> = {
+  recipientCancelled: "failed.recipientCancelled",
+  expiredOnRelay: "failed.expiredOnRelay",
+  depositGone: "failed.depositGone",
+  noSpace: "failed.noSpace",
+};
+/** The ones that quote something — a path, the transport's own words. */
+const FAILED_QUOTED: Record<string, "failed.sourceMissing" | "failed.network"> = {
+  sourceMissing: "failed.sourceMissing",
+  network: "failed.network",
+};
+
+/** What a failed row says, in the reader's language where we can — and the
+ *  daemon's own sentence where we cannot: a failure with no code, or a daemon
+ *  older than the field. */
+export function failText(code?: string, detail?: string, raw?: string): string {
+  if (!code) return raw || t("meta.failed");
+  const quoted = FAILED_QUOTED[code];
+  if (quoted) return t(quoted, detail || "");
+  const plain = FAILED_PLAIN[code];
+  return plain ? t(plain) : raw || t("meta.failed");
 }
 
 /** The right-hand meta line under the status. */
@@ -302,7 +343,7 @@ export function metaLine(tx: UITransfer): string {
       return offer ? t(offer) : t("meta.deposited");
     }
     case "failed":
-      return tx.reason || t("meta.failed");
+      return failText(tx.failCode, tx.failDetail, tx.reason);
     default:
       return "";
   }

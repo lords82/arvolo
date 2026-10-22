@@ -39,6 +39,12 @@ mod publish_android;
 // inside it — what a second file of the same name is called — is a decision, and
 // decisions are tested on a laptop.
 mod publish_ios;
+// Su ogni piattaforma: i tipi che i comandi restituiscono (`Recent`, `Peek`)
+// servono anche alla finestra, che risponde «niente» — le funzioni che leggono
+// davvero sono cfg'd per sistema dentro i moduli.
+mod photos;
+#[cfg(mobile)]
+mod share_inbox;
 mod update;
 
 use arvolo_ipc::protocol::EventDto;
@@ -60,7 +66,7 @@ const EV_FILES_PICKED: &str = "files://picked";
 /// The ticket read out of a `.arvolo` file handed to the app — dropped on the
 /// window, double-clicked (macOS `Opened`), or passed on argv. The webview gets
 /// the ticket string, never the path.
-const EV_ARVOLO_TICKET: &str = "files://arvolo";
+pub(crate) const EV_ARVOLO_TICKET: &str = "files://arvolo";
 
 /// The UI language, as the webview resolved it ("en"/"it"/"fr"/"de"). The six
 /// native strings (tray menu, arrival notifications) read it; the webview sets
@@ -149,6 +155,9 @@ fn window_hidden(app: AppHandle, hidden: bool) {
             ios_background::entered_background(&app);
         } else {
             ios_background::left_background(&app);
+            // Coming back may mean coming back from the share sheet of another
+            // app, with its files waiting in the group container.
+            share_inbox::collect_app_group(&app);
         }
     }
     #[cfg(not(target_os = "ios"))]
@@ -224,24 +233,24 @@ fn init_logging() {
     }
     #[cfg(desktop)]
     {
-    arvolo_ipc::rotate_log_at(&arvolo_ipc::gui_log_path(), GUI_LOG_MAX_BYTES);
-    let Ok(file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(arvolo_ipc::gui_log_path())
-    else {
-        // Nowhere to write is not a reason to refuse to start; it only puts us
-        // back where we were before this existed.
-        return;
-    };
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_env("ARVOLO_LOG")
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .with_writer(std::sync::Mutex::new(file))
-        .with_ansi(false)
-        .try_init();
+        arvolo_ipc::rotate_log_at(&arvolo_ipc::gui_log_path(), GUI_LOG_MAX_BYTES);
+        let Ok(file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(arvolo_ipc::gui_log_path())
+        else {
+            // Nowhere to write is not a reason to refuse to start; it only puts us
+            // back where we were before this existed.
+            return;
+        };
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::try_from_env("ARVOLO_LOG")
+                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+            )
+            .with_writer(std::sync::Mutex::new(file))
+            .with_ansi(false)
+            .try_init();
     }
 }
 
@@ -292,6 +301,11 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             bridge::status,
+            bridge::photos_add,
+            bridge::photos_remove,
+            bridge::photos_available,
+            bridge::photos_recent,
+            bridge::photos_export,
             bridge::list_transfers,
             bridge::list_pending,
             bridge::list_contacts,
@@ -341,7 +355,10 @@ pub fn run() {
             bridge::import_contacts,
             bridge::export_contacts,
             bridge::save_ticket,
+            bridge::share_link,
             bridge::take_pending_ticket,
+            #[cfg(mobile)]
+            share_inbox::take_pending_shared,
             set_ui_language,
             window_hidden,
             bridge::pick_files,
@@ -398,17 +415,15 @@ pub fn run() {
             {
                 use tauri_plugin_notification::NotificationExt;
                 let handle = app.handle().clone();
-                std::thread::spawn(move || {
-                    match handle.notification().permission_state() {
-                        Ok(tauri_plugin_notification::PermissionState::Prompt)
-                        | Ok(tauri_plugin_notification::PermissionState::PromptWithRationale) => {
-                            if let Err(e) = handle.notification().request_permission() {
-                                tracing::warn!("could not ask about notifications: {e}");
-                            }
+                std::thread::spawn(move || match handle.notification().permission_state() {
+                    Ok(tauri_plugin_notification::PermissionState::Prompt)
+                    | Ok(tauri_plugin_notification::PermissionState::PromptWithRationale) => {
+                        if let Err(e) = handle.notification().request_permission() {
+                            tracing::warn!("could not ask about notifications: {e}");
                         }
-                        Ok(_) => {}
-                        Err(e) => tracing::warn!("could not read notification permission: {e}"),
                     }
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!("could not read notification permission: {e}"),
                 });
             }
             // No daemon to dial here, so there is one to start: the engine runs
@@ -488,6 +503,52 @@ pub fn run() {
                         let _ = _app.emit(EV_ARVOLO_TICKET, ticket);
                     }
                 }
+            }
+        }
+        // On a phone the same event carries two things: `arvolo://shared` from
+        // the share extension (the files are in the group container — go and
+        // get them), and a `.arvolo` opened from Files.
+        #[cfg(target_os = "ios")]
+        if let tauri::RunEvent::Opened { urls } = _event {
+            let mut shared = false;
+            let mut to_send: Vec<std::path::PathBuf> = Vec::new();
+            for url in urls {
+                if url.scheme() == "arvolo" {
+                    shared = true;
+                } else if let Ok(path) = url.to_file_path() {
+                    if let Some(ticket) = read_arvolo_ticket(&path) {
+                        let _ = _app.emit(EV_ARVOLO_TICKET, ticket);
+                    } else {
+                        // Un file qualunque aperto con noi: **è una cosa da
+                        // mandare**, e finisce nella stessa coda delle
+                        // condivisioni, cioè in Scambia con il file in mano.
+                        //
+                        // Qui prima non c'era niente. Il tipo che dichiariamo
+                        // (`it.termox.arvolo.ticket`) è conforme a
+                        // `public.plain-text`, quindi il sistema offre Arvolo in
+                        // «Apri con» per *qualunque* file di testo — e di tutti
+                        // quelli che non finivano in `.arvolo` non facevamo
+                        // nulla: l'app si apriva su una schermata qualunque e la
+                        // persona restava a chiedersi cosa fosse successo. Fare
+                        // niente, in silenzio, dopo che qualcuno ha scelto la
+                        // tua app da un menu, è la cosa peggiore che si possa
+                        // fare in risposta a una scelta esplicita.
+                        to_send.push(path);
+                    }
+                }
+            }
+            if !to_send.is_empty() {
+                // Copiati nella cartella dell'app prima di toccarli: il permesso
+                // di leggere un documento aperto da fuori dura quanto l'evento,
+                // e un invio può cominciare molto dopo.
+                let adopted: Vec<std::path::PathBuf> = to_send
+                    .into_iter()
+                    .map(|p| bridge::adopt_shared(_app, p))
+                    .collect();
+                share_inbox::offer(adopted);
+            }
+            if shared {
+                share_inbox::collect_app_group(_app);
             }
         }
     });
@@ -571,6 +632,26 @@ fn start_embedded_engine(app: &AppHandle) -> anyhow::Result<String> {
     ))?;
     bridge::use_embedded(std::sync::Arc::new(running.daemon.clone()));
     bridge::use_manager(running.daemon.manager.clone());
+    // Shares that arrived before this point are queued; from here on the screen
+    // is nudged as they come. See `share_inbox`.
+    share_inbox::attach(app);
+    // A register written by an earlier build still calls this phone `localhost`
+    // — the hostname iOS answers with, and not a name anybody can aim a send
+    // at. Renamed once to the platform's own word, the way `default_device_name`
+    // now names a fresh one; a name the person chose is left alone.
+    {
+        use arvolo_engine::book;
+        let key = arvolo_core::sync::device_key(&book::load_or_init_device());
+        let mut devices = book::load_devices();
+        if let Some(row) = devices.devices.get_mut(&key) {
+            if row.name.trim().eq_ignore_ascii_case("localhost") {
+                row.name = book::platform_device_name().to_string();
+                if let Err(e) = book::save_devices(&devices) {
+                    tracing::warn!("arvolo: could not rename this device: {e:#}");
+                }
+            }
+        }
+    }
     // Whatever the last run left in the picked-copies folder and no send still
     // claims. Here rather than on a timer: the copies are only made while the
     // app is in front, and this is the moment after the engine has read the

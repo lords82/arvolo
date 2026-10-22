@@ -1,102 +1,104 @@
-// Codes, both directions: the one you are showing and the one you are reading.
+// The code you are showing, on a screen of its own.
 //
-// On a desktop a code is a line of a send's row — you made it while sending, and
-// you read it out. A phone is the device that is *held up*, and the one held in
-// front of it: the two halves of a code exchange are two screens here, and a
-// segmented control is the honest way to say that there are exactly two.
+// A code exists to be handed over: held up to a camera across a table, or read
+// out loud down a phone line. Both of those want the same thing — the square as
+// big as the screen allows, and the words under it large enough to dictate — and
+// neither of them wants a screen with a second half. So the half that read codes
+// moved to *Ricevi*, where the camera already is, and what is left here is the
+// showing.
 //
-// Showing is not something this screen starts. A code is a way of reaching one
-// particular send, so it is made where the send is made; what this shows is the
-// one that is live, and what it says about it is the thing the desktop never has
-// to: that it lasts only while the app is in front of you.
+// Nothing on this screen counts down. A code made by this app lasts for as long
+// as the app is in front of you and its send is alive, and a timer would be a
+// number invented to look precise: the daemon does not send an expiry for a live
+// code, and what actually ends one is leaving the app or withdrawing it. Both of
+// those are said in words instead.
 
-import { useState } from "react";
+import { fire, useStore } from "../store";
+import { fmtBytes } from "../format";
 import { useT } from "../i18n";
-import { useStore } from "../store";
-import { scanOne } from "../scan";
 import { CodeHero } from "../ui/Bits";
 import { Icon } from "../ui/Icons";
-import { Button, Empty, Segmented } from "../ui/Primitives";
-import { toast } from "../ui/Toasts";
+import { Button, Empty } from "../ui/Primitives";
 
 export function CodesView() {
   const t = useT();
-  const [mode, setMode] = useState<"show" | "scan">("show");
   const transfers = useStore((s) => s.transfers);
-  const openSheet = useStore((s) => s.openSheet);
-  const openReceive = useStore((s) => s.openReceive);
-  const openReceiveWith = useStore((s) => s.openReceiveWith);
+  const startCompose = useStore((s) => s.startCompose);
+  const openShare = useStore((s) => s.openShare);
+  const cancel = useStore((s) => s.cancel);
 
-  // Every send that is answering to a code right now. Usually one; more than one
-  // is legitimate and the list says so rather than picking a winner.
+  // Every send answering to a code right now. Usually one; more than one is
+  // legitimate and the list says so rather than picking a winner.
   const hosted = Object.values(transfers).filter((x) => x.code);
 
-  return (
-    <div className="view-narrow codes">
-      <Segmented
-        block
-        label={t("codes.mode")}
-        value={mode}
-        onChange={(v) => setMode(v as "show" | "scan")}
-        options={[
-          { value: "show", label: t("codes.show") },
-          { value: "scan", label: t("codes.scan") },
-        ]}
-      />
-
-      {mode === "show" ? (
-        hosted.length ? (
-          <>
-            {hosted.map((tx) => (
-              <CodeHero
-                key={tx.key}
-                value={tx.code!}
-                caption={t("codes.whileOpen")}
-              />
-            ))}
-            <div className="card card-pad t-xs t-mut">{t("codes.pauseNote")}</div>
-          </>
-        ) : (
-          <div className="card">
-            <Empty
-              icon={<Icon.Qr size={22} />}
-              title={t("codes.noneTitle")}
-              action={
-                <Button
-                  variant="primary"
-                  onClick={() => openSheet([], undefined, "code")}
-                >
-                  <Icon.Send size={14} />
-                  {t("codes.hostAction")}
-                </Button>
-              }
-            >
-              {t("codes.noneBody")}
-            </Empty>
-          </div>
-        )
-      ) : (
-        <div className="card card-pad stack">
-          <div className="t-sm t-mut">{t("codes.scanHint")}</div>
-          <Button
-            variant="primary"
-            block
-            onClick={async () => {
-              const got = await scanOne();
-              if (got) openReceiveWith(got);
-              else toast.info(t("codes.scanNothing"));
-            }}
+  if (!hosted.length) {
+    return (
+      <div className="ios-page">
+        <div className="ios-group">
+          <Empty
+            icon={<Icon.Qr size={22} />}
+            title={t("codes.noneTitle")}
+            action={
+              <Button
+                variant="in"
+                onClick={() => startCompose({ kind: "code" })}
+              >
+                <Icon.Send size={14} />
+                {t("codes.hostAction")}
+              </Button>
+            }
           >
-            <Icon.Qr size={14} />
-            {t("codes.scanAction")}
-          </Button>
-          {/* The other half of "read a code": the one somebody sent you in a
-              message, which never went near a camera. */}
-          <Button block onClick={openReceive}>
-            {t("codes.pasteAction")}
-          </Button>
+            {t("codes.noneBody")}
+          </Empty>
         </div>
-      )}
+      </div>
+    );
+  }
+
+  return (
+    <div className="ios-page codes">
+      {hosted.map((tx) => (
+        <section key={tx.key} className="stack">
+          <div className="ios-group code-card">
+            <CodeHero
+              value={tx.code!}
+              qrSize={212}
+              caption={t("codes.readItOut")}
+            />
+          </div>
+
+          {/* What is happening, in words and without a clock. Nothing on this
+              screen counts down: what ends a code is leaving the app or
+              withdrawing it, and a timer would be a number invented to look
+              precise. The dot is the same one the canvas draws — a state, not a
+              progress bar, because there is no progress yet. */}
+          <div className="code-state">
+            <span className="code-dot" aria-hidden />
+            {t("codes.waitingOther")}
+          </div>
+
+          <div className="ios-foot code-what tnum">
+            {t("codes.bothOnline", fmtBytes(tx.size))}
+          </div>
+
+          <div className="ios-foot">{t("codes.pauseNote")}</div>
+
+          {/* Withdrawing is what actually ends a code, so it is on the screen
+              rather than behind a swipe on a row somewhere else — a live code is
+              an open door, and the way to shut it belongs next to the thing that
+              is open. Beside it, the other way to hand a code over: the system's
+              own share sheet, for when the person is not in the room. */}
+          <div className="phone-actions code-actions">
+            <Button size="lg" onClick={() => openShare(tx.id)}>
+              <Icon.Link size={15} />
+              {t("common.share")}
+            </Button>
+            <Button variant="danger" size="lg" onClick={() => fire(cancel(tx.id))}>
+              {t("codes.withdraw")}
+            </Button>
+          </div>
+        </section>
+      ))}
     </div>
   );
 }

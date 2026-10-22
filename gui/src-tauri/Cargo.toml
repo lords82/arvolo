@@ -147,9 +147,22 @@ block2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = [
     "std",
     "NSString",
+    # La griglia delle ultime foto e gli appunti — vedi `photos::recent` e
+    # `clipboard`: ordinare per data, portare fuori i byte, leggere un errore.
+    "NSSortDescriptor",
+    "NSData",
+    "NSError",
+    "NSDictionary",
+    # The App Group container the share extension writes into — see
+    # `share_inbox`.
+    "NSFileManager",
+    "NSURL",
 ] }
 objc2-ui-kit = { version = "0.3", default-features = false, features = [
     "std",
+    # La miniatura di una foto come JPEG.
+    "UIImage",
+    "objc2-core-foundation",
     "UIApplication",
     "UIResponder",
     # Handing a received file to the rest of the phone — see `ios_open`.
@@ -166,6 +179,28 @@ objc2-ui-kit = { version = "0.3", default-features = false, features = [
 objc2-core-foundation = { version = "0.3", default-features = false, features = [
     "std",
     "CFCGTypes",
+] }
+# La copia in Galleria — vedi `photos`. Il permesso che serve è `add-only`, il
+# più stretto che Apple offra: lascia aggiungere senza lasciar leggere.
+objc2-photos = { version = "0.3", default-features = false, features = [
+    "std",
+    "block2",
+    # `performChangesAndWait:` vuole un blocco di dispatch, non uno qualsiasi.
+    "dispatch2",
+    "PHPhotoLibrary",
+    "PHChangeRequest",
+    "PHAssetChangeRequest",
+    "PHObject",
+    "PHAsset",
+    "PHFetchResult",
+    "PHFetchOptions",
+    "PhotosTypes",
+    # Le ultime foto nella griglia di «Cosa» (sezione 11): miniature e
+    # l'originale scritto in un file quando si parte.
+    "PHImageManager",
+    "PHAssetResource",
+    "PHAssetResourceManager",
+    "objc2-core-foundation",
 ] }
 
 # Only the publisher's naming rule is tested here — the one decision in this

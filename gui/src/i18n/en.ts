@@ -48,6 +48,7 @@ export const en = {
 
   // ---- app frame ---------------------------------------------------------
   "title.transfers": "Transfers",
+  "title.activity": "Activity",
   "title.people": "People",
   "title.deposits": "Links and deposits",
   "title.history": "History",
@@ -86,6 +87,9 @@ export const en = {
   "app.errHintDaemon": "The daemon isn't answering — restart it and try again.",
   "app.errHintRelay": "This needs a relay — set one under Settings → Network.",
   "app.errHintPassword": "This one is password-protected — ask the sender for the password.",
+  "app.errHintTooLarge": (limit: string) =>
+    `The server does not accept files this large — its limit is ${limit}.`,
+  "app.errHintTooLargeNoLimit": "The server does not accept files this large.",
   "app.errOpenSettings": "Open Settings",
 
   "crash.title": "Something broke in the interface",
@@ -151,6 +155,12 @@ export const en = {
   "waiting.noRoute": "no relay reachable — local network only",
   // What goes where the relay's own words would, when it gave none.
   "waiting.relayUnnamed": "the relay could not take it",
+  "failed.sourceMissing": (p: string) => `the file is no longer where you picked it (${p})`,
+  "failed.recipientCancelled": "cancelled on their side",
+  "failed.expiredOnRelay": "expired on the relay — nobody collected it",
+  "failed.depositGone": "no longer on the relay: collected, expired or withdrawn. Ask for it again.",
+  "failed.noSpace": "no space left on this device",
+  "failed.network": (why: string) => `the connection dropped: ${why}`,
   "meta.incoming": "open for the details",
   "meta.deposited": "waiting for the recipient to collect it",
   "meta.failed": "transfer failed",
@@ -190,6 +200,12 @@ export const en = {
   "transfers.revokeDeposit": "Withdraw",
   "transfers.cancel": "Cancel",
   "transfers.removeRow": "Remove",
+  // The long-press sheet (7c): the way out of it, and the two consequences it
+  // writes under the verbs. "Leave it alone" rather than "Cancel" — one of the
+  // actions above it *is* a cancel.
+  "transfers.cancelDesc":
+    "Whatever has already gone across is thrown away: if you do it again, it starts from scratch.",
+  "transfers.removeRowDesc": "Only the line goes; the file stays where it is.",
   "transfers.verifiedIdentity": "Verified identity",
   "transfers.swarm": "Transfer spread across several peers",
   "transfers.peers": (n: number) => (n === 1 ? "1 peer" : `${n} peers`),
@@ -213,6 +229,40 @@ export const en = {
   "transfers.confirmCancelLabel": "Cancel the transfer",
   "transfers.keepGoing": "Leave it",
   "transfers.outgoing": "Outgoing",
+  // Attività, the phone's board: a direction is two tinted words at the start of
+  // a line here, not a column of its own.
+  "activity.from": (who: string) => `from ${who}`,
+  "activity.to": (who: string) => `to ${who}`,
+  "activity.notInBook": "not in your contacts",
+  // Who an offer is from when it is from you: the peer label ("Your devices")
+  // is a column heading and reads as a plural subject inside the sentence.
+  "activity.oneOfYours": "One of your devices",
+  "activity.ofSize": (got: string, total: string) => `${got} of ${total}`,
+  "activity.examine": "Review",
+  "activity.halfLabel": "Now or the record",
+  "activity.now": "Now",
+  "activity.inFlight": "In flight and on hold",
+  "activity.pauseAll": "Hold everything",
+  "activity.resumeAll": "Resume everything",
+  "activity.emptyTitle": "Nothing in flight",
+  "activity.emptyBody": "Files you send, and files somebody sends you, show up here.",
+  "activity.emptyGo": "Open Exchange",
+  "activity.emptyScan": "Scan",
+  "activity.emptySend": "Send something",
+  "activity.emptyNoMatch": "No transfer matches",
+  // The day's finished transfers, counted rather than unrolled — a row that
+  // opens, which is what the wide scale does with every long list.
+  "activity.doneToday": (n: number) =>
+    n === 1 ? "1 done today" : `${n} done today`,
+  "activity.endedToday": (n: number, failed: number, cancelled: number, deposited: number) =>
+    [
+      `${n} today`,
+      failed && `${failed} failed`,
+      cancelled && `${cancelled} cancelled`,
+      deposited && `${deposited} in a mailbox`,
+    ]
+      .filter(Boolean)
+      .join(" · "),
   "transfers.incoming": "Incoming",
   "transfers.emptyOutTitle": "Nothing going out",
   "transfers.emptyInTitle": "Nothing coming in",
@@ -233,6 +283,14 @@ export const en = {
   "scan.noPermissionHow": "Allow access to the camera to read the QR. You can also type the code in by hand.",
   "scan.openSettings": "Open Settings",
   "codes.whileOpen": "Good while Arvolo is open",
+  // 7g: what to do with the code, what is happening, and what it costs. No
+  // clock anywhere â what ends a code is leaving the app or withdrawing it.
+  "codes.readItOut": "Read it out, or hold it up. They open Exchange and put it in.",
+  "codes.waitingOther": "Waiting for the other side…",
+  "codes.bothOnline": (size: string) => `${size} · you both have to be online now`,
+  "common.share": "Share",
+  "codes.share": "Share the code",
+  "codes.withdraw": "Withdraw the code",
   "codes.pauseNote": "Leave the app and the code pauses. The transfer picks up where it left off when you come back.",
   "codes.noneTitle": "No code is live",
   "codes.noneBody": "A code reaches one particular send, so it is made with the files it hands over.",
@@ -244,6 +302,10 @@ export const en = {
   "you.receiving": "Receiving",
   "you.elsewhere": "Elsewhere",
   "you.unnamed": "No name yet",
+  "you.identitySub": "The same on every device you link.",
+  "you.thisMachine": (name: string) => `this device: ${name}`,
+  "you.copyId": "Copy the id",
+  "you.showQr": "Show the QR",
   "you.liveCount": (n: number) => `${n} live`,
   "you.footer": (v: string) => `Arvolo ${v} · your identity is kept on this device`,
   "title.you": "You",
@@ -274,6 +336,9 @@ export const en = {
   "people.presenceUnknownTitle": "The relay didn't answer",
   "people.presenceUnknownLabel": "Presence unknown",
   "people.presenceOnTitle": "Connected right now",
+  "people.groupOnline": "Online now",
+  "people.groupOffline": "Not connected",
+  "people.sendTo": (who: string) => `Send to ${who}`,
   "people.presenceOffTitle": "Not connected",
   "people.presenceOn": "Connected",
   "people.presenceOff": "Not connected",
@@ -294,6 +359,9 @@ export const en = {
   "people.menuRemove": "Remove from contacts",
   "people.rowActions": (name: string) => `Actions for ${name}`,
   "people.notVerified": "Not verified",
+  "people.wordTrusted": "Trusted",
+  "people.wordAsks": "Asks first",
+  "people.wordBlocked": "Blocked",
   "people.notVerifiedTitle": "Fingerprint never compared",
   "people.claimedPlain": (name: string) => `(“${name}”)`,
   "people.claimedNew": (name: string) => `(calls themselves “${name}”)`,
@@ -345,6 +413,7 @@ export const en = {
   "people.rekeyed": (name: string) => `“${name}” now points at the new key`,
   "people.rekeyedDetail": "Verified and trusted were dropped.",
 
+  "person.thread": "What passed between you",
   "person.fingerprint": "Fingerprint",
   // The canonical wording. Everywhere else that needs this either points here
   // or repeats it verbatim — nine near-variants was eight too many.
@@ -365,6 +434,10 @@ export const en = {
 
   "people.moreActions": "More ways to add",
   "people.swap": "Swap contacts",
+  // Under the one filled thing on the screen: what the swap is *for*, which is
+  // the half a verb cannot carry.
+  "people.swapBoth":
+    "You both end up in each other's address book, with no fingerprint words to compare.",
   "people.haveCode": "Enter a code",
   "people.byId": "By id",
   "people.export": "Export",
@@ -382,7 +455,7 @@ export const en = {
   "people.emptyNone": "Nobody in the address book",
   "people.emptyNoMatch": "No contact matches",
   "people.emptyNoneBody":
-    "Swapping codes is quickest: you save each other, already verified.",
+    "Swapping a code is quickest: you both end up in each other's address book, with no fingerprint words to compare.",
   "people.emptyNoMatchBody": "Try a different filter or search.",
   "people.exportFilename": "arvolo-contacts.json",
   "people.exportedOne": "Exported 1 contact",
@@ -433,6 +506,7 @@ export const en = {
   "deposits.publicLink": "Public link",
   "deposits.sealed": "Deposit",
   "deposits.revoke": "Withdraw",
+  "deposits.askAgain": "Ask the relay again",
   "deposits.sealedFor": (who: string, detail: string) =>
     `sealed for ${who} · ${detail}`,
   "deposits.confirmRevokeTitle": "Withdraw it?",
@@ -448,6 +522,9 @@ export const en = {
   "deposits.emptyTitle": "No live link or deposit",
   "deposits.emptyBody": "Public links and mailbox deposits show up here.",
   "deposits.sectionLinks": "Public links",
+  "deposits.kindLabel": "What to show",
+  "deposits.noneLinks": "No live links",
+  "deposits.noneSealed": "Nothing in the mailbox",
   "deposits.sectionSealed": "Sealed deposits",
 
   // ---- history -----------------------------------------------------------
@@ -478,6 +555,9 @@ export const en = {
   "devices.identityTitle": "Your shared identity",
   "devices.identityHint":
     "Every linked device uses this one. To everyone else you are one person.",
+  "devices.identityNameLabel": "Name you show",
+  "devices.identityNameHint":
+    "One name for the identity, the same on every device. The names below are the machines, and only you see them.",
   "devices.fingerprint": "Fingerprint",
   "devices.fingerprintHint":
     "It must match on all your devices. Different words mean a different identity.",
@@ -492,8 +572,6 @@ export const en = {
   "devices.haveCode": "Enter a code",
   "devices.pairWarnLead": "Never on a machine that isn't yours.",
   "devices.syncTitle": "Address book in step",
-  "devices.syncHint":
-    "Contacts travel inside an encrypted cell on your mailbox.",
   "devices.syncOn": "On",
   "devices.syncOff": "Off",
   "devices.contactCount": (n: number) =>
@@ -513,7 +591,7 @@ export const en = {
   "devices.rename": "Rename",
   "devices.renameTitle": "Name this device",
   "devices.renameHint":
-    "Only this one: a device is described by itself, so the others are renamed on themselves.",
+    "Only this one, and only for you: it tells your machines apart and reaches nobody else.",
   "devices.renameThereDesc": "On that machine: it writes its own row.",
   "devices.forget": "Forget",
   "devices.forgetHereDesc":
@@ -544,7 +622,7 @@ export const en = {
   "settings.sourceNone": "none",
   "settings.nameSaved": "Name updated",
   "settings.nameSavedDetail":
-    "It travels inside every offer you send, from now on.",
+    "It travels in every offer you send, from every device you linked.",
   "settings.relaySaved": "Relay saved",
   "settings.relaySavedDetail": "Restart the daemon below to apply it now.",
   "settings.whoYouAre": "Who you are",
@@ -552,7 +630,7 @@ export const en = {
   // Not "and the fingerprint is what identifies you" — that is the next field
   // down, and it says so itself.
   "settings.nameHint":
-    "A label you pick yourself: whoever receives it sees it in quotes.",
+    "The same on every device you link. Whoever receives a file from you sees it, in quotes.",
   "settings.namePlaceholder": "none",
   "settings.fingerprintLabel": "Your fingerprint",
   "settings.fingerprintHint":
@@ -579,6 +657,10 @@ export const en = {
   "settings.themeDark": "Dark",
   "settings.language": "Language",
   "settings.languageAuto": "System",
+  // The same two sentences on a phone, where the thing being followed is the
+  // phone rather than the computer. Under the wheel, not beside a field.
+  "settings.languageHintPhone": "“System” follows your phone, falling back to English.",
+  "settings.themeHintPhone": "“System” follows how your phone looks.",
   "settings.languageHint":
     "“System” follows your computer, falling back to English.",
   "settings.startup": "Startup",
@@ -600,6 +682,16 @@ export const en = {
   // where the relay is chosen, so this is where it belongs.
   "settings.relayNote":
     "Routes the codes, the mailbox and the links. It never sees your files in the clear.",
+  "settings.relayReset": "Back to the default",
+  "settings.relayResetHint":
+    "Drops the saved relay: the one the app ships with comes back.",
+  "settings.relayResetDone": "Relay put back",
+  "settings.relayResetDetail": "It applies the next time the app opens.",
+  "identity.title": "Your address",
+  "identity.what":
+    "Hand this to somebody who has to write to you: it says who you are and where you are found.",
+  "identity.noQr":
+    "No square: Arvolo's camera reads sending codes, not addresses.",
   "settings.files": "Files",
   "settings.downloadDirLabel": "Where files land",
   "settings.downloadDirEnv": "Decided by the ARVOLO_DOWNLOAD_DIR variable.",
@@ -673,7 +765,7 @@ export const en = {
   "send.ttl30d": "30 days",
   "send.pickerEmptyTitle": "Your address book is empty",
   "send.pickerEmpty":
-    "Add somebody from People. Swapping codes is quickest — it saves you both, already verified.",
+    "Add somebody from People: swap a code and you each end up in the other's address book, with nothing to compare after.",
   "send.pickerSearch": "Search a contact…",
   "send.pickerRecipient": "Recipient",
   "send.whoNobody": "Nobody yet",
@@ -717,6 +809,8 @@ export const en = {
   "send.subtitle": "Encrypted end to end, always.",
   "send.submitDeposit": "Deposit",
   "send.submitSend": "Send",
+  "send.sealed": "end-to-end encrypted",
+  "send.submitTo": (who: string) => `Send to ${who}`,
   "send.submitCode": "Generate code",
   "send.submitLink": "Create link",
   "send.submitTicket": "Create ticket",
@@ -725,6 +819,19 @@ export const en = {
   "send.linkKeyNote":
     "The key rides after the `#`, which browsers never send to the server.",
   "send.filesLabel": "What you are sending",
+  // Invia as a place (the design of record's 8a/9c): one question, and answers
+  // that are situations rather than transports.
+  "send.whatNothing": "Nothing chosen yet",
+  "send.whatPick": "Tap to choose",
+  "send.whatChange": "Tap to change",
+  "send.toWhom": "Who are you sending it to?",
+  "send.book": "Address book",
+  "send.toMine": "One of my devices",
+  "send.toHere": "They are here with me",
+  "send.toAnyone": "Anyone with the link",
+  "send.publicWord": "Public",
+  "send.publicRest": ", even without Arvolo",
+  "send.otherWays": "Other ways",
   "send.filesHint": "You can also drag files and folders into the window.",
   "send.filesRemove": (name: string) => `Remove ${name}`,
   "send.pickFiles": "Files…",
@@ -749,6 +856,9 @@ export const en = {
     "Leaves it on the relay even if they are online, so you can close the window. Unlocks expiry, collections and password.",
   "send.depositLabel": "Leave it in the mailbox",
   "send.expiresAfter": "Expires after",
+  // The heading over the address itself on the phone, where the link is the
+  // whole screen rather than a field in a form.
+  "send.linkPublic": "Public link",
   "send.depositTtlLabel": "Deposit expiry",
   "send.linkTtlLabel": "Link expiry",
   "send.maxPickupsLabel": "Collections allowed",
@@ -777,6 +887,64 @@ export const en = {
   "receive.explainUnknown":
     "Unfamiliar shape — worth trying, but check you copied it whole.",
   "receive.title": "Receive",
+  // Impostazioni âº Ricevuti (the design's 6c/10o): the one choice about what
+  // arrives, and the fact underneath it.
+  "received.title": "Received",
+  // Finito (10d, and 6a/6b for the question): what arrived, where it went, and
+  // the one question worth asking â once.
+  "finished.title": "Done",
+  "finished.count": (n: number, size: string, who: string) =>
+    `${n === 1 ? "1 file" : `${n} files`} · ${size} from ${who}`,
+  "finished.someone": "somebody",
+  "finished.takeOut": "Take out of the gallery",
+  "finished.askTitle": (n: number) =>
+    n === 1 ? "1 photo: where do you keep it?" : `${n} photos: where do you keep them?`,
+  "finished.askRest": "The rest stays in Arvolo",
+  "finished.withYourPhotos": "with your photos",
+  "finished.inFiles": "in Files › Received",
+  "finished.always": "Always do this for photos and videos",
+  "finished.saveWho": (who: string) => `Save ${who} to your contacts`,
+  "finished.saveWhy": "You verified them by scanning.",
+  "finished.notNow": "Not now",
+  "received.photosLabel": "Photos and videos, whoever they come from",
+  "received.inGallery": "In the gallery",
+  "received.inGallerySub": "A copy stays in Arvolo",
+  "received.onlyArvolo": "Only in Arvolo",
+  "received.askEvery": "Ask every time",
+  "received.askEverySub": "When the transfer is done, never before",
+  "received.photosFoot":
+    "It covers what arrives from anyone, your own devices included. Everything else always stays in Arvolo.",
+  "received.whereLabel": "Where files land",
+  "received.whereFoot": "Fixed on a phone: you can see it from Files and from other apps too.",
+  "received.inGalleryShort": "in the gallery",
+  "received.wentToGallery": "Photos in the gallery Â· the rest in Arvolo",
+  "received.allInArvolo": "Everything in Arvolo",
+  // Scambia, the camera screen. The canvas these come from is in Italian and
+  // `it.ts` keeps its wording word for word; this is that wording in English.
+  "exchange.title": "Exchange",
+  "exchange.aim": "Point at the other person's square",
+  "exchange.again": "Nothing read.",
+  "exchange.aimAgain": "Scan again",
+  "exchange.noCamera": "No camera on this screen",
+  "exchange.sheetUp": "Pull the sheet up",
+  "exchange.sheetDown": "Put the sheet down",
+  "exchange.yourDevices": "Your devices",
+  "exchange.showCode": "Show my code",
+  "exchange.readyToGive": (n: number, size: string) =>
+    `${n === 1 ? "1 file" : `${n} files`} · ${size} ready to give`,
+  "exchange.nothingToGive": "Choose what to give",
+  "exchange.deviceAwake": "seen just now",
+  "exchange.deviceOfYours": "yours, same identity",
+  "exchange.takeFromMine": (n: number, size: string) =>
+    `Take ${n === 1 ? "1 file" : `${n} files`} · ${size} from one of yours`,
+  "exchange.metRecently": "Met recently",
+  "exchange.verified": "verified",
+  "exchange.unverified": "not verified",
+  "exchange.sendTo": "Send",
+  "exchange.linkCard": "Make a link",
+  "exchange.linkCardSub": "For whoever has no Arvolo",
+  "exchange.typedCode": "Got a code in writing?",
+  "exchange.code": "Code",
   "receive.subtitle": "Paste what you were given.",
   "receive.submit": "Receive",
   "receive.fieldLabel": "Code or ticket",
@@ -785,6 +953,9 @@ export const en = {
   "receive.passwordHint": "The sender will have told you separately.",
   "receive.passwordPlaceholder": "none",
   "receive.whereLabel": "Where to save it",
+  "receive.whereAndroid": "The phone's Downloads",
+  "receive.whereIos": "Files › Arvolo",
+  "receive.whereHere": "The downloads folder",
   "receive.whereHint": (dir: string) => `Default folder: ${dir}`,
   "receive.whereAria": "Destination folder",
   "receive.choose": "Choose…",
@@ -847,7 +1018,7 @@ export const en = {
   "pair.titleDeviceHost": "Link another device of yours",
   "pair.titleDeviceJoin": "Link this device",
   "pair.subContactHost":
-    "Show them the code: you save each other, already verified.",
+    "Show them the code: the moment they type it in, you are each in the other's address book, with nothing to compare after.",
   "pair.subContactJoin": "Type in the code they read out to you.",
   "pair.subDeviceHost": "It shares your identity with the new machine.",
   "pair.subDeviceJoin":
@@ -899,7 +1070,7 @@ export const en = {
   "palette.receiveHint": "paste a code or a ticket",
   "palette.receiveKw": "download get paste",
   "palette.pairContact": "Swap contacts",
-  "palette.pairContactHint": "you save each other, already verified",
+  "palette.pairContactHint": "you both end up in each other's address book, nothing to compare",
   "palette.pairContactKw": "pairing pair add person verify",
   "palette.pairDevice": "Link another device of yours",
   "palette.pairDeviceKw": "multidevice identity sync",
@@ -982,6 +1153,127 @@ export const en = {
       ? "1 update from your other devices."
       : `${n} updates from your other devices.`,
   "store.syncNone": "No updates from your other devices.",
+  "compose.title": "What",
+  "compose.countPhotos": (n: number) => (n === 1 ? "1 photo" : `${n} photos`),
+  "compose.countFiles": (n: number) => (n === 1 ? "1 file" : `${n} files`),
+  "compose.noteContact": "It reaches them now. If they don't take it right away, it waits in their mailbox for 7 days.",
+  "compose.noteSelf": "Arrives right away. Nobody has to accept.",
+  "compose.publicSub": "anybody with the link",
+  "compose.verified": "Verified",
+  "compose.unverified": "Not verified",
+  "compose.onlineNow": "online now",
+  "compose.recent": "Recent photos",
+  "compose.file": "Files",
+  "compose.shareFailed": "Could not share it",
+  "compose.linkWhereBack": "You find it again in Activity › Deposits, where you can revoke it.",
+  "compose.linkReady": "Link ready",
+  "compose.copyLink": "Copy the link",
+  "exchange.aimOrSend": "Frame their square: take or send.",
+  "activity.left": "Deposits",
+  "activity.leftIntro": "What you sent and can still take back.",
+  "activity.leftSealed": "In mailboxes",
+  "activity.leftFor": (who: string) => `for ${who}`,
+  "activity.leftNew": "Make a public link",
+  "activity.leftNone": "Nothing to take back",
+  "activity.openLink": "Open in browser",
+  "settings.appearanceLanguage": "Appearance and language",
+  "transfers.leaveAlone": "Leave it",
+  // ---- Scambia rifatta (canvas sections 13–16, 2026-10-04) --------------
+  "common.clear": "Clear",
+  "exchange.inFront": "They are in front of me",
+  "exchange.aimTheirSquare": "Frame their square",
+  "exchange.searchPlaceholder": "Person, device or a code you got",
+  "exchange.takeTitle": (n: number, from: string | null) =>
+    from
+      ? `${from} has ${n === 1 ? "1 file" : `${n} files`} for you`
+      : `${n === 1 ? "1 file" : `${n} files`} from one of your devices`,
+  "exchange.takeSub": (size: string, since: string) => `${size} · since ${since}`,
+  "exchange.take": "Take",
+  "exchange.pairTile": "Pair",
+  "exchange.online": "online",
+  "exchange.pickedCount": (n: number) => (n === 1 ? "1 person" : `${n} people`),
+  "exchange.pickedSub": (online: number, offline: number) =>
+    offline === 0 ? `${online} online` : online === 0 ? `${offline} to the mailbox` : `${online} online · ${offline} to the mailbox`,
+  "exchange.next": "Next",
+  "code.title.code": "Send code",
+  "code.title.chunk": "Direct ticket",
+  "code.title.mailbox": "Mailbox ticket",
+  "code.sub.code": "Downloads from whoever is showing it right now.",
+  "code.sub.chunk": "Straight from the sender, who has to be online.",
+  "code.sub.mailbox": "Collected from the relay; a password if they set one.",
+  "code.receive": "Receive",
+  "code.note": "The same field also reads arvc… and arvm… tickets.",
+  "compose.photos": "Photos",
+  "compose.pickFile": "Choose a file…",
+  "compose.noPhotos": "No photos to show.",
+  "compose.nothingPicked": "Nothing in hand yet: choose a file.",
+  "compose.message": "Add a message…",
+  "compose.howDirect": "Arrives now, direct",
+  "compose.howMailbox": (ttl: string) => `Waits in their mailbox for ${ttl}`,
+  "compose.howSelf": (device: string) => `Arrives right away on ${device}`,
+  "compose.howCode": "Whoever has the code downloads from here",
+  "compose.howLink": "Anyone with the link downloads it",
+  "compose.howWait": "Waits for them to be online, nothing on the relay",
+  "compose.groupName": (n: number) => (n === 1 ? "1 person" : `${n} people`),
+  "compose.onItsWayGroup": (n: number) => `On its way to ${n} people`,
+  "compose.ttlLabel": "Stays in the mailbox",
+  "compose.pickups": "Collections allowed",
+  "compose.pickupsHint": (n: number) => (n === 1 ? "1 · usually enough" : `${n}`),
+  "compose.fewer": "Fewer",
+  "compose.more": "More",
+  "compose.password": "Password",
+  "compose.passwordHint": "Told to them separately",
+  "compose.none": "none",
+  "compose.waitTitle": "Wait until they are online",
+  "compose.waitDesc": "No mailbox: you stay open until they accept.",
+  // ---- section 17: the sheet on *What* ----------------------------------
+  "compose.countVideos": (n: number) => (n === 1 ? "1 video" : `${n} videos`),
+  "compose.countPhotoVideo": (p: number, v: number) =>
+    `${p === 1 ? "1 photo" : `${p} photos`}, ${v === 1 ? "1 video" : `${v} videos`}`,
+  "compose.countMixed": (n: number) => (n === 1 ? "1 item" : `${n} items`),
+  "compose.pickHint": "Tap the photos or files to send.",
+  "compose.sealedFor": (name: string) => `Sealed for ${name}`,
+  "compose.sealedTravels": "Travels sealed with the files",
+  "compose.goTo": (name: string) => `Send to ${name}`,
+  "compose.goGroup": "Send to everyone",
+  "compose.goCode": "Make the code",
+  "compose.goLink": "Make the link",
+  "compose.goSelf": (device: string) => `Send to ${device}`,
+  "compose.go": "Send",
+  "compose.howGroupNow": (who: string) => `${who} get it now`,
+  "compose.howGroupBox": (who: string) => `${who} finds it in their mailbox`,
+  "compose.optionsTitle": (name: string) => `How it reaches ${name}`,
+  "compose.removeItem": (name: string) => `Remove ${name}`,
+  "compose.optionsOpen": "Delivery options",
+  "xfer.to": (who: string) => `To ${who}`,
+  "xfer.from": (who: string) => `From ${who}`,
+  "xfer.fromWho": (who: string) => `From ${who}`,
+  "xfer.arrivedTo": (who: string) => `Arrived at ${who}`,
+  "xfer.arrivedFrom": (who: string) => `Arrived from ${who}`,
+  "xfer.inMailboxTitle": (who: string) => `In ${who}'s mailbox`,
+  "xfer.inSecs": (s: number) => (s === 1 ? "in 1 second" : `in ${s} seconds`),
+  "xfer.ofBytes": (done: string, total: string) => `${done} of ${total}`,
+  "xfer.remaining": (eta: string) => `${eta} left`,
+  "xfer.about": (eta: string) => `about ${eta}`,
+  "xfer.allArrived": (n: number) => `All ${n} arrived`,
+  "xfer.nInProgress": (n: number) => `${n} in progress`,
+  "xfer.nArrived": (n: number) => (n === 1 ? "1 arrived" : `${n} arrived`),
+  "xfer.nSends": (n: number) => `${n} sends`,
+  "xfer.nReceives": (n: number) => `${n} arriving`,
+  "xfer.nTransfers": (n: number) => `${n} transfers`,
+  "xfer.inMailbox": (names: string) => `${names} to the mailbox`,
+  "xfer.done": "Done",
+  "xfer.direct": "direct",
+  "xfer.mailbox": "mailbox",
+  "xfer.outgoing": "Outgoing",
+  "xfer.incoming": "Incoming",
+  "xfer.bgNote": "You can close this: it keeps going with the app in the background.",
+  "xfer.rowNote": "Tap a row to pause or cancel just that one.",
+  "xfer.waitingMailbox": "waiting to reach the mailbox",
+  "xfer.inMailboxWaiting": "in the mailbox, waiting to be taken",
+  "xfer.arrived": "arrived",
+  "xfer.sheetTitle": "In progress",
+  "waiting.forThem": "waiting for them to be online — direct only, nothing on the relay",
 } as const satisfies Record<string, string | ((...a: never[]) => string)>;
 
 /** The shape every other language has to fill. Deriving it from `en` is what

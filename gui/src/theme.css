@@ -134,7 +134,12 @@
 
 /* Dark. Warm charcoal rather than neutral black, to stay the same room as the
    light theme; the direction hues are lifted and desaturated so they carry on a
-   dark field without glowing. */
+   dark field without glowing.
+
+   Questo è lo scuro della **finestra**. Il telefono ne ha uno suo, più in basso:
+   non perché due palette siano una buona idea — il chiaro è lo stesso per tutti
+   e due — ma perché il canvas del telefono ne disegna uno e la finestra in quel
+   canvas non c'è. */
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     --canvas: #16130f;
@@ -876,6 +881,18 @@ select {
   display: flex;
   width: 100%;
 }
+/* Un segmento cede prima di uscire dal controllo. A larghezza piena le voci si
+   dividono la riga in parti uguali, ma quattro parole più un contatore —
+   «Tutti · Verificati · Fidati · Bloccati (3)» — al corpo grande misurano 369
+   dentro 350, e con il solo `nowrap` finivano disegnate fuori dal bordo, dove
+   non si possono né leggere né toccare. `min-width: 0` è ciò che permette a un
+   elemento flex di stringersi sotto il suo contenuto; i puntini dicono che
+   l'etichetta continua. */
+.segmented-block > button {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 /* Five destinations, in four languages, in a 480px sheet that can be at 92vw:
    the labels are words and there is a width at which they do not fit on one
    line. Wrapping puts the overflow on a second row; `nowrap` on the buttons
@@ -1510,13 +1527,22 @@ select {
   font-weight: 600;
   letter-spacing: 0.02em;
   text-align: center;
-  word-break: break-all;
+  /* Ai trattini, mai dentro una parola.
+     `break-all` è giusto per un ticket — un blocco di base32 che nessuno legge e
+     che deve solo starci — ma un codice di scambio è fatto di tre parole che
+     qualcuno **detta a voce**, e spezzarne una in «…mang / o» è il modo di
+     farla ripetere sbagliata. `anywhere` cede solo quando nemmeno un pezzo
+     intero ci sta, cioè quasi mai. */
+  word-break: normal;
+  overflow-wrap: anywhere;
   -webkit-user-select: text;
   user-select: text;
   color: var(--ink);
 }
 .code-hero .value.sm {
   font-size: 15px;
+  /* Il ticket: nessuno lo legge, deve solo starci. */
+  word-break: break-all;
 }
 
 .copyfield {
@@ -1931,55 +1957,248 @@ select {
 
 @media (max-width: 560px) {
   /* -- Materials -----------------------------------------------------------
-     The brand is the tint, and the tint is the *only* place it appears: what a
-     control does is orange, and everything a control sits on is neutral. That
-     is not a preference, it is how this platform reads — a warm ground under a
-     white card says "somebody designed a theme", and a neutral one says
-     nothing at all, which is the point of a ground.
+     The phone wears the same palette as the window, and that is a decision that
+     was once the other way round.
 
-     The greys are the system's: a grouped background under white cards in
-     light, and near-black under raised cards in dark, with separators thin
-     enough to be a hairline rather than a rule. */
+     It had its own: TermoX navy as the ink of every title, one blue for
+     everything that acts, white cards with a drawn border on a cool ground. The
+     argument was that a phone app is opened by name, from an icon, and is
+     allowed to look like the company that made it. It was drawn on a design
+     canvas of its own ("Arvolo mobile app design", turns 4 and 5), which is also
+     where it came from.
+
+     What undid it is the canvas that replaced that one. "Arvolo Mobile 2 —
+     Scambia" is drawn on **this stylesheet**: it links `theme.css` and reads
+     `:root`, so every screen in it is warm paper, near-black ink, orange for
+     what you send and blue for what arrives. Built against the phone's own
+     palette, the same screens came out cool, navy and single-coloured — the
+     structure of the design with none of its colour, which is what "it does not
+     look like the canvas" meant. Two palettes, one app, and the newer canvas
+     was drawn on the one the phone was covering.
+
+     So the phone inherits, and what is left below is the six names the phone
+     layout needs that the window has no use for, each pointing at the palette
+     rather than restating it. One consequence to keep in mind: direction is a
+     *temperature* again — amber out, blue in — which is what the canvas draws
+     and what the rows have always meant. */
+  /* The phone adds six tokens the window has no use for, and **no colours**.
+     
+     It used to redeclare the whole palette: a cool blue-grey ground, navy ink,
+     one blue for everything that acts. That came from the previous design of
+     record, which was drawn on another design system — and it is why the screens
+     stopped looking like the canvas they were built from. The canvas loads *this*
+     stylesheet and uses `:root`: warm paper, near-black ink, orange for what you
+     send and blue for what arrives. So the phone inherits it, and what is left
+     here is the handful of names the phone layout needs, each pointing at the
+     palette rather than restating it. */
   .app-phone {
-    --canvas: #f2f2f7;
+    /* A screen's name and the one filled shape in the bar. The canvas draws both
+       in plain ink. */
+    --ink-title: var(--ink);
+    --ink-faint: var(--ink-weak);
+    /* Between two rows *inside* a card, where the card already has an edge. */
+    --line-inset: var(--line);
+
+    /* -- La palette TermoX (2026-10-04, sera: sezioni 14–16 del canvas) ----
+       «Invio, più carattere»: blu notte #090735 e blu acqua #3C78BF, Plus
+       Jakarta per titoli e numeri, Inter per il testo, fondo grigio freddo.
+       Il blu notte segna i momenti che contano — la scheda della camera, il
+       foglio d'invio, la scheda del trasferimento — e il resto resta chiaro e
+       calmo. Ha preso il posto della palette iOS del pomeriggio. Solo qui,
+       sotto `.app-phone`: la finestra tiene la sua carta calda. Le due
+       direzioni restano due blu (16d: chiaro per ciò che arriva, pieno per
+       ciò che parte); l'arancio del desktop non c'è più sul telefono. */
+    --font: "Inter Variable", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+    --font-display: "Plus Jakarta Sans Variable", "Inter Variable", system-ui, sans-serif;
+    --mono: ui-monospace, "SF Mono", Menlo, monospace;
+    --canvas: #f7f8fa;
     --surface: #ffffff;
-    --surface-2: #e9e9ee;
-    --surface-3: #e5e5ea;
-    --surface-sunk: #f2f2f7;
-    --line: rgba(60, 60, 67, 0.16);
-    --line-strong: rgba(60, 60, 67, 0.29);
-    --ink: #000000;
-    --ink-sec: rgba(60, 60, 67, 0.72);
-    --ink-mut: rgba(60, 60, 67, 0.6);
-    /* Tertiary: a chevron is a hint about where a row goes, never a thing to
-       read. */
-    --ink-faint: rgba(60, 60, 67, 0.3);
-    /* The glass the two bars are made of: a hair lighter than the ground, and
-       thin enough that what passes under it can be seen passing. */
-    --bar: rgba(249, 249, 249, 0.82);
-    /* The fill under a quiet button: the system's own grey, which is a grey
-       with a little of every background in it rather than a colour. */
-    --fill-quiet: rgba(120, 120, 128, 0.16);
+    --surface-2: #eef0f4;
+    --surface-3: #e2ecf7;
+    --surface-sunk: #f7f8fa;
+    --track: #c4cad6;
+    --ink: #090735;
+    --ink-sec: #333846;
+    --ink-mut: #6b7384;
+    --ink-weak: #9199a9;
+    --line: #dde1e9;
+    --line-strong: #c4cad6;
+    --line-hard: #aab1bf;
+    --in: #3c78bf;
+    --in-strong: #2f66a9;
+    --in-soft: #e2ecf7;
+    --in-line: rgba(60, 120, 191, 0.3);
+    --in-fill: #3c78bf;
+    --out: #2f66a9;
+    --out-strong: #1a1850;
+    --out-soft: #e2ecf7;
+    --out-line: rgba(47, 102, 169, 0.3);
+    --out-fill: #3c78bf;
+    --on-fill: #ffffff;
+    --green: #1f9d6b;
+    --green-soft: #e3f5ec;
+    --red: #d64545;
+    --red-soft: #fdecec;
+    --teal: #0a7c8c;
+    --teal-soft: #e0f4f7;
+    --amber: #d08a00;
+    --amber-soft: #fff3d6;
+    --focus: #3c78bf;
+    --shadow-1: 0 0 0 1px #dde1e9;
+    --shadow-2: 0 0 0 1px #dde1e9, 0 10px 30px rgba(9, 7, 53, 0.1);
+    --overlay-scrim: rgba(9, 7, 53, 0.32);
+    /* L'ombra sotto una scheda piena (`--x-sh` nel canvas): il blu notte nel
+       chiaro, nero nel buio — dove un'ombra colorata non si vede e una nera sì. */
+    --navy-sh: rgba(9, 7, 53, 0.28);
+    /* Il secondo grigio dei quadrati segnaposto (`--x-ph2`): azzurrino nel
+       chiaro, neutro nel buio. Il primo è `--track`, il terzo `--in-soft`. */
+    --ph2: #bcd3ec;
+    /* L'inchiostro dei due posti non selezionati nella barra (`--x-tab`): un
+       gradino più scuro del testo secondario, perché una riga di 10.5px chiede
+       più contrasto di una di 13. */
+    --tab-ink: #5a6172;
+    /* E quella che l'isola della barra posa sul fondo chiaro. */
+    --shadow-cast: rgba(9, 7, 53, 0.10);
+    /* I blu notte delle schede piene, e i colori che vivono solo sopra di
+       loro: il blu del progresso, l'azzurro di ciò che arriva, il verde e il
+       rosso che reggono sul notte. */
+    --navy: #090735;
+    --navy-2: #1a1850;
+    --navy-blue: #5a93d2;
+    --in-light: #9cc4ef;
+    --green-on-navy: #3fbf8a;
+    --red-on-navy: #ff9a94;
+    /* The glass the two bars are made of, and the fill under a quiet button. */
+    --bar: rgba(247, 248, 250, 0.92);
+    --fill-quiet: var(--surface-2);
+
+    /* Scritti da JS: la scala del testo di sistema (Dynamic Type, `phone.ts`)
+       e l'altezza della tastiera (`keyboard.ts`). A riposo non cambiano niente. */
+    --dt: 1;
+    --kb: 0px;
   }
+  /* -- Lo scuro del telefono ------------------------------------------------
+     Il canvas dichiara la sua palette come variabili (`--x-*` nell'helmet) e
+     con loro lo scuro, che è **neutro**: fondo #0c0c0e, superfici #17171a e
+     #222226, inchiostro #f2f2f4 — e la scheda piena (`--x-navy`) diventa un
+     grigio scuro #1f1f24 invece del blu notte. Il blu notte è un colore della
+     luce, non del buio: su fondo nero una scheda blu è l'unica cosa colorata
+     dello schermo, e il canvas la spegne. Restano accesi solo gli accenti che
+     vivono *sopra* la scheda e sono gli stessi nei due temi — il blu acqua
+     #3C78BF, la riga di scansione #5a93d2, il verde #3fbf8a, l'azzurro di ciò
+     che arriva #9cc4ef, il rosso #ff9a94 — e il disco dentro l'anello
+     (#1a1850), che il canvas tiene letterale in entrambi.
+     14e («Scambia, scuro», fondo notte) è superata: la 15 la sostituisce e la
+     16 dice che «lo scuro seguirà la palette delle altre schermate».
+     Due blocchi perché l'interruttore girato a mano deve battere la media
+     query in tutte e due le direzioni. */
   @media (prefers-color-scheme: dark) {
     .app-phone:not([data-theme="light"]) {
-      --canvas: #000000;
-      --surface: #1c1c1e;
-      --surface-2: #2c2c2e;
-      --surface-3: #3a3a3c;
-      --surface-sunk: #000000;
-      --line: rgba(84, 84, 88, 0.6);
-      --line-strong: rgba(84, 84, 88, 0.65);
-      --ink: #ffffff;
-      --ink-sec: rgba(235, 235, 245, 0.65);
-      --ink-mut: rgba(235, 235, 245, 0.6);
-      --ink-faint: rgba(235, 235, 245, 0.3);
-      --bar: rgba(28, 28, 30, 0.78);
-      --fill-quiet: rgba(120, 120, 128, 0.24);
+      --canvas: #0c0c0e;
+      --surface: #17171a;
+      --surface-2: #222226;
+      --surface-3: #2a2a2f;
+      --surface-sunk: #0c0c0e;
+      --track: #2a2a2f;
+      --ink: #f2f2f4;
+      --ink-sec: #d6d6da;
+      --ink-mut: #9a9aa2;
+      --ink-weak: #6e6e76;
+      --line: rgba(255, 255, 255, 0.08);
+      --line-strong: rgba(255, 255, 255, 0.14);
+      --line-hard: rgba(255, 255, 255, 0.26);
+      --in: #8fb4dc;
+      --in-strong: #b9d3ef;
+      --in-soft: #17202c;
+      --in-line: rgba(143, 180, 220, 0.38);
+      --in-fill: #3c78bf;
+      --out: #8fb4dc;
+      --out-strong: #b9d3ef;
+      --out-soft: #17202c;
+      --out-line: rgba(143, 180, 220, 0.30);
+      --out-fill: #3c78bf;
+      --on-fill: #ffffff;
+      --green: #3fbf8a;
+      --green-soft: #12291f;
+      --red: #ff9a94;
+      --red-soft: #3a1a18;
+      --teal: #55c7ba;
+      --teal-soft: #0c2e2a;
+      --amber: #e0b070;
+      --amber-soft: #352a16;
+      --focus: #8fb4dc;
+      --shadow-1: 0 0 0 1px rgba(255, 255, 255, 0.06);
+      --shadow-2: 0 0 0 1px rgba(255, 255, 255, 0.06), 0 10px 30px rgba(0, 0, 0, 0.5);
+      --overlay-scrim: rgba(0, 0, 0, 0.6);
+      --bar: rgba(23, 23, 26, 0.92);
+      --navy: #1f1f24;
+      --navy-2: #1a1850;
+      --navy-blue: #5a93d2;
+      --in-light: #9cc4ef;
+      --green-on-navy: #3fbf8a;
+      --red-on-navy: #ff9a94;
+      --navy-sh: rgba(0, 0, 0, 0.5);
+      --shadow-cast: rgba(0, 0, 0, 0.5);
+      --ph2: #25282f;
+      --tab-ink: #9a9aa2;
     }
   }
 
-  .app-phone {
+  /* E lo stesso per l'interruttore girato a mano, che deve battere la media
+     query in tutte e due le direzioni. */
+  .app-phone[data-theme="dark"] {
+    --canvas: #0c0c0e;
+    --surface: #17171a;
+    --surface-2: #222226;
+    --surface-3: #2a2a2f;
+    --surface-sunk: #0c0c0e;
+    --track: #2a2a2f;
+    --ink: #f2f2f4;
+    --ink-sec: #d6d6da;
+    --ink-mut: #9a9aa2;
+    --ink-weak: #6e6e76;
+    --line: rgba(255, 255, 255, 0.08);
+    --line-strong: rgba(255, 255, 255, 0.14);
+    --line-hard: rgba(255, 255, 255, 0.26);
+    --in: #8fb4dc;
+    --in-strong: #b9d3ef;
+    --in-soft: #17202c;
+    --in-line: rgba(143, 180, 220, 0.38);
+    --in-fill: #3c78bf;
+    --out: #8fb4dc;
+    --out-strong: #b9d3ef;
+    --out-soft: #17202c;
+    --out-line: rgba(143, 180, 220, 0.30);
+    --out-fill: #3c78bf;
+    --on-fill: #ffffff;
+    --green: #3fbf8a;
+    --green-soft: #12291f;
+    --red: #ff9a94;
+    --red-soft: #3a1a18;
+    --teal: #55c7ba;
+    --teal-soft: #0c2e2a;
+    --amber: #e0b070;
+    --amber-soft: #352a16;
+    --focus: #8fb4dc;
+    --shadow-1: 0 0 0 1px rgba(255, 255, 255, 0.06);
+    --shadow-2: 0 0 0 1px rgba(255, 255, 255, 0.06), 0 10px 30px rgba(0, 0, 0, 0.5);
+    --overlay-scrim: rgba(0, 0, 0, 0.6);
+    --bar: rgba(23, 23, 26, 0.92);
+    --navy: #1f1f24;
+    --navy-2: #1a1850;
+    --navy-blue: #5a93d2;
+    --in-light: #9cc4ef;
+    --green-on-navy: #3fbf8a;
+    --red-on-navy: #ff9a94;
+    --navy-sh: rgba(0, 0, 0, 0.5);
+    --shadow-cast: rgba(0, 0, 0, 0.5);
+    --ph2: #25282f;
+    --tab-ink: #9a9aa2;
+  }
+  /* The frame itself. `.app-phone` is on <html> — see `App.tsx` — so the thing
+     being laid out is named here rather than being the same element as the
+     palette above. */
+  .app-phone .app {
     /* Both bars are lifted out of the frame and laid over the view — see the
        material below. What is left is one cell holding the screen. */
     grid-template-columns: 1fr;
@@ -2019,7 +2238,7 @@ select {
     border: 1px solid var(--line);
     border-radius: 12px;
     box-shadow: var(--shadow-1);
-    font-size: 13px;
+    font-size: calc(13px * var(--dt));
   }
   /* And the screen starts below it. Hanging clear of the edges stopped the
      banner pushing the whole app down, but it still landed on the first row of
@@ -2037,11 +2256,16 @@ select {
      So the view fills the frame edge to edge, under the status bar and under
      both bars, and each page insets its own content by exactly the height of
      the glass above and below it. */
-  .app-phone .header,
-  .app-phone .tabbar {
+  .app-phone .header {
     background: var(--bar);
     -webkit-backdrop-filter: saturate(180%) blur(20px);
     backdrop-filter: saturate(180%) blur(20px);
+  }
+  /* La barra in basso non è più vetro: è il fondo. Il canvas la disegna in
+     `--canvas` pieno, senza filo e senza sfocatura — e il disco al centro non
+     ha più l'anello, perché non c'è più niente da cui staccarsi. */
+  .app-phone .tabbar {
+    background: var(--canvas);
   }
   /* Where there is no blur there is no material, only a translucent strip with
      text showing through it. Then it is opaque, which is the honest fallback. */
@@ -2105,8 +2329,11 @@ select {
     left: 50%;
     transform: translateX(-50%);
     max-width: 52%;
-    font-size: 17px;
-    font-weight: 620;
+    font-family: var(--font-display);
+    font-size: calc(16px * var(--dt));
+    font-weight: 700;
+    letter-spacing: -0.015em;
+    color: var(--ink-title);
     text-align: center;
     opacity: 1;
     transition: opacity var(--t) var(--ease);
@@ -2127,25 +2354,831 @@ select {
     align-items: center;
     gap: 2px;
     max-width: 42%;
-    min-height: 40px;
+    min-height: 44px;
     padding: 0 4px 0 0;
     border: 0;
     background: none;
-    color: var(--out-strong);
-    font: 500 16px var(--font);
+    /* Grigio, non arancio: il canvas (11b, 12b) disegna la via d'uscita in
+       `--ink-sec`, e l'arancio resta a quello che manda. */
+    color: var(--ink-sec);
+    font: 500 calc(16px * var(--dt)) var(--font);
     cursor: pointer;
   }
   .nav-back:active {
     opacity: 0.5;
   }
-  /* 34/41 bold, which is the size this platform's large titles are. */
+  /* 34/41, which is the size this platform's large titles are — in the house
+     face, at the weight the canvas sets its screen names in, and in the brand
+     navy. This is the one word on the screen that is the company's rather than
+     the platform's, so it is also the one that carries the face. */
   .large-title {
-    margin: 0 0 8px;
-    font-size: 34px;
-    font-weight: 700;
+    margin: 0 0 10px;
+    /* 32/800 in Plus Jakarta (15a): il nome della schermata è la faccia della
+       casa, e lo è anche sul telefono adesso. */
+    font-family: var(--font-display);
+    font-size: calc(32px * min(var(--dt), 1.15));
+    font-weight: 800;
     letter-spacing: -0.025em;
-    line-height: 41px;
+    line-height: 1.1;
     color: var(--ink);
+  }
+
+  /* The identity block under the name: the label, the words, and the two things
+     you do with them. The words are the point of the block, so they are set at
+     reading size and allowed to wrap — see `.fingerprint`, which is shared with
+     the window. */
+  .you-print {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 12px 16px 14px;
+    border-top: 1px solid var(--line-inset);
+  }
+  .you-print .fingerprint {
+    font-size: calc(15px * var(--dt));
+    line-height: 1.5;
+    white-space: normal;
+    word-break: keep-all;
+  }
+  .you-print .t-label {
+    font-family: var(--font-display);
+    font-size: calc(12px * var(--dt));
+    font-weight: 700;
+    text-transform: none;
+    letter-spacing: 0;
+    color: var(--ink-title);
+  }
+
+  /* -- Filters as pills, and the counter beside a group's name -------------- */
+  .segmented-chips {
+    display: flex;
+    gap: 8px;
+    /* `overflow-x: auto` da solo non lascia l'altro asse a `visible`: lo porta
+       anch'esso ad `auto`. Bastava questo perché la striscia, che deve scorrere
+       di lato, ballasse di qualche pixel anche in verticale sotto il dito —
+       il bersaglio esteso delle pillole (`::after` più giù) usciva dal riquadro
+       e lo rendeva scrollabile. L'asse verticale è dichiarato chiuso, e il
+       bersaglio rientrato dentro il padding. */
+    border: 0;
+    background: none;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
+  }
+  .segmented-chips::-webkit-scrollbar {
+    display: none;
+  }
+  /* Il bersaglio, esteso fin dove il padding del contenitore arriva e non oltre:
+     sul telefono la pillola è già alta 40 (`.app-phone .segmented button`) e con
+     i 3 di padding il bersaglio è 46, sopra il pavimento dei 44. A -6 sporgeva,
+     ed è quello che rendeva scrollabile il verticale. */
+  .segmented-chips > button::after {
+    content: "";
+    position: absolute;
+    inset: -3px 0;
+  }
+  .segmented-chips > button {
+    position: relative;
+    flex: none;
+    height: 32px;
+    padding: 0 12px;
+    border: 1px solid var(--line);
+    border-radius: var(--r-pill);
+    background: var(--surface);
+    color: var(--ink-sec);
+    font: 500 calc(13px * var(--dt)) var(--font);
+  }
+  .segmented-chips > button[aria-checked="true"] {
+    border-color: var(--ink-title);
+    background: var(--ink-title);
+    color: var(--canvas);
+    font-weight: 600;
+    box-shadow: none;
+  }
+
+  /* A count that belongs to a heading rather than to a tab: quiet, because the
+     heading has already said what is being counted. */
+  .count-soft {
+    display: grid;
+    place-items: center;
+    min-width: 20px;
+    height: 19px;
+    padding: 0 6px;
+    border-radius: var(--r-pill);
+    background: var(--fill-quiet);
+    color: var(--ink-sec);
+    font: 600 calc(11px * var(--dt))/1 var(--font-display);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* The address book's line under a name is one line, and it *clips*. The board
+     and the deposits panel want the opposite — `.row-meta` there is allowed to
+     wrap and to overflow, because "active · 43 B · expires in 7 days" losing its
+     tail loses the half that matters. Here the tail is "ultimo scambio 16 giorni
+     fa", the row has a button at the end of it, and a meta line that refuses to
+     shrink does not wrap: it pushes that button off the card. */
+  .people-row .row-meta {
+    display: block;
+    flex-wrap: nowrap;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+  .people-row .row-meta > * {
+    display: inline;
+  }
+
+  /* The trust word under a name. Tone, not colour: "ok" is the green the rest
+     of the app uses for a good outcome, and untrusted is deliberately not red —
+     not having compared a fingerprint yet is the normal state of a new contact,
+     not a fault. */
+  .trust-word {
+    flex: none;
+    font-weight: 500;
+  }
+  .trust-word.ok {
+    color: var(--green);
+  }
+  .trust-word.bad {
+    color: var(--red);
+  }
+  .trust-word.mut {
+    color: var(--ink-mut);
+  }
+
+  /* The address-book row: the whole line opens the person, and the square at
+     the end sends to them. Two targets on one line, so the hit areas are drawn
+     rather than assumed — 44px each, which is the platform's floor. */
+  .people-row {
+    display: flex;
+    align-items: stretch;
+  }
+  /* `.ios-row` is `width: 100%` — correct for a row that *is* the group, and
+     the whole of this bug when one shares a line with a button: as a flex item
+     it then asks for the full width of the line and the button is laid out
+     past the card's edge, clipped by the group's `overflow: hidden`. Half of the
+     address book had no send button at all for exactly this reason. */
+  .people-row > .ios-row {
+    width: auto;
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+  /* "Manda", as a word in the sending colour — which is what the canvas draws
+     at the end of a person's row (4b, 5c), and what this was getting wrong in
+     the one way that matters: it was a filled square in the *arriving* blue.
+     Colour means direction in this app, and a send wearing the colour of an
+     arrival is the palette telling the opposite of the truth. Eight of them
+     down a screen also made the address book look like a column of buttons
+     rather than a list of people. */
+  /* Il verbo, come glifo.
+     Era la parola «Invia», e una parola in fondo a una riga che ne contiene già
+     due — il nome e com'è messo — è una terza cosa da leggere per capire che è
+     un pulsante. La freccia la si riconosce senza leggerla, ed è la stessa che
+     il bottone d'invio porta in fondo a *Cosa*: lo stesso gesto, lo stesso
+     segno. Il nome resta per chi non vede il glifo, nell'`aria-label`. */
+  .people-send {
+    position: relative;
+    display: grid;
+    place-items: center;
+    flex: none;
+    width: 36px;
+    height: 36px;
+    border: 0;
+    border-radius: 50%;
+    background: var(--fill-quiet);
+    color: var(--out-strong);
+    cursor: pointer;
+  }
+  /* 36 di disegno, 44 di dito. */
+  .people-send::after {
+    content: "";
+    position: absolute;
+    inset: -4px;
+  }
+  .people-send:active {
+    opacity: 0.5;
+  }
+
+
+  /* -- Attività ------------------------------------------------------------
+     The screen's own head, because the two glyphs belong beside the large title
+     rather than up in the bar: the tray is the way to what is still sitting on a
+     relay, and the magnifier is the only way to search on a phone — there is no
+     field in the bar to put one in. */
+  /* No gap of its own any more: `.ios-page` is 14 now, which is the canvas's
+     own, and this screen was only overriding it because 32 was too much. */
+  .act-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  .act-head .large-title {
+    margin: 0;
+  }
+  .act-head-tools {
+    display: flex;
+    flex: none;
+    gap: 6px;
+  }
+  .act-tool {
+    display: grid;
+    place-items: center;
+    width: 44px;
+    height: 44px;
+    border: 0;
+    border-radius: 50%;
+    background: var(--surface);
+    box-shadow: 0 0 0 1px var(--line);
+    color: var(--ink);
+    cursor: pointer;
+  }
+  .act-tool:active {
+    opacity: 0.6;
+  }
+  .act-tool[aria-pressed="true"] {
+    background: var(--ink-title);
+    color: var(--canvas);
+  }
+  /* The one filled thing on the address book: the exchange two people do while
+     standing in front of each other. Ink rather than an accent — it is not a
+     direction, and the screen has no other filled surface to argue with. */
+  .people-swap {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+    min-height: 60px;
+    padding: 8px 14px;
+    border: 0;
+    border-radius: var(--r-lg);
+    background: var(--ink-title);
+    color: var(--canvas);
+    font-family: var(--font);
+    text-align: left;
+    cursor: pointer;
+  }
+  .people-swap:active {
+    filter: brightness(1.15);
+  }
+  .people-swap-title {
+    display: block;
+    font-size: calc(15.5px * var(--dt));
+    font-weight: 650;
+  }
+  .people-swap-sub {
+    display: block;
+    font-size: calc(12.5px * var(--dt));
+    opacity: 0.8;
+  }
+
+  /* -- A link, after it is made --------------------------------------------
+     An address, whole. The box grows to fit it and the text breaks anywhere,
+     because the one thing a person needs to be sure of is that what they are
+     copying is all of it — an ellipsis in a URL is a URL that does not work. */
+  .link-file {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 14px;
+    border: 1px solid var(--line);
+    border-radius: var(--r-lg);
+    background: var(--surface);
+  }
+  .link-file-name {
+    display: block;
+    font-size: calc(14.5px * var(--dt));
+    font-weight: 600;
+    line-height: 1.35;
+    overflow-wrap: anywhere;
+  }
+  .link-file-size {
+    display: block;
+    font-size: calc(12.5px * var(--dt));
+    color: var(--ink-mut);
+  }
+  .link-box {
+    min-height: 72px;
+    padding: 12px 14px;
+    border: 1px solid var(--line-strong);
+    border-radius: var(--r-md);
+    background: var(--surface);
+    font-size: calc(15px * var(--dt));
+    line-height: 1.45;
+    overflow-wrap: anywhere;
+    -webkit-user-select: text;
+    user-select: text;
+  }
+  .link-actions {
+    display: flex;
+    gap: 8px;
+  }
+  .link-actions .btn {
+    flex: 1;
+  }
+
+  /* The code, waiting. A dot and a sentence: there is nothing to measure yet,
+     and a bar that filled to 100% and stopped would be measuring the wrong
+     thing — what is being waited for is a person, not bytes. */
+  .code-state {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    font-size: calc(13.5px * var(--dt));
+    color: var(--ink-mut);
+  }
+  .code-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--out);
+    animation: pulse 2s var(--ease) infinite;
+  }
+  .code-what {
+    text-align: center;
+  }
+  .code-actions {
+    flex-direction: row;
+  }
+  .code-actions .btn {
+    flex: 1;
+  }
+
+  /* -- The wheel -----------------------------------------------------------
+     A scroller with one row centred, a band behind it and the ends faded. The
+     momentum, the rubber band and the snap are the engine's; what is here is
+     the geometry, and the one number that matters — the row height — is shared
+     with the arithmetic in `Wheel.tsx`. */
+  .wheel-sheet {
+    --wheel-item: 44px;
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 41;
+    display: flex;
+    flex-direction: column;
+    padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 10px + var(--kb));
+    border-radius: 28px 28px 0 0;
+    background: var(--canvas);
+    box-shadow: var(--shadow-3);
+    animation: sheet-up var(--t-slow) var(--ease);
+  }
+  .wheel {
+    position: relative;
+    padding: 6px 0 2px;
+  }
+  /* The band is drawn *behind* the rows and does not move: it is the window the
+     cylinder turns past, not a selected row. */
+  .wheel-band {
+    position: absolute;
+    left: 12px;
+    right: 12px;
+    top: 50%;
+    height: var(--wheel-item);
+    transform: translateY(-50%);
+    border-radius: var(--r-sm);
+    background: var(--surface-2);
+    pointer-events: none;
+  }
+  .wheel-list {
+    position: relative;
+    height: calc(var(--wheel-item) * 5);
+    overflow-y: scroll;
+    scroll-snap-type: y mandatory;
+    scrollbar-width: none;
+    /* Faded at both ends, which is what makes a flat list read as a cylinder. */
+    -webkit-mask-image: linear-gradient(
+      transparent,
+      #000 28%,
+      #000 72%,
+      transparent
+    );
+    mask-image: linear-gradient(transparent, #000 28%, #000 72%, transparent);
+  }
+  .wheel-list::-webkit-scrollbar {
+    display: none;
+  }
+  /* Two rows of air at each end, so the first and the last can reach the middle. */
+  .wheel-pad {
+    display: block;
+    height: calc(var(--wheel-item) * 2);
+  }
+  .wheel-item {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    height: var(--wheel-item);
+    scroll-snap-align: center;
+    border: 0;
+    background: none;
+    color: var(--ink-sec);
+    font: 500 calc(17px * var(--dt)) var(--font);
+    cursor: pointer;
+  }
+  .wheel-item.on {
+    color: var(--ink);
+    font-weight: 620;
+  }
+  .wheel-hint {
+    padding: 4px 20px 2px;
+  }
+
+  /* An empty Attività, as the design draws it: the block in the middle of the
+     free space rather than at the top, and the two gestures stacked under it at
+     full width. The glyph sits in a tile of its own, which is what makes an
+     empty screen look composed rather than unfinished. */
+  .act-empty {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 50vh;
+  }
+  .empty-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    width: 100%;
+    max-width: 260px;
+    margin-top: 8px;
+  }
+  .empty-actions .btn {
+    width: 100%;
+  }
+  /* Ink, not an accent: the canvas fills this one with the brand's own black
+     because the screen has nothing else on it to argue with, and a blue block
+     in the middle of an empty screen is the loudest thing the app can draw. */
+  .app-phone .btn.btn-ink {
+    border-color: transparent;
+    background: var(--ink-title);
+    color: var(--canvas);
+  }
+
+  /* Quello che è già finito non è una lista, è una riga che si apre: su un
+     telefono usato da due settimane la parte "oggi" era la schermata, e quello
+     che sta ancora succedendo finiva sotto il bordo. */
+  .act-done-row {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    width: 100%;
+    min-height: 60px;
+    padding: 0 18px;
+    border: 1px solid var(--line);
+    border-radius: var(--r-xl);
+    background: var(--surface);
+    color: var(--ink);
+    font: 600 calc(16px * var(--dt)) var(--font);
+    text-align: left;
+    cursor: pointer;
+  }
+  .act-done-row:active {
+    background: var(--surface-2);
+  }
+  .act-done-row .ico {
+    flex: none;
+    display: grid;
+    place-items: center;
+    color: var(--ink-mut);
+  }
+
+  /* -- The long press: everything a row can do, with its consequences --------
+     The design's 7c. It comes up from the edge the thumb is already at, opens
+     with what the row *is*, and writes under each verb what the verb will do —
+     which is the whole difference between this and the window's row menu. */
+  .act-sheet {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 41;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    max-height: 86%;
+    overflow-y: auto;
+    padding: 10px 16px calc(env(safe-area-inset-bottom, 0px) + 20px + var(--kb));
+    border-radius: 28px 28px 0 0;
+    background: var(--canvas);
+    box-shadow: var(--shadow-3);
+    animation: sheet-up var(--t-slow) var(--ease);
+  }
+  @keyframes sheet-up {
+    from {
+      transform: translateY(100%);
+    }
+  }
+  /* The bar you take hold of, on every sheet that can be dragged. 5px of ink
+     in 44 of target, like `.exch-grab`; the negative margins keep the sheet's
+     own spacing where it was. */
+  .sheet-grab {
+    flex: none;
+    align-self: center;
+    display: grid;
+    place-items: center;
+    width: 72px;
+    min-height: 44px;
+    margin: -12px 0 -14px;
+    cursor: grab;
+  }
+  .sheet-grab > span {
+    display: block;
+    width: 36px;
+    height: 5px;
+    border-radius: 3px;
+    background: var(--line-hard);
+  }
+  /* While a dragged sheet settles it moves on its own; under a finger it does
+     not — a transition there would make it lag the finger. */
+  .settling {
+    transition: transform 380ms cubic-bezier(0.32, 0.72, 0, 1);
+  }
+  .act-sheet-head {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 0 4px;
+  }
+  .act-sheet-title {
+    font-size: calc(16px * var(--dt));
+    font-weight: 650;
+    /* A file name has no spaces to break at and is routinely longer than a
+       phone: anywhere is better than off the edge. */
+    overflow-wrap: anywhere;
+  }
+  .act-sheet-state {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    font-size: calc(13px * var(--dt));
+    color: var(--ink-mut);
+  }
+  .act-sheet-note {
+    font-size: calc(13px * var(--dt));
+    color: var(--ink-sec);
+  }
+  .act-sheet-row {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+    min-height: 54px;
+    padding: 8px 14px;
+    border: 0;
+    background: var(--surface);
+    color: var(--ink);
+    font-family: var(--font);
+    text-align: left;
+    cursor: pointer;
+  }
+  .act-sheet-row:active {
+    background: var(--surface-2);
+  }
+  .act-sheet-row + .act-sheet-row::before {
+    content: "";
+    position: absolute;
+    left: 60px;
+    right: 0;
+    top: 0;
+    height: 1px;
+    background: var(--line);
+  }
+  .act-sheet-glyph {
+    flex: none;
+    display: grid;
+    place-items: center;
+    width: 34px;
+    height: 34px;
+    border-radius: var(--r-sm);
+    background: var(--surface-3);
+    color: var(--ink);
+  }
+  .act-sheet-row.danger .act-sheet-glyph {
+    background: var(--red-soft);
+    color: var(--red);
+  }
+  .act-sheet-label {
+    display: block;
+    font-size: calc(15px * var(--dt));
+    font-weight: 600;
+  }
+  .act-sheet-row.danger .act-sheet-label {
+    color: var(--red);
+  }
+  .act-sheet-desc {
+    display: block;
+    font-size: calc(12.5px * var(--dt));
+    line-height: 1.4;
+    color: var(--ink-mut);
+  }
+  .act-sheet-dismiss {
+    min-height: 50px;
+    border: 1px solid var(--line-strong);
+    border-radius: var(--r-md);
+    background: var(--surface);
+    color: var(--ink-sec);
+    font: 650 calc(16px * var(--dt)) var(--font);
+    cursor: pointer;
+  }
+  .act-sheet-dismiss:active {
+    background: var(--surface-2);
+  }
+
+  /* A heading with the one thing that can be done to the whole of what is under
+     it. A plural verb — hold everything, forget everything — which on this
+     platform sits beside the label rather than in a toolbar. */
+  .act-head-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 0 4px 7px;
+  }
+  .act-head-act {
+    min-height: 44px;
+    /* Pulled back into the heading's line so the target grows downwards into
+       the gap above the group rather than pushing the heading up. */
+    margin: -6px 0 -6px;
+    padding: 0 2px;
+    border: 0;
+    background: none;
+    color: var(--ink-sec);
+    font: 600 calc(13px * var(--dt)) var(--font);
+    cursor: pointer;
+  }
+  .act-head-act:active {
+    opacity: 0.5;
+  }
+
+  
+
+  /* The decision, cold and at the top. Cold rather than filled navy: the colour
+     the whole app uses for things coming towards you says which way this is
+     going, and it says it without being the loudest thing on the screen for as
+     long as it sits there unanswered. */
+  /* La decisione, fredda e in cima. Nella scala larga il verbo non sta più
+     accanto alla frase ma **sotto**, a tutta larghezza: una frase lunga e un
+     bottone sulla stessa riga si rubano lo spazio a vicenda, e qui la frase è
+     il nome di una persona più quello che vuole. */
+  .act-offer {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    padding: 20px;
+    border: 1px solid var(--in-line);
+    border-radius: var(--r-xl);
+    background: var(--in-soft);
+  }
+  .act-offer-who {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+  }
+  .act-offer .btn {
+    width: 100%;
+    height: 48px;
+    border-radius: var(--r-lg);
+  }
+  /* Two lines, not one with an ellipsis: the sentence is "X wants to send you a
+     file", and a name long enough to eat it is exactly when the sentence matters
+     most. */
+  .act-offer-title {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    font-size: calc(17px * var(--dt));
+    font-weight: 680;
+    line-height: 1.25;
+    color: var(--in-strong);
+  }
+  .act-offer-sub {
+    margin-top: 2px;
+    font-size: calc(13.5px * var(--dt));
+    color: var(--ink-sec);
+  }
+
+
+  /* A row: the file, then one line that opens with where it is going, then the
+     bar if anything is moving. The direction is two tinted words rather than a
+     column, which is the whole of what replaced the board's two halves. */
+  .act-row {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 16px 18px;
+    background: var(--surface);
+  }
+  /* The separator starts where the text does, past the glyph. Drawn on the row
+     rather than as a border so a swiped row's actions are not underlined. */
+  .swipe + .swipe .act-row::before,
+  .act-row + .act-row::before {
+    content: "";
+    position: absolute;
+    left: 18px;
+    right: 0;
+    top: 0;
+    height: 1px;
+    background: var(--line);
+  }
+  .act-row {
+    position: relative;
+  }
+  .act-top {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .act-glyph {
+    flex: none;
+    display: grid;
+    place-items: center;
+    width: 16px;
+    color: var(--ink-mut);
+  }
+  .act-glyph.tone-in {
+    color: var(--in);
+  }
+  .act-glyph.tone-out {
+    color: var(--out-strong);
+  }
+  .act-name {
+    flex: 1;
+    min-width: 0;
+    font-size: calc(16px * var(--dt));
+    font-weight: 600;
+  }
+  .act-meta {
+    display: block;
+    padding-left: 26px;
+    font-size: calc(13.5px * var(--dt));
+    color: var(--ink-mut);
+  }
+  /* La percentuale sta in colonna a destra del nome, non nella riga sotto. */
+  .act-pct {
+    flex: none;
+    font-size: calc(13.5px * var(--dt));
+    color: var(--ink-mut);
+  }
+  .act-dir {
+    font-weight: 600;
+  }
+  .act-row .prog {
+    margin: 10px 0 0;
+  }
+  /* The one thing on the right of a row, where the row has one: a square to
+     hold up, a link to read, a file to open. 44 square, like everything else a
+     finger is asked to hit. */
+  .act-side {
+    flex: none;
+    display: grid;
+    place-items: center;
+    width: 44px;
+    height: 44px;
+    /* The disc is drawn at 44 and the row keeps its height: the negative margin
+       lets the target overhang the row's padding, which is what this platform
+       does with a trailing glyph. */
+    margin: -10px -10px -10px 0;
+    border: 0;
+    border-radius: var(--r-pill);
+    background: var(--surface-2);
+    color: var(--ink-sec);
+    cursor: pointer;
+  }
+  .act-side:active {
+    opacity: 0.6;
+  }
+  /* La barra delle azioni in fondo a una schermata che scorre.
+     `flex: none` su di lei **e** sui pulsanti, perché qui sono flex item dentro
+     flex item: la pagina è una colonna, questa barra è una sua riga, e i
+     pulsanti sono righe di lei. Lungo l'asse principale un flex item si
+     *restringe* sotto l'altezza che gli hai dato, e in Codici — dove sopra c'è
+     un QR da 212 che non lascia spazio — i due pulsanti finivano alti 23 invece
+     di 56: non schiacciati per un pixel, dimezzati. */
+  .phone-actions {
+    position: sticky;
+    bottom: 0;
+    z-index: 2;
+    display: flex;
+    flex: none;
+    flex-direction: column;
+    gap: 8px;
+    margin: 0 -16px -16px;
+    padding: 12px 16px calc(env(safe-area-inset-bottom, 0px) + 12px);
+    background: linear-gradient(
+      to bottom,
+      transparent,
+      var(--canvas) 18px
+    );
+  }
+  .phone-actions .btn {
+    width: 100%;
+    flex: none;
   }
 
   /* The grouped background this platform reads a list against. */
@@ -2177,8 +3210,17 @@ select {
      where a group is the first thing there is, the first row arrived with its
      rounded corner shaved off. */
   .app-phone .page {
-    padding: calc(env(safe-area-inset-top, 0px) + 52px) 16px
-      calc(env(safe-area-inset-bottom, 0px) + 64px);
+    /* 20 di margine, non 16: la sezione 9 del canvas ("Più aria") allarga la
+       scala di tutte le schermate principali, e il margine è la prima cosa che
+       si vede cambiare. */
+    /* In fondo: l'isola della barra, più l'aria della pagina.
+       L'isola è alta 64 e sta 30 sopra l'area sicura, quindi occupa 94; il 110
+       di prima lasciava 16 di stacco, che non è aria — è il margine per cui
+       l'ultima riga *tocca* la barra e, con l'ombra lunga che l'isola proietta,
+       si legge come se ci finisse sotto. 122 lascia i 28 che il canvas mette
+       fra due blocchi: lo stesso respiro che c'è fra tutto il resto. */
+    padding: calc(env(safe-area-inset-top, 0px) + 52px) 20px
+      calc(env(safe-area-inset-bottom, 0px) + 122px + var(--dock, 0px));
     background: var(--surface-sunk);
   }
   /* One screen in there is no large title to open with, and a list that starts
@@ -2187,6 +3229,24 @@ select {
      which is why only the pushed ones need it said. */
   .app-phone .page.stacked {
     padding-top: calc(env(safe-area-inset-top, 0px) + 52px + 18px);
+  }
+  /* Cosa (14b) ha la via d'uscita dentro la pagina, nella riga della capsula:
+     niente barra sopra, e la pagina comincia sotto la status bar. */
+  .app-phone .page.headless {
+    display: flex;
+    flex-direction: column;
+    padding-top: calc(env(safe-area-inset-top, 0px) + 8px);
+    /* Niente barra sotto una schermata spinta: il foglio blu è l'ultima cosa. */
+    padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 12px);
+    overflow: hidden;
+  }
+  /* La galleria scorre da sola, sotto la capsula e sopra il foglio (14b): la
+     pagina non è lo scroller qui, lo è la griglia. */
+  .app-phone .page.headless > .page-fill {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
   }
   /* The page is the scroller, always — not just while a transition is running.
      The frame around it is clipped (that is what stages the slide), so a page
@@ -2210,6 +3270,46 @@ select {
      finger. */
   .app-phone .view.staged > .page > .page-fill {
     min-height: calc(100% + 1px);
+  }
+  /* -- Tirare per aggiornare -------------------------------------------------
+     L'indicatore sta sopra il contenuto, dentro `.page-fill`, così l'elastico
+     nativo lo scopre da solo mentre si tira (vedi `pullRefresh.ts`). */
+  .ptr {
+    position: absolute;
+    top: -52px;
+    left: 0;
+    right: 0;
+    display: flex;
+    justify-content: center;
+    pointer-events: none;
+  }
+  .ptr-ring {
+    width: 30px;
+    height: 30px;
+    border-radius: 50%;
+    border: 2.5px solid var(--ink-weak);
+    border-top-color: transparent;
+    opacity: var(--prog, 0);
+    transform: rotate(calc(var(--prog, 0) * 300deg));
+  }
+  .page.ptr-settle .ptr-ring {
+    transition: opacity 200ms var(--ease);
+  }
+  .page.ptr-busy .ptr-ring {
+    opacity: 1;
+    transform: none;
+    animation: ptr-spin 800ms linear infinite;
+  }
+  @keyframes ptr-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+  .app-phone .view.staged > .page > .page-fill {
+    transition: transform 280ms var(--ease);
+  }
+  .app-phone .view.staged > .page.ptr-busy > .page-fill {
+    transform: translateY(56px);
   }
   .app-phone .view.staged > .page {
     position: absolute;
@@ -2304,15 +3404,23 @@ select {
   .ios-page {
     display: flex;
     flex-direction: column;
-    /* The platform's own air between groups (35pt in its tables). Groups set
-       tighter than this stop reading as separate thoughts. */
-    gap: 32px;
+    /* 28. Il canvas è passato da `gap:14` a `gap:28` (sezione 9, "Più aria") e
+       insieme ha tolto roba da ogni schermata: l'aria non è aggiunta sopra le
+       stesse cose, è quello che resta quando le cose sono meno. Due frame su sei
+       usano 24; 28 è il numero dichiarato nell'introduzione e quello delle due
+       schermate più piene, quindi è lui la base. */
+    gap: 28px;
   }
+  /* r-xl e un filo, senza ombra: il canvas non solleva niente dal fondo tranne
+     le due cose che devono esserlo (il foglio, e la scheda che è l'unica azione
+     della sua schermata). Un'ombra sotto ogni gruppo fa leggere una lista di
+     gruppi come una pila di schede. L'angolo si è ammorbidito con la scala. */
   .ios-group {
     display: flex;
     flex-direction: column;
     background: var(--surface);
-    border-radius: 11px;
+    border: 1px solid var(--line);
+    border-radius: var(--r-xl);
     overflow: hidden;
   }
   .ios-row {
@@ -2320,14 +3428,26 @@ select {
     align-items: center;
     gap: 10px;
     width: 100%;
-    min-height: 47px;
-    padding: 11px 16px;
+    /* 60, e 18 dentro: la riga della scala larga. Resta sopra il pavimento dei
+       44, che è l'unico numero che non si muove. */
+    min-height: 60px;
+    padding: 10px 18px;
     border: 0;
     background: none;
     color: var(--ink);
-    /* Body is 17 here, and everything secondary is 15. Rows set at 16.5 read
-       as a web page that has been made small. */
-    font: 400 17px var(--font);
+    /* -- The scale ----------------------------------------------------------
+       15, not 17. The platform's own body size is 17 and this stylesheet used
+       it everywhere, which is why the screens read as a heavier, chunkier thing
+       than the design they were drawn from: the canvas sets its rows at 14–15,
+       its secondary text at 12, its labels at 11 and its screen titles at 24.
+       That is one decision applied about thirty times, and every one of them is
+       in this file.
+
+       The trade is real and taken deliberately: 15px rows fit more on a screen
+       and look like the design; 17px rows are what the system's own apps do, and
+       are easier to read at arm's length in bad light. The design of record wins
+       here — but see the form fields below, which are the one place it cannot. */
+    font: 400 calc(15px * var(--dt)) var(--font);
     letter-spacing: -0.01em;
     text-align: left;
     cursor: pointer;
@@ -2341,10 +3461,10 @@ select {
     content: "";
     position: absolute;
     top: 0;
-    left: 16px;
+    left: 18px;
     right: 0;
     height: 1px;
-    background: var(--line);
+    background: var(--line-inset);
   }
   /* On at once, off slowly: a highlight that fades *in* is a page thinking
      about it, and the whole point of this one is that the row answers the
@@ -2358,7 +3478,7 @@ select {
   }
   .ios-detail {
     color: var(--ink-mut);
-    font-size: 17px;
+    font-size: calc(13px * var(--dt));
     letter-spacing: -0.01em;
     /* Holds its natural width, but *yields* when there is not enough for both:
        a value longer than the row would otherwise squeeze the label it belongs
@@ -2368,6 +3488,21 @@ select {
     flex: 0 1 auto;
     min-width: 0;
   }
+  /* The name wins the row, the value yields. `.grow` is `flex: 1` — basis zero —
+     and a flex item with a zero basis carries zero shrink *weight*, so every
+     pixel that had to be given up was taken from the name and none from the
+     value beside it: a device called "MacBook di Lorenzo" became "M…" while
+     "ultima sincronizzazione 5 minuti fa" stayed whole. Giving the name a real
+     basis makes the two shrink in proportion to what they actually are, and the
+     value truncates first because it is the longer of the two. */
+  .ios-row > .grow {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+  .ios-detail {
+    flex: 0 2 auto;
+  }
+
   /* A switch row's label wraps rather than truncating. There is no second line
      of explanation inside these rows — it lives under the group — so a clipped
      label is the whole of what the switch is for, cut off. */
@@ -2393,7 +3528,7 @@ select {
   .ios-sub {
     display: block;
     margin-top: 2px;
-    font-size: 13px;
+    font-size: calc(13px * var(--dt));
     line-height: 1.3;
     color: var(--ink-mut);
     white-space: normal;
@@ -2406,6 +3541,43 @@ select {
   .mode-row .ios-check {
     margin-top: 2px;
   }
+  /* Una riga che è un pulsante: centrata, nel colore di ciò che agisce, e da
+     sola nel suo gruppo. È la forma che questa piattaforma dà a un comando
+     dentro una lista di impostazioni — non un bottone pieno in mezzo alle
+     righe, che si leggerebbe come la cosa principale della schermata. */
+  .ios-row.action {
+    justify-content: center;
+    gap: 8px;
+    color: var(--in);
+    font-weight: 600;
+  }
+  .ios-row.action:disabled {
+    color: var(--ink-weak);
+    cursor: default;
+  }
+  /* L'indirizzo per intero: non una riga ma un paragrafo di base32, che va a
+     capo dove capita perché non ha spazi, e che si può selezionare a mano —
+     qualcuno vorrà prenderne un pezzo per confrontarlo. */
+  .id-full {
+    padding: 14px 16px;
+    font-size: calc(14px * var(--dt));
+    line-height: 1.55;
+    letter-spacing: 0;
+    color: var(--ink);
+    word-break: break-all;
+    user-select: text;
+    -webkit-user-select: text;
+  }
+  .id-full + .ios-row::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 1px;
+    background: var(--line);
+  }
+
   /* A whole row, centred, red, and at the bottom of what it destroys. This
      platform never puts an emptying button above the list it empties: up there
      it is one mis-tap away from the thing you came to read. */
@@ -2431,7 +3603,10 @@ select {
     border: 0;
     background: none;
     color: var(--ink);
-    font: 400 17px var(--font);
+    /* 16, not 15: a field under 16px makes this platform's browser zoom the page
+       on focus, and the zoom does not come back. The row it sits in is 15 — one
+       pixel of disagreement nobody can see, against a screen that jumps. */
+    font: 400 calc(16px * var(--dt)) var(--font);
     letter-spacing: -0.01em;
     text-align: right;
     outline: none;
@@ -2447,6 +3622,104 @@ select {
     opacity: 1;
   }
 
+  /* -- The row with a glyph in it ------------------------------------------
+     The other half of the grouped list, and the half that had no stylesheet at
+     all. *Impostazioni* (12b) and *Attività › Lasciati* (12a) are drawn with a
+     40px tile at the head of every row: five destinations you pick out by shape
+     before you have read any of them, and a deposit whose kind — a public link
+     or a sealed mailbox — is said by its tile rather than by a word. Both
+     screens were written against these class names and the rules were never
+     written, so every one of those rows fell back to the browser's own
+     `<button>`: a grey bordered pill with its text centred, the glyph welded to
+     the first word and the chevron landing wherever the label happened to end.
+
+     Written as its own row rather than as a modifier of `.ios-row`, because the
+     two differ in nearly everything a row is: the inset, the gap, the height,
+     where the hairline starts and whether the title is 15 or 16. What they
+     share is the group they sit in, and that is already said by `.ios-group`. */
+  .big-row {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    width: 100%;
+    /* 68 with two lines in it, 60 with one — the deposits carry a state badge
+       under the name and the settings rows carry nothing. */
+    min-height: 68px;
+    padding: 10px 16px;
+    border: 0;
+    background: none;
+    color: var(--ink);
+    text-align: left;
+    cursor: pointer;
+    position: relative;
+    transition: background 320ms var(--ease);
+  }
+  .big-row.r60 {
+    min-height: 60px;
+  }
+  .big-row:active {
+    background: var(--surface-2);
+    transition: none;
+  }
+  /* Full width, not inset to the text: a row this tall with a tile at its head
+     is already read as one thing, and the canvas draws the hairline edge to
+     edge under it. */
+  .big-row + .big-row::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 1px;
+    background: var(--line);
+  }
+  .row-glyph {
+    width: 40px;
+    height: 40px;
+    flex: none;
+    display: grid;
+    place-items: center;
+    border-radius: var(--r-md);
+    background: var(--surface-3);
+    color: var(--ink);
+  }
+  /* What is on its way out, in the temperature the whole app gives that
+     direction: a deposit in a mailbox is something you sent. */
+  .row-glyph.out {
+    background: var(--out-soft);
+    color: var(--out-strong);
+  }
+  .big-row > .grow {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+  /* 16/600: a destination is the thing on its row, not a label beside a value,
+     so it is set a size up from the plain rows and carries the weight. */
+  .big-row-title {
+    display: block;
+    font: 600 calc(16px * var(--dt)) var(--font);
+    letter-spacing: -0.01em;
+  }
+  /* The second line, which is a state and then a sentence about it. A flex row
+     rather than running text: the badge keeps its own width and the sentence
+     beside it is the part that gives way. */
+  .big-row-sub {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    margin-top: 2px;
+    font-size: calc(13px * var(--dt));
+    line-height: 1.4;
+    color: var(--ink-mut);
+  }
+  .big-row-sub .badge {
+    flex: none;
+    font-size: calc(12px * var(--dt));
+  }
+
   /* -- Controls, at this platform's sizes ----------------------------------
      The desktop's buttons are 32px with a hairline border and 13px text, which
      on a phone is both too small to hit and the wrong dialect. The system these
@@ -2455,21 +3728,26 @@ select {
      quiet one, the same shape on the grey fill with tinted text. Everything
      else a desktop grows on a button (borders, hover states, the 1px press
      dip) is not in the dialect: a press dims, and nothing moves. */
+  /* A secondary button, as the canvas draws it everywhere it draws one: a white
+     surface with a drawn edge and the text in the secondary ink. It was a quiet
+     tinted fill, which on the warm ground reads as a disabled control — and in a
+     pair (the empty screens put two of these one above the other) it made the
+     second one look like a hint rather than a choice. */
   .app-phone .btn {
-    height: 50px;
-    padding: 0 20px;
-    border: 0;
-    border-radius: 12px;
-    font-size: 17px;
-    font-weight: 590;
+    height: 52px;
+    padding: 0 18px;
+    border: 1px solid var(--line-strong);
+    border-radius: var(--r-md);
+    font-size: calc(15px * var(--dt));
+    font-weight: 600;
     letter-spacing: -0.01em;
-    background: var(--fill-quiet);
-    color: var(--out-strong);
+    background: var(--surface);
+    color: var(--ink-sec);
     box-shadow: none;
     transition: opacity 320ms var(--ease);
   }
   .app-phone .btn:hover:not(:disabled) {
-    background: var(--fill-quiet);
+    background: var(--surface);
     filter: none;
   }
   .app-phone .btn:active:not(:disabled) {
@@ -2477,40 +3755,65 @@ select {
     opacity: 0.7;
     transition: none;
   }
-  .app-phone .btn-primary,
-  .app-phone .btn-in {
+  /* Two fills, not one. They were the same blue, because the phone's own palette
+     had a single colour for everything that acts; on the canvas's palette the
+     two directions are two colours, and this is the button that *starts* one —
+     accepting is blue because what is arriving is blue, sending is orange for
+     the same reason. */
+  .app-phone .btn-primary {
+    border-color: transparent;
     background: var(--out-fill);
     color: var(--on-fill);
   }
-  .app-phone .btn-primary:hover:not(:disabled),
-  .app-phone .btn-in:hover:not(:disabled) {
+  .app-phone .btn-in {
+    border-color: transparent;
+    background: var(--in-fill);
+    color: var(--on-fill);
+  }
+  .app-phone .btn-primary:hover:not(:disabled) {
     background: var(--out-fill);
     filter: none;
   }
+  .app-phone .btn-in:hover:not(:disabled) {
+    background: var(--in-fill);
+    filter: none;
+  }
   .app-phone .btn-danger {
-    background: var(--fill-quiet);
+    background: var(--surface);
     color: var(--red);
   }
   .app-phone .btn-danger:hover:not(:disabled) {
     background: var(--fill-quiet);
   }
   .app-phone .btn-ghost {
+    border-color: transparent;
     background: none;
   }
   /* An inline button — one sitting inside a row or beside a field, where 50pt
      would be a wall. 34pt capsule, 15pt text: the size this platform uses for
-     a button that lives inside something else. */
+     a button that lives inside something else.
+     
+     Drawn at 34 and *hit* at 44. The platform's minimum is about the finger,
+     not about the ink: Apple's own inline capsules are this size and carry an
+     invisible target around them, which is what the pseudo-element is. Growing
+     the pill itself instead would put a 44pt wall inside every row. */
   .app-phone .btn-sm {
+    position: relative;
     height: 34px;
     padding: 0 14px;
     border-radius: 17px;
-    font-size: 15px;
+    font-size: calc(15px * var(--dt));
     font-weight: 590;
   }
+  .app-phone .btn-sm::after {
+    content: "";
+    position: absolute;
+    inset: -5px 0;
+  }
   .app-phone .btn-lg {
-    height: 50px;
-    border-radius: 12px;
-    font-size: 17px;
+    height: 56px;
+    border-radius: var(--r-md);
+    font-size: calc(15px * var(--dt));
   }
   /* The glyph next to a label scales with it. */
   .app-phone .btn svg {
@@ -2548,9 +3851,10 @@ select {
     min-height: 44px;
     padding: 0 16px;
     border: 0;
-    border-radius: 11px;
+    border-radius: var(--r-md);
     background: var(--surface);
-    font-size: 17px;
+    /* The 16px floor again — see the row value above. */
+    font-size: max(16px, calc(16px * var(--dt)));
     letter-spacing: -0.01em;
   }
   /* The multi-line field keeps a floor instead of a height, and gets back the
@@ -2561,7 +3865,7 @@ select {
     border: 0;
     border-radius: 11px;
     background: var(--surface);
-    font-size: 17px;
+    font-size: calc(17px * var(--dt));
     letter-spacing: -0.01em;
   }
   .app-phone .input:hover,
@@ -2581,25 +3885,29 @@ select {
   .app-phone .input-lg {
     height: 44px;
     min-height: 44px;
-    font-size: 17px;
+    font-size: max(16px, calc(16px * var(--dt)));
   }
   /* The palette's own field opted out of `.input`; it does not opt out of the
      platform's field height. */
   .app-phone .palette input {
     height: 52px;
     padding: 0 18px;
-    font-size: 17px;
+    font-size: calc(17px * var(--dt));
   }
   /* A field's label is a group header here — footnote size, in capitals, in the
      ground's colour — the same thing the grouped lists use. A 12px semibold
      dark label is a web form's; this platform has one way of titling a section
      and uses it everywhere. */
+  /* Sentence case, like every other heading on this platform now: the house
+     face at 600 is what tells a label from a sentence here, and capitals on top
+     of it read as shouting rather than as structure. */
   .app-phone .field > label {
-    font-size: 13px;
-    font-weight: 400;
-    color: var(--ink-mut);
-    text-transform: uppercase;
-    letter-spacing: 0.03em;
+    font-family: var(--font-display);
+    font-size: calc(13px * var(--dt));
+    font-weight: 700;
+    color: var(--ink-title);
+    text-transform: none;
+    letter-spacing: -0.005em;
     padding: 0 4px;
   }
   .app-phone .field {
@@ -2608,7 +3916,7 @@ select {
   /* And its hint is the footnote under the group, not a caption glued to it. */
   .app-phone .field .hint {
     padding: 0 4px;
-    font-size: 13px;
+    font-size: calc(13px * var(--dt));
     line-height: 1.35;
   }
   /* The one field drawn on a white card rather than on the ground: without its
@@ -2689,7 +3997,7 @@ select {
     border-radius: 0;
     padding: 11px 16px;
     gap: 12px;
-    font-size: 17px;
+    font-size: calc(15px * var(--dt));
     letter-spacing: -0.01em;
   }
   /* Each item sits in its own wrapper div, so the hairlines go between the
@@ -2716,24 +4024,28 @@ select {
      A track, and one raised segment on it. The desktop's is a smaller, harder
      object with a border on the selected chip; here the chip is a white pill
      with a soft shadow and no outline, which is the one this platform draws. */
+  /* 12a: traccia `--surface-3` con 3 di bordo e `--r-lg`, segmenti alti 40 a
+     `--r-md`, 14.5 — il selezionato è `--surface` e più pesante, niente ombra. */
   .app-phone .segmented {
-    padding: 2px;
+    padding: 3px;
     border: 0;
-    border-radius: 9px;
-    background: var(--surface-2);
+    border-radius: var(--r-lg);
+    background: var(--surface-3);
   }
   .app-phone .segmented button {
+    min-height: 40px;
     padding: 6px 10px;
-    border-radius: 7px;
-    font-size: 13px;
-    font-weight: 500;
-    color: var(--ink);
+    border-radius: var(--r-md);
+    font-size: calc(14.5px * var(--dt));
+    font-weight: 550;
+    color: var(--ink-sec);
     letter-spacing: -0.01em;
   }
   .app-phone .segmented button[aria-checked="true"] {
-    font-weight: 590;
+    font-weight: 650;
+    color: var(--ink);
     background: var(--surface);
-    box-shadow: 0 3px 8px rgba(0, 0, 0, 0.12), 0 1px 1px rgba(0, 0, 0, 0.04);
+    box-shadow: none;
   }
 
   /* -- Every other screen's list -------------------------------------------
@@ -2741,17 +4053,21 @@ select {
      a card with a border and a shadow, holding rows. On a phone that reads as
      five objects stacked up; the same rows in a grouped, inset list read as one
      thing. Only the surface changes — the markup is the desktop's. */
+  /* The canvas draws a card, not a shape cut out of the ground: a white face, a
+     hairline border and a shadow barely deep enough to lift it. On the system's
+     own near-white ground a borderless group was legible on its own; on this
+     one — cooler, and closer in value to white — it was not. */
   .app-phone .card {
-    border: 0;
-    border-radius: 11px;
-    box-shadow: none;
+    border: 1px solid var(--line);
+    border-radius: var(--r-md);
+    box-shadow: var(--shadow-1);
   }
   .app-phone .rows > * + * {
     border-top: 0;
   }
   .app-phone .row {
     padding: 11px 16px;
-    font-size: 15px;
+    font-size: calc(15px * var(--dt));
   }
   /* Not the two rows that already draw their own, inset past an avatar. */
   .app-phone .rows > * + *:not(.cs-row):not(.ios-row)::after {
@@ -2761,10 +4077,10 @@ select {
     left: 16px;
     right: 0;
     height: 1px;
-    background: var(--line);
+    background: var(--line-inset);
   }
   .app-phone .row .row-name {
-    font-size: 17px;
+    font-size: calc(15px * var(--dt));
     font-weight: 500;
     letter-spacing: -0.015em;
   }
@@ -2780,7 +4096,7 @@ select {
     margin-top: 10px;
   }
   .app-phone .row .row-meta {
-    font-size: 13px;
+    font-size: calc(12px * var(--dt));
     /* Wrap the line instead of shaving its end off: a desktop has the width to
        keep "active · 43 B · 0/10000 · expires in 7 days" on one line and a
        phone does not, and the half that got cut was the half that says when it
@@ -2798,11 +4114,12 @@ select {
   /* The label over a group, in the ground's own colour: this platform titles a
      list from outside it. */
   .app-phone .section-head .t-label {
-    font-size: 13px;
-    font-weight: 400;
+    font-family: var(--font-display);
+    font-size: calc(13px * var(--dt));
+    font-weight: 700;
     text-transform: none;
-    letter-spacing: 0;
-    color: var(--ink-mut);
+    letter-spacing: -0.005em;
+    color: var(--ink-title);
   }
   /* The sentence under a group: what the choice above actually costs. It
      belongs to the group, not to the space between groups — so it sits close
@@ -2810,21 +4127,25 @@ select {
      means it can only be written where that gap is known: see `.ios-page`
      below. Everywhere else this is a plain footnote and spaces itself. */
   .ios-foot {
-    padding: 8px 16px 0;
+    padding: 0 4px;
     color: var(--ink-mut);
-    font-size: 13px;
-    line-height: 1.35;
+    font-size: calc(12.5px * var(--dt));
+    line-height: 1.45;
   }
-  /* The label above a group. Grouped lists on this platform are titled from
-     outside, in the ground's own colour — and in capitals, which is how the
-     platform tells a section title from a sentence. */
+  /* L'etichetta sopra un gruppo. Nella scala larga il canvas non usa più il
+     maiuscoletto (`t-label`) ma una frase: 15/650 in inchiostro secondario, 4px
+     dal bordo. Il maiuscoletto era giusto quando i blocchi erano fitti e
+     un'etichetta doveva pesare poco per non competere con le righe; con 28 di
+     aria fra i blocchi è l'aria a separarli, e l'etichetta può tornare una cosa
+     che si legge. */
   .ios-head {
-    padding: 0 16px 7px;
-    color: var(--ink-mut);
-    font-size: 13px;
+    padding: 0 4px 12px;
+    color: var(--ink-sec);
+    font-size: calc(15px * var(--dt));
+    font-weight: 650;
     line-height: 1.3;
-    text-transform: uppercase;
-    letter-spacing: 0.03em;
+    letter-spacing: -0.01em;
+    text-transform: none;
   }
   /* A header and its group are one thing with 7px between them, and two things
      with 32px between them. Inside the page that spaces groups apart, the extra
@@ -2833,88 +4154,144 @@ select {
      to nothing: the title sat on the first row. A number that depends on a
      parent belongs in a rule that names the parent. */
   .ios-page > .ios-head {
-    margin-bottom: calc(7px - 32px);
+    margin-bottom: calc(12px - 28px);
   }
   .ios-page > .ios-foot {
-    margin-top: calc(8px - 32px);
+    margin-top: calc(10px - 28px);
   }
 
   .tabbar {
     position: absolute;
-    left: 0;
-    right: 0;
-    bottom: 0;
+    left: 22px;
+    right: 22px;
+    bottom: calc(env(safe-area-inset-bottom, 0px) + 30px);
     z-index: 6;
-    display: flex;
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
     align-items: stretch;
-    gap: 2px;
-    padding: 4px 6px calc(env(safe-area-inset-bottom, 0px) + 4px);
-    border-top: 1px solid var(--line);
+    /* 15a: un'isola sospesa — 64 alta, bianca, col filo e un'ombra lunga —
+       e non più il fondo che continua. Il 30 sotto è l'inset del mock. */
+    height: 64px;
+    padding: 0;
+    border: 0;
+    border-radius: 32px;
+    background: var(--surface);
+    box-shadow: 0 0 0 1px var(--line), 0 10px 30px var(--shadow-cast);
+    transition: transform 280ms var(--ease);
+  }
+  /* Sotto la tastiera nessuno la raggiunge: via. */
+  html[data-kb="1"] .tabbar {
+    transform: translateY(calc(100% + 60px));
   }
 
   .tab {
-    flex: 1 1 0;
-    letter-spacing: 0;
-    min-width: 0;
-    /* The platform minimum for something meant to be hit with a finger. */
-    min-height: 44px;
+    position: relative;
     display: flex;
     flex-direction: column;
     align-items: center;
     justify-content: center;
     gap: 3px;
+    min-width: 0;
+    min-height: 44px;
     padding: 4px 2px;
     border: 0;
-    border-radius: var(--r-md);
     background: none;
-    color: var(--ink-mut);
-    font: 500 10.5px var(--font);
+    color: var(--tab-ink);
+    font: 600 calc(10.5px * min(var(--dt), 1.1)) var(--font);
     cursor: pointer;
   }
-
-  /* A fixed height, so the labels of five tabs sit on one line even though one
-     of them has a pill above it instead of a glyph. */
   .tab .ico {
     position: relative;
-    height: 30px;
-
     display: flex;
     align-items: center;
     justify-content: center;
+    height: 24px;
   }
+  /* -- Dove sei -------------------------------------------------------------
+     Il posto corrente porta una barretta sotto. Non una pastiglia.
 
+     Prima lo diceva solo l'inchiostro di un'etichetta da 10.5px — `--tab-ink`
+     contro `--ink`, due scuri sul bianco — e su *Scambia* non lo diceva
+     affatto, perché la sua pillola è piena comunque: il segno più forte della
+     barra è un segno di marca («è da qui che si parte»), non di posizione.
+
+     Il primo rimedio fu una pastiglia dietro il posto corrente, e l'anello
+     intorno alla pillola quando il posto era Scambia. Sbagliato di un passo:
+     **una pastiglia è la forma che Scambia ha già**, quindi il selezionato e
+     il verbo finivano nella stessa famiglia — e al buio, dove `--navy` è
+     #1f1f24 e la pastiglia è #222226, erano quasi lo stesso oggetto.
+
+     Quindi: due vocabolari separati. **Pieno = Scambia**, ed è l'unico pieno
+     della barra, in tutti e due i temi. **Barretta = dove sei**, un segno che
+     non è una forma piena e che nessun altro elemento qui usa — sotto il
+     glifo e l'etichetta per Attività e Persone, sotto la pillola per Scambia,
+     alla stessa altezza perché le celle sono alte quanto l'isola. */
   .tab[aria-current="page"] {
     color: var(--ink);
-    background: var(--surface);
+    font-weight: 700;
   }
-
+  .tab[aria-current="page"]::before {
+    content: "";
+    position: absolute;
+    left: 50%;
+    bottom: 7px;
+    transform: translateX(-50%);
+    width: 20px;
+    height: 3px;
+    border-radius: 2px;
+    background: var(--in);
+  }
   .tab:active {
     opacity: 0.5;
   }
-  /* Selected is a colour, not a chip: this platform tints the glyph and the
-     label and leaves the bar alone. */
-  .tab[aria-current="page"] {
-    background: none;
-    color: var(--out-strong);
+  /* Scambia è una pillola blu notte con il glifo e il nome, sempre: è il posto
+     da cui tutto parte, e la barra lo dice anche quando si è altrove. Il filo
+     intorno è quello del canvas (15a, `outline:1px solid var(--x-line)`): al
+     buio il blu notte e il bianco dell'isola si somigliano troppo perché il
+     bordo della pillola si veda da sé. */
+  .tab-disc {
+    color: var(--ink);
   }
-
-  /* A decision waiting on the user is visible whatever the screen. */
-  .tab-count {
-    position: absolute;
-    top: -6px;
-    right: -10px;
-    min-width: 15px;
-    padding: 0 4px;
-    border-radius: var(--r-pill);
-    background: var(--surface-3);
-    color: var(--ink-sec);
-    font-size: 10px;
-    line-height: 15px;
-    text-align: center;
+  .tab-disc .verb-disc {
+    outline: 1px solid var(--line);
+    outline-offset: -1px;
   }
-  .tab-count.hot {
-    background: var(--in);
+  /* Più in basso che sotto le altre due: lì la barretta sta sotto un'etichetta
+     alta 14, qui sotto una pillola alta 48, e misurata dallo stesso bordo
+     finirebbe *sopra* la pillola invece che sotto. */
+  .tab-disc[aria-current="page"]::before {
+    bottom: 3px;
+  }
+  .tab-disc .verb-disc {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    height: 48px;
+    padding: 0 20px;
+    border-radius: 24px;
+    background: var(--navy);
     color: #fff;
+    font-family: var(--font-display);
+    font-size: calc(14.5px * min(var(--dt), 1.1));
+    font-weight: 700;
+    white-space: nowrap;
+  }
+  .tab-disc:active .verb-disc {
+    filter: brightness(1.2);
+  }
+  /* Il pallino su Attività: c'è qualcosa in corso, o qualcuno aspetta. */
+  .tab-dot {
+    position: absolute;
+    top: -2px;
+    left: calc(50% + 6px);
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: var(--in-fill);
+    box-shadow: 0 0 0 2px var(--surface);
+  }
+  .tab-count {
+    display: none;
   }
 
   /* The way to the three places the bar has no room for. */
@@ -2929,7 +4306,7 @@ select {
     border-top: 1px solid var(--line);
     background: var(--surface);
     color: var(--ink);
-    font: 500 14px var(--font);
+    font: 500 calc(14px * var(--dt)) var(--font);
     text-align: left;
     cursor: pointer;
   }
@@ -2946,137 +4323,331 @@ select {
     flex: none;
   }
 
-  /* -- Casella: one row per correspondent ---------------------------------- */
-
-  .casella {
+  /* -- Finito --------------------------------------------------------------
+     Cosa è arrivato, dove è andato, e la domanda che si fa una volta sola. */
+  .fin-head {
     display: flex;
-    flex-direction: column;
-  }
-
-  /* A row is a whole button. The tap target is the row, not the name in it.
-     The separator starts where the *text* starts, past the avatar: that
-     alignment is what makes a stack of rows read as one list. */
-  .cs-row {
-    display: flex;
-    gap: 12px;
     align-items: center;
-    width: 100%;
-    min-height: 64px;
-    padding: 10px 16px;
+    gap: 12px;
+  }
+  .fin-tick {
+    flex: none;
+    display: grid;
+    place-items: center;
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    background: var(--green-soft);
+    color: var(--green);
+  }
+  .fin-count {
+    font-size: calc(19px * var(--dt));
+    font-weight: 680;
+  }
+  /* Dove è andato cosa. Una riga, con il modo di disfarlo accanto: la copia in
+     Galleria è l'unica cosa che questa schermata ha fatto senza chiedere. */
+  .fin-where {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-height: 60px;
+    padding: 10px 18px;
+    border: 1px solid var(--line);
+    border-radius: var(--r-xl);
+    background: var(--surface);
+    font-size: calc(15px * var(--dt));
+  }
+  .fin-undo {
+    flex: none;
+    min-height: 44px;
+    padding: 0 2px;
     border: 0;
     background: none;
+    color: var(--ink-sec);
+    font: 600 calc(14px * var(--dt)) var(--font);
+    cursor: pointer;
+  }
+  .fin-ask {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    padding: 20px;
+    border: 1px solid var(--line-strong);
+    border-radius: var(--r-xl);
+    background: var(--surface);
+  }
+  .fin-ask-title {
+    display: block;
+    font-size: calc(17px * var(--dt));
+    font-weight: 680;
+  }
+  .fin-ask-sub {
+    display: block;
+    margin-top: 2px;
+    font-size: calc(13.5px * var(--dt));
+    color: var(--ink-sec);
+  }
+  .fin-ask-choices {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+  }
+  .fin-choice {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-height: 84px;
+    padding: 14px;
+    border: 1px solid var(--line-strong);
+    border-radius: var(--r-lg);
+    background: var(--surface);
     color: var(--ink);
     font-family: var(--font);
     text-align: left;
     cursor: pointer;
   }
-  .cs-row {
-    position: relative;
+  .fin-choice.ink {
+    border-color: transparent;
+    background: var(--ink-title);
+    color: var(--canvas);
   }
-  .cs-row + .cs-row::before {
-    content: "";
-    position: absolute;
-    top: 0;
-    left: 62px;
-    right: 0;
-    height: 1px;
-    background: var(--line);
+  .fin-choice-title {
+    margin-top: auto;
+    font-size: calc(15px * var(--dt));
+    font-weight: 650;
   }
-  .cs-row {
-    transition: background 320ms var(--ease);
+  .fin-choice-sub {
+    font-size: calc(12px * var(--dt));
+    opacity: 0.75;
   }
-  .cs-row:active {
-    background: var(--surface-2);
-    transition: none;
-  }
-
-  .cs-body {
-    flex: 1;
-    min-width: 0;
-    display: block;
-  }
-  .cs-head {
-    display: flex;
-    align-items: baseline;
-    gap: 8px;
-  }
-  /* The time a row happened is secondary, and 15 is what secondary is. */
-  .cs-head .t-xs {
-    font-size: 15px;
-    color: var(--ink-mut);
-  }
-  /* The name and its count, together, taking what is left after the time. */
-  .cs-name {
-    display: flex;
-    align-items: baseline;
-    gap: 6px;
-    flex: 1;
-    min-width: 0;
-  }
-  .cs-who {
-    flex: 0 1 auto;
-    font-size: 17px;
-    font-weight: 600;
-    letter-spacing: -0.015em;
-  }
-  /* Grey, small, and beside the name — this platform's own way of saying how
-     many messages a conversation holds. Not a coloured badge: a badge means
-     *unread*, which is a state this list does not have, and inventing one to
-     carry a count would be saying something untrue in a louder voice. */
-  .cs-count {
-    flex: none;
-    font-size: 15px;
-    font-weight: 400;
-    color: var(--ink-mut);
-    font-variant-numeric: tabular-nums;
-  }
-  .cs-head {
-    gap: 8px;
-  }
-  .cs-line {
-    display: block;
-    margin: 2px 0 0;
-    font-size: 15px;
-    letter-spacing: -0.01em;
-  }
-  .cs-track {
-    margin-top: 6px;
-  }
-  .cs-badges {
-    display: flex;
-    gap: 6px;
-    margin-top: 6px;
-  }
-  /* Stands in for an avatar where there is no person — a public link. */
-  .cs-glyph {
-    width: 36px;
-    height: 36px;
-    flex: none;
+  .fin-always {
     display: flex;
     align-items: center;
-    justify-content: center;
-    border-radius: var(--r-md);
-    background: var(--surface-3);
-    border: 1px solid var(--line);
+    gap: 12px;
+    min-height: 44px;
+    font-size: calc(14px * var(--dt));
+  }
+  .fin-file {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 18px;
+    background: var(--surface);
+  }
+  .fin-file + .fin-file {
+    border-top: 1px solid var(--line);
+  }
+  .fin-file-name {
+    display: block;
+    font-size: calc(14.5px * var(--dt));
+    font-weight: 550;
+    line-height: 1.35;
+    overflow-wrap: anywhere;
+  }
+  .fin-file-meta {
+    display: block;
+    margin-top: 2px;
+    font-size: calc(12.5px * var(--dt));
     color: var(--ink-mut);
   }
-  .cs-hint {
-    padding: 14px 2px 0;
+  .fin-open {
+    flex: none;
+    min-height: 44px;
+    padding: 0 12px;
+    border: 0;
+    border-radius: var(--r-sm);
+    background: var(--surface-2);
+    color: var(--ink);
+    font: 600 calc(14px * var(--dt)) var(--font);
+    cursor: pointer;
+  }
+  .fin-save {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 16px 18px;
+    border: 1px solid var(--line);
+    border-radius: var(--r-xl);
+    background: var(--surface);
+  }
+  .fin-save-title {
+    font-size: calc(15px * var(--dt));
+    font-weight: 650;
+  }
+  .fin-save-sub {
+    margin-top: 2px;
+    font-size: calc(13px * var(--dt));
+    color: var(--ink-mut);
   }
 
+  
+  
+
+  
+  
+
+  /* -- Scambia: the camera is the screen -----------------------------------
+     The one screen in the app with no bar of its own. The preview is behind the
+     webview (`scan({ windowed: true })`), so everything from the document down
+     has to let light through for as long as it is open — `html.cam` is set by
+     the view and removed when it leaves, which is also what stops the camera.
+
+     Where there is no camera to open, nothing is transparent: `.exch-cam` is
+     black unless it is `.live`, so a build without the scanner shows a dark
+     screen that says so rather than a white page with four corners on it. */
+  html.cam,
+  html.cam body,
+  html.cam #root {
+    background: transparent;
+  }
+  .app-bare,
+  .app-bare .main,
+  .app-bare .view.staged,
+  .app-bare .page {
+    background: transparent;
+  }
+  .app-bare .page,
+  /* A banner on this screen floats over the viewfinder rather than pushing it
+     down: there is nothing under it to be landed on, and a camera that started
+     126px down would be a camera in a box. */
+  .app-phone .main:has(.banners > *) .app-bare-page,
+  .app-bare .main:has(.banners > *) .page {
+    padding: 0;
+  }
+  /* The screen is the frame, so it has to *have* the frame's height. `.page-fill`
+     carries only a `min-height`, and a percentage height against an auto-height
+     parent resolves to auto — which is why the sheet floated 100px short of the
+     bar with the camera showing under it. */
+  .app-bare .view.staged > .page > .page-fill {
+    display: flex;
+    flex-direction: column;
+    min-height: 100%;
+  }
+  
+
+  .exch {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+  .exch-cam {
+    position: relative;
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 24px;
+    padding: calc(env(safe-area-inset-top, 0px) + 24px) 20px 20px;
+    background: #000;
+    color: #fff;
+  }
+  /* Four corners, and nothing else: a frame with a border all the way round
+     reads as a window the camera is behind, and the camera is the screen. */
+  .exch-frame {
+    position: relative;
+    display: block;
+    flex: none;
+  }
+  .exch-frame i {
+    position: absolute;
+    width: 40px;
+    height: 40px;
+    border: 0 solid rgba(255, 255, 255, 0.92);
+  }
+  .exch-frame.sm i {
+    width: 24px;
+    height: 24px;
+  }
+  .exch-frame .tl {
+    left: 0;
+    top: 0;
+    border-left-width: 3px;
+    border-top-width: 3px;
+    border-top-left-radius: 20px;
+  }
+  .exch-frame .tr {
+    right: 0;
+    top: 0;
+    border-right-width: 3px;
+    border-top-width: 3px;
+    border-top-right-radius: 20px;
+  }
+  .exch-frame .bl {
+    left: 0;
+    bottom: 0;
+    border-left-width: 3px;
+    border-bottom-width: 3px;
+    border-bottom-left-radius: 20px;
+  }
+  .exch-frame .br {
+    right: 0;
+    bottom: 0;
+    border-right-width: 3px;
+    border-bottom-width: 3px;
+    border-bottom-right-radius: 20px;
+  }
+  .exch-frame.sm i {
+    border-radius: 0;
+  }
+  .exch-frame.sm .tl {
+    border-top-left-radius: 12px;
+  }
+  .exch-frame.sm .tr {
+    border-top-right-radius: 12px;
+  }
+  .exch-frame.sm .bl {
+    border-bottom-left-radius: 12px;
+  }
+  .exch-frame.sm .br {
+    border-bottom-right-radius: 12px;
+  }
+  /* What the camera has to say, in white on the preview rather than in a card:
+     a panel here would be a second surface over the thing being looked at. */
+  .exch-say {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+    max-width: 300px;
+    text-align: center;
+    font-size: calc(15px * var(--dt));
+    font-weight: 600;
+    line-height: 1.4;
+    color: rgba(255, 255, 255, 0.85);
+    text-wrap: pretty;
+  }
+  .exch-say-sub {
+    font-size: calc(13px * var(--dt));
+    font-weight: 450;
+    color: rgba(255, 255, 255, 0.62);
+  }
+
+  
+  
+
+  
+
+  
+
+  
+
+  
   .people-row {
     gap: 12px;
     padding: 9px 16px;
     min-height: 62px;
   }
   .people-row .row-name {
-    font-size: 17px;
+    font-size: calc(17px * var(--dt));
     font-weight: 500;
     letter-spacing: -0.015em;
   }
   .people-row .row-meta {
     display: block;
-    font-size: 15px;
+    font-size: calc(15px * var(--dt));
     color: var(--ink-mut);
     margin-top: 1px;
   }
@@ -3124,9 +4695,17 @@ select {
   .you-me:active {
     background: var(--surface-2);
   }
+  /* A column, because the card has two or three lines under the name and they
+     are sentences: as inline spans they ran together — "…sei una persona
+     sola.questo dispositivo: localhost". */
+  .you-me > .grow {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
   .you-name {
     display: block;
-    font-size: 20px;
+    font-size: calc(20px * var(--dt));
     font-weight: 600;
     letter-spacing: -0.02em;
   }
@@ -3219,14 +4798,14 @@ select {
     gap: 4px;
   }
   .sheet.center.alert .t-head {
-    font-size: 17px;
+    font-size: calc(17px * var(--dt));
     font-weight: 620;
     text-align: center;
     letter-spacing: -0.01em;
   }
   .sheet.center.alert .t-sm {
     margin-top: 0 !important;
-    font-size: 13px;
+    font-size: calc(13px * var(--dt));
     text-align: center;
   }
   .sheet.center.alert .sheet-foot {
@@ -3244,7 +4823,7 @@ select {
     border: 0;
     border-radius: 0;
     background: none;
-    font-size: 17px;
+    font-size: calc(17px * var(--dt));
     font-weight: 400;
     color: var(--out-strong);
     box-shadow: none;
@@ -3304,7 +4883,7 @@ select {
   }
   .sheet-bar .t-head {
     text-align: center;
-    font-size: 16px;
+    font-size: calc(16px * var(--dt));
   }
   .bar-left {
     justify-self: start;
@@ -3313,12 +4892,13 @@ select {
     justify-self: end;
   }
   .bar-btn {
-    min-height: 40px;
+    /* A sheet's bar buttons are words, and a word is still a target. */
+    min-height: 44px;
     padding: 0 2px;
     border: 0;
     background: none;
     color: var(--out-strong);
-    font: 400 16.5px var(--font);
+    font: 400 calc(16.5px * var(--dt)) var(--font);
     cursor: pointer;
   }
   .bar-btn.strong {
@@ -3327,6 +4907,18 @@ select {
   .bar-btn:disabled {
     opacity: 0.35;
     cursor: default;
+  }
+  /* Focus lands here when a sheet opens (`useModal`), and on a phone the ring
+     it draws is a desktop's answer to a question nobody asked. */
+  .app-phone .bar-btn:focus {
+    outline: none;
+  }
+  /* The bar of a sheet that comes up from the bottom never sits under the
+     status bar, so the top inset the full-screen sheets pad for is not its
+     business. Android reports a real one and drew a hole above the title. */
+  .wheel-sheet .sheet-head,
+  .act-sheet .sheet-head {
+    padding-top: 10px;
   }
   .bar-btn:active:not(:disabled) {
     opacity: 0.5;
@@ -3346,6 +4938,8 @@ select {
     flex-direction: column-reverse;
     align-items: stretch;
     gap: 8px;
+    /* Over the keyboard, not under it — see `keyboard.ts`. */
+    margin-bottom: var(--kb);
     padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 12px);
     /* On the sheet's own ground: the grey strip under a desktop footer is a
        window's way of saying "chrome", and these buttons are not chrome. */
@@ -3363,31 +4957,59 @@ select {
      The action sits still underneath and the row slides off it, which is what
      makes the gesture feel like uncovering something rather than dragging a
      button along. */
+  /* One grid cell holding both layers, rather than a box with something
+     absolutely positioned inside it. The difference is not tidiness: an
+     absolutely positioned `top:0;bottom:0` resolves against the *rounded* height
+     of the row while the sliding face paints against its own — and on a row
+     whose height lands on a half pixel, which is most of them at 2×, the two
+     disagree by one device pixel and a hairline of the red DELETE action shows
+     through under every row that has one. As two items in the same cell they are
+     the same rectangle by construction. */
   .swipe {
+    display: grid;
+    /* One column, and it is the *card's* width rather than the row's. A grid
+       track left at `auto` is sized by its content, so a row whose text does not
+       fit made the track wider than the card and everything after it — the send
+       button on an address-book row — was laid out past the edge and clipped
+       away. `minmax(0, 1fr)` is what lets the row shrink and its text ellipsise. */
+    grid-template-columns: minmax(0, 1fr);
     position: relative;
     overflow: hidden;
+    /* The row's own colour, under both layers: whatever a fraction of a pixel
+       of rounding leaves uncovered is then the card rather than the action. */
+    background: var(--surface);
   }
+  /* No `will-change` at rest, and this is not a micro-optimisation. A promoted
+     layer is rasterised on its own and composited back at a fractional offset —
+     on a row whose height lands on a half pixel it lands a hair short, and the
+     red DELETE action underneath shows through as a hairline under a row nobody
+     has touched. The hint is worth having *during* a drag and costs a seam at
+     every other moment, so the component sets it while the finger is down and
+     drops it when the row settles. */
   .swipe-face {
+    grid-area: 1 / 1;
     position: relative;
     background: var(--surface);
-    will-change: transform;
   }
   /* The actions lie still under the row and the row slides off them, which is
      what makes the gesture feel like uncovering something rather than dragging
      a button along. Two of them sit side by side, in the order they come out
      from the edge. */
   .swipe-actions {
-    position: absolute;
-    top: 0;
-    right: 0;
-    bottom: 0;
+    grid-area: 1 / 1;
+    justify-self: end;
     display: flex;
+    /* Held a pixel clear of the top and bottom edges, which is the other half of
+       the fix: the hairline that used to show through is now the background
+       above, and an action block inset by one pixel is not something anybody
+       can see while dragging. */
+    padding: 1px 0;
   }
   .swipe-action {
     border: 0;
     background: var(--surface-3);
     color: var(--ink);
-    font: 500 15px var(--font);
+    font: 500 calc(15px * var(--dt)) var(--font);
     cursor: pointer;
   }
   .swipe-action.danger {
@@ -3405,25 +5027,34 @@ select {
   }
   .th-now-name {
     display: block;
-    font-size: 17px;
+    font-size: calc(17px * var(--dt));
     font-weight: 600;
     letter-spacing: -0.015em;
   }
   .th-now-meta {
     display: block;
     margin-top: 2px;
-    font-size: 13px;
+    font-size: calc(13px * var(--dt));
     color: var(--ink-mut);
   }
   .th-now-bytes {
     display: flex;
     align-items: center;
     gap: 2px;
-    font-size: 13px;
+    font-size: calc(13px * var(--dt));
     color: var(--ink);
+  }
+  /* The thread sheet's inline capsules: drawn at 34, hit at 44, like every
+     other `btn-sm`-sized control on this platform. */
+  .th-now-act::after,
+  .th-past-act::after {
+    content: "";
+    position: absolute;
+    inset: -5px 0;
   }
   .th-now-act,
   .th-past-act {
+    position: relative;
     margin-left: auto;
     min-height: 34px;
     padding: 0 14px;
@@ -3431,7 +5062,7 @@ select {
     border-radius: 17px;
     background: var(--fill-quiet);
     color: var(--out-strong);
-    font: 590 15px var(--font);
+    font: 590 calc(15px * var(--dt)) var(--font);
     cursor: pointer;
   }
   .th-past-act:active,
@@ -3474,7 +5105,7 @@ select {
   }
   .sheet-full-bar h2 {
     margin: 0;
-    font-size: 17px;
+    font-size: calc(17px * var(--dt));
     font-weight: 620;
     letter-spacing: -0.01em;
     text-align: center;
@@ -3505,7 +5136,7 @@ select {
   }
   .th-who-name {
     max-width: 100%;
-    font-size: 22px;
+    font-size: calc(22px * var(--dt));
     font-weight: 600;
     letter-spacing: -0.02em;
   }
@@ -3528,23 +5159,30 @@ select {
     background: none;
     border: 0;
   }
+  /* A tile, not a floating glyph. The canvas draws every empty screen with the
+     mark inside a 64pt rounded square: it is what stops an empty screen reading
+     as a screen that failed to load, and it is the same shape the groups under
+     it are drawn with. */
   .app-phone .empty .glyph {
-    background: none;
+    display: grid;
+    place-items: center;
+    width: 64px;
+    height: 64px;
     border: 0;
-    width: auto;
-    height: auto;
-    color: var(--ink-faint);
+    border-radius: var(--r-lg);
+    background: var(--surface-3);
+    color: var(--ink-sec);
   }
   .app-phone .empty .glyph svg {
-    width: 46px;
-    height: 46px;
+    width: 26px;
+    height: 26px;
   }
   .app-phone .empty h3 {
-    font-size: 17px;
-    font-weight: 600;
+    font-size: calc(20px * var(--dt));
+    font-weight: 680;
   }
   .app-phone .empty p {
-    font-size: 15px;
+    font-size: calc(15px * var(--dt));
     color: var(--ink-mut);
   }
   /* Wherever it is nested: the card around an empty state is the box, and the
@@ -3563,7 +5201,7 @@ select {
     border: 0;
     box-shadow: none;
     color: var(--out-strong);
-    font-size: 17px;
+    font-size: calc(17px * var(--dt));
     font-weight: 560;
     padding: 6px 8px;
   }
@@ -3581,6 +5219,1846 @@ select {
     border-color: var(--line);
     background: var(--surface);
   }
+  /* ==========================================================================
+     Sezioni 11 e 12 del canvas (2026-10-04): Scambia e Invia diventano una
+     cosa sola, tre posti nella barra, Link e depositi dentro Attività,
+     Impostazioni dietro l'ingranaggio. Le misure sono quelle dei frame.
+     ========================================================================== */
+
+  /* -- La testa di una schermata radice (11a, 12a) ---------------------------
+     Titolo grande a sinistra e, a destra, cerchi da 44 in `--surface-2` con il
+     glifo in inchiostro: la ricerca, il quadrato, l'ingranaggio. `.act-head` e
+     `.act-tool` erano di Attività e adesso sono di tutte e tre. */
+  .root-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding-right: 0;
+  }
+  .root-head .large-title {
+    margin: 0;
+  }
+  .root-tools {
+    display: flex;
+    flex: none;
+    gap: 8px;
+  }
+  /* Il bottone di un menu (il «+» di Persone) nella stessa forma degli altri. */
+  .root-tools .tool-wrap > button,
+  .root-tools .tool-wrap .icon-btn {
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    background: var(--surface);
+    box-shadow: 0 0 0 1px var(--line);
+    color: var(--ink);
+  }
+  /* Quando la camera è viva l'anteprima è dietro la webview, e questa è una
+     finestra su di lei (vedi `scan.ts` e `html.cam`). */
+  .exch-cam.live {
+    background: transparent;
+  }
+
+  /* ==========================================================================
+     Sezioni 13–16 del canvas (2026-10-04, sera): Scambia rifatta con
+     l'identità TermoX. La camera è una scheda blu notte, il campo cerca e
+     legge i codici, i dispositivi sono quadrati e le persone tonde con
+     l'anello se sono collegate; Cosa (14b) è la galleria a tutto schermo con
+     il foglio blu in fondo; il trasferimento vive in una scheda sopra la
+     barra (15b) e nel suo foglio (15c/16c); più persone insieme (16a).
+     Le misure sono quelle dei frame.
+     ========================================================================== */
+
+  /* -- Il campo che cerca e legge i codici (13a/13e, 15a) ------------------- */
+  .xs-search {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    height: 48px;
+    padding: 0 16px;
+    border-radius: 16px;
+    background: var(--surface);
+    box-shadow: 0 0 0 1px var(--line);
+    color: var(--ink-mut);
+  }
+  /* Un codice riconosciuto accende il bordo (13e). */
+  .xs-search.code {
+    box-shadow: 0 0 0 2px var(--in);
+  }
+  .xs-search input {
+    flex: 1;
+    min-width: 0;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--ink);
+    /* 16, mai meno: sotto i 16 WebKit zooma la pagina al focus. */
+    font: 400 max(16px, calc(15.5px * var(--dt))) var(--font);
+    outline: none;
+  }
+  .xs-search input::placeholder {
+    color: var(--ink-mut);
+  }
+  .xs-search input.mono {
+    font-family: var(--mono);
+  }
+  .xs-clear {
+    display: grid;
+    place-items: center;
+    width: 20px;
+    height: 20px;
+    padding: 0;
+    border: 0;
+    border-radius: 50%;
+    background: var(--ink-weak);
+    color: var(--surface);
+    cursor: pointer;
+  }
+
+  /* -- La scheda della camera (15a) ---------------------------------------- */
+  /* Le due tessere in cima (18a): la camera e il link, affiancate.
+     1.25 contro 1 perché non sono pari d'uso — la camera è quasi sempre la
+     risposta, il link è l'eccezione pubblica — e la larghezza lo dice prima di
+     qualunque parola. */
+  .cam-pair {
+    display: grid;
+    grid-template-columns: 1.25fr 1fr;
+    gap: 10px;
+  }
+  .cam-card,
+  .link-card {
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    gap: 16px;
+    min-height: 132px;
+    padding: 16px;
+    border: 0;
+    border-radius: 24px;
+    text-align: left;
+    cursor: pointer;
+  }
+  .cam-card {
+    background: var(--navy);
+    color: #fff;
+  }
+  /* Chiaro, non pieno: è l'azione meno frequente, e quella che non riguarda
+     nessuno in particolare. */
+  .link-card {
+    background: var(--surface);
+    box-shadow: 0 0 0 1px var(--line);
+    color: var(--ink);
+  }
+  .link-card-ico {
+    display: grid;
+    place-items: center;
+    width: 44px;
+    height: 44px;
+    border-radius: 14px;
+    background: var(--in-soft);
+    color: var(--in-strong);
+  }
+  .cam-card:active,
+  .link-card:active {
+    opacity: 0.8;
+  }
+  .cam-card:active {
+    opacity: 0.85;
+  }
+  .cam-card .exch-frame {
+    position: relative;
+    flex: none;
+    width: 56px;
+    height: 56px;
+  }
+  .cam-card .exch-frame i {
+    position: absolute;
+    width: 18px;
+    height: 18px;
+    border: 0 solid #fff;
+  }
+  .cam-card .exch-frame i.tl { top: 0; left: 0; border-top-width: 2.5px; border-left-width: 2.5px; border-top-left-radius: 9px; }
+  .cam-card .exch-frame i.tr { top: 0; right: 0; border-top-width: 2.5px; border-right-width: 2.5px; border-top-right-radius: 9px; }
+  .cam-card .exch-frame i.bl { bottom: 0; left: 0; border-bottom-width: 2.5px; border-left-width: 2.5px; border-bottom-left-radius: 9px; }
+  .cam-card .exch-frame i.br { bottom: 0; right: 0; border-bottom-width: 2.5px; border-right-width: 2.5px; border-bottom-right-radius: 9px; }
+  /* La linea di scansione: ferma, è un'icona. */
+  .cam-card .exch-frame::after {
+    content: "";
+    position: absolute;
+    left: 16%;
+    right: 16%;
+    top: 50%;
+    height: 2px;
+    border-radius: 2px;
+    background: var(--navy-blue);
+  }
+  .cam-card-title {
+    display: block;
+    font-family: var(--font-display);
+    font-size: calc(16.5px * var(--dt));
+    font-weight: 700;
+    letter-spacing: -0.01em;
+  }
+  /* La riga sotto il titolo: chiara sulla scheda blu, grigia su quella bianca.
+     Il bianco al 72 per cento è leggibile solo sopra il blu notte — sulla
+     tessera chiara sarebbe quasi invisibile, che è il modo in cui una regola
+     scritta per una scheda sola si rompe quando le schede diventano due. */
+  .cam-card-sub {
+    display: block;
+    margin-top: 2px;
+    font-size: calc(12.5px * var(--dt));
+    line-height: 1.4;
+    color: var(--ink-mut);
+  }
+  .cam-card .cam-card-sub {
+    color: rgba(255, 255, 255, 0.72);
+  }
+
+  /* -- Quello che un tuo dispositivo ti ha lasciato (15a: Prendi) ----------- */
+  .take-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 10px 10px 14px;
+    border-radius: 20px;
+    background: var(--in-soft);
+    color: var(--ink);
+  }
+  .take-row > svg {
+    flex: none;
+    color: var(--in);
+  }
+  .take-title {
+    font-size: calc(14.5px * var(--dt));
+    font-weight: 650;
+  }
+  .take-sub {
+    margin-top: 1px;
+    font-size: calc(12.5px * var(--dt));
+    color: var(--ink-mut);
+  }
+  .take-btn {
+    display: flex;
+    align-items: center;
+    flex: none;
+    height: 38px;
+    min-height: 44px;
+    margin: -3px 0;
+    padding: 0 16px;
+    border: 0;
+    border-radius: var(--r-pill);
+    background: var(--in-fill);
+    color: #fff;
+    font-size: calc(14.5px * var(--dt));
+    font-weight: 650;
+    cursor: pointer;
+  }
+
+  /* -- Le due sezioni: I tuoi dispositivi, Persone (15a) -------------------- */
+  .xs-section {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  .xs-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    padding: 0 4px;
+  }
+  .xs-head-title {
+    font-family: var(--font-display);
+    font-size: calc(17px * var(--dt));
+    font-weight: 700;
+    letter-spacing: -0.01em;
+  }
+  .xs-head-link {
+    min-height: 44px;
+    margin: -14px -4px -14px 0;
+    padding: 0 4px;
+    border: 0;
+    background: none;
+    color: var(--in-strong);
+    font-size: calc(13.5px * var(--dt));
+    font-weight: 600;
+    cursor: pointer;
+  }
+  /* Quattro per riga da 76, spinti ai bordi; una seconda riga quando serve. */
+  .xs-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 76px);
+    justify-content: space-between;
+    gap: 16px 0;
+  }
+  /* La riga del link pubblico: la stessa carta delle altre, senza la griglia.
+     Un'icona in un quadrato come le righe di Impostazioni, il nome, il chevron
+     — e nessuna colonna da riempire. */
+  .xs-link {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+    min-height: 60px;
+    padding: 10px 14px;
+    border: 1px solid var(--line);
+    border-radius: var(--r-xl);
+    background: var(--surface);
+    color: var(--ink);
+    font: 600 calc(15px * var(--dt)) var(--font);
+    text-align: left;
+    cursor: pointer;
+  }
+  .xs-link:active {
+    background: var(--surface-2);
+  }
+  .xs-link-ico {
+    display: grid;
+    place-items: center;
+    flex: none;
+    width: 40px;
+    height: 40px;
+    border-radius: var(--r-md);
+    background: var(--surface-3);
+    color: var(--ink);
+  }
+  .xs-cell {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    width: 76px;
+    min-width: 0;
+    min-height: 64px;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--ink);
+    text-align: center;
+    cursor: pointer;
+  }
+  .xs-cell:active {
+    opacity: 0.6;
+  }
+  .xs-name {
+    max-width: 100%;
+    font-size: calc(13px * var(--dt));
+    font-weight: 600;
+  }
+  .xs-sub {
+    max-width: 100%;
+    margin-top: 1px;
+    font-size: calc(11px * var(--dt));
+    color: var(--ink-mut);
+  }
+  .xs-cell.cold .xs-name {
+    color: var(--ink-mut);
+  }
+  /* Un dispositivo è un quadrato; il link è un quadrato tratteggiato. */
+  .dev-tile {
+    position: relative;
+    display: grid;
+    place-items: center;
+    width: 64px;
+    height: 64px;
+    border-radius: 20px;
+    background: var(--surface);
+    box-shadow: 0 0 0 1px var(--line);
+    color: var(--ink);
+  }
+  .xs-cell.cold .dev-tile {
+    color: var(--ink-mut);
+  }
+  .dev-tile.dashed {
+    background: none;
+    box-shadow: none;
+    border: 1.5px dashed var(--line);
+    color: var(--ink-mut);
+  }
+  .dev-dot {
+    position: absolute;
+    right: -3px;
+    top: -3px;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: var(--green);
+    box-shadow: 0 0 0 3px var(--canvas);
+  }
+  /* Quanti file quel dispositivo ti ha lasciato. */
+  .dev-badge {
+    position: absolute;
+    left: -4px;
+    top: -5px;
+    display: grid;
+    place-items: center;
+    min-width: 20px;
+    height: 20px;
+    padding: 0 5px;
+    border-radius: 10px;
+    background: var(--in-fill);
+    color: #fff;
+    font-size: calc(11.5px * var(--dt));
+    font-weight: 700;
+    box-shadow: 0 0 0 2.5px var(--canvas);
+  }
+  /* Una persona è tonda: l'iniziale su un disco, l'anello blu se è collegata. */
+  .face-pic {
+    position: relative;
+    flex: none;
+    width: 64px;
+    height: 64px;
+  }
+  .face-pic > svg {
+    position: absolute;
+    inset: 0;
+  }
+  .face-in {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    border-radius: 50%;
+    background: var(--surface-2);
+    font-family: var(--font-display);
+    font-size: calc(22px * var(--dt));
+    font-weight: 700;
+    color: var(--ink);
+  }
+  .face-pic.ring .face-in {
+    inset: 5px;
+  }
+  .face-dot {
+    position: absolute;
+    right: 1px;
+    bottom: 1px;
+    width: 13px;
+    height: 13px;
+    border-radius: 50%;
+    background: var(--green);
+    box-shadow: 0 0 0 3px var(--canvas);
+  }
+  /* 16a: i volti spuntabili. */
+  .face-pic.sel .face-in {
+    background: var(--in-soft);
+    box-shadow: inset 0 0 0 2.5px var(--in-fill);
+  }
+  .face-check {
+    position: absolute;
+    right: -2px;
+    top: -2px;
+    display: grid;
+    place-items: center;
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    background: var(--surface);
+    color: #fff;
+    box-shadow: 0 0 0 3px var(--canvas), inset 0 0 0 1.5px var(--track);
+  }
+  .face-pic.sel .face-check {
+    background: var(--in-fill);
+    box-shadow: 0 0 0 3px var(--canvas);
+  }
+  .face-pic.dashed {
+    display: grid;
+    place-items: center;
+    border: 1.5px dashed var(--line);
+    border-radius: 50%;
+    color: var(--ink-mut);
+  }
+
+  /* -- Un codice ricevuto, riconosciuto nel campo (13e) --------------------- */
+  .code-card {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    padding: 20px;
+    border-radius: 20px;
+    background: var(--surface);
+    box-shadow: 0 0 0 1px var(--line);
+  }
+  .code-card-head {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+  }
+  .code-icon {
+    display: grid;
+    place-items: center;
+    flex: none;
+    width: 48px;
+    height: 48px;
+    border-radius: 50%;
+    background: var(--in-soft);
+    color: var(--in);
+  }
+  .code-title {
+    font-size: calc(17px * var(--dt));
+    font-weight: 680;
+  }
+  .code-sub {
+    margin-top: 2px;
+    font-size: calc(13.5px * var(--dt));
+    line-height: 1.4;
+    color: var(--ink-mut);
+  }
+  .code-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    height: 52px;
+    border: 0;
+    border-radius: var(--r-lg);
+    background: var(--in-fill);
+    color: #fff;
+    font-size: calc(16.5px * var(--dt));
+    font-weight: 650;
+    cursor: pointer;
+  }
+  .code-note {
+    padding: 0 4px;
+    font-size: calc(13px * var(--dt));
+    line-height: 1.5;
+    color: var(--ink-mut);
+  }
+
+  /* -- La scheda sopra la barra (15b, 16a): un trasferimento, o la scelta --- */
+  .dock {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: calc(env(safe-area-inset-bottom, 0px) + 30px + 64px + 8px);
+    z-index: 6;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 0 16px;
+    pointer-events: none;
+  }
+  .dock > * {
+    pointer-events: auto;
+  }
+  /* Più dock insieme (la scelta delle persone e un trasferimento che passa):
+     il secondo sale sopra il primo. */
+  .dock ~ .dock {
+    bottom: calc(env(safe-area-inset-bottom, 0px) + 30px + 64px + 8px + 74px);
+  }
+  .exch-page {
+    gap: 20px;
+  }
+  .xfer-card {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+    min-height: 66px;
+    padding: 10px;
+    border: 0;
+    border-radius: 24px;
+    background: var(--navy);
+    color: #fff;
+    box-shadow: 0 12px 28px var(--navy-sh);
+    text-align: left;
+    cursor: pointer;
+    animation: dock-in 280ms var(--ease);
+  }
+  @keyframes dock-in {
+    from {
+      transform: translateY(20px);
+      opacity: 0;
+    }
+  }
+  .xfer-card.sel {
+    padding-left: 14px;
+    border-radius: 26px;
+  }
+  .xfer-pile {
+    display: flex;
+    flex: none;
+  }
+  .xfer-pile > * + * {
+    margin-left: -14px;
+  }
+  /* Un anello attorno a un volto: la base tenue, il progresso sopra. */
+  .ring-av {
+    position: relative;
+    flex: none;
+    width: 46px;
+    height: 46px;
+    border-radius: 50%;
+    background: var(--navy);
+  }
+  .ring-av > svg {
+    position: absolute;
+    inset: 0;
+    transform: rotate(-90deg);
+  }
+  .ring-av-in {
+    position: absolute;
+    inset: 6px;
+    display: grid;
+    place-items: center;
+    border-radius: 50%;
+    background: var(--navy-2);
+    font-family: var(--font-display);
+    font-size: calc(14px * var(--dt));
+    font-weight: 700;
+    color: #fff;
+  }
+  .ring-av-in.done {
+    background: var(--green);
+  }
+  .ring-av.lg {
+    width: 60px;
+    height: 60px;
+  }
+  .ring-av.lg .ring-av-in {
+    inset: 8px;
+    font-size: calc(18px * var(--dt));
+  }
+  .ring-av.md {
+    width: 44px;
+    height: 44px;
+  }
+  .ring-av.md .ring-av-in {
+    font-size: calc(13px * var(--dt));
+  }
+  .sel-av {
+    position: relative;
+    display: grid;
+    place-items: center;
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    background: var(--navy-2);
+    box-shadow: 0 0 0 2.5px var(--navy);
+    font-family: var(--font-display);
+    font-size: calc(13px * var(--dt));
+    font-weight: 700;
+  }
+  .xfer-title {
+    font-family: var(--font-display);
+    font-size: calc(15px * var(--dt));
+    font-weight: 700;
+  }
+  .xfer-sub {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 1px;
+    font-size: calc(12.5px * var(--dt));
+    color: rgba(255, 255, 255, 0.72);
+  }
+  .xfer-sub .in {
+    color: var(--in-light);
+  }
+  .xfer-sub > span {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+  }
+  .xfer-open {
+    display: grid;
+    place-items: center;
+    flex: none;
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.12);
+    color: #fff;
+  }
+  .xfer-done-btn {
+    display: flex;
+    align-items: center;
+    flex: none;
+    height: 36px;
+    min-height: 44px;
+    margin: -4px 0;
+    padding: 0 14px;
+    border: 0;
+    border-radius: 18px;
+    background: rgba(255, 255, 255, 0.12);
+    color: #fff;
+    font-size: calc(14px * var(--dt));
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .sel-go {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex: none;
+    height: 44px;
+    padding: 0 18px;
+    border: 0;
+    border-radius: 22px;
+    background: var(--in-fill);
+    color: #fff;
+    font-size: calc(15px * var(--dt));
+    font-weight: 650;
+    cursor: pointer;
+  }
+
+  /* -- Il foglio del trasferimento (15c, 16c) ------------------------------- */
+  /* Il tocco non lascia un anello di focus su quello che ha appena toccato. */
+  .xfer-card:focus,
+  .xr-row:focus,
+  .xs-act:focus,
+  .xs-pause-all:focus,
+  .xs-cell:focus,
+  .cam-card:focus,
+  .comp-chip:focus,
+  .tile:focus,
+  .comp-go:focus,
+  .comp-ttl:focus,
+  .comp-thumb-x:focus,
+  .take-btn:focus,
+  .code-btn:focus,
+  .sel-go:focus {
+    outline: none;
+  }
+  .xfer-scrim {
+    position: fixed;
+    inset: 0;
+    z-index: 40;
+    background: var(--overlay-scrim);
+  }
+  .xfer-sheet {
+    position: fixed;
+    left: 8px;
+    right: 8px;
+    bottom: 8px;
+    z-index: 41;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    max-height: 86vh;
+    padding: 10px 20px calc(24px + env(safe-area-inset-bottom, 0px));
+    border-radius: 38px;
+    background: var(--navy);
+    color: #fff;
+    box-shadow: 0 20px 50px var(--navy-sh);
+    overflow: auto;
+    animation: ios-present 320ms var(--ease);
+  }
+  .xfer-sheet .sheet-grab span {
+    background: rgba(255, 255, 255, 0.25);
+  }
+  .xs-top {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 4px 0;
+  }
+  .xs-top.multi {
+    align-items: baseline;
+    justify-content: space-between;
+    padding: 8px 0 4px;
+  }
+  .xs-pct {
+    font-family: var(--font-display);
+    font-size: calc(26px * var(--dt));
+    font-weight: 800;
+    letter-spacing: -0.02em;
+    line-height: 1;
+  }
+  .xs-total {
+    font-family: var(--font-display);
+    font-size: calc(24px * var(--dt));
+    font-weight: 800;
+    letter-spacing: -0.02em;
+  }
+  .xs-total-sub {
+    margin-top: 3px;
+    font-size: calc(13px * var(--dt));
+    color: rgba(255, 255, 255, 0.7);
+  }
+  .xs-who {
+    margin-top: 5px;
+    font-size: calc(13.5px * var(--dt));
+    color: rgba(255, 255, 255, 0.72);
+  }
+  .xs-pill {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex: none;
+    height: 30px;
+    padding: 0 10px;
+    border-radius: 15px;
+    background: rgba(255, 255, 255, 0.1);
+    font-size: calc(12px * var(--dt));
+    font-weight: 600;
+  }
+  .xs-pause-all {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 44px;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: rgba(255, 255, 255, 0.85);
+    font-size: calc(14px * var(--dt));
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .xs-lane {
+    padding-top: 6px;
+    font-size: calc(12px * var(--dt));
+    font-weight: 650;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: rgba(255, 255, 255, 0.5);
+  }
+  .xr-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+    min-height: 44px;
+    padding: 12px 0;
+    border: 0;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    background: none;
+    color: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+  .xr-row:last-of-type {
+    border-bottom: 0;
+  }
+  .xr-name {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: calc(15px * var(--dt));
+    font-weight: 650;
+  }
+  .xr-sub {
+    margin-top: 2px;
+    font-size: calc(12.5px * var(--dt));
+    color: rgba(255, 255, 255, 0.68);
+  }
+  .xr-pct {
+    flex: none;
+    font-family: var(--font-display);
+    font-size: calc(15px * var(--dt));
+    font-weight: 700;
+  }
+  .xr-done {
+    flex: none;
+    font-size: calc(13px * var(--dt));
+    font-weight: 600;
+    color: var(--green-on-navy);
+  }
+  /* Una riga per file (15c), con la sua barra. */
+  .xf-row {
+    padding: 14px 0;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  }
+  .xf-row:last-of-type {
+    border-bottom: 0;
+  }
+  .xf-line {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .xf-thumb {
+    flex: none;
+    width: 38px;
+    height: 38px;
+    border-radius: 10px;
+    background: var(--ph2);
+    object-fit: cover;
+  }
+  .xf-name {
+    font-size: calc(14.5px * var(--dt));
+    font-weight: 600;
+  }
+  .xf-size {
+    margin-top: 1px;
+    font-size: calc(12.5px * var(--dt));
+    color: rgba(255, 255, 255, 0.65);
+  }
+  .xf-bar {
+    height: 4px;
+    margin: 10px 0 0 50px;
+    border-radius: 2px;
+    background: rgba(255, 255, 255, 0.12);
+    overflow: hidden;
+  }
+  .xf-bar > span {
+    display: block;
+    height: 100%;
+    border-radius: 2px;
+    background: var(--navy-blue);
+    transition: width var(--t) var(--ease);
+  }
+  .xf-bar > span.done {
+    background: var(--green-on-navy);
+  }
+  .xs-actions {
+    display: flex;
+    gap: 10px;
+    padding-top: 8px;
+  }
+  .xs-act {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    flex: 1;
+    height: 52px;
+    border: 0;
+    border-radius: 26px;
+    background: rgba(255, 255, 255, 0.1);
+    color: #fff;
+    font-size: calc(15.5px * var(--dt));
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .xs-act.danger {
+    color: var(--red-on-navy);
+  }
+  .xs-note {
+    padding-top: 8px;
+    text-align: center;
+    font-size: calc(12.5px * var(--dt));
+    color: rgba(255, 255, 255, 0.6);
+  }
+
+  /* -- Cosa (14b): chi in alto, la galleria, il foglio blu in fondo ---------- */
+  .compose {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+    gap: 0;
+  }
+  /* 17e: mentre si scrive, le foto si ritirano.
+     Non per far posto alla tastiera — a quello pensa `--kb` — ma perché una
+     griglia di foto sopra un campo di testo è una griglia che si tocca per
+     sbaglio con il palmo mentre si scrive, e perché la sola cosa che conta in
+     quel momento sono le tre o quattro righe che si stanno scrivendo. Resta la
+     capsula in cima: a chi si sta scrivendo è la cosa da non perdere di vista. */
+  .compose.writing .comp-chips,
+  .compose.writing .tiles,
+  .compose.writing .comp-list {
+    display: none;
+  }
+  .compose.writing .comp-foot {
+    margin-top: auto;
+  }
+  /* E il foglio si stringe su se stesso: i quadratini scendono a 36 e le due
+     righe di «come arriva» si tolgono. Non sono sparite per far posto: mentre
+     si scrive si guarda quello che si sta scrivendo, e quelle due righe sono la
+     risposta a una domanda che si è già fatta prima di arrivare al campo. */
+  .compose.writing .comp-hows {
+    display: none;
+  }
+  .compose.writing .comp-thumb {
+    width: 36px;
+    height: 36px;
+    border-radius: 9px;
+  }
+  .compose.writing .comp-thumb-x {
+    display: none;
+  }
+  .compose.writing .comp-count {
+    font-size: calc(13px * var(--dt));
+    font-weight: 400;
+    color: rgba(255, 255, 255, 0.7);
+  }
+  /* Il foglio cresciuto (17d): un po' più stretto di fianchi, perché dentro non
+     ci sono più quadratini a tutta larghezza ma righe di testo. */
+  .comp-card.open {
+    gap: 12px;
+    padding: 12px 18px 18px;
+  }
+  .comp-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 4px 0 14px;
+  }
+  .comp-back {
+    display: grid;
+    place-items: center;
+    flex: none;
+    width: 44px;
+    height: 44px;
+    border: 0;
+    border-radius: 50%;
+    background: var(--surface);
+    box-shadow: 0 0 0 1px var(--line);
+    color: var(--ink);
+    cursor: pointer;
+  }
+  .comp-cap {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex: 1;
+    min-width: 0;
+    height: 52px;
+    padding: 0 8px 0 6px;
+    border-radius: 26px;
+    background: var(--surface);
+    box-shadow: 0 0 0 1px var(--line);
+  }
+  .comp-av {
+    position: relative;
+    flex: none;
+    width: 40px;
+    height: 40px;
+  }
+  .comp-av-ring {
+    position: absolute;
+    inset: 0;
+    padding: 2.5px;
+    border-radius: 50%;
+    background: var(--track);
+  }
+  .comp-av-ring.on {
+    background: var(--in-fill);
+  }
+  .comp-av-in {
+    display: grid;
+    place-items: center;
+    width: 100%;
+    height: 100%;
+    border-radius: 50%;
+    background: var(--surface-2);
+    box-shadow: inset 0 0 0 2.5px var(--canvas);
+    font-family: var(--font-display);
+    font-size: calc(15px * var(--dt));
+    font-weight: 700;
+    color: var(--ink);
+  }
+  .comp-av .face-dot {
+    right: 1px;
+    bottom: 1px;
+  }
+  .comp-av.pile {
+    display: flex;
+    width: auto;
+  }
+  .comp-av.pile .comp-av-ring {
+    position: relative;
+    width: 40px;
+    height: 40px;
+  }
+  .comp-av.pile .comp-av-ring + .comp-av-ring {
+    margin-left: -12px;
+  }
+  .comp-name {
+    font-family: var(--font-display);
+    font-size: calc(16px * var(--dt));
+    font-weight: 700;
+  }
+  .comp-sub {
+    font-size: calc(12px * var(--dt));
+    color: var(--ink-mut);
+  }
+  .comp-opts {
+    display: grid;
+    place-items: center;
+    flex: none;
+    width: 40px;
+    height: 40px;
+    border: 0;
+    border-radius: 50%;
+    background: var(--surface-2);
+    color: var(--ink);
+    cursor: pointer;
+  }
+  /* Il disco pieno della capsula quando il destinatario non è nessuno in
+     particolare (18b): il link, il codice. */
+  .comp-av-fill {
+    display: grid;
+    place-items: center;
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    background: var(--ink);
+    color: var(--canvas);
+  }
+  /* «PUBBLICO», non «Pubblico»: non è il nome di qualcuno, è la condizione in
+     cui parte quello che mandi — e si legge come un'etichetta, non come una
+     persona che si chiama così. */
+  .comp-name.shout {
+    font-size: calc(15.5px * var(--dt));
+    font-weight: 800;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+  .comp-chips {
+    display: flex;
+    gap: 8px;
+    padding: 0 0 14px;
+  }
+  .comp-chip {
+    display: flex;
+    align-items: center;
+    height: 36px;
+    padding: 0 16px;
+    border: 0;
+    border-radius: 18px;
+    background: var(--surface);
+    box-shadow: 0 0 0 1px var(--line);
+    color: var(--ink-sec);
+    font-size: calc(14px * var(--dt));
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .comp-chip[aria-pressed="true"] {
+    background: var(--navy);
+    color: #fff;
+    box-shadow: none;
+  }
+  /* La galleria, tre per riga, è la pagina: scorre lei. */
+  .tiles {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    grid-auto-rows: min-content;
+    gap: 6px;
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+    padding-bottom: 8px;
+  }
+  .tile {
+    position: relative;
+    aspect-ratio: 1;
+    min-height: 44px;
+    padding: 0;
+    border: 0;
+    border-radius: 14px;
+    background: var(--surface-3);
+    overflow: hidden;
+    cursor: pointer;
+  }
+  .tile img {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+  .tile.on::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: 14px;
+    box-shadow: inset 0 0 0 3px var(--in-fill);
+    pointer-events: none;
+  }
+  .tile-mark {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    display: grid;
+    place-items: center;
+    width: 24px;
+    height: 24px;
+    border: 1.5px solid #fff;
+    border-radius: 50%;
+    box-shadow: 0 0 0 1px rgba(9, 7, 53, 0.15);
+    color: #fff;
+    font-size: calc(12.5px * var(--dt));
+    font-weight: 700;
+  }
+  .tile.on .tile-mark {
+    border: 0;
+    background: var(--in-fill);
+    box-shadow: 0 0 0 2px #fff;
+  }
+  .tile-dur {
+    position: absolute;
+    left: 8px;
+    bottom: 6px;
+    padding: 1px 6px;
+    border-radius: var(--r-pill);
+    background: rgba(0, 0, 0, 0.55);
+    color: #fff;
+    font-size: calc(11px * var(--dt));
+    font-weight: 600;
+  }
+  /* File e Appunti: una lista, con la riga che aggiunge. */
+  .comp-list {
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  .comp-empty {
+    padding: 24px 4px;
+    text-align: center;
+    font-size: calc(14px * var(--dt));
+    line-height: 1.5;
+    color: var(--ink-mut);
+  }
+  .comp-foot {
+    flex: none;
+    padding: 12px 0 calc(14px + var(--kb));
+  }
+  .comp-card {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    padding: 16px;
+    border-radius: 30px;
+    background: var(--navy);
+    color: #fff;
+    box-shadow: 0 18px 40px var(--navy-sh);
+  }
+  /* -- Quello che parte, nel foglio (17a–17c) ------------------------------- */
+  .comp-what {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  /* I quadratini di quello che si è scelto, in fila e non più impilati storti.
+     La pila diceva «delle foto»; questi dicono *quali*, e ognuno porta la sua
+     croce — che è l'unico modo di disfare una scelta senza tornare alla
+     sorgente da cui veniva. Tre, e poi un «+n»: oltre, la fila mangerebbe la
+     riga che dice quanti sono. */
+  .comp-thumbs {
+    display: flex;
+    gap: 6px;
+    flex: none;
+  }
+  .comp-thumb {
+    position: relative;
+    display: grid;
+    place-items: center;
+    width: 44px;
+    height: 44px;
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.1);
+    color: rgba(255, 255, 255, 0.75);
+  }
+  .comp-thumb > img {
+    width: 100%;
+    height: 100%;
+    border-radius: 10px;
+    object-fit: cover;
+  }
+  .comp-thumb-x {
+    position: absolute;
+    top: -5px;
+    right: -5px;
+    display: grid;
+    place-items: center;
+    width: 18px;
+    height: 18px;
+    padding: 0;
+    border: 0;
+    border-radius: 50%;
+    background: #3a3a44;
+    color: #fff;
+    box-shadow: 0 0 0 2px var(--navy);
+    cursor: pointer;
+  }
+  /* Il bersaglio della croce è 18 di disegno e 34 di dito. */
+  .comp-thumb-x::after {
+    content: "";
+    position: absolute;
+    inset: -8px;
+  }
+  .comp-more {
+    display: grid;
+    place-items: center;
+    min-width: 30px;
+    height: 44px;
+    padding: 0 6px;
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.08);
+    font-size: calc(13px * var(--dt));
+    font-weight: 700;
+    color: rgba(255, 255, 255, 0.75);
+  }
+  .comp-count {
+    font-family: var(--font-display);
+    font-size: calc(16px * var(--dt));
+    font-weight: 700;
+  }
+  .comp-size {
+    margin-top: 1px;
+    font-size: calc(12.5px * var(--dt));
+    color: rgba(255, 255, 255, 0.65);
+  }
+  /* Una riga per ogni cosa diversa che succede. */
+  .comp-hows {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .comp-how {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: calc(13px * var(--dt));
+    color: rgba(255, 255, 255, 0.78);
+  }
+  .comp-how > svg {
+    flex: none;
+  }
+  /* 17c: niente scelto. Un quadrato tratteggiato dove andranno i quadratini. */
+  .comp-none {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 4px 2px;
+  }
+  .comp-none-box {
+    flex: none;
+    width: 44px;
+    height: 44px;
+    border-radius: 12px;
+    border: 1.5px dashed rgba(255, 255, 255, 0.3);
+  }
+  .comp-none-say {
+    font-size: calc(14px * var(--dt));
+    line-height: 1.4;
+    color: rgba(255, 255, 255, 0.75);
+  }
+
+  /* -- Il messaggio, e la riga da cui si manda (17a/17e) --------------------- */
+  .comp-msg {
+    width: 100%;
+    min-height: 46px;
+    max-height: 46px;
+    padding: 12px 16px;
+    border: 0;
+    border-radius: 23px;
+    background: rgba(255, 255, 255, 0.08);
+    color: #fff;
+    /* 16 è il pavimento: sotto, questa webview ingrandisce la pagina al fuoco
+       e non la rimpicciolisce più. */
+    font: 400 max(16px, calc(15px * var(--dt))) / 1.45 var(--font);
+    resize: none;
+    outline: none;
+    transition: min-height 180ms var(--ease), max-height 180ms var(--ease);
+  }
+  .comp-msg::placeholder {
+    color: rgba(255, 255, 255, 0.55);
+  }
+  /* 17e: col fuoco il campo diventa un foglio da scriverci dentro, e l'anello
+     dice quale dei due pezzi del foglio sta ascoltando la tastiera. */
+  .comp-msg.big {
+    min-height: 72px;
+    max-height: 132px;
+    border-radius: 20px;
+    box-shadow: inset 0 0 0 1.5px var(--navy-blue);
+  }
+  .comp-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  /* La scadenza è un pulsante, ed è la porta delle opzioni: si legge quanto
+     resterà in casella, si tocca, e il foglio si allunga. */
+  .comp-ttl {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex: none;
+    height: 52px;
+    padding: 0 14px;
+    border: 0;
+    border-radius: 26px;
+    background: rgba(255, 255, 255, 0.08);
+    color: rgba(255, 255, 255, 0.85);
+    font: 600 calc(13.5px * var(--dt)) var(--font);
+    cursor: pointer;
+  }
+  .comp-seal {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex: 1;
+    min-width: 0;
+    font-size: calc(12.5px * var(--dt));
+    color: rgba(255, 255, 255, 0.62);
+  }
+  /* Il bottone porta il nome di chi riceve. Era un disco col solo glifo: a
+     fianco di un campo di testo, un disco è il tasto «invia» di una chat — e
+     questo manda dei file, non la riga che si è appena scritta. */
+  .comp-go {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    flex: 1;
+    min-width: 0;
+    height: 52px;
+    padding: 0 18px;
+    border: 0;
+    border-radius: 26px;
+    background: var(--in-fill);
+    color: #fff;
+    font: 700 calc(16px * var(--dt)) var(--font-display);
+    cursor: pointer;
+  }
+  .comp-go:disabled {
+    opacity: 0.4;
+    cursor: default;
+  }
+  .comp-go.small {
+    flex: none;
+    height: 46px;
+    padding: 0 18px;
+    border-radius: 23px;
+    font-size: calc(15px * var(--dt));
+  }
+  .comp-go.busy svg {
+    animation: spin 900ms linear infinite;
+  }
+  /* Il contatore sul chip della sorgente. */
+  .comp-n {
+    display: grid;
+    place-items: center;
+    min-width: 18px;
+    height: 18px;
+    padding: 0 5px;
+    border-radius: 9px;
+    background: var(--in-fill);
+    color: #fff;
+    font-size: calc(11px * var(--dt));
+    font-weight: 700;
+  }
+  .comp-chip[aria-pressed="true"] .comp-n {
+    background: var(--in-fill);
+  }
+
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  /* -- Le opzioni, dentro il foglio blu notte (17d) -------------------------
+     Erano un foglio a parte, bianco, che saliva dal basso sopra uno scrim: tutte
+     le misure qui sotto erano scritte per quel fondo. Ora stanno *dentro* la
+     scheda che c'era già, quindi il fondo è il blu notte e i colori sono quelli
+     che vivono sopra di lui — bianco a percentuali, non `--ink`. Niente
+     posizione, niente `max-height`, niente animazione d'ingresso: il foglio non
+     entra, era già lì ed è cresciuto. */
+  /* -- Link pronto (18c) ----------------------------------------------------
+     Un foglio dal basso, blu notte come quello da cui è nato: la schermata che
+     lo ha creato resta dietro, scurita, perché quello che si è appena fatto è
+     ancora lì sotto. */
+  .ready {
+    position: fixed;
+    left: 8px;
+    right: 8px;
+    bottom: 8px;
+    z-index: 42;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    padding: 10px 18px 22px;
+    border-radius: 38px;
+    background: var(--navy);
+    color: #fff;
+    box-shadow: 0 20px 50px var(--navy-sh);
+    animation: ios-present 320ms var(--ease);
+  }
+  .ready-head {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+  }
+  .ready-ico {
+    display: grid;
+    place-items: center;
+    width: 60px;
+    height: 60px;
+    border-radius: 50%;
+    background: #fff;
+    color: var(--navy);
+  }
+  .ready-title {
+    font-family: var(--font-display);
+    font-size: calc(24px * var(--dt));
+    font-weight: 800;
+    letter-spacing: -0.02em;
+    text-align: center;
+  }
+  .ready-what {
+    font-size: calc(13.5px * var(--dt));
+    color: rgba(255, 255, 255, 0.7);
+  }
+  /* L'indirizzo intero, che va a capo dove capita: un URL non si detta, si
+     copia — qui si legge solo per riconoscerlo. */
+  .ready-url {
+    padding: 14px 16px;
+    border-radius: 18px;
+    background: rgba(255, 255, 255, 0.07);
+    font-size: calc(13.5px * var(--dt));
+    line-height: 1.5;
+    word-break: break-all;
+    -webkit-user-select: text;
+    user-select: text;
+  }
+  .ready-acts {
+    display: flex;
+    gap: 10px;
+  }
+  .ready-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    flex: 1;
+    min-width: 0;
+    height: 52px;
+    border: 0;
+    border-radius: 26px;
+    background: rgba(255, 255, 255, 0.1);
+    color: #fff;
+    font: 650 calc(16px * var(--dt)) var(--font);
+    cursor: pointer;
+  }
+  /* Quello che si fa quasi sempre con un link appena nato: darlo a qualcuno. */
+  .ready-btn.strong {
+    background: #fff;
+    color: var(--navy);
+    font-weight: 700;
+  }
+  .ready-note {
+    font-size: calc(12.5px * var(--dt));
+    line-height: 1.45;
+    color: rgba(255, 255, 255, 0.6);
+  }
+  .ready-done {
+    min-height: 44px;
+    border: 0;
+    background: none;
+    color: var(--in-light);
+    font: 650 calc(15px * var(--dt)) var(--font);
+    cursor: pointer;
+  }
+
+  .comp-grab {
+    width: 36px;
+    height: 5px;
+    margin: 0 auto 2px;
+    border-radius: 3px;
+    background: rgba(255, 255, 255, 0.25);
+  }
+  .opt-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+  }
+  .opt-title {
+    font-family: var(--font-display);
+    font-size: calc(19px * var(--dt));
+    font-weight: 700;
+  }
+  .opt-done:focus {
+    outline: none;
+  }
+  .opt-done {
+    display: flex;
+    align-items: center;
+    flex: none;
+    min-height: 44px;
+    padding: 0 4px;
+    border: 0;
+    background: none;
+    color: var(--in-light);
+    font: 650 calc(15px * var(--dt)) var(--font);
+    cursor: pointer;
+  }
+  .opt-ttl {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  /* Perché la scadenza esiste, in una riga: è la sola delle tre regole che
+     cambia qualcosa anche quando non la si tocca. */
+  .opt-ttl-say {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: calc(13.5px * var(--dt));
+    line-height: 1.35;
+    color: rgba(255, 255, 255, 0.75);
+  }
+  .opt-ttl-say > svg {
+    flex: none;
+  }
+  /* Il segmented del canvas, in versione notturna: la traccia è il bianco all'8
+     per cento e il scelto è bianco pieno con l'inchiostro scuro sopra. */
+  .opt-seg {
+    display: flex;
+    gap: 2px;
+    padding: 3px;
+    border-radius: 14px;
+    background: rgba(255, 255, 255, 0.08);
+  }
+  .opt-seg > button {
+    flex: 1;
+    min-width: 0;
+    height: 38px;
+    padding: 0 4px;
+    border: 0;
+    border-radius: 11px;
+    background: none;
+    color: rgba(255, 255, 255, 0.8);
+    font: 550 calc(14px * var(--dt)) var(--font);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    cursor: pointer;
+  }
+  .opt-seg > button[aria-checked="true"] {
+    background: #fff;
+    color: var(--navy);
+    font-weight: 700;
+  }
+  .opt-seg > button:focus {
+    outline: none;
+  }
+  .opt-rows {
+    display: flex;
+    flex-direction: column;
+  }
+  .opt-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-height: 58px;
+    padding: 8px 0;
+  }
+  .opt-row > svg {
+    flex: none;
+    color: rgba(255, 255, 255, 0.6);
+  }
+  .opt-label {
+    font-size: calc(15.5px * var(--dt));
+    font-weight: 600;
+  }
+  .opt-hint {
+    margin-top: 1px;
+    font-size: calc(12.5px * var(--dt));
+    line-height: 1.4;
+    color: rgba(255, 255, 255, 0.62);
+  }
+  .stepper {
+    display: flex;
+    align-items: center;
+    flex: none;
+    border-radius: 12px;
+    background: rgba(255, 255, 255, 0.08);
+  }
+  .stepper > button {
+    position: relative;
+    display: grid;
+    place-items: center;
+    width: 44px;
+    height: 38px;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: #fff;
+    font-size: calc(19px * var(--dt));
+    cursor: pointer;
+  }
+  /* 38 di disegno, 44 di dito: il canvas disegna il passo alto 38 e il
+     pavimento di questa piattaforma è 44, quindi la differenza se la prende il
+     bersaglio e non la grafica. */
+  .stepper > button::after {
+    content: "";
+    position: absolute;
+    inset: -3px 0;
+  }
+  .stepper > button:disabled {
+    opacity: 0.35;
+  }
+  .stepper > i {
+    min-width: 20px;
+    font-style: normal;
+    font-weight: 700;
+    text-align: center;
+  }
+  .opt-value {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    min-height: 44px;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: rgba(255, 255, 255, 0.6);
+    font-size: calc(14.5px * var(--dt));
+    cursor: pointer;
+  }
+  .opt-value input {
+    width: 120px;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: #fff;
+    text-align: right;
+    font: 400 max(16px, calc(14.5px * var(--dt))) var(--font);
+    outline: none;
+  }
+  .opt-note {
+    padding: 0 4px;
+    font-size: calc(13px * var(--dt));
+    line-height: 1.5;
+    color: var(--ink-mut);
+  }
+  .opt-intro {
+    padding: 0 4px;
+    font-size: calc(14px * var(--dt));
+    line-height: 1.5;
+    color: var(--ink-sec);
+  }
+  .opt-glyph {
+    display: grid;
+    place-items: center;
+    flex: none;
+    width: 40px;
+    height: 40px;
+    border-radius: var(--r-md);
+    background: var(--surface-3);
+    color: var(--ink);
+  }
+
+  /* -- 11e: i file già in mano, al posto del titolo ------------------------- */
+  .files-head {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-height: 44px;
+  }
+  .files-head > .icon-btn {
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    background: var(--surface);
+    box-shadow: 0 0 0 1px var(--line);
+    color: var(--ink);
+  }
+  .files-thumbs {
+    position: relative;
+    flex: none;
+    width: 52px;
+    height: 44px;
+  }
+  .files-thumbs .thumb {
+    position: absolute;
+    width: 38px;
+    height: 38px;
+    border-radius: 10px;
+    background: var(--ph2);
+    box-shadow: 0 0 0 2px var(--canvas);
+  }
+  .files-thumbs .thumb:first-child {
+    left: 0;
+    top: 4px;
+    transform: rotate(-8deg);
+  }
+  .files-thumbs .thumb:nth-child(2) {
+    left: 14px;
+    top: 0;
+    background: var(--in-soft);
+    transform: rotate(6deg);
+  }
+  .files-line {
+    display: block;
+    font-family: var(--font-display);
+    font-size: calc(16px * var(--dt));
+    font-weight: 700;
+  }
+  .files-ask {
+    display: block;
+    font-size: calc(13px * var(--dt));
+    color: var(--ink-mut);
+  }
+
+  /* -- 12a: Lasciati ------------------------------------------------------- */
+  .left-intro {
+    padding: 0 4px;
+    font-size: calc(14.5px * var(--dt));
+    line-height: 1.5;
+    color: var(--ink-sec);
+  }
+
+  /* -- 12b: Impostazioni ---------------------------------------------------- */
+  .page-title {
+    margin: 0;
+    padding: 0 4px;
+    font-size: calc(28px * var(--dt));
+    font-weight: 740;
+    letter-spacing: -0.022em;
+  }
+  .me-block {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    width: 100%;
+    min-height: 60px;
+    padding: 0 4px;
+    border: 0;
+    background: none;
+    color: var(--ink);
+    text-align: left;
+    cursor: pointer;
+  }
+  .me-name {
+    font-size: calc(20px * var(--dt));
+    font-weight: 700;
+  }
+  /* Il nome è un campo che non sembra un campo finché non lo si tocca. */
+  .me-name-input {
+    display: block;
+    width: 100%;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--ink);
+    outline: none;
+  }
+  .me-name-input::placeholder {
+    color: var(--ink-weak);
+  }
+  .me-words {
+    margin-top: 2px;
+    font-size: calc(13px * var(--dt));
+    line-height: 1.5;
+    color: var(--ink-sec);
+  }
+
+  /* -- La camera (dietro la scheda) ----------------------------------------- */
+  .cam-back {
+    position: absolute;
+    top: calc(env(safe-area-inset-top, 0px) + 8px);
+    left: 12px;
+    z-index: 3;
+    display: grid;
+    place-items: center;
+    width: 44px;
+    height: 44px;
+    border: 0;
+    border-radius: 50%;
+    background: rgba(0, 0, 0, 0.45);
+    color: #fff;
+    cursor: pointer;
+  }
+
 }
 
 /* ==========================================================================

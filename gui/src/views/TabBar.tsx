@@ -1,20 +1,29 @@
-// The rail, lying down.
+// The rail, lying down: three places, and the one in the middle is where
+// everything starts.
 //
-// Six places and two verbs do not fit across the bottom of a phone, and a bar
-// nobody can hit accurately is worse than one place fewer. So the bar carries
-// the five things a person reaches for while standing up — the two verbs, the
-// two lists they produce, and yourself — and the rest keeps its parity by moving
-// under *You*, which is where a phone puts everything that is not a verb.
+// This bar has been through five shapes, and the reason for this one is worth
+// keeping rather than the rule it breaks. It held four places and no verb, on the
+// argument that a tab bar on this platform is navigation and a filled button in
+// the middle of one is somebody else's convention. Then it held *Invia* in the
+// middle as a disc. Then five places, with *Scambia* in the middle as a camera
+// and *Invia* beside it as a fourth — which asked "a chi" twice, once in each.
+// Then three places on a bar that was the floor continuing.
 //
-// Four places and no verb. A tab bar on this platform is navigation and nothing
-// else — the thing you *do* lives in the top right of the bar above, where a
-// compose button has lived since Mail had one. A filled action in the middle of
-// a tab bar is somebody else's convention, and next to the platform's own it
-// reads as a foreign object rather than as emphasis.
+// The design of record ("Arvolo Mobile 2 — Scambia", sections 14–15) makes it
+// an island: a white capsule floating over the screen, with **Scambia** in the
+// middle as a navy pill that always carries its name — it is the place everything
+// starts from, and the bar says so wherever you are. Attività and Persone are a
+// glyph and a word; a blue dot over Attività says something is moving, or
+// somebody is waiting for an answer.
 
 import { phoneTitle, useStore, type Route } from "../store";
 import { useT } from "../i18n";
 import { Icon } from "../ui/Icons";
+import { haptic } from "../haptics";
+import type { UIStatus } from "../types";
+
+/** The states the dot stands for: moving, held, or waiting on a decision. */
+const BUSY: UIStatus[] = ["active", "preparing", "offered", "stalled", "incoming"];
 
 export function TabBar() {
   const t = useT();
@@ -22,42 +31,48 @@ export function TabBar() {
   const go = useStore((s) => s.go);
   const transfers = useStore((s) => s.transfers);
 
-  const rows = Object.values(transfers);
-  const pending = rows.filter((x) => x.status === "incoming").length;
-  const active = rows.filter(
-    (x) => x.status === "active" || x.status === "stalled"
-  ).length;
-  const count = pending || active;
+  const busy = Object.values(transfers).some((x) => BUSY.includes(x.status));
 
-  const place = (route_: Route, icon: JSX.Element, badge?: number) => {
+  const place = (
+    route_: Route,
+    icon: JSX.Element,
+    opts: { dot?: boolean; disc?: boolean } = {}
+  ) => {
     // One name for one place: the header says it too.
     const label = t(phoneTitle(route_));
     return (
       <button
-        className="tab"
+        className={`tab${opts.disc ? " tab-disc" : ""}`}
         aria-current={route === route_ ? "page" : undefined}
-        onClick={() => go(route_)}
+        onClick={() => {
+          // The system's tick on a change of place, and nothing on the tab you
+          // are already on: that tap does nothing, and should feel like it.
+          if (route !== route_) haptic.picked();
+          go(route_);
+        }}
         title={label}
       >
-        <span className="ico">
-          {icon}
-          {badge ? (
-            <span className={`tab-count tnum ${pending ? "hot" : ""}`}>
-              {badge}
-            </span>
-          ) : null}
-        </span>
-        <span className="truncate">{label}</span>
+        {opts.disc ? (
+          <span className="verb-disc">
+            {icon}
+            <span>{label}</span>
+          </span>
+        ) : (
+          <>
+            <span className="ico">{icon}</span>
+            <span className="truncate">{label}</span>
+            {opts.dot ? <span className="tab-dot" aria-hidden /> : null}
+          </>
+        )}
       </button>
     );
   };
 
   return (
     <nav className="tabbar" aria-label={t("rail.nav")}>
-      {place("transfers", <Icon.Transfers size={24} />, count)}
-      {place("people", <Icon.People size={24} />)}
-      {place("codes", <Icon.Qr size={24} />)}
-      {place("settings", <Icon.Settings size={24} />)}
+      {place("transfers", <Icon.Activity size={22} />, { dot: busy })}
+      {place("exchange", <Icon.Scan size={20} />, { disc: true })}
+      {place("people", <Icon.People size={22} />)}
     </nav>
   );
 }

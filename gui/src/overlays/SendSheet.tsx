@@ -31,7 +31,9 @@ import {
   Textarea,
   TrustBadges,
 } from "../ui/Primitives";
-import { Avatar, ClaimedName, CodeHero } from "../ui/Bits";
+import { Avatar, ClaimedName, CodeHero, ExtChip, useCopy } from "../ui/Bits";
+import { ValueRow } from "../ui/Rows";
+import { fmtBytes } from "../format";
 import { Sheet } from "../ui/Sheet";
 import { toast } from "../ui/Toasts";
 import type { ContactDto, DeviceDto, PickedItem } from "../types";
@@ -355,6 +357,7 @@ export function SendSheet() {
   const picks = useStore((s) => s.sheetPicks);
   const presetTo = useStore((s) => s.sheetTo);
   const presetMode = useStore((s) => s.sheetMode);
+  const presetDevice = useStore((s) => s.sheetDevice);
   const close = useStore((s) => s.closeSheet);
   const contacts = useStore((s) => s.contacts);
   const send = useStore((s) => s.send);
@@ -386,6 +389,9 @@ export function SendSheet() {
   const [busy, setBusy] = useState(false);
   /** A file has been chosen and is still on its way in. */
   const [picking, setPicking] = useState(false);
+  /** The link's own copy button, which says so for a moment afterwards. */
+  const { state: copyState, copy: copyLink } = useCopy();
+  const copied = copyState === "ok";
   const [result, setResult] = useState<Result | null>(null);
   /** Which of our machines to aim at; `null` is "whichever is awake", which is
    *  what every send did before there was a register to choose from. */
@@ -410,9 +416,12 @@ export function SendSheet() {
     setKeepCode(false);
     setMaxDl("1");
     setMaxDlLink("");
-    setDevice(null);
+    // Opened by tapping one of your own machines in *Scambia*: that tap already
+    // named the destination, and asking for it again is the app forgetting what
+    // it was just told.
+    setDevice(presetDevice ?? null);
     setTtl(7 * 24 * 3600);
-  }, [open, picks, presetTo, presetMode]);
+  }, [open, picks, presetTo, presetMode, presetDevice]);
 
   // Sync state is what the Devices screen loads, and the sheet can be the first
   // thing a session opens. Fetch it here so "no other machine holds this identity
@@ -619,7 +628,10 @@ export function SendSheet() {
             {t("common.cancel")}
           </button>
         ),
-        confirm: isPhone && step !== "main" ? undefined : result ? (
+        confirm: isPhone && step !== "main" ? undefined : isPhone && !result ? (
+          // Sending is the band at the foot of the screen — see the body.
+          undefined
+        ) : result ? (
           <button className="bar-btn strong" onClick={close}>
             {t("common.done")}
           </button>
@@ -679,15 +691,92 @@ export function SendSheet() {
     >
       {result ? (
         <div className="stack">
-          {result.kind === "sent" ? null : (
-            <CodeHero
-              value={result.value}
-              small={result.kind !== "code"}
-              caption={result.detail}
-            />
-          )}
-          {result.kind === "link" && (
-            <div className="t-sm t-sec">{t("send.linkKeyNote")}</div>
+          {/* A link is not a code and the design draws it as what it is: an
+              address, whole, in a box you can read across — never a square and
+              never an ellipsis. The square is for things a camera reads; a URL
+              gets copied, and what the reader needs is the certainty that what
+              they are copying is all of it. */}
+          {isPhone && result.kind === "link" ? (
+            <>
+              {files[0] && (
+                <div className="link-file">
+                  <ExtChip name={files[0].name} />
+                  <span className="grow" style={{ minWidth: 0 }}>
+                    <span className="link-file-name">{files[0].name}</span>
+                    <span className="link-file-size tnum">
+                      {fmtBytes(files.reduce((n, f) => n + (f.size ?? 0), 0))}
+                    </span>
+                  </span>
+                </div>
+              )}
+              <div className="stack-sm">
+                <div className="t-label" style={{ padding: "0 4px" }}>
+                  {t("send.linkPublic")}
+                </div>
+                <div className="link-box mono">{result.value}</div>
+              </div>
+              <div className="link-actions">
+                <Button size="lg" onClick={() => copyLink(result.value)}>
+                  <Icon.Copy size={15} />
+                  {copied ? t("common.copied") : t("common.copy")}
+                </Button>
+                {/* Only where the system has a share sheet to offer. Tauri has
+                    no plugin for one yet (see MOBILE.md, phase 5); this is the
+                    web's own, which WKWebView answers on a user gesture. A
+                    button that did nothing would be worse than no button. */}
+                {typeof navigator !== "undefined" && "share" in navigator && (
+                  <Button
+                    size="lg"
+                    variant="primary"
+                    onClick={() => {
+                      void (
+                        navigator as Navigator & {
+                          share: (d: { text: string }) => Promise<void>;
+                        }
+                      )
+                        .share({ text: result.value })
+                        .catch(() => {
+                          /* dismissed, or refused: the link is still on screen */
+                        });
+                    }}
+                  >
+                    <Icon.External size={15} />
+                    {t("common.share")}
+                  </Button>
+                )}
+              </div>
+              <div className="ios-group">
+                <ValueRow
+                  label={t("send.expiresAfter")}
+                  value={t(
+                    TTL_CHOICES.find((c) => c.secs === ttl)?.key ?? "send.ttl7d"
+                  )}
+                />
+                <ValueRow
+                  label={t("send.maxDownloadsLabel")}
+                  value={
+                    maxDlLink.trim()
+                      ? maxDlLink.trim()
+                      : t("send.maxDownloadsPlaceholder")
+                  }
+                />
+              </div>
+              <div className="ios-foot">{t("send.linkKeyNote")}</div>
+            </>
+          ) : (
+            <>
+              {result.kind === "sent" ? null : (
+                <CodeHero
+                  value={result.value}
+                  small={result.kind !== "code"}
+                  qrSize={isPhone && result.kind === "code" ? 212 : 148}
+                  caption={result.detail}
+                />
+              )}
+              {result.kind === "link" && (
+                <div className="t-sm t-sec">{t("send.linkKeyNote")}</div>
+              )}
+            </>
           )}
           {/* A ticket is a blob nobody retypes: offer it as a `.arvolo` file —
               the CLI's own default artefact — shareable over any channel. */}
@@ -831,19 +920,26 @@ export function SendSheet() {
                why the screen rewrote itself under the reader's hands. */
             <div className="stack-sm">
               <div className="ios-head">{t("send.whoLabel")}</div>
-              <div className="ios-group">
-                <button
-                  className="ios-row"
-                  onClick={() => {
-                    setStep("mode");
-                    history.pushState({ arvolo: "sendstep" }, "");
-                  }}
-                >
-                  <span className="grow truncate">{t("send.modeLabel")}</span>
-                  <span className="ios-detail">{t(MODE_KEY[mode])}</span>
-                  <Icon.ChevronRight size={15} className="ios-chev" />
-                </button>
-                {mode === "contact" && (
+              {/* The five destinations in a strip that scrolls, with the chosen
+                  one's own sentence under it — the design of record's shape, and
+                  a better one than the row it replaces: the row named the mode
+                  but hid the other four behind a push, so choosing between them
+                  meant leaving the screen you were filling in. Five *short*
+                  labels do not fit a segmented control at this width; as pills
+                  that scroll they do not have to. */}
+              <Segmented
+                chips
+                label={t("send.modeLabel")}
+                value={mode}
+                onChange={setMode}
+                options={MODE_ORDER.map((m) => ({
+                  value: m,
+                  label: t(MODE_KEY[m]),
+                }))}
+              />
+              <div className="ios-foot">{t(BLURB[mode])}</div>
+              {mode === "contact" && (
+                <div className="ios-group">
                   <button
                     className="ios-row"
                     onClick={() => {
@@ -859,8 +955,8 @@ export function SendSheet() {
                     </span>
                     <Icon.ChevronRight size={15} className="ios-chev" />
                   </button>
-                )}
-              </div>
+                </div>
+              )}
               <div className="ios-foot">{t(BLURB_MORE[mode])}</div>
 
               {/* And the two rare ones, behind their own rows. A message is
@@ -1120,6 +1216,42 @@ export function SendSheet() {
               <Badge kind="info">
                 <Icon.Lock size={10} /> {t("send.noArvoloRelay")}
               </Badge>
+            </div>
+          )}
+
+          {/* The band at the foot of the screen, where this design keeps the one
+              thing a screen is for — and where a thumb already is. It carries
+              what is about to happen before it happens: how many files, how
+              heavy, and that they are sealed on the way. The bar at the top
+              keeps only the way out; two buttons meaning *send*, one at each end
+              of the screen, is a choice nobody was asking to make. */}
+          {isPhone && part("main") && (
+            <div className="phone-actions">
+              <div className="t-xs t-mut truncate">
+                {/* Nothing picked yet says so by saying nothing: "· sealed" on
+                    its own is a promise about no files. */}
+                {totalNote ? `${totalNote} · ${t("send.sealed")}` : null}
+              </div>
+              <Button
+                variant="in"
+                size="lg"
+                onClick={submit}
+                busy={busy}
+                disabled={!canSubmit || linkTooMany}
+              >
+                <Icon.Send size={15} />
+                {mode === "contact" && to
+                  ? t("send.submitTo", to)
+                  : pushes
+                    ? asDeposit
+                      ? t("send.submitDeposit")
+                      : t("send.submitSend")
+                    : mode === "code"
+                      ? t("send.submitCode")
+                      : mode === "link"
+                        ? t("send.submitLink")
+                        : t("send.submitTicket")}
+              </Button>
             </div>
           )}
         </div>

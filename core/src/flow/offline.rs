@@ -80,6 +80,88 @@ fn granted_ttl_from(raw: Option<&str>, asked: u64) -> u64 {
 
 const REVOKE_TOKEN_HEADER: &str = "x-arvolo-revoke-token";
 
+/// On a relay's 413: the per-blob cap it enforces, in bytes. The same figure its
+/// `/v1/features` advertises as `max_blob_bytes` ([`crate::link::relay_max_blob_bytes`]).
+const MAX_BLOB_HEADER: &str = "x-arvolo-max-blob-bytes";
+
+/// The cap a relay named on its refusal, if it named one. An older relay sends
+/// nothing, and a relay sending nonsense is read as having said nothing.
+pub(crate) fn blob_limit(resp: &reqwest::Response) -> Option<u64> {
+    resp.headers()
+        .get(MAX_BLOB_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|&n| n > 0)
+}
+
+/// A file the relay will not hold, because it is larger than the relay allows.
+///
+/// Typed, like [`crate::manager::AcceptRefusal`], because more than one program
+/// has to act on it — the daemon answers a window with a code instead of a
+/// sentence, the window translates the code and shows the limit in the reader's
+/// units — and because it carries the two numbers that make the refusal mean
+/// something: how large the file is, and how large the relay lets one be. The
+/// bare "413 Payload Too Large" it replaces said neither, and a person reading
+/// it could not tell whether a slightly smaller file would do or none would.
+///
+/// `limit` is `None` when the relay did not say: a relay older than the header
+/// and the `max_blob_bytes` feature, which still refuses, just without a number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TooLargeForRelay {
+    /// The file, in bytes.
+    pub size: u64,
+    /// The relay's per-file cap, in bytes, when it named one.
+    pub limit: Option<u64>,
+}
+
+impl TooLargeForRelay {
+    /// The stable word a front-end matches on, in place of reading the sentence.
+    /// The same word the engine's waiting reason uses for the same fact.
+    pub const CODE: &'static str = "tooLarge";
+
+    /// The refusal inside an error, if that is what it is.
+    pub fn of(e: &anyhow::Error) -> Option<Self> {
+        e.downcast_ref::<TooLargeForRelay>().copied()
+    }
+}
+
+impl std::fmt::Display for TooLargeForRelay {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.limit {
+            Some(limit) => write!(
+                f,
+                "this relay does not accept files this large: its limit is {}, and the \
+                 file is {}",
+                human_size(limit),
+                human_size(self.size)
+            ),
+            None => write!(
+                f,
+                "this relay does not accept files this large (the file is {})",
+                human_size(self.size)
+            ),
+        }
+    }
+}
+
+impl std::error::Error for TooLargeForRelay {}
+
+/// Human-readable byte size, binary units: what a refusal names a limit in.
+pub fn human_size(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut v = bytes as f64;
+    let mut u = 0;
+    while v >= 1024.0 && u < UNITS.len() - 1 {
+        v /= 1024.0;
+        u += 1;
+    }
+    if u == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{v:.1} {}", UNITS[u])
+    }
+}
+
 fn random_token() -> String {
     let bytes: [u8; 16] = rand::random();
     data_encoding::BASE32_NOPAD.encode(&bytes).to_lowercase()
@@ -96,8 +178,10 @@ fn random_token() -> String {
 /// later), [`Fatal`](DepositError::Fatal) is a local, unrecoverable error.
 #[derive(Debug)]
 pub enum DepositError {
-    /// The relay refused the file as larger than its per-file cap.
-    TooLarge,
+    /// The relay refused the file as larger than its per-file cap — or said in
+    /// advance that it would, which is the same fact learnt before the upload
+    /// rather than after it.
+    TooLarge(TooLargeForRelay),
     /// The relay has no room at this moment: it is holding as many bytes as its
     /// operator allows. Distinct from [`Unavailable`](Self::Unavailable) because
     /// nothing is broken and nothing is unreachable — the mailbox is simply full
@@ -113,7 +197,7 @@ pub enum DepositError {
 impl std::fmt::Display for DepositError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            DepositError::TooLarge => write!(f, "the relay refused the file as too large"),
+            DepositError::TooLarge(e) => write!(f, "{e}"),
             DepositError::Busy => write!(
                 f,
                 "the relay is being used by a lot of people right now — try again \
@@ -145,10 +229,22 @@ pub async fn deposit_offline(
     // Only a path can be pre-checked; a handed-off descriptor IS the access.
     if let crate::source::SendSource::Path(p) = source {
         if !p.is_file() {
-            return Err(Fatal(anyhow::anyhow!("{} is not a file", p.display())));
+            return Err(Fatal(crate::source::NotAFile(p.clone()).into()));
         }
     }
     let total_size = source.len().map_err(Fatal)?;
+    // Ask before sealing and uploading: a relay that advertises its cap lets a
+    // file it will not hold be refused here, in one small round trip, instead of
+    // after every byte of it has been encrypted and sent. A relay that does not
+    // advertise one is asked the old way — by uploading — and answers with 413.
+    if let Some(limit) = crate::link::relay_max_blob_bytes(relay).await {
+        if total_size > limit {
+            return Err(DepositError::TooLarge(TooLargeForRelay {
+                size: total_size,
+                limit: Some(limit),
+            }));
+        }
+    }
     let total_chunks = if total_size == 0 {
         0
     } else {
@@ -271,7 +367,10 @@ pub async fn deposit_offline(
     };
     let status = resp.status();
     if status == reqwest::StatusCode::PAYLOAD_TOO_LARGE {
-        return Err(DepositError::TooLarge);
+        return Err(DepositError::TooLarge(TooLargeForRelay {
+            size: total_size,
+            limit: blob_limit(&resp),
+        }));
     }
     // 507 is the relay saying it is holding all the bytes it is allowed to hold.
     // Reported as its own case rather than folded into `Unavailable`: "the relay
@@ -460,7 +559,12 @@ pub async fn fetch_offline_with_progress(
         anyhow::bail!("this link is password-protected — supply the password");
     }
 
-    let url = format!("{}/v1/fetch/{}", t.relay.trim_end_matches('/'), t.claim);
+    // `hold=1`: serve the blob but do not spend the download yet — that is the
+    // ack below, sent once every byte is on disk. A relay too old to know the
+    // query burns on read as it always did, and the ack then finds nothing,
+    // which is fine. See `Mailbox::fetch_plan_held` in the relay.
+    let relay = t.relay.trim_end_matches('/');
+    let url = format!("{relay}/v1/fetch/{}?hold=1", t.claim);
     let resp = crate::http::client()
         .get(&url)
         .send()
@@ -468,7 +572,19 @@ pub async fn fetch_offline_with_progress(
         .context("fetch request")?;
     let resp = match resp.error_for_status_ref() {
         Ok(_) => resp,
-        Err(e) => return Err(anyhow::Error::from(e).context(fetch_refusal(resp.status()))),
+        Err(e) => {
+            let status = resp.status();
+            let why = fetch_refusal(status);
+            // Typed when it is the one refusal a person can do something about
+            // (ask the sender again), so a window can say it in their language.
+            return Err(
+                if status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::GONE {
+                    anyhow::Error::from(e).context(crate::manager::FailReason::DepositGone(why))
+                } else {
+                    anyhow::Error::from(e).context(why)
+                },
+            );
+        }
     };
 
     let encapped = resp
@@ -548,6 +664,13 @@ pub async fn fetch_offline_with_progress(
         );
     }
     outfile.flush().await.context("flush output")?;
+    // Now, and only now, the relay may count this download — and burn a
+    // one-shot deposit. Best effort: the file is here whatever the relay says,
+    // and an unacked claim expires on its own.
+    let ack = format!("{relay}/v1/fetch/{}/ack", t.claim);
+    if let Err(e) = crate::http::client().post(&ack).send().await {
+        tracing::debug!("mailbox ack not delivered (the deposit stays until its TTL): {e}");
+    }
     Ok((out, total_size as usize))
 }
 
@@ -626,7 +749,43 @@ mod mailbox_out_tests {
 /// over-estimates, the recipient pays for as an arrival that 404s.
 #[cfg(test)]
 mod granted_ttl_tests {
-    use super::granted_ttl_from;
+    use super::{granted_ttl_from, human_size, TooLargeForRelay};
+
+    /// The sentence names both numbers when it has them, in units a person reads,
+    /// and does not invent a limit when the relay gave none.
+    #[test]
+    fn a_refusal_says_how_large_is_too_large() {
+        let with = TooLargeForRelay {
+            size: 6 * 1024 * 1024 * 1024,
+            limit: Some(5 * 1024 * 1024 * 1024),
+        }
+        .to_string();
+        assert!(with.contains("5.0 GiB"), "{with}");
+        assert!(with.contains("6.0 GiB"), "{with}");
+
+        let without = TooLargeForRelay {
+            size: 150 * 1024 * 1024,
+            limit: None,
+        }
+        .to_string();
+        assert!(without.contains("150.0 MiB"), "{without}");
+        assert!(!without.contains("limit is"), "{without}");
+
+        // Carried inside anyhow, it is still itself on the way out.
+        let e = anyhow::Error::new(TooLargeForRelay {
+            size: 1,
+            limit: Some(2),
+        });
+        assert_eq!(TooLargeForRelay::of(&e).and_then(|r| r.limit), Some(2));
+        assert_eq!(TooLargeForRelay::of(&anyhow::anyhow!("other")), None);
+    }
+
+    #[test]
+    fn sizes_read_in_binary_units() {
+        assert_eq!(human_size(512), "512 B");
+        assert_eq!(human_size(1536), "1.5 KiB");
+        assert_eq!(human_size(5 * 1024 * 1024 * 1024), "5.0 GiB");
+    }
 
     const WEEK: u64 = 7 * 24 * 3600;
 

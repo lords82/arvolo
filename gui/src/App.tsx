@@ -6,10 +6,11 @@
 // report the app's own health — a daemon that cannot be reached, and a daemon
 // whose version no longer matches this build.
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { enable as autostartEnable } from "@tauri-apps/plugin-autostart";
-import { onArvoloTicket, onPickedFiles } from "./ipc";
+import { onArvoloTicket, onPickedFiles, onSharedArrived } from "./ipc";
+import type { PickedItem } from "./types";
 import { api } from "./ipc";
 import { fire, phoneTitle, TITLE_KEY, useStore, type Route } from "./store";
 import { isBusy, shouldAnnounce } from "./update";
@@ -20,18 +21,28 @@ import { Button, IconButton, modKey, TextInput } from "./ui/Primitives";
 import { ToastHost, toast } from "./ui/Toasts";
 import { Rail } from "./views/Rail";
 import { TabBar } from "./views/TabBar";
-import { CasellaView } from "./views/CasellaView";
+import { TransferDock } from "./views/TransferCard";
+import { ActivityView } from "./views/ActivityView";
 import { CodesView } from "./views/CodesView";
+import { ExchangeView } from "./views/ExchangeView";
+import { CameraView } from "./views/CameraView";
+import { ComposeView } from "./views/ComposeView";
+import { NetworkView } from "./views/NetworkView";
+import { ReceivedView } from "./views/ReceivedView";
+import { FinishedSheet } from "./overlays/FinishedSheet";
 import { YouView } from "./views/YouView";
 import { AutoAcceptView } from "./views/AutoAcceptView";
 import { AppearanceView } from "./views/AppearanceView";
+import { IdentityView } from "./views/IdentityView";
 import { AdvancedView } from "./views/AdvancedView";
 import { ThreadSheet } from "./overlays/ThreadSheet";
-import { useIsPhone } from "./phone";
+import { useIsPhone, installDynamicType, isPhoneNow } from "./phone";
 import { tookBack } from "./backstack";
 import { useEdgeBack } from "./edgeback";
+import { usePullToRefresh } from "./ui/pullRefresh";
+import { installKeyboardInset } from "./keyboard";
 import { TransfersView } from "./views/TransfersView";
-import { PeopleBarMenu, PeopleView } from "./views/PeopleView";
+import { PeopleView } from "./views/PeopleView";
 import { DepositsView } from "./views/DepositsView";
 import { HistoryView } from "./views/HistoryView";
 import { DevicesView } from "./views/DevicesView";
@@ -53,19 +64,36 @@ const SEARCHABLE: Route[] = ["transfers"];
  *  A function rather than an expression inside the render because a push has to
  *  draw *two* screens for the length of the animation: the one arriving and the
  *  one being left behind. */
+/** Roots that draw their own head (title and tools) rather than the frame's. */
+const ROOT_HEADS: Route[] = ["transfers", "exchange", "people"];
+/** Pushed screens whose title is on the page, not in the bar (12b, 11b). */
+const PAGE_TITLED: Route[] = ["compose", "settings", "network"];
+
 function viewFor(route: Route, isPhone: boolean) {
   return route === "transfers"
     ? isPhone
-      ? CasellaView
+      ? ActivityView
       : TransfersView
     : route === "people"
       ? PeopleView
+      : route === "exchange"
+        ? ExchangeView
+      : route === "camera"
+        ? CameraView
+      : route === "compose"
+        ? ComposeView
+      : route === "network"
+        ? NetworkView
       : route === "codes"
         ? CodesView
         : route === "autoAccept"
           ? AutoAcceptView
+        : route === "received"
+          ? ReceivedView
         : route === "appearance"
           ? AppearanceView
+        : route === "identity"
+          ? IdentityView
           : route === "deposits"
             ? DepositsView
             : route === "history"
@@ -84,15 +112,31 @@ function viewFor(route: Route, isPhone: boolean) {
 
 export function App() {
   const isPhone = useIsPhone();
-  // The phone class goes on the document element, not only on the app's own
-  // div: sheets, menus and alerts render through portals into `document.body`,
-  // and a phone style scoped under a div they are not inside is a style they
-  // silently lose. On <html> it also sits beside `data-theme`, which makes the
-  // dark-palette guard `.app-phone:not([data-theme="light"])` actually able to
-  // see the choice it guards against.
-  useEffect(() => {
+  // The phone class goes on the document element, and **only** there.
+  //
+  // It has to be on <html> at all because sheets, menus and alerts render
+  // through portals into `document.body`, and a phone style scoped under a div
+  // they are not inside is a style they silently lose. It has to be *only* there
+  // because of the palette: the phone's colours are declared on `.app-phone`,
+  // and the dark ones on `.app-phone[data-theme="dark"]` — one selector naming
+  // two things that live on the same element. While the class was also on the
+  // app's own div, that div matched the light declaration and not the dark one
+  // (it carries no `data-theme`), so it re-declared the light palette *under* a
+  // root that had just been told to be dark: choosing Dark by hand on a phone
+  // whose system was light changed the sheets and nothing else.
+  //
+  // Laid out before the paint, not after it: `useEffect` would let one frame of
+  // the window's layout through on a phone, which is a visible flash of a rail
+  // and a two-column board at every launch.
+  useLayoutEffect(() => {
     document.documentElement.classList.toggle("app-phone", isPhone);
-    return () => document.documentElement.classList.remove("app-phone");
+    // And the system's text size with it (`installDynamicType`), and where the
+    // keyboard is (`installKeyboardInset`).
+    const stops = isPhone ? [installDynamicType(), installKeyboardInset()] : [];
+    return () => {
+      stops.forEach((stop) => stop());
+      document.documentElement.classList.remove("app-phone");
+    };
   }, [isPhone]);
   const stack = useStore((s) => s.stack);
   const personOpen = useStore((s) => s.personOpen);
@@ -109,6 +153,7 @@ export function App() {
   const guiVersion = useStore((s) => s.guiVersion);
   const loadError = useStore((s) => s.loadError);
   const actionError = useStore((s) => s.actionError);
+  const actionRefusal = useStore((s) => s.actionRefusal);
   const dismissActionError = useStore((s) => s.dismissActionError);
   const reload = useStore((s) => s.reload);
   const route = useStore((s) => s.route);
@@ -152,6 +197,15 @@ export function App() {
   // a gesture that does not work.
   const canGoBack = stack.length > 1 || !!personOpen || !!threadKey;
   useEdgeBack(viewRef, isPhone && canGoBack, () => window.history.back());
+  // Pull down on a root screen to ask again. Not one screen in, where the top
+  // of the page is a group rather than a list, and not on the camera.
+  const pageRef = useRef<HTMLDivElement>(null);
+  const refresh = useStore((s) => s.refresh);
+  usePullToRefresh(
+    pageRef,
+    isPhone && stack.length === 1 && route !== "exchange",
+    refresh
+  );
   useEffect(() => {
     // Layers first — a sheet, an alert, a menu, a thread — and only then the
     // stack. `backstack` holds what is open and knows which pops are its own.
@@ -395,17 +449,38 @@ export function App() {
     return () => un?.();
   }, []);
 
-  // The registered result of a drop, from the window handler in Rust.
+  // Files handed to the app from outside — dropped on the window, or shared
+  // from another app's share sheet. On a phone they come first and the
+  // question is "a chi?": the design of record's 11e, Scambia with the files
+  // already in hand. A share is *pulled*, at launch and on coming back to the
+  // front, because it can land before this page exists to listen.
   useEffect(() => {
-    let un: (() => void) | undefined;
-    onPickedFiles((items) => {
-      if (items.length) openSheet(items);
-    })
-      .then((f) => {
-        un = f;
-      })
-      .catch(() => {});
-    return () => un?.();
+    const inHand = (items: PickedItem[]) => {
+      if (!items.length) return;
+      if (isPhoneNow()) {
+        useStore.getState().setComposeFiles(items);
+        useStore.getState().go("exchange");
+      } else openSheet(items);
+    };
+    const pullShared = () => {
+      if (!isPhoneNow()) return;
+      api
+        .takePendingShared()
+        .then((items) => inHand(items ?? []))
+        .catch(() => {});
+    };
+    const uns: (() => void)[] = [];
+    onPickedFiles(inHand).then((f) => uns.push(f)).catch(() => {});
+    onSharedArrived(pullShared).then((f) => uns.push(f)).catch(() => {});
+    const onVisible = () => {
+      if (!document.hidden) pullShared();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    pullShared();
+    return () => {
+      uns.forEach((f) => f());
+      document.removeEventListener("visibilitychange", onVisible);
+    };
   }, [openSheet]);
 
   // A `.arvolo` handed to the app is something to RECEIVE: dropped on the
@@ -436,12 +511,21 @@ export function App() {
   // The raw daemon string stays (it is the truth), but the toast leads with what
   // to DO about it and carries the button that does it — the action affordance
   // existed in Toasts from the start and no caller ever used it.
+  //
+  // A typed refusal is read first, because the keyword tests below are guesses
+  // about English: a file the relay will not hold mentions "relay", and the guess
+  // would send the reader to set up the relay they already have.
   useEffect(() => {
     if (!actionError) return;
     const low = actionError.toLowerCase();
     let action: { label: string; run: () => void } | undefined;
     let hint = "";
-    if (low.includes("no daemon") || low.includes("daemon")) {
+    if (actionRefusal?.code === "tooLarge") {
+      hint =
+        actionRefusal.limitBytes !== null
+          ? t("app.errHintTooLarge", fmtBytes(actionRefusal.limitBytes))
+          : t("app.errHintTooLargeNoLimit");
+    } else if (low.includes("no daemon") || low.includes("daemon")) {
       action = { label: t("app.restart"), run: () => fire(restartDaemon()) };
       hint = t("app.errHintDaemon");
     } else if (low.includes("relay")) {
@@ -452,15 +536,25 @@ export function App() {
     }
     toast.bad(t("app.actionFailed"), hint ? `${hint} — ${actionError}` : actionError, action);
     dismissActionError();
-  }, [actionError, dismissActionError, t, go, restartDaemon]);
+  }, [actionError, actionRefusal, dismissActionError, t, go, restartDaemon]);
 
   // The desktop keeps every screen it had. Where a phone wants a different one —
   // and Transfers is the case: two columns of files against one list of people —
   // it gets its own, and the desktop never sees it.
   const View = viewFor(route, isPhone);
 
+  // *Scambia* has no bar of its own: the camera is the screen, from the status
+  // bar down, and a title over a viewfinder is a label on a window. What the
+  // place is called is said by the disc in the tab bar, which is lit while you
+  // are here. Everything else on the screen is in the sheet the view draws.
+  // The camera draws no bar of its own and no header: the viewfinder is the
+  // screen, and the way back floats over it (see `CameraView`).
+  const bare = isPhone && route === "camera";
+  // Cosa (14b) carries its own way out in the capsule row: no bar over it.
+  const headless = isPhone && route === "compose";
+
   return (
-    <div className={`app${isPhone ? " app-phone" : ""}`}>
+    <div className={`app${bare ? " app-bare" : ""}`}>
       {isPhone ? null : <Rail />}
 
       <div className="main">
@@ -596,6 +690,7 @@ export function App() {
         </div>
 
         {/* --- header --------------------------------------------------- */}
+        {bare || headless ? null : (
         <header
           className={`header${
             isPhone ? ` nav${bigTitle && stack.length === 1 ? " big" : ""}` : ""
@@ -615,7 +710,11 @@ export function App() {
           {/* The phone calls this place what the design calls it: the mailbox is
               the thing you open to see who has written, and on that screen the
               rows are people rather than files. */}
-          <h1>{t(isPhone ? phoneTitle(route) : TITLE_KEY[route])}</h1>
+          {/* Le schermate spinte che hanno il titolo nella pagina (12b, 11b)
+              tengono in barra solo la via d'uscita. */}
+          {isPhone && stack.length > 1 && PAGE_TITLED.includes(route) ? null : (
+            <h1>{t(isPhone ? phoneTitle(route) : TITLE_KEY[route])}</h1>
+          )}
           <div className="spacer" />
 
           {/* A 240px field is a third of a phone. The same search is a tap away
@@ -654,14 +753,12 @@ export function App() {
               have their own tab with a search field in it, and the places are
               four rows deep at most. A glyph that opens a search across an app
               this small is chrome standing in for navigation. */}
-          {isPhone &&
-            (route === "people" ? (
-              <PeopleBarMenu />
-            ) : (
-              <IconButton label={t("app.send")} onClick={() => openSheet([])}>
-                <Icon.Plus size={17} />
-              </IconButton>
-            ))}
+          {/* Only the address book keeps a button up here, and it is not a send:
+              it is the two ways a person gets *into* the book. Sending moved to
+              the middle of the tab bar, where the thumb is, and a second way to
+              start the same sheet — in the corner furthest from it — was one
+              more thing on screen saying what the disc already says. */}
+          {/* Persone draws its own head now, with the "+" beside the gear. */}
 
           {/* Both are already in the bottom bar on a phone, and one of them is
               named after a key combination nobody can press there. */}
@@ -685,6 +782,7 @@ export function App() {
             </>
           )}
         </header>
+        )}
 
         {/* --- the screen ----------------------------------------------- */}
         <main ref={viewRef} className={`view${isPhone ? " staged" : ""}`}>
@@ -697,7 +795,8 @@ export function App() {
             </div>
           )}
           <div
-            className={`page${stack.length > 1 ? " stacked" : ""}${
+            ref={pageRef}
+            className={`page${stack.length > 1 ? " stacked" : ""}${headless ? " headless" : ""}${
               leaving ? ` entering ${leaving.dir}` : ""
             }`}
             onScroll={
@@ -713,7 +812,19 @@ export function App() {
             {/* One box holding the screen, so there is something for the pull
                 at the top and the bottom to stretch — see `.page-fill`. */}
             <div className={isPhone ? "page-fill" : undefined}>
-              {isPhone && stack.length === 1 && (
+              {/* Above the first row, uncovered by the bounce — see `.ptr`. */}
+              {isPhone && stack.length === 1 && !bare && (
+                <div className="ptr" aria-hidden>
+                  <span className="ptr-ring" />
+                </div>
+              )}
+              {/* The home draws its own head — the brand, not the name of the
+                  place (see `HomeView`). Everywhere else keeps the platform's
+                  large title. */}
+              {/* The three roots draw their own head — title plus the tools
+                  beside it (11a, 12a); anything else that lands as a root
+                  still gets the platform's large title. */}
+              {isPhone && stack.length === 1 && !ROOT_HEADS.includes(route) && !bare && (
                 <h2 className="large-title">{t(phoneTitle(route))}</h2>
               )}
               <View />
@@ -722,8 +833,16 @@ export function App() {
         </main>
       </div>
 
-      {isPhone ? <TabBar /> : null}
+      {/* Only on a root: the pushed screens of sections 11 and 12 have no bar
+          under them, and their own band of buttons where it would be. */}
+      {isPhone && stack.length === 1 ? <TabBar /> : null}
+      {/* Quello che sta passando, sopra la barra (15b): su ogni radice, mai
+          sotto una schermata pushata o la camera. */}
+      {isPhone && stack.length === 1 && !bare ? <TransferDock /> : null}
       {isPhone ? <ThreadSheet /> : null}
+      {/* Quello che è appena arrivato, guardato una volta. Solo sul telefono:
+          una finestra ha la riga sotto gli occhi e non ha una Galleria. */}
+      {isPhone ? <FinishedSheet /> : null}
 
       {/* --- overlays ---------------------------------------------------- */}
       <SendSheet />

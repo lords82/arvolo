@@ -17,7 +17,7 @@ import { SwipeRow } from "../ui/SwipeRow";
 import { depositMeta, fmtBytes } from "../format";
 import { useT } from "../i18n";
 import { Icon } from "../ui/Icons";
-import { Badge, Button, Empty } from "../ui/Primitives";
+import { Badge, Button, Empty, Segmented } from "../ui/Primitives";
 import { CodeHero, ExtChip } from "../ui/Bits";
 import { Confirm, Sheet } from "../ui/Sheet";
 import { toast } from "../ui/Toasts";
@@ -27,6 +27,7 @@ function DepositRow({ d }: { d: DepositDto }) {
   const t = useT();
   const revoke = useStore((s) => s.revokeDeposit);
   const revoking = useStore((s) => s.revoking.includes(d.id));
+  const reload = useStore((s) => s.loadDeposits);
   const peerLabel = useStore((s) => s.peerLabel);
   const [confirm, setConfirm] = useState(false);
   const [share, setShare] = useState(false);
@@ -111,11 +112,24 @@ function DepositRow({ d }: { d: DepositDto }) {
               — and no sender — can open it, and no `#fragment` could carry the
               key. A label that promises a URL where none can exist is worse than
               a longer word. */}
-          {handover && (
-            <Button size="sm" onClick={() => setShare(true)}>
-              <Icon.Link size={13} />{" "}
-              {t(isLink ? "deposits.share" : "deposits.shareTicket")}
+          {/* The third state — "the relay did not answer" — is the only one with
+              something to *do* about it that is not destructive: ask again. It
+              is offered here rather than as a refresh button over the whole
+              list, because the doubt belongs to this row and the reader is
+              looking at it. And the handover button is withheld while the doubt
+              lasts: a QR for a file that may already be gone is exactly the
+              confident-looking lie this screen exists to avoid. */}
+          {d.present === null ? (
+            <Button size="sm" onClick={() => fire(reload())}>
+              <Icon.Refresh size={13} /> {t("deposits.askAgain")}
             </Button>
+          ) : (
+            handover && (
+              <Button size="sm" onClick={() => setShare(true)}>
+                <Icon.Link size={13} />{" "}
+                {t(isLink ? "deposits.share" : "deposits.shareTicket")}
+              </Button>
+            )
           )}
           <Button
             size="sm"
@@ -218,6 +232,7 @@ export function DepositsView() {
   const reload = useStore((s) => s.loadDeposits);
   const openSheet = useStore((s) => s.openSheet);
   const isPhone = useIsPhone();
+  const [kind, setKind] = useState<"link" | "sealed">("link");
 
   const links = deposits.filter((d) => d.kind === "link");
   const sealed = deposits.filter((d) => d.kind !== "link");
@@ -270,6 +285,46 @@ export function DepositsView() {
             {t("deposits.emptyBody")}
           </Empty>
         </div>
+      ) : isPhone ? (
+        /* One list at a time, chosen from a pair of pills that carry their own
+           counts. The two kinds are not two halves of one thing — a public link
+           is a URL anybody can fetch, a sealed deposit is a blob only one person
+           can open — and on a phone two stacked sections meant scrolling past
+           the kind you were not looking for to reach the one you were. */
+        <>
+          <Segmented
+            chips
+            label={t("deposits.kindLabel")}
+            value={kind}
+            onChange={setKind}
+            options={[
+              {
+                value: "link",
+                label: `${t("deposits.sectionLinks")} · ${links.length}`,
+              },
+              {
+                value: "sealed",
+                label: `${t("deposits.sectionSealed")} · ${sealed.length}`,
+              },
+            ]}
+          />
+          <div className="ios-group">
+            {(kind === "link" ? links : sealed).map((d) => (
+              <DepositRow key={d.id} d={d} />
+            ))}
+            {(kind === "link" ? links : sealed).length === 0 && (
+              <div className="ios-row" style={{ cursor: "default" }}>
+                <span className="grow t-sec">
+                  {t(
+                    kind === "link"
+                      ? "deposits.noneLinks"
+                      : "deposits.noneSealed"
+                  )}
+                </span>
+              </div>
+            )}
+          </div>
+        </>
       ) : (
         <>
           {links.length > 0 && (
@@ -301,18 +356,16 @@ export function DepositsView() {
         </>
       )}
 
-      {/* The verb, where this platform puts one when the screen is a list: a
-          row at the end, not a filled button over the top of it. */}
+      {/* The verb, in the band this design gives every screen. */}
       {isPhone && deposits.length > 0 && (
-        <div className="ios-group">
-          <button
-            className="ios-row"
+        <div className="phone-actions">
+          <Button
+            variant="in"
+            size="lg"
             onClick={() => openSheet([], undefined, "link")}
           >
-            <span className="grow" style={{ color: "var(--out-strong)" }}>
-              {t("deposits.createLink")}
-            </span>
-          </button>
+            <Icon.Link size={15} /> {t("deposits.createLink")}
+          </Button>
         </div>
       )}
     </div>

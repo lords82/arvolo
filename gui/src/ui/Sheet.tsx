@@ -21,6 +21,16 @@ import { useIsPhone } from "../phone";
 import { Icon } from "./Icons";
 import { Button, IconButton } from "./Primitives";
 
+/** The bar you take hold of. 36×5 of ink in 44 of target, like the one the
+ *  camera's sheet already had. */
+export function SheetGrab() {
+  return (
+    <div className="sheet-grab" aria-hidden>
+      <span />
+    </div>
+  );
+}
+
 const FOCUSABLE =
   'a[href],button:not([disabled]),textarea:not([disabled]),input:not([disabled]),select:not([disabled]),[tabindex]:not([tabindex="-1"])';
 
@@ -132,8 +142,8 @@ export function Sheet({
   // Escape closes this on a desktop; the phone's equivalent is the system's
   // back, and it has to reach here rather than the screen underneath.
   useBackDismiss(open && isPhone, onClose);
-  if (!open) return null;
   const pushed = isPhone && !!pushFrom;
+  if (!open) return null;
   // Through a portal, whatever subtree asked for the sheet. `position: fixed`
   // is only fixed to the viewport until an ancestor has a filter, a backdrop
   // blur or a transform — then that ancestor becomes the containing block, and

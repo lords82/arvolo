@@ -203,8 +203,9 @@ fn random_token() -> String {
 /// socket". Deliberately not a valid path.
 pub const IN_PROCESS: &str = "@arvolo-in-process";
 
-static STASH: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, Vec<std::fs::File>>>> =
-    std::sync::OnceLock::new();
+static STASH: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, Vec<std::fs::File>>>,
+> = std::sync::OnceLock::new();
 
 fn stash() -> &'static std::sync::Mutex<std::collections::HashMap<String, Vec<std::fs::File>>> {
     STASH.get_or_init(Default::default)

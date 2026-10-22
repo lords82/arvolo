@@ -9,7 +9,7 @@ import {
   onEngineEvent,
   onUpdateProgress,
 } from "./ipc";
-import { shortId } from "./format";
+import { isMedia, shortId } from "./format";
 import { t } from "./i18n";
 import type { Dict } from "./i18n";
 import { haptic } from "./haptics";
@@ -46,6 +46,23 @@ export type Route =
    *  the send it belongs to and reads one by pasting, so it has no such place
    *  and nothing navigates here. */
   | "codes"
+  /** Phone only: *Scambia* — the disc in the middle of the bar, and a camera
+   *  rather than a form. The window has no such place: it receives by pasting
+   *  into a panel it opens from the rail, because the thing being pasted is
+   *  already on that machine's clipboard. On a phone the other half of the
+   *  exchange is usually in the room holding up a square, so the viewfinder *is*
+   *  the screen and everything else — your own machines, the people you met
+   *  yesterday, a code somebody read out to you — is in the sheet over it. */
+  | "exchange"
+  /** Phone only: la camera dietro la scheda di *Scambia* (11a). Era la
+   *  schermata stessa di Scambia; dalla sezione 11 Scambia è una lista di
+   *  risposte e la camera è la prima. */
+  | "camera"
+  /** Phone only: *Cosa* — la seconda domanda di Scambia (11b–11d), una
+   *  schermata sola qualunque sia la risposta alla prima. */
+  | "compose"
+  /** Phone only: la riga «Rete» di Impostazioni (12b). */
+  | "network"
   | "deposits"
   | "history"
   | "devices"
@@ -58,7 +75,14 @@ export type Route =
    *  a list with a checkmark, not as three words in a strip. */
   | "autoAccept"
   /** Phone only: theme and language, one list each. Same reason. */
-  | "appearance";
+  | "appearance"
+  /** Phone only: dove va quello che arriva — la scelta della sezione 6 del
+   *  design, e la cartella che non è una scelta. */
+  | "received"
+  /** Phone only: l'indirizzo per intero, che in una riga di lista non ci sta.
+   *  La finestra lo stampa dentro Impostazioni e non ha bisogno di una
+   *  schermata per farlo. */
+  | "identity";
 
 /** What each place is called, as a dictionary key rather than as words. The rail,
  *  the header and the command palette all name the same six places; a second
@@ -67,6 +91,10 @@ export const TITLE_KEY = {
   transfers: "title.transfers",
   people: "title.people",
   codes: "title.codes",
+  exchange: "exchange.title",
+  camera: "exchange.title",
+  compose: "compose.title",
+  network: "settings.network",
   deposits: "title.deposits",
   history: "title.history",
   devices: "title.devices",
@@ -74,27 +102,38 @@ export const TITLE_KEY = {
   advanced: "title.settings",
   autoAccept: "settings.autoAcceptTitle",
   appearance: "settings.appearance",
+  received: "received.title",
+  identity: "identity.title",
 } as const satisfies Record<Route, string>;
 
-/** What a place is called on a phone, where it is called something else.
+/** The phone's name for a place, where it has one of its own.
  *
- *  Two of the six are: the transfers list is a *mailbox* of correspondents
- *  rather than two columns of files, and the settings screen is *you* — an
- *  identity with a few switches under it, not a preferences window. Anything not
- *  named here keeps the name it has everywhere. */
-const PHONE_TITLES = {
-  transfers: "casella.title",
-  settings: "title.you",
-} as const;
+ *  One entry, and it earns the indirection. The window calls its board
+ *  *Trasferimenti*, which is what it is there: two columns of files. On a phone
+ *  the same route is one list in time order with a record of it behind a
+ *  segmented control, and the design of record calls that **Attività** — a
+ *  screen about what is happening rather than about what a transfer is. The
+ *  window keeps its own word; nothing else differs. */
+const PHONE_TITLE: Partial<Record<Route, keyof Dict>> = {
+  transfers: "title.activity",
+  // One screen in from Impostazioni, and each says which one — with the same
+  // words as the row that led there (12b).
+  advanced: "settings.advanced",
+  appearance: "settings.appearanceLanguage",
+};
 
-/** The phone's name for a place, or the one everywhere else. */
 export function phoneTitle(route: Route): keyof Dict {
-  return route in PHONE_TITLES
-    ? PHONE_TITLES[route as keyof typeof PHONE_TITLES]
-    : TITLE_KEY[route];
+  return PHONE_TITLE[route] ?? TITLE_KEY[route];
 }
 
 export type ThemeChoice = "system" | "light" | "dark";
+
+/** Le tre risposte alla domanda della sezione 6 del design.
+ *
+ *  `ask` è la partenza: finché nessuno ha risposto, l'app non mette niente nella
+ *  Galleria di nessuno — la domanda si fa a trasferimento finito, mai prima, e
+ *  il file intanto è già al sicuro nella cartella di Arvolo. */
+export type PhotosChoice = "gallery" | "arvolo" | "ask";
 
 /** The five ways a send can reach someone. Lives here rather than in the send
  *  sheet because callers elsewhere preselect one — see `sheetMode`.
@@ -104,6 +143,20 @@ export type ThemeChoice = "system" | "light" | "dark";
  *  "who is this for?", and your own machines are one of the answers — the one
  *  nobody has to accept, and the only one that is not a person. */
 export type SendMode = "contact" | "self" | "code" | "link" | "ticket";
+
+/** La prima risposta di Scambia (11a): una persona, una tua macchina, o il
+ *  link pubblico. Non un trasporto — quello lo sceglie l'app fra i sigillati —
+ *  tranne il link, che è pubblico e quindi sempre esplicito. */
+export type ComposeTo =
+  | { kind: "contact"; name: string }
+  /** 16a: più persone in una volta. Un invio per ciascuna, stesso messaggio. */
+  | { kind: "group"; names: string[] }
+  | { kind: "self"; device: string }
+  | { kind: "link" }
+  /** Un codice corto da dettare o far inquadrare. È «pubblico» come il link —
+   *  chi ce l'ha scarica — ma dura quanto la schermata che lo mostra, perché
+   *  sta in piedi su questo dispositivo e non sul relay. */
+  | { kind: "code" };
 
 /** The reserved recipient standing for this identity's own machines, the way the
  *  daemon resolves it (`resolve_recipient_or_self`).
@@ -155,6 +208,11 @@ export interface PairingState {
 }
 
 const THEME_KEY = "arvolo.theme";
+/** Dove vanno foto e video che arrivano. Per telefono, non per identità: parla
+ *  della Galleria *di questa macchina*, e due telefoni della stessa persona
+ *  possono volere cose diverse — per questo non sta nella configurazione che si
+ *  sincronizza, ma accanto al tema. */
+const PHOTOS_KEY = "arvolo.photos";
 const ORDER_KEY = "arvolo.order";
 
 /** Pairing events that arrived before their session handle did.
@@ -171,6 +229,17 @@ export function applyTheme(choice: ThemeChoice) {
   const root = document.documentElement;
   if (choice === "system") root.removeAttribute("data-theme");
   else root.setAttribute("data-theme", choice);
+}
+
+function readPhotos(): PhotosChoice {
+  try {
+    const v = localStorage.getItem(PHOTOS_KEY);
+    if (v === "gallery" || v === "arvolo" || v === "ask") return v;
+  } catch {
+    // Come per il tema: una webview in privato può rifiutare, e non è una
+    // ragione per non partire.
+  }
+  return "ask";
 }
 
 function readTheme(): ThemeChoice {
@@ -390,6 +459,12 @@ interface State {
    *  `onClick` that cannot await it, so a rejected promise had nowhere to go: the
    *  button simply did nothing, silently, and the user was left guessing. */
   actionError: string | null;
+  /** The daemon's word for why, beside the sentence, when it gave one — so the
+   *  notice can lead with what the refusal *means* in the reader's language
+   *  (and, for a file the relay will not hold, with the relay's limit in their
+   *  units) instead of testing the English for a keyword. Cleared with the
+   *  error. */
+  actionRefusal: { code: string; limitBytes: number | null } | null;
   dismissActionError: () => void;
 
   /** What is still on a relay and can be taken back. Unlike the board's rows these
@@ -439,6 +514,21 @@ interface State {
   // UI state
   route: Route;
   theme: ThemeChoice;
+  /** Dove vanno foto e video che arrivano — vedi `PhotosChoice`. */
+  photos: PhotosChoice;
+  setPhotos: (choice: PhotosChoice) => void;
+  /** Le copie messe nella Galleria, per chiave di riga: l'identificatore serve a
+   *  poterle togliere, e solo quelle. */
+  inGallery: Record<string, string>;
+  /** Quello che è appena arrivato e non è ancora stato guardato: la schermata
+   *  Finito del design. Vuoto quando non c'è niente da dire. */
+  finished: string[];
+  closeFinished: () => void;
+  /** Metti nella Galleria le foto e i video di queste righe. Il file è già al
+   *  sicuro: questa è la copia in più, e può fallire senza conseguenze. */
+  putInGallery: (keys: string[]) => Promise<void>;
+  /** E toglile. Per chiave, perché è la riga che si vede. */
+  takeOutOfGallery: (key: string) => Promise<void>;
   search: string;
   pauseAll: boolean;
   paletteOpen: boolean;
@@ -453,6 +543,19 @@ interface State {
    *  only mean a link. Left null where the section implies nothing (the rail's
    *  Invia, a drop on the window), and the sheet starts on a contact. */
   sheetMode: SendMode | null;
+  /** Which of your own machines the sheet should aim at, when it was opened by
+   *  tapping that machine — the device cards in *Scambia*. Only meaningful with
+   *  the self recipient, which is the only mode that takes a device. */
+  sheetDevice: string | null;
+  /** Le due risposte di Scambia (sezione 11), tenute finché non si parte: i
+   *  file (già in mano se si arriva da Condividi) e il destinatario (già
+   *  scelto se si arriva da una scheda persona). Ogni domanda si fa una volta. */
+  composeFiles: PickedItem[];
+  composeTo: ComposeTo | null;
+  /** 16a: the faces being ticked for one send to several people, or null when
+   *  Scambia is not choosing. Here rather than in the screen because the bar
+   *  that counts them floats over the whole app, beside the transfer card. */
+  picking: string[] | null;
   incomingOfferId: string | null; // incoming offer dialog
   /** Transfer id whose share panel is open, if any. A share has no progress to
    *  watch, so its numbers live behind a panel rather than crowding the row. */
@@ -467,6 +570,9 @@ interface State {
   // lifecycle
   init: () => Promise<() => void>;
   reload: () => Promise<void>;
+  /** What a pull on a root screen does: the two reads a screen gets on arrival
+   *  and on waking, done again because somebody asked. */
+  refresh: () => Promise<void>;
   refreshContacts: () => Promise<void>;
 
   // helpers
@@ -482,8 +588,20 @@ interface State {
   go: (r: Route) => void;
   setTheme: (choice: ThemeChoice) => void;
   setPaletteOpen: (v: boolean) => void;
-  openSheet: (picks: PickedItem[], to?: string, mode?: SendMode) => void;
+  openSheet: (
+    picks: PickedItem[],
+    to?: string,
+    mode?: SendMode,
+    device?: string
+  ) => void;
   closeSheet: () => void;
+  /** I file in mano prima di sapere a chi vanno (Condividi, o la griglia). */
+  setComposeFiles: (files: PickedItem[]) => void;
+  /** La prima domanda ha una risposta: via alla seconda. */
+  startCompose: (to: ComposeTo) => void;
+  /** Partito, o lasciato perdere: niente resta in mano. */
+  clearCompose: () => void;
+  setPicking: (names: string[] | null) => void;
   /** Where the phone has drilled to, root first. The desktop never pushes: its
    *  rail *is* the stack, one deep, and `go` keeps it that way.
    *
@@ -546,7 +664,9 @@ interface State {
     items: string[],
     note: string,
     /** Aim it at one of our own machines; only with the self recipient. */
-    device?: string | null
+    device?: string | null,
+    /** 13d «Aspetta che sia collegata»: never the mailbox, direct or nothing. */
+    liveOnly?: boolean
   ) => Promise<number>;
   /** `send --deposit`: skip the live attempt entirely. Returns the `arvm…`
    *  ticket, which is the sender's copy for hand-delivery. */
@@ -615,6 +735,13 @@ interface State {
  *  Every one of these is a snapshot the daemon does not push: it is only ever
  *  as fresh as the last time somebody asked, so arriving is when to ask. */
 function arrive(s: State, r: Route): void {
+  // Your own devices are half of *Scambia* (the design of record's 5a), and
+  // nothing pushes them: the register is written by each machine on its own sync
+  // round, so arriving is when to read it.
+  if (r === "exchange") {
+    void s.loadDevices();
+    void s.loadSync();
+  }
   if (r === "deposits") void s.loadDeposits();
   if (r === "history") void s.loadHistory();
   if (r === "devices") void s.loadSync();
@@ -637,13 +764,26 @@ export const useStore = create<State>((set, get) => {
     return typeof m === "string" ? m : String(e);
   };
 
+  /** The typed part of a rejection, when the IPC layer attached one. */
+  const refusalOf = (e: unknown): State["actionRefusal"] => {
+    const raw = e as { code?: unknown; limitBytes?: unknown } | null;
+    if (typeof raw?.code !== "string" || !raw.code) return null;
+    return {
+      code: raw.code,
+      limitBytes: typeof raw.limitBytes === "number" ? raw.limitBytes : null,
+    };
+  };
+
   const act = async <T,>(what: string, fn: () => Promise<T>): Promise<T> => {
     try {
       const r = await fn();
-      set({ actionError: null });
+      set({ actionError: null, actionRefusal: null });
       return r;
     } catch (e) {
-      set({ actionError: `${what}: ${errText(e)}` });
+      set({
+        actionError: `${what}: ${errText(e)}`,
+        actionRefusal: refusalOf(e),
+      });
       throw e;
     }
   };
@@ -677,6 +817,8 @@ export const useStore = create<State>((set, get) => {
       status,
       reason,
       waitingCode: d.waiting_code ?? undefined,
+      failCode: d.fail_code ?? undefined,
+      failDetail: d.fail_detail ?? undefined,
       waitingDetail: d.waiting_detail ?? undefined,
       // A daemon that predates the field says nothing; keep the button, which is
       // what that daemon has always done.
@@ -695,10 +837,12 @@ export const useStore = create<State>((set, get) => {
       // back to what we already had keeps a path learned from a live event when
       // talking to a daemon too old to report it.
       path: d.path ?? prev?.path,
+      savedUri: d.saved_uri ?? prev?.savedUri ?? undefined,
       // The engine's own clock, not ours: a row we first see today may well be
       // yesterday's. `created` is 0 only from a daemon that predates the field —
       // then, and only then, fall back to when we noticed it.
       firstSeen: d.created > 0 ? d.created * 1000 : (prev?.firstSeen ?? now()),
+      stamped: d.created > 0 || (prev?.stamped ?? false),
       rank: rankFor(`t${d.id}`, prev),
       rate: prev?.rate,
       code: d.code ?? prev?.code,
@@ -729,7 +873,9 @@ export const useStore = create<State>((set, get) => {
     verified: get().isVerified(o.from),
     swarmPeers: 0,
     downloadPeers: 0,
+    // An offer *is* now: it arrived while this app was watching.
     firstSeen: prev?.firstSeen ?? now(),
+    stamped: true,
     rank: rankFor(`o${o.id}`, prev),
     copiesServed: 0,
     bytesServed: 0,
@@ -758,6 +904,7 @@ export const useStore = create<State>((set, get) => {
           swarmPeers: 0,
           downloadPeers: 0,
           firstSeen: now(),
+          stamped: true,
           rank: rankFor(key),
           // A row built from an event alone, before any snapshot: assume it can
           // be held, as this window always did, and let the next snapshot say.
@@ -781,18 +928,26 @@ export const useStore = create<State>((set, get) => {
     },
     loadError: null,
     actionError: null,
+    actionRefusal: null,
     contacts: [],
     contactsById: {},
     transfers: {},
     route: "transfers",
     stack: ["transfers"],
     theme: readTheme(),
+    photos: readPhotos(),
+    inGallery: {},
+    finished: [],
     search: "",
     pauseAll: false,
     paletteOpen: false,
     sheetPicks: null,
     sheetTo: null,
     sheetMode: null,
+    sheetDevice: null,
+    composeFiles: [],
+    composeTo: null,
+    picking: null,
     incomingOfferId: null,
     shareOpen: null,
     receiveOpen: false,
@@ -1129,14 +1284,32 @@ export const useStore = create<State>((set, get) => {
                 : "active",
           }));
           break;
-        case "completed":
+        case "completed": {
           patch(ev.id, (tx) => ({
             ...tx,
             status: "completed",
             transferred: tx.size || tx.transferred,
             path: ev.path ?? tx.path,
           }));
+          // Quello che è appena arrivato si guarda una volta: la schermata
+          // Finito del design (10d). Solo quello che *arriva* — un invio
+          // finito non è un incontro, è una riga che smette di muoversi.
+          const done = get().transfers[`t${ev.id}`];
+          if (done?.dir === "in") {
+            set((st) =>
+              st.finished.includes(done.key)
+                ? {}
+                : { finished: [...st.finished, done.key] }
+            );
+            // E la copia in Galleria, se la risposta è già stata data. Il file
+            // è comunque già nella cartella di Arvolo: questa è in più, e la
+            // domanda — quando c'è da farla — la fa la schermata.
+            if (get().photos === "gallery" && isMedia(done.name)) {
+              void get().putInGallery([done.key]);
+            }
+          }
           break;
+        }
         case "deposited":
           patch(ev.id, (tx) => ({ ...tx, status: "deposited" }));
           break;
@@ -1168,7 +1341,14 @@ export const useStore = create<State>((set, get) => {
           patch(ev.id, (tx) => ({ ...tx, status: "paused", reason: ev.reason }));
           break;
         case "failed":
-          patch(ev.id, (tx) => ({ ...tx, status: "failed", reason: ev.error }));
+          patch(ev.id, (tx) => ({
+            ...tx,
+            status: "failed",
+            reason: ev.error,
+            // Empty from a daemon that predates the code: store nothing, so
+            // the renderer's fallback to `reason` still triggers.
+            failCode: ev.code || undefined,
+          }));
           break;
         case "cancelled":
           patch(ev.id, (tx) => ({ ...tx, status: "cancelled" }));
@@ -1200,6 +1380,15 @@ export const useStore = create<State>((set, get) => {
           // Fired by the daemon whoever wrote the book — typically an
           // `arvolo contacts …` run in another process.
           void get().refreshContacts();
+          // Your own display name belongs to the identity, so a *merge* can
+          // change it: set on the phone, it arrives here with the rest of the
+          // book. The rail and the settings field read it off `status`, which
+          // nothing else in this handler would refresh. Only on a real book
+          // edit — this event is not a poll.
+          void api
+            .status()
+            .then((status) => set({ status }))
+            .catch(() => {});
           break;
         case "finished_cleared":
           // Somebody else cleared the list — `arvolo status clear`, or another
@@ -1255,6 +1444,11 @@ export const useStore = create<State>((set, get) => {
 
     setSearch: (q) => set({ search: q }),
 
+    refresh: async () => {
+      await get().reload();
+      arrive(get(), get().route);
+    },
+
     // Arriving *is* the refresh for the three screens with no push event behind
     // them. Doing it here rather than in each view keeps a stale panel from ever
     // being what greets the user, however they navigated to it — rail, command
@@ -1281,6 +1475,48 @@ export const useStore = create<State>((set, get) => {
       });
       arrive(get(), r);
     },
+    closeFinished: () => set({ finished: [] }),
+
+    putInGallery: async (keys) => {
+      for (const key of keys) {
+        const tx = get().transfers[key];
+        // Il percorso dove c'è, la URI dove il percorso non esiste (Android).
+        const from = tx?.path || tx?.savedUri;
+        if (!tx || !from || !isMedia(tx.name)) continue;
+        if (get().inGallery[key]) continue;
+        try {
+          const id = await api.photosAdd(from);
+          set((st) => ({ inGallery: { ...st.inGallery, [key]: id } }));
+        } catch (e) {
+          // Il file è già arrivato ed è già dove la riga dice che sia: la copia
+          // in Galleria è un di più, e non vale la pena rovinare una schermata
+          // "finito" con un errore su una cosa in più. Lo dice una volta sola.
+          set({ actionError: errText(e) });
+          return;
+        }
+      }
+    },
+
+    takeOutOfGallery: async (key) => {
+      const id = get().inGallery[key];
+      if (!id) return;
+      await api.photosRemove(id);
+      set((st) => {
+        const rest = { ...st.inGallery };
+        delete rest[key];
+        return { inGallery: rest };
+      });
+    },
+
+    setPhotos: (choice) => {
+      set({ photos: choice });
+      try {
+        localStorage.setItem(PHOTOS_KEY, choice);
+      } catch {
+        // Come il tema: la scelta vale per questa sessione anche se non si
+        // riesce a ricordarla.
+      }
+    },
     setTheme: (choice) => {
       applyTheme(choice);
       try {
@@ -1292,15 +1528,23 @@ export const useStore = create<State>((set, get) => {
       set({ theme: choice });
     },
     setPaletteOpen: (v) => set({ paletteOpen: v }),
-    openSheet: (picks, to, mode) =>
+    openSheet: (picks, to, mode, device) =>
       set({
         sheetPicks: picks,
         sheetTo: to ?? null,
         sheetMode: mode ?? null,
+        sheetDevice: device ?? null,
         incomingOfferId: null,
       }),
     closeSheet: () =>
-      set({ sheetPicks: null, sheetTo: null, sheetMode: null }),
+      set({ sheetPicks: null, sheetTo: null, sheetMode: null, sheetDevice: null }),
+    setComposeFiles: (files) => set({ composeFiles: files }),
+    startCompose: (to) => {
+      set({ composeTo: to });
+      get().push("compose");
+    },
+    clearCompose: () => set({ composeFiles: [], composeTo: null, picking: null }),
+    setPicking: (names) => set({ picking: names }),
     push: (r) => {
       // One entry per screen, so the platform's own back — the gesture from the
       // edge on Android, which belongs to the system and not to this app —
@@ -1571,11 +1815,11 @@ export const useStore = create<State>((set, get) => {
     },
     clearPairing: () => set({ pairing: null }),
 
-    send: async (to, items, note, device) => {
+    send: async (to, items, note, device, liveOnly) => {
       const id = await act(t("store.errSend", to), () =>
-        api.sendTo(to, items, note, device ?? null)
+        api.sendTo(to, items, note, device ?? null, liveOnly ?? false)
       );
-      set({ sheetPicks: null, sheetTo: null, sheetMode: null });
+      set({ sheetPicks: null, sheetTo: null, sheetMode: null, sheetDevice: null });
       return id;
     },
     deposit: async (to, items, note, ttl, max, password, device) => {
@@ -1638,6 +1882,7 @@ export const useStore = create<State>((set, get) => {
               swarmPeers: 0,
               downloadPeers: 0,
               firstSeen: Date.now(),
+              stamped: true,
               rank: Date.now(),
               canPause: true,
               copiesServed: 0,
@@ -1828,7 +2073,7 @@ export const useStore = create<State>((set, get) => {
         set({ pauseAll: false });
       }
     },
-    dismissActionError: () => set({ actionError: null }),
+    dismissActionError: () => set({ actionError: null, actionRefusal: null }),
     clearFinished: async () => {
       // Daemon first: a local-only clear would just see every row come back with
       // the next snapshot. Its ClearFinished applies the same definition of

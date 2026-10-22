@@ -7,7 +7,7 @@
 
 import { useMemo, useState } from "react";
 import { fire, useStore } from "../store";
-import { fmtBytes } from "../format";
+import { fmtBytes, failText } from "../format";
 import { locale, t as translate, useLang, useT } from "../i18n";
 import { Icon } from "../ui/Icons";
 import { Button, Empty, Segmented, TextInput } from "../ui/Primitives";
@@ -54,7 +54,7 @@ function dayLabel(unixSecs: number): string {
 
 /** Split a daemon status into a word and its tone. `failed: …` carries its
  *  reason after the colon and that reason is the useful half. */
-function outcome(status: string): { text: string; tone: string; detail?: string } {
+function outcome(status: string, failCode?: string): { text: string; tone: string; detail?: string } {
   if (status === "completed")
     return { text: translate("history.completed"), tone: "ok" };
   if (status === "cancelled")
@@ -66,7 +66,9 @@ function outcome(status: string): { text: string; tone: string; detail?: string 
     return {
       text: translate("history.failed"),
       tone: "bad",
-      detail: rest.join(":").trim(),
+      // The code, where the record has one, says it in the reader's language;
+      // the sentence after the colon is the fallback.
+      detail: failText(failCode, undefined, rest.join(":").trim()),
     };
   // Anything the engine invents that this build has not learned yet: name the
   // fact, and keep the raw string as the detail rather than putting an
@@ -81,7 +83,7 @@ function outcome(status: string): { text: string; tone: string; detail?: string 
 function Row({ h }: { h: HistoryDto }) {
   const t = useT();
   const peerLabel = useStore((s) => s.peerLabel);
-  const o = outcome(h.status);
+  const o = outcome(h.status, h.fail_code);
   const out = h.direction === "send";
   return (
     <div className={`row dir-${out ? "out" : "in"} is-done`}>
@@ -117,7 +119,7 @@ function Row({ h }: { h: HistoryDto }) {
   );
 }
 
-export function HistoryView() {
+export function HistoryView({ query }: { query?: string } = {}) {
   const t = useT();
   // Not for a string on this screen — for the day headings, which `dayLabel`
   // builds through `Intl` and the memo below caches.
@@ -131,8 +133,14 @@ export function HistoryView() {
 
   const isPhone = useIsPhone();
   const [filter, setFilter] = useState<Filter>("all");
-  const [q, setQ] = useState("");
+  const [own, setOwn] = useState("");
   const [confirmClear, setConfirmClear] = useState(false);
+  /** Who is searching. The desktop has a field of its own, in the row of
+   *  controls above the log. On a phone the log is half of *Attività* and the
+   *  magnifier that filters it belongs to that screen, so the query is handed
+   *  down — one field, filtering both halves, rather than a second one that only
+   *  ever appeared under the first. */
+  const q = query ?? own;
 
   const groups = useMemo(() => {
     const needle = q.trim().toLowerCase();
@@ -187,7 +195,7 @@ export function HistoryView() {
           <div className="grow" style={{ maxWidth: 280 }}>
             <TextInput
               value={q}
-              onChange={(e) => setQ(e.currentTarget.value)}
+              onChange={(e) => setOwn(e.currentTarget.value)}
               placeholder={t("history.searchPlaceholder")}
               aria-label={t("history.searchLabel")}
             />
@@ -229,19 +237,33 @@ export function HistoryView() {
           </Empty>
         </div>
       ) : (
-        groups.map((g) => (
-          <div key={g.label + g.when} className="section">
-            <div className="section-head">
-              <span className="t-label">{g.label}</span>
-              <span className="t-xs t-mut tnum">{g.items.length}</span>
+        groups.map((g) =>
+          isPhone ? (
+            <div key={g.label + g.when}>
+              <div className="ios-head hstack-sm">
+                <span>{g.label}</span>
+                <span className="count-soft tnum">{g.items.length}</span>
+              </div>
+              <div className="ios-group">
+                {g.items.map((h) => (
+                  <Row key={h.id} h={h} />
+                ))}
+              </div>
             </div>
-            <div className="card rows">
-              {g.items.map((h) => (
-                <Row key={h.id} h={h} />
-              ))}
+          ) : (
+            <div key={g.label + g.when} className="section">
+              <div className="section-head">
+                <span className="t-label">{g.label}</span>
+                <span className="t-xs t-mut tnum">{g.items.length}</span>
+              </div>
+              <div className="card rows">
+                {g.items.map((h) => (
+                  <Row key={h.id} h={h} />
+                ))}
+              </div>
             </div>
-          </div>
-        ))
+          )
+        )
       )}
 
       {isPhone && history.length > 0 && (

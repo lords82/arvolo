@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Shared with the share extension: the folder the extension writes
+	     into and the app empties. -->
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>group.it.termox.arvolo</string>
+	</array>
+</dict>
+</plist>

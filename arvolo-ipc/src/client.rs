@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use anyhow::{bail, Context, Result};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 
+use arvolo_core::flow::TooLargeForRelay;
 use arvolo_core::manager::AcceptRefusal;
 
 use crate::protocol::{
@@ -274,6 +275,8 @@ impl DaemonClient {
         max: Option<u32>,
         password: Option<String>,
         device: Option<String>,
+        // Never fall back to the mailbox: wait for them, or stay waiting.
+        live_only: bool,
         fds: Option<FdHandoff>,
     ) -> Result<u64> {
         let (fd_socket, fd_token) = split(fds);
@@ -283,6 +286,7 @@ impl DaemonClient {
                 paths,
                 note,
                 deposit: false,
+                live_only,
                 ttl,
                 max,
                 password,
@@ -318,6 +322,7 @@ impl DaemonClient {
                 paths,
                 note,
                 deposit: true,
+                live_only: false,
                 ttl,
                 max,
                 password,
@@ -419,10 +424,28 @@ impl DaemonClient {
                 max,
                 fd_socket,
                 fd_token,
+                typed_refusal: true,
             })
             .await?
         {
             Response::Link(url) => Ok(url),
+            // The refusal as itself, as on `accept_with_password`: a window reads
+            // the code and the limit off it, everyone else prints the sentence.
+            // `size` is not on the wire — the sentence already names it — so the
+            // typed value a caller gets back carries the limit and a zero size.
+            Response::Refused {
+                code,
+                message,
+                limit_bytes,
+            } => Err(if code == TooLargeForRelay::CODE {
+                anyhow::Error::new(TooLargeForRelay {
+                    size: 0,
+                    limit: limit_bytes,
+                })
+                .context(message)
+            } else {
+                anyhow::anyhow!(message)
+            }),
             other => unexpected(other),
         }
     }
@@ -518,7 +541,7 @@ impl DaemonClient {
             // reading English. `{e:#}` still prints the same words for everyone
             // else. An unknown code (a daemon newer than this client) keeps the
             // message and loses only the ability to act on it.
-            Response::Refused { code, message } => Err(match AcceptRefusal::from_code(&code) {
+            Response::Refused { code, message, .. } => Err(match AcceptRefusal::from_code(&code) {
                 Some(r) => anyhow::Error::new(r),
                 None => anyhow::anyhow!(message),
             }),

@@ -244,6 +244,18 @@ describe("link", () => {
     await boot();
     harness.fail = new Set(["createLink"]);
     await expect(s().link("/a.txt", null, null)).rejects.toThrow();
+    expect(s().actionRefusal, "a plain failure carries no code").toBeNull();
+  });
+
+  it("79b. a file the relay will not hold keeps its code and the relay's limit", async () => {
+    await boot();
+    harness.refuse = { createLink: { code: "tooLarge", limitBytes: 5 * 1024 ** 3 } };
+    await expect(s().link("/big.iso", null, null)).rejects.toThrow();
+    expect(s().actionRefusal).toEqual({ code: "tooLarge", limitBytes: 5 * 1024 ** 3 });
+    // Dismissing the sentence dismisses its code with it: a stale code against
+    // the next, unrelated failure would translate it as the wrong thing.
+    s().dismissActionError();
+    expect(s().actionRefusal).toBeNull();
   });
 });
 

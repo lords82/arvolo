@@ -68,6 +68,7 @@ pub enum InboxStatus {
 
 /// The metadata result of a claim: enough to read the blob file off-lock.
 /// Returned by [`Mailbox::fetch_plan`].
+#[derive(Debug)]
 pub struct FetchPlan {
     pub encapped_key: Vec<u8>,
     /// Filesystem path of the blob to read.
@@ -431,6 +432,79 @@ impl Mailbox {
             encapped_key,
             blob_path: self.blob_path(claim),
             burn,
+        })
+    }
+
+    /// Like [`Self::fetch_plan`], but the download is **not** spent: the blob is
+    /// served and the row left exactly as it was, for a fetcher that will
+    /// [`Self::ack_fetch`] once the bytes are safely on its own disk.
+    ///
+    /// Burn-after-read used to happen at the first byte served, which is the
+    /// wrong moment for a phone: an app put away — or killed for memory — in the
+    /// middle of a sealed deposit left the sender's copy burned and the
+    /// recipient's half-written, and nothing on either side could get it back.
+    /// Held, the deposit survives until the recipient says it has it. The cost
+    /// is that a fetcher that never acks keeps the blob until its TTL, which is
+    /// what the TTL is for.
+    pub fn fetch_plan_held(&self, claim: &str, now: u64) -> Result<FetchPlan, MailboxError> {
+        let conn = self.conn.lock().unwrap();
+        let (encapped_key, expires_at, max_downloads, downloads) = self.row(&conn, claim)?;
+        if now >= expires_at as u64 {
+            self.delete(&conn, claim)?;
+            return Err(MailboxError::Expired);
+        }
+        if downloads >= max_downloads {
+            self.delete(&conn, claim)?;
+            return Err(MailboxError::Exhausted);
+        }
+        Ok(FetchPlan {
+            encapped_key,
+            blob_path: self.blob_path(claim),
+            burn: false,
+        })
+    }
+
+    /// Spend the download a held fetch did not: the same accounting
+    /// [`Self::fetch_plan`] does up front, done afterwards. Deletes the entry
+    /// when this was the last download allowed. Idempotent in effect — a second
+    /// ack of a burned claim finds nothing and says so.
+    pub fn ack_fetch(&self, claim: &str, now: u64) -> Result<(), MailboxError> {
+        let conn = self.conn.lock().unwrap();
+        let (_, expires_at, max_downloads, downloads) = self.row(&conn, claim)?;
+        if now >= expires_at as u64 || downloads + 1 >= max_downloads {
+            self.delete(&conn, claim)?;
+        } else {
+            conn.execute(
+                "UPDATE entries SET downloads = ?2 WHERE claim = ?1",
+                params![claim, downloads + 1],
+            )
+            .map_err(backend)?;
+        }
+        Ok(())
+    }
+
+    /// One entry's accounting columns, or `NotFound`.
+    fn row(
+        &self,
+        conn: &Connection,
+        claim: &str,
+    ) -> Result<(Vec<u8>, i64, i64, i64), MailboxError> {
+        conn.query_row(
+            "SELECT encapped_key, expires_at, max_downloads, downloads
+             FROM entries WHERE claim = ?1",
+            params![claim],
+            |r| {
+                Ok((
+                    r.get::<_, Vec<u8>>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, i64>(3)?,
+                ))
+            },
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => MailboxError::NotFound,
+            other => backend(other),
         })
     }
 
@@ -1195,5 +1269,67 @@ mod stored_bytes_tests {
         // A burn-after-read fetch deletes the row and frees its budget.
         let _plan = mb.fetch_plan(&claim, 2).unwrap();
         assert_eq!(mb.stored_bytes(), 500);
+    }
+
+    fn one_shot(mb: &Mailbox) -> String {
+        mb.deposit(
+            Deposit {
+                encapped_key: vec![9],
+                ciphertext: vec![0u8; 100],
+                ttl_secs: 60,
+                max_downloads: 1,
+                revoke_hash: Vec::new(),
+            },
+            1,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_held_fetch_spends_nothing_until_it_is_acked() {
+        let dir = tempfile::tempdir().unwrap();
+        let mb = Mailbox::open(
+            dir.path().join("db.sqlite").to_str().unwrap(),
+            dir.path().join("blobs").to_str().unwrap(),
+        )
+        .unwrap();
+        let claim = one_shot(&mb);
+        // Held twice: the deposit is still there, still whole, both times.
+        let p1 = mb.fetch_plan_held(&claim, 2).unwrap();
+        assert!(!p1.burn);
+        assert!(p1.blob_path.exists());
+        let p2 = mb.fetch_plan_held(&claim, 3).unwrap();
+        assert!(!p2.burn);
+        assert_eq!(mb.entry_counts(&claim, 3), Some((0, 1)));
+        // The ack is the download: the last one allowed burns the entry.
+        mb.ack_fetch(&claim, 4).unwrap();
+        assert!(!p1.blob_path.exists());
+        assert_eq!(
+            mb.fetch_plan_held(&claim, 5).unwrap_err(),
+            MailboxError::NotFound
+        );
+        assert_eq!(mb.ack_fetch(&claim, 5).unwrap_err(), MailboxError::NotFound);
+    }
+
+    #[test]
+    fn a_held_fetch_still_refuses_what_is_expired_or_exhausted() {
+        let dir = tempfile::tempdir().unwrap();
+        let mb = Mailbox::open(
+            dir.path().join("db.sqlite").to_str().unwrap(),
+            dir.path().join("blobs").to_str().unwrap(),
+        )
+        .unwrap();
+        let claim = one_shot(&mb);
+        assert_eq!(
+            mb.fetch_plan_held(&claim, 1000).unwrap_err(),
+            MailboxError::Expired
+        );
+        let claim = one_shot(&mb);
+        // A plain fetch spends the one download; a held fetch after it is told so.
+        let _ = mb.fetch_plan(&claim, 2).unwrap();
+        assert!(matches!(
+            mb.fetch_plan_held(&claim, 3).unwrap_err(),
+            MailboxError::NotFound | MailboxError::Exhausted
+        ));
     }
 }

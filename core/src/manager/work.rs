@@ -259,6 +259,7 @@ pub(super) fn persist_held_record(inner: &Inner, id: u64, paused: bool, reason: 
                 note: h.note.clone(),
                 target: h.target,
                 relay: h.relay.clone(),
+                live_only: h.live_only,
             },
         );
     }
@@ -486,6 +487,7 @@ pub(super) async fn deliver_to(
     name: String,
     archive: bool,
     note: String,
+    live_only: bool,
     pause_flag: Arc<std::sync::atomic::AtomicBool>,
 ) {
     // The offer outlives the individual attempts now (see `deliver_to_inner`), so
@@ -503,6 +505,7 @@ pub(super) async fn deliver_to(
         &name,
         archive,
         &note,
+        live_only,
         &pause_flag,
         &mut standing,
     )
@@ -539,11 +542,15 @@ async fn deliver_to_inner(
     name: &str,
     archive: bool,
     note: &str,
+    live_only: bool,
     pause_flag: &Arc<std::sync::atomic::AtomicBool>,
     standing: &mut Option<StandingOffer>,
 ) {
     use std::time::{Duration, Instant};
     let mut too_big = false;
+    // Said once, the first time the loop finds nobody: a `live_only` send that
+    // is waiting has to say so, and saying it every turn would churn the row.
+    let mut told_for_them = false;
     // Sticky: the relay is already holding this transfer in resumable form, so the
     // mailbox is not a fallback any more — it is a second, worse copy. Set only by
     // a *complete* offload (see [`LiveOutcome::Offloaded`]); a capped or failed one
@@ -747,7 +754,14 @@ async fn deliver_to_inner(
         // `offloaded` keeps this whole branch shut afterwards. So there is no
         // delivered set to subtract here — only what the relay already holds, which
         // `park_on_relay` asks it for.
-        if park_now && !too_big && !offloaded && standing.is_some() {
+        // `live_only` shuts both relay routes below — parking the pieces and the
+        // sealed mailbox copy alike: the sender said nothing goes on a relay.
+        if live_only {
+            if !online && !told_for_them {
+                set_waiting(inner, id, WaitingReason::ForThem);
+                told_for_them = true;
+            }
+        } else if park_now && !too_big && !offloaded && standing.is_some() {
             if let Some(out) = park_on_relay(
                 inner, id, cancel, relay, recipient, payload, name, archive, &prep,
             )
@@ -768,7 +782,7 @@ async fn deliver_to_inner(
             // Couldn't park it all (capped, refused, unreachable): fall through to
             // the mailbox, which is what the user asked for a route to.
         }
-        if !too_big && !offloaded && (park_now || Instant::now() >= next_relay_try) {
+        if !live_only && !too_big && !offloaded && (park_now || Instant::now() >= next_relay_try) {
             // Interruptible: the upload is the longest thing this loop does, and a
             // cancel that is only noticed once it *finishes* is a cancel that does
             // nothing for as long as the file takes — minutes on a big one, with the
@@ -818,7 +832,7 @@ async fn deliver_to_inner(
                     );
                     return;
                 }
-                Err(flow::DepositError::TooLarge) => {
+                Err(flow::DepositError::TooLarge(_)) => {
                     too_big = true;
                     set_waiting(inner, id, WaitingReason::TooLarge);
                 }
@@ -1208,9 +1222,7 @@ pub(super) async fn serve_live_once(
         let _ = presence::retract_offer(&inner.client, relay, recipient, &offer_id, &poster_token)
             .await;
         *standing = None;
-        return LiveOutcome::Fatal(anyhow::anyhow!(
-            "the recipient cancelled the transfer on their side"
-        ));
+        return LiveOutcome::Fatal(anyhow::Error::new(FailReason::RecipientCancelled));
     }
     if cancel.is_cancelled() {
         return LiveOutcome::Cancelled;
@@ -1591,9 +1603,7 @@ pub(super) async fn confirm_offline_delivery(
                 return;
             }
             Verdict::Expired => {
-                let msg = "expired on the relay — the recipient never collected it".to_string();
-                inner.set_status(id, TransferStatus::Failed(msg.clone()));
-                inner.emit(ManagerEvent::Failed { id, error: msg });
+                inner.fail(id, &FailReason::ExpiredOnRelay);
                 retire_record(&inner, id);
                 return;
             }
@@ -2190,9 +2200,7 @@ pub(super) fn finish(inner: &Inner, id: u64, cancelled: bool, result: Result<Opt
             inner.emit(ManagerEvent::Completed { id, path });
         }
         Err(e) => {
-            let msg = format!("{e:#}");
-            inner.set_status(id, TransferStatus::Failed(msg.clone()));
-            inner.emit(ManagerEvent::Failed { id, error: msg });
+            inner.fail(id, &FailReason::classify(&e));
         }
     }
 }

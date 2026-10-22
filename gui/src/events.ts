@@ -56,7 +56,7 @@ export type WireEvent =
       };
     }
   | { paused: { id: number; reason: string } }
-  | { failed: { id: number; error: string } }
+  | { failed: { id: number; error: string; code?: string } }
   | { cancelled: { id: number } }
   | { code_ready: { id: number; code: string } }
   | { code_paired: { id: number; done: number } }

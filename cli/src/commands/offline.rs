@@ -186,10 +186,9 @@ pub(crate) async fn send_sealed(
                 let _ = std::fs::remove_file(t);
             }
             match e {
-                flow::DepositError::TooLarge => anyhow::bail!(
-                    "the relay refused this file — it's larger than the mailbox allows. \
-                     Send it directly instead (`arvolo send …` P2P while both devices are \
-                     online), or use a private relay with a higher limit."
+                flow::DepositError::TooLarge(e) => anyhow::bail!(
+                    "{e}. Send it directly instead (`arvolo send …` P2P while both devices \
+                     are online), or use a private relay with a higher limit."
                 ),
                 flow::DepositError::Busy => anyhow::bail!(
                     "the relay is being used by a lot of people right now. Try again \

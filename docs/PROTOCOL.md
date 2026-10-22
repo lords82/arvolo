@@ -264,8 +264,9 @@ swarm announce) additionally share a per-IP write-rate limit
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
-| POST | `/v1/deposit?ttl=&max=` | revoke-hash (opt) | Store a ciphertext blob; returns a fresh `claim`. Headers: `x-arvolo-encapped-key` (base32, may be empty), `x-arvolo-revoke-hash` (base32 BLAKE3 of the revoke token, optional). |
-| GET | `/v1/fetch/{claim}` | bearer (the claim) | Return the ciphertext + `x-arvolo-encapped-key` header. **Burn-after-read**: the download counter is consumed server-side; the blob is deleted when it reaches the cap. |
+| POST | `/v1/deposit?ttl=&max=` | revoke-hash (opt) | Store a ciphertext blob; returns a fresh `claim`. Headers: `x-arvolo-encapped-key` (base32, may be empty), `x-arvolo-revoke-hash` (base32 BLAKE3 of the revoke token, optional). A blob over the per-blob cap gets `413` with `x-arvolo-max-blob-bytes: <cap>`; one the relay has no room left for gets `507`. |
+| GET | `/v1/fetch/{claim}` | bearer (the claim) | Return the ciphertext + `x-arvolo-encapped-key` header. **Burn-after-read**: the download counter is consumed server-side; the blob is deleted when it reaches the cap. With `?hold=1` nothing is consumed: the fetcher spends the download afterwards with the ack below. |
+| POST | `/v1/fetch/{claim}/ack` | bearer (the claim) | The second half of a held fetch: count the download now (and burn a one-shot deposit). 404 once the entry is gone. Relays that have it say `"hold":true` in `/v1/features`. |
 | DELETE | `/v1/entry/{claim}` | revoke token | Delete the blob. Header `x-arvolo-revoke-token`; the relay checks its BLAKE3 against the stored hash (constant-time). |
 | GET | `/v1/entry/{claim}/status` | none | `pending` (present) / 404 `gone`. The claim is already a secret capability, so existence leaks nothing. |
 | GET | `/v1/addr` | none | The relay blob node's iroh address + a seed token (for backfill). |
@@ -321,7 +322,7 @@ that may legitimately not need a reply.
 | GET | `/v1/swarm/{swarm_id}/peers` | none | List the live peers announced for a swarm. A poisoned/fake announce can only waste a dial: every chunk is verified by BLAKE3 hash + AEAD, so bad providers are detected, not trusted. |
 | GET | `/dl/{claim}` | none | The browser **download page** (static HTML, strict CSP). It stays a static file and translates itself in the browser (en/it/fr/de, off `navigator.languages`, English fallback). The 403 page served when links are disabled ships no script, so that one picks its language from `Accept-Language`. |
 | GET | `/dl.js`, `/arvolo-sw.js` | none | The download script and streaming service worker (embedded in the binary). |
-| GET | `/v1/features` | none | Advertise optional features so a client can fail fast: `{"links":true,"rz2":true}`. The two are read with **opposite defaults** on purpose — an unreachable or older relay means "links allowed" (worst case, a deposit is refused later) but "no rz2", because minting a v2 code no relay can host would strand whoever types it. |
+| GET | `/v1/features` | none | Advertise optional features so a client can fail fast: `{"links":true,"rz2":true,…,"max_blob_bytes":N}`. The two flags are read with **opposite defaults** on purpose — an unreachable or older relay means "links allowed" (worst case, a deposit is refused later) but "no rz2", because minting a v2 code no relay can host would strand whoever types it. `max_blob_bytes` is the per-blob cap `/v1/deposit` enforces (`0` = none): a client compares the file against it **before** encrypting and uploading, and names it in the refusal. |
 | GET | `/healthz` | none | Liveness. |
 
 ### 6.2 Slots (per-epoch blinded keys)
@@ -556,9 +557,13 @@ sender:  arvolo send R file --deposit
   2. POST /v1/deposit (encapped key + optional revoke-hash) → claim
   3. print arvm… (relay, claim, sender, salt) + save a local deposit session (§8)
 receiver: arvolo recv arvm…
-  1. GET /v1/fetch/{claim} (+ encapped-key header)
+  1. GET /v1/fetch/{claim}?hold=1 (+ encapped-key header)
   2. optional password unwrap → HPKE-open with your identity (verifies sender)
-  3. burn-after-read: the blob is gone once the download cap is reached
+  3. every byte on disk → POST /v1/fetch/{claim}/ack
+  4. burn-after-read: the blob is gone once the download cap is reached — at
+     the ack, not at the first byte served, so a receiver killed mid-fetch
+     (a phone put away) finds the deposit still there. A relay without `hold`
+     burns on read as before; the ack then finds nothing, which is harmless.
 ```
 The sender can later confirm delivery via `/v1/entry/{claim}/status` (gone ⇒
 fetched) or delete it early via `/v1/entry/{claim}` with the revoke token.

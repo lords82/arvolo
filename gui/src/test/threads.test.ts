@@ -4,7 +4,7 @@
 // under nobody at all and quietly missing.
 
 import { describe, expect, it } from "vitest";
-import { threadsOf, UNKNOWN } from "../views/CasellaView";
+import { threadsOf, UNKNOWN } from "../threads";
 import type { UITransfer } from "../types";
 
 function t(over: Partial<UITransfer> = {}): UITransfer {
@@ -21,6 +21,7 @@ function t(over: Partial<UITransfer> = {}): UITransfer {
     swarmPeers: 0,
     downloadPeers: 0,
     firstSeen: 1_000,
+    stamped: true,
     rank: 1_000,
     copiesServed: 0,
     bytesServed: 0,

@@ -94,7 +94,7 @@ function PresenceDot({ id }: { id: string }) {
  *  A contact with neither gets an empty line rather than filler. Somebody saved a
  *  minute ago and never written to has nothing to report yet, and saying so takes
  *  up a row's worth of attention for no answer. */
-function ContactMeta({ c }: { c: ContactDto }) {
+function ContactMeta({ c, prefix = "" }: { c: ContactDto; prefix?: string }) {
   const t = useT();
   const mine = useStore((s) => s.status?.relay ?? "");
   const parts: string[] = [];
@@ -102,7 +102,28 @@ function ContactMeta({ c }: { c: ContactDto }) {
   const elsewhere = c.relay && relayHost(c.relay) !== relayHost(mine);
   if (elsewhere) parts.push(t("people.listensOn", relayHost(c.relay!)));
   if (!parts.length) return null;
-  return <span className="t-xs t-mut truncate">{parts.join(" · ")}</span>;
+  // `prefix` is for the phone's row, where this follows the trust word on the
+  // same line: the separator has to be part of the text, not a gap that
+  // disappears the moment the line wraps.
+  return <span className="t-xs t-mut">{prefix}{parts.join(" · ")}</span>;
+}
+
+/** The one word this screen uses for where a person stands. The three marks are
+ *  deliberately not collapsed anywhere else in the app; here they are read at a
+ *  glance down a column, and a column of two-chip combinations is read one line
+ *  at a time. The order is the order of consequence, not the order of the
+ *  fields. */
+function trustWord(c: ContactDto, t: ReturnType<typeof useT>): string {
+  if (c.blocked) return t("people.wordBlocked");
+  if (c.trusted) return t("people.wordTrusted");
+  if (c.verified) return t("people.wordAsks");
+  return t("people.notVerified");
+}
+
+function trustTone(c: ContactDto): string {
+  if (c.blocked) return "bad";
+  if (c.trusted) return "ok";
+  return "mut";
 }
 
 /** The row this platform draws for a person: a face, a name, one line about
@@ -111,6 +132,7 @@ function ContactMeta({ c }: { c: ContactDto }) {
 function PhoneRow({ c }: { c: ContactDto }) {
   const t = useT();
   const openPerson = useStore((s) => s.openPerson);
+  const startCompose = useStore((s) => s.startCompose);
   const blockContact = useStore((s) => s.blockContact);
   const unblockContact = useStore((s) => s.unblockContact);
   return (
@@ -150,20 +172,51 @@ function PhoneRow({ c }: { c: ContactDto }) {
             },
       ]}
     >
-    <button className="ios-row people-row" onClick={() => openPerson(c.name)}>
-      <Avatar name={c.display_name || c.name} id={c.id} size={38} />
-      <span className="grow" style={{ minWidth: 0 }}>
-        <span className="row-name hstack-sm" title={c.name}>
-          <PresenceDot id={c.id} />
-          <span className="truncate">{c.name}</span>
+    <div className="people-row">
+      <button className="ios-row grow" onClick={() => openPerson(c.name)}>
+        <Avatar name={c.display_name || c.name} id={c.id} size={42} />
+        <span className="grow" style={{ minWidth: 0 }}>
+          <span className="row-name hstack-sm" title={c.name}>
+            <PresenceDot id={c.id} />
+            <span className="truncate">{c.name}</span>
+          </span>
+          {/* Trust as a *word*, on the line under the name, rather than as two
+              chips beside it. Two marks in chips took the width the send button
+              needs and pushed it off a 402px screen at the second badge; and
+              "verified but not trusted" says more as the sentence it actually
+              means — you will be asked before anything of theirs lands — than as
+              the absence of a second chip. */}
+          {/* One line, and it *truncates* rather than wrapping. Wrapped, it made
+              every row a different height and pushed the send button off the
+              card — and the two halves ran together into "Chiede confermaultimo
+              scambio 16 giorni fa", because a flex gap is not a separator when
+              the line breaks. The dot is written, so it is there in the reading
+              as well as in the spacing. */}
+          <span className="row-meta truncate">
+            <span className={`trust-word ${trustTone(c)}`}>{trustWord(c, t)}</span>
+            <ContactMeta c={c} prefix=" · " />
+          </span>
         </span>
-        <span className="row-meta">
-          <ContactMeta c={c} />
-        </span>
-      </span>
-      <TrustBadges verified={c.verified} trusted={c.trusted} blocked={c.blocked} />
-      <Icon.ChevronRight size={15} className="ios-chev" />
-    </button>
+        {/* No chevron beside a send button: two glyphs at the end of one row,
+            one of which is not a target, is the row asking to be read twice. The
+            chevron stays where it is the only way in. */}
+        {c.blocked ? <Icon.ChevronRight size={15} className="ios-chev" /> : null}
+      </button>
+      {/* Sending is one tap from the row, not two. The address book is opened
+          *in order to send* far more often than it is opened to read about
+          somebody, and the design of record puts the verb on the line for
+          exactly that reason. Blocked people do not get one: the daemon would
+          refuse, and a button that cannot work is worse than no button. */}
+      {!c.blocked && (
+        <button
+          className="people-send"
+          aria-label={t("people.sendTo", c.name)}
+          onClick={() => startCompose({ kind: "contact", name: c.name })}
+        >
+          <Icon.ArrowUpRight size={18} />
+        </button>
+      )}
+    </div>
     </SwipeRow>
   );
 }
@@ -558,6 +611,8 @@ function PersonSheet() {
   const acceptName = useStore((s) => s.acceptName);
 
   const c = contacts.find((x) => x.name === name);
+  const openThread = useStore((s) => s.openThread);
+  const transfers = useStore((s) => s.transfers);
   const [checked, setChecked] = useState(false);
   const [newName, setNewName] = useState("");
 
@@ -569,6 +624,14 @@ function PersonSheet() {
     setChecked(false);
     setNewName("");
   }, [name]);
+
+  // The grouping keys a thread by the peer's id when it has one, and by the
+  // label otherwise — so the row has to ask the same question `threadsOf` does,
+  // and only offers itself when there is in fact something to open.
+  const threadKey = c?.id || c?.name || "";
+  const hasThread = Object.values(transfers).some(
+    (x) => (x.peerId || x.peer) === threadKey && x.status !== "sharing"
+  );
 
   if (!c) return null;
 
@@ -599,6 +662,19 @@ function PersonSheet() {
           />
         </div>
       </div>
+
+      {/* Everything that has passed between the two of you. This used to be the
+          phone's home screen — one row per correspondent, opening the thread —
+          and when the home went back to being the board the thread came here,
+          which is where somebody looking for "what did I send them" would go
+          anyway: a person's own screen. */}
+      {hasThread && (
+        <button className="ios-row card" onClick={() => openThread(threadKey)}>
+          <Icon.History size={16} className="t-sec" />
+          <span className="grow">{t("person.thread")}</span>
+          <Icon.ChevronRight size={15} className="ios-chev" />
+        </button>
+      )}
 
       {/* Same offer as the row, because this panel is where someone lands when
           they open a contact to look into exactly this. */}
@@ -806,13 +882,9 @@ export function PeopleBarMenu() {
   const { contacts, addOpen, setAddOpen, doExport, doImport } =
     usePeopleActions();
 
+  // «Scambia contatti» is the card at the top of the screen, and only there:
+  // the menu holds the other ways in.
   const items: MenuItem[] = [
-    {
-      key: "swap",
-      label: t("people.swap"),
-      icon: <Icon.Qr size={13} />,
-      onSelect: () => fire(startPairing("contact_host")),
-    },
     {
       key: "have-code",
       label: t("people.haveCode"),
@@ -853,6 +925,7 @@ export function PeopleBarMenu() {
 
 export function PeopleView() {
   const t = useT();
+  const push = useStore((s) => s.push);
   const contacts = useStore((s) => s.contacts);
   const startPairing = useStore((s) => s.startPairing);
   const loadPresence = useStore((s) => s.loadPresence);
@@ -889,6 +962,9 @@ export function PeopleView() {
 
   const [filter, setFilter] = useState<Filter>("all");
   const [q, setQ] = useState("");
+  /** The phone's search is a glyph beside the title (12a); this is whether the
+   *  field is out. Closing it also clears the filter. */
+  const [finding, setFinding] = useState(false);
   const { addOpen, setAddOpen, importing, doExport, doImport } =
     usePeopleActions();
 
@@ -913,11 +989,70 @@ export function PeopleView() {
 
   const blockedCount = contacts.filter((c) => c.blocked).length;
 
+  // The phone's two groups. `presence` is a three-valued answer — yes, no, and
+  // the relay did not say — and only the first of the three earns the top
+  // group: a dot nobody could confirm is not a person you can reach now.
+  const presence = useStore((s) => s.presence);
+  const online = shown.filter((c) => presence[c.id] === true);
+  const offline = shown.filter((c) => presence[c.id] !== true);
+
   return (
     <div className="stack">
-      {/* On a phone none of this row exists: the verbs live in the bar's "+"
-          (see `PeopleBarMenu`), which is where this platform keeps a screen's
-          verbs — the list is the screen. */}
+      {/* One way in, at the top of the screen and filled, with what it costs
+          written under it. The design of record (7i) is firm about this being
+          *one* thing rather than two: swapping codes is what two people do while
+          standing in front of each other, and it is the only one of the five
+          ways into the address book that is not an errand. The other four —
+          typing a code you were given, adding a bare id, importing, exporting —
+          are in the bar's menu, which is where errands go.
+
+          It was two buttons side by side, and the second one ("I have a code")
+          read as the equal-weight alternative it is not: it is the other half of
+          the same exchange, reached from the other person's screen. */}
+      {/* La testa della schermata (sezione 12): il titolo, le vie per entrare
+          in rubrica, e l'ingranaggio. */}
+      {isPhone && (
+        <div className="root-head">
+          <h2 className="large-title">{t("title.people")}</h2>
+          <div className="root-tools">
+            <button
+              className="act-tool"
+              aria-label={t("people.searchLabel")}
+              aria-pressed={finding}
+              onClick={() => {
+                if (finding) setQ("");
+                setFinding((v) => !v);
+              }}
+            >
+              <Icon.Search size={19} />
+            </button>
+            <span className="tool-wrap">
+              <PeopleBarMenu />
+            </span>
+            <button
+              className="act-tool"
+              aria-label={t("title.settings")}
+              onClick={() => push("settings")}
+            >
+              <Icon.Settings size={20} />
+            </button>
+          </div>
+        </div>
+      )}
+      {isPhone && (
+        <button
+          className="people-swap"
+          onClick={() => fire(startPairing("contact_host"))}
+        >
+          <Icon.Qr size={20} />
+          <span className="grow" style={{ minWidth: 0 }}>
+            <span className="people-swap-title">{t("people.swap")}</span>
+            <span className="people-swap-sub">{t("people.swapBoth")}</span>
+          </span>
+          <Icon.ChevronRight size={16} />
+        </button>
+      )}
+
       {!isPhone && (
       <div className="hstack wrap">
         <Button variant="primary" onClick={() => fire(startPairing("contact_host"))}>
@@ -965,18 +1100,21 @@ export function PeopleView() {
             },
           ]}
         />
-        <div className="grow" style={isPhone ? undefined : { maxWidth: 280 }}>
-          <TextInput
-            value={q}
-            onChange={(e) => setQ(e.currentTarget.value)}
-            placeholder={t("people.searchPlaceholder")}
-            aria-label={t("people.searchLabel")}
-          />
-        </div>
+        {(!isPhone || finding) && (
+          <div className="grow" style={isPhone ? undefined : { maxWidth: 280 }}>
+            <TextInput
+              autoFocus={isPhone}
+              value={q}
+              onChange={(e) => setQ(e.currentTarget.value)}
+              placeholder={t("people.searchPlaceholder")}
+              aria-label={t("people.searchLabel")}
+            />
+          </div>
+        )}
       </div>
 
       {shown.length === 0 ? (
-        <div className="card">
+        <div className={isPhone ? "act-empty" : "card"}>
           <Empty
             icon={<Icon.People size={22} />}
             title={
@@ -986,12 +1124,31 @@ export function PeopleView() {
             }
             action={
               contacts.length === 0 ? (
-                <Button
-                  variant="primary"
-                  onClick={() => fire(startPairing("contact_host"))}
-                >
-                  <Icon.Qr size={14} /> {t("people.swap")}
-                </Button>
+                // The quickest way first, and the fallback under it — the design
+                // of record's 7r, and the same pair of stacked buttons an empty
+                // Attività offers. On a desktop the row of ways in is above the
+                // list already, so one button is enough there.
+                isPhone ? (
+                  <div className="empty-actions">
+                    <Button
+                      size="lg"
+                      className="btn-ink"
+                      onClick={() => fire(startPairing("contact_host"))}
+                    >
+                      <Icon.Qr size={15} /> {t("people.swap")}
+                    </Button>
+                    <Button size="lg" onClick={() => setAddOpen(true)}>
+                      <Icon.Plus size={15} /> {t("people.byId")}
+                    </Button>
+                  </div>
+                ) : (
+                  <Button
+                    variant="primary"
+                    onClick={() => fire(startPairing("contact_host"))}
+                  >
+                    <Icon.Qr size={14} /> {t("people.swap")}
+                  </Button>
+                )
               ) : undefined
             }
           >
@@ -1000,8 +1157,35 @@ export function PeopleView() {
               : t("people.emptyNoMatchBody")}
           </Empty>
         </div>
+      ) : isPhone ? (
+        /* Two groups, and the first one is the answer to the question a phone
+           is usually holding: is this person reachable *right now*, or is this
+           going to sit in their mailbox. One list sorted by name makes that a
+           thing you read off forty dots one at a time. Presence the relay could
+           not answer for is not online — it goes below, where the row says so
+           in words. */
+        <>
+          {[
+            { key: "on", title: t("people.groupOnline"), rows: online },
+            { key: "off", title: t("people.groupOffline"), rows: offline },
+          ]
+            .filter((g) => g.rows.length > 0)
+            .map((g) => (
+              <div key={g.key}>
+                <div className="ios-head hstack-sm">
+                  <span>{g.title}</span>
+                  <span className="count-soft tnum">{g.rows.length}</span>
+                </div>
+                <div className="ios-group">
+                  {g.rows.map((c) => (
+                    <PersonRow key={c.name} c={c} />
+                  ))}
+                </div>
+              </div>
+            ))}
+        </>
       ) : (
-        <div className={isPhone ? "ios-group" : "card rows"}>
+        <div className="card rows">
           {shown.map((c) => (
             <PersonRow key={c.name} c={c} />
           ))}

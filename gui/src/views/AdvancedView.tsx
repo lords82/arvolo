@@ -13,56 +13,37 @@
 // self-updating binary, no daemon of its own to restart (the engine is inside
 // this process), and no text editor to open `config.toml` in. Showing them
 // disabled would be the app claiming a capability and then refusing it; the
-// honest version is a screen with only the rows that do something. The
-// config-file path stays, as a line of fact, because "where does this live" is a
-// fair question even where the answer cannot be tapped.
+// honest version is a screen with only the rows that do something.
+//
+// And three more things left later, for the same kind of reason:
+//
+// - **Il file di configurazione.** Una riga che dava un percorso dentro la
+//   sandbox del telefono, che da qui non si apre, non si modifica e non si
+//   raggiunge. Sapere dove vive non serve a chi non può andarci.
+// - **L'impronta.** È già in Impostazioni, intera, sotto il nome: ripeterla qui
+//   accorciata significava mostrare *peggio* lo stesso valore.
+// - **Versione e motore.** Non sono una regolazione avanzata; il numero di
+//   build sta nel piede di Impostazioni, che è dove questa piattaforma lo
+//   scrive. Sul telefono motore e app sono lo stesso binario, quindi erano due
+//   righe che non potevano discordare.
+//
+// Resta l'indirizzo, che però non è una riga: `IdentityView`.
 
-import { useEffect, useState } from "react";
 import { useT } from "../i18n";
 import { fire, useStore } from "../store";
 import { haptic } from "../haptics";
 import { Empty } from "../ui/Primitives";
-import { InputRow, Place, ToggleRow, ValueRow } from "../ui/Rows";
+import { Place, ToggleRow } from "../ui/Rows";
 import { Icon } from "../ui/Icons";
 import { toast } from "../ui/Toasts";
 
-const SOURCE_KEY = {
-  env: "settings.sourceEnv",
-  config: "settings.sourceConfig",
-  builtin: "settings.sourceBuiltin",
-  none: "settings.sourceNone",
-} as const;
-
-/** The last two components of a path — "Download/Arvolo" out of a dozen
- *  characters of Android sandbox nobody can act on. The full one is a row's
- *  title attribute away, and on a phone it would only ever wrap. */
-function shortPath(p: string): string {
-  const parts = p.split("/").filter(Boolean);
-  return parts.slice(-2).join("/") || p;
-}
 
 export function AdvancedView() {
   const t = useT();
-  const push = useStore((s) => s.push);
   const config = useStore((s) => s.config);
   const error = useStore((s) => s.configError);
   const save = useStore((s) => s.saveConfig);
-  const status = useStore((s) => s.status);
-  const guiVersion = useStore((s) => s.guiVersion);
-  const theme = useStore((s) => s.theme);
-
-  const [name, setName] = useState("");
-  const [relay, setRelay] = useState("");
-  const [dirty, setDirty] = useState<{ name?: boolean; relay?: boolean }>({});
-
-  // Same rule as the desktop's: a refresh may land while a field is being typed
-  // in, and it must not eat what is there.
-  useEffect(() => {
-    if (!config) return;
-    setName((n) => (dirty.name ? n : config.display_name));
-    setRelay((r) => (dirty.relay ? r : config.relay_configured));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [config]);
+  const push = useStore((s) => s.push);
 
   if (!config) {
     return (
@@ -75,103 +56,14 @@ export function AdvancedView() {
     );
   }
 
-  const relayLocked = config.relay_source === "env";
-
-  /** Copying is the only thing these two rows can do, and on a phone there is no
-   *  banner to say so — the confirmation is the knock. */
-  const copy = (value: string) => {
-    if (!value) return;
-    void navigator.clipboard
-      .writeText(value)
-      .then(() => haptic.did())
-      .catch(() => haptic.refused());
-  };
-
-  const commitName = () => {
-    if (!dirty.name) return;
-    const next = name.trim();
-    if (next === config.display_name) {
-      setDirty((d) => ({ ...d, name: false }));
-      return;
-    }
-    fire(
-      save({ display_name: next ? { set: next } : "clear" }).then(() => {
-        setDirty((d) => ({ ...d, name: false }));
-        haptic.did();
-      })
-    );
-  };
-
-  const commitRelay = () => {
-    if (!dirty.relay || relayLocked) return;
-    const next = relay.trim();
-    if (next === config.relay_configured) {
-      setDirty((d) => ({ ...d, relay: false }));
-      return;
-    }
-    fire(
-      save({ relay: next ? { set: next } : "clear" }).then(() => {
-        setDirty((d) => ({ ...d, relay: false }));
-        haptic.did();
-        toast.info(t("settings.relaySaved"), t("settings.relaySavedDetail"));
-      })
-    );
-  };
-
   return (
     <div className="ios-page">
-      {/* ---- who you are ---------------------------------------------- */}
-      <div className="ios-group">
-        <InputRow
-          label={t("settings.nameLabel")}
-          value={name}
-          maxLength={64}
-          placeholder={t("settings.namePlaceholder")}
-          onChange={(v) => {
-            setName(v);
-            setDirty((d) => ({ ...d, name: true }));
-          }}
-          onCommit={commitName}
-        />
-      </div>
-      <div className="ios-foot">{t("settings.nameHint")}</div>
-
+      {/* L'indirizzo non sta in una riga — ci sta la porta per andarlo a
+          leggere. L'impronta invece non è qui affatto: è in Impostazioni,
+          intera, ed è lì che si detta. */}
       <div className="ios-head">{t("adv.identity")}</div>
       <div className="ios-group">
-        {/* The address and the words that prove it. Both are longer than a row,
-            so the row shows the head of one and hands over the whole of it. */}
-        <ValueRow
-          label={t("settings.publicIdLabel")}
-          value={status?.public_id?.slice(0, 10) ?? "…"}
-          mono
-          onClick={() => copy(status?.shareable_id || status?.public_id || "")}
-        />
-        {/* Two of the eight words, not eight: the fingerprint is joined by
-            hyphens (see `Identity::fingerprint`), so splitting it on spaces
-            returned the whole of it, the value pushed the label out of its own
-            row, and "La tua impronta" was nowhere on screen. A row shows enough
-            to recognise; the tap hands over all of it. */}
-        <ValueRow
-          label={t("settings.fingerprintLabel")}
-          value={status?.fingerprint?.split("-").slice(0, 2).join("-") ?? "…"}
-          onClick={() => copy(status?.fingerprint ?? "")}
-        />
-      </div>
-      <div className="ios-foot">{t("adv.copyHint")}</div>
-
-      {/* ---- appearance ------------------------------------------------ */}
-      <div className="ios-group">
-        <Place
-          label={t("settings.appearance")}
-          note={t(
-            theme === "light"
-              ? "settings.themeLight"
-              : theme === "dark"
-                ? "settings.themeDark"
-                : "settings.themeSystem"
-          )}
-          onClick={() => push("appearance")}
-        />
+        <Place label={t("identity.title")} onClick={() => push("identity")} />
       </div>
 
       {/* ---- files ------------------------------------------------------ */}
@@ -196,47 +88,6 @@ export function AdvancedView() {
         />
       </div>
       <div className="ios-foot">{t("settings.seedDesc")}</div>
-
-      {/* ---- network ---------------------------------------------------- */}
-      <div className="ios-head">{t("settings.network")}</div>
-      <div className="ios-group">
-        <InputRow
-          label={t("settings.relayLabel")}
-          value={relay}
-          mono
-          disabled={relayLocked}
-          placeholder={config.relay ?? t("settings.relayPlaceholder")}
-          onChange={(v) => {
-            setRelay(v);
-            setDirty((d) => ({ ...d, relay: true }));
-          }}
-          onCommit={commitRelay}
-        />
-      </div>
-      <div className="ios-foot">
-        {relayLocked
-          ? t("settings.relayLocked")
-          : t(
-              "settings.relayHint",
-              config.relay ?? t("settings.relayNone"),
-              config.relay_source in SOURCE_KEY
-                ? t(SOURCE_KEY[config.relay_source as keyof typeof SOURCE_KEY])
-                : config.relay_source
-            )}
-      </div>
-
-      {/* ---- what this is ----------------------------------------------- */}
-      <div className="ios-head">{t("adv.about")}</div>
-      <div className="ios-group">
-        <ValueRow label={t("adv.version")} value={guiVersion || "…"} />
-        <ValueRow label={t("adv.engine")} value={status?.version || "…"} />
-        <ValueRow
-          label={t("settings.configFileLabel")}
-          value={shortPath(config.config_path)}
-          mono
-        />
-      </div>
-      <div className="ios-foot">{t("settings.configFileHint")}</div>
     </div>
   );
 }

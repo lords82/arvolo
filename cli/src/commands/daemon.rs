@@ -897,7 +897,9 @@ pub(crate) async fn push_via_daemon(
     };
     eprintln!("Handing off to the daemon (sending to {shown_to})…");
     let id = client
-        .push(to, paths_s, note, ttl, max, password, device, handoff)
+        .push(
+            to, paths_s, note, ttl, max, password, device, false, handoff,
+        )
         .await
         .context("daemon rejected the push")?;
     let shown = handle_for(&mut client, id).await;

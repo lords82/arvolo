@@ -14,7 +14,7 @@ import { useBackDismiss } from "../backstack";
 import { barClass, fmtAgo, fmtBytes, metaLine, pct, statusMeta } from "../format";
 import { fire, useStore } from "../store";
 import type { UITransfer } from "../types";
-import { threadsOf } from "../views/CasellaView";
+import { threadsOf } from "../threads";
 import { api } from "../ipc";
 import { Avatar, ExtChip } from "../ui/Bits";
 import { Icon } from "../ui/Icons";
@@ -38,7 +38,8 @@ export function ThreadSheet() {
   const close = useStore((s) => s.closeThread);
   const transfers = useStore((s) => s.transfers);
   const openIncoming = useStore((s) => s.openIncoming);
-  const openSheet = useStore((s) => s.openSheet);
+  const startCompose = useStore((s) => s.startCompose);
+  const contacts = useStore((s) => s.contacts);
   const reject = useStore((s) => s.reject);
   const pause = useStore((s) => s.pause);
   const resume = useStore((s) => s.resume);
@@ -81,7 +82,23 @@ export function ThreadSheet() {
             aria-label={t("thread.sendBack", thread.who)}
             onClick={() => {
               close();
-              openSheet([], thread.peerId || thread.who);
+              // **La schermata d'invio è una sola.** Da qui si apriva il
+              // pannello della finestra — quello con «A chi va» e le cinque
+              // pastiglie — che su un telefono è l'unica porta rimasta a un
+              // modo di mandare che il canvas ha sostituito: una domanda («a
+              // chi») già risposta, fatta di nuovo, e poi un'altra schermata
+              // per rispondere a «cosa». Adesso porta in *Cosa* con la persona
+              // già scelta, come ogni altro invio del telefono.
+              // Un filo porta il peer come lo ha nominato il daemon: a volte è
+              // il nome che gli hai dato tu, a volte l'id nudo di chi non è in
+              // rubrica. *Cosa* cerca per nome, quindi qui si risolve finché
+              // c'è qualcosa da risolvere — e se non c'è, l'id va bene lo
+              // stesso: è un destinatario valido, solo senza faccia.
+              {
+                const peer = thread.peerId || thread.who;
+                const known = contacts.find((c) => c.id === peer || c.name === peer);
+                startCompose({ kind: "contact", name: known?.name ?? peer });
+              }
             }}
           >
             <Icon.Plus size={19} />
@@ -101,7 +118,7 @@ export function ThreadSheet() {
         </div>
 
         {now.map((tx) => (
-          <div className="card card-pad stack th-now" key={tx.key}>
+          <div className="card card-pad stack" key={tx.key}>
             <div className="th-now-head">
               <ExtChip name={tx.name} />
               <span className="grow" style={{ minWidth: 0 }}>

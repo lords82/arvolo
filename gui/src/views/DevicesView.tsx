@@ -26,6 +26,7 @@
 import { useEffect, useState } from "react";
 import { fire, useStore } from "../store";
 import { useT } from "../i18n";
+import { useIsPhone } from "../phone";
 import { Icon } from "../ui/Icons";
 import { Badge, Button, Empty, SwitchRow, TextInput } from "../ui/Primitives";
 import { MenuButton } from "../ui/Menu";
@@ -211,10 +212,13 @@ function DeviceList() {
 
 export function DevicesView() {
   const t = useT();
+  const isPhone = useIsPhone();
+  const go = useStore((s) => s.go);
   const sync = useStore((s) => s.sync);
   // The shared identity is this daemon's identity, so the shareable spelling it
   // reports is the same one — and the field below is for handing out.
   const shareableId = useStore((s) => s.status?.shareable_id);
+  const myName = useStore((s) => s.status?.display_name);
   const loading = useStore((s) => s.syncLoading);
   const error = useStore((s) => s.syncError);
   const reload = useStore((s) => s.loadSync);
@@ -257,6 +261,11 @@ export function DevicesView() {
   return (
     <div className="view-narrow stack">
       {/* ---- identity ------------------------------------------------- */}
+      {/* Not on a phone: there the identity is read on Impostazioni (name and
+          fingerprint, in the head) and copied from Avanzate, and sending to
+          your own machines starts from Scambia. A third copy of it here made
+          this screen a page about you with a list of machines at the bottom. */}
+      {!isPhone && (
       <div className="card card-pad stack">
         <div className="hstack">
           <span className="tone-in">
@@ -266,6 +275,17 @@ export function DevicesView() {
             <div className="t-head">{t("devices.identityTitle")}</div>
             <div className="hint">{t("devices.identityHint")}</div>
           </div>
+        </div>
+
+        {/* The one screen where both names are visible at once, which makes it
+            the place to draw the line between them: this is the identity's name,
+            the rows below are the machines. Read-only here — it is edited in
+            Settings, and a second field for one value is how they came to look
+            like two different things in the first place. */}
+        <div className="stack-sm">
+          <div className="t-label">{t("devices.identityNameLabel")}</div>
+          <div>{myName || t("you.unnamed")}</div>
+          <div className="hint">{t("devices.identityNameHint")}</div>
         </div>
 
         <div className="stack-sm">
@@ -285,14 +305,20 @@ export function DevicesView() {
         </div>
 
         {/* The one thing a shared identity is *for*, reachable from the screen
-            that explains it. It opens the ordinary send sheet with the recipient
-            already chosen — same panel, same options, nothing to learn twice. */}
+            that explains it. On a desktop it opens the ordinary send panel with
+            the recipient already chosen — same panel, same options, nothing to
+            learn twice. On a phone that panel is not where sending happens any
+            more: there the answer to «con chi» is a tile in Scambia, and this
+            goes to the same place a face does. */}
         <div className="hstack">
-          <Button onClick={() => openSheet([], undefined, "self")}>
+          <Button
+            onClick={() => (isPhone ? go("exchange") : openSheet([], undefined, "self"))}
+          >
             <Icon.Send size={14} /> {t("devices.sendToSelf")}
           </Button>
         </div>
       </div>
+      )}
 
       <DeviceList />
 
@@ -328,7 +354,6 @@ export function DevicesView() {
         <div className="hstack">
           <div className="grow">
             <div className="t-head">{t("devices.syncTitle")}</div>
-            <div className="hint">{t("devices.syncHint")}</div>
           </div>
           <Badge kind={sync.enabled ? "ok" : "neutral"}>
             {sync.enabled ? t("devices.syncOn") : t("devices.syncOff")}

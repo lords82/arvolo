@@ -57,6 +57,13 @@ pub enum Request {
         /// Skip the live attempt and deposit on the relay even if they're online.
         #[serde(default)]
         deposit: bool,
+        /// The opposite of `deposit`: never touch the mailbox. The send waits for
+        /// the recipient to be online and goes direct, or does not go at all —
+        /// for a file too big to park, or one that must not sit on a relay even
+        /// for a minute. Additive and off by default, so an older client's
+        /// request keeps meaning what it meant.
+        #[serde(default)]
+        live_only: bool,
         /// Mailbox time-to-live in seconds (daemon default: 7 days).
         #[serde(default)]
         ttl: Option<u64>,
@@ -100,14 +107,18 @@ pub enum Request {
     /// describes (see the authorship rule in `arvolo_core::sync`), so renaming a
     /// different machine is something to do on that machine. A UI should say so
     /// rather than offer a field whose value the next sync round would discard.
-    RenameThisDevice { name: String },
+    RenameThisDevice {
+        name: String,
+    },
     /// Forget a machine: tombstone its row so it leaves every device's register.
     ///
     /// Bookkeeping, not revocation — it still holds the identity secret, and if
     /// it is still running it will notice it was retired and stop announcing
     /// itself, which works because it is your machine running your software and
     /// for no stronger reason than that.
-    ForgetDevice { who: String },
+    ForgetDevice {
+        who: String,
+    },
     /// Serve an anonymous P2P ticket in the background (no recipient); paths are on
     /// the *daemon's* filesystem. → [`Response::Served`].
     ServeTicket {
@@ -149,12 +160,22 @@ pub enum Request {
         fd_socket: Option<String>,
         #[serde(default)]
         fd_token: Option<String>,
+        /// "Answer a refusal with [`Response::Refused`] rather than a sentence" —
+        /// the same opt-in as on [`Request::AcceptOffer`], for the same reason.
+        /// The one refusal a link meets is the relay's size cap, which travels
+        /// as `tooLarge` with the cap in `limit_bytes`.
+        #[serde(default)]
+        typed_refusal: bool,
     },
     /// Cancel a transfer by id → [`Response::Ok`].
-    Cancel { id: u64 },
+    Cancel {
+        id: u64,
+    },
     /// Drop one **finished** transfer from the list (per-row "Elimina" in a UI).
     /// No-op for anything still in flight → [`Response::Ok`].
-    Remove { id: u64 },
+    Remove {
+        id: u64,
+    },
     /// Drop **every** finished transfer (completed / cancelled / failed) from the
     /// list → [`Response::Cleared`] with the count. Anything still in flight stays,
     /// including a Deposited send awaiting its pickup. The history log is a separate
@@ -162,15 +183,21 @@ pub enum Request {
     ClearFinished,
     /// Mark a saved contact (by name) verified after an out-of-band fingerprint
     /// check → [`Response::Ok`] (error if the name isn't a saved contact).
-    MarkVerified { name: String },
+    MarkVerified {
+        name: String,
+    },
     /// Everything this client has left on a relay and can still take back: public
     /// download links and sealed mailbox deposits → [`Response::Deposits`].
     ListDeposits,
     /// Withdraw a deposit from the relay by its id and forget the record. The blob
     /// stops being fetchable → [`Response::Ok`].
-    RevokeDeposit { id: String },
+    RevokeDeposit {
+        id: String,
+    },
     /// Pause an in-progress `send --to` by id → [`Response::Ok`].
-    Pause { id: u64 },
+    Pause {
+        id: u64,
+    },
     /// Stop everything in flight because this process is about to be suspended,
     /// and start again what was stopped that way → [`Response::Ok`].
     ///
@@ -190,9 +217,13 @@ pub enum Request {
     /// same as a person having answered it. This is how somebody who already knows
     /// the answer is not coming skips that wait, without cancelling and sending
     /// the file a second time.
-    DepositNow { id: u64 },
+    DepositNow {
+        id: u64,
+    },
     /// Resume a paused `send --to` by id → [`Response::Ok`].
-    Resume { id: u64 },
+    Resume {
+        id: u64,
+    },
     /// Accept a parked offer, optionally to a specific path → [`Response::TransferId`].
     ///
     /// `password` is for the case where the offer points at a mailbox deposit
@@ -215,7 +246,9 @@ pub enum Request {
         typed_refusal: bool,
     },
     /// Reject a parked offer → [`Response::Ok`].
-    RejectOffer { offer_id: String },
+    RejectOffer {
+        offer_id: String,
+    },
     /// Receive from a pasted artefact — the daemon-side mirror of `arvolo recv`.
     /// An `arvc…` ticket or a pairing code fetches live (the code is resolved to
     /// its ticket first); an offline `arvm…` ticket is fetched from the relay
@@ -246,11 +279,18 @@ pub enum Request {
         rebind: bool,
     },
     /// Remove a saved contact by name → [`Response::Ok`] (error if unknown).
-    RemoveContact { name: String },
+    RemoveContact {
+        name: String,
+    },
     /// Rename a contact, keeping its key and verified/trusted marks → [`Response::Ok`].
-    RenameContact { old: String, new: String },
+    RenameContact {
+        old: String,
+        new: String,
+    },
     /// Clear a contact's verified mark → [`Response::Ok`].
-    MarkUnverified { name: String },
+    MarkUnverified {
+        name: String,
+    },
     /// Trust a contact/id to auto-download without a prompt → [`Response::Ok`].
     /// Refused for an unverified contact unless `force` — auto-downloading from
     /// an unconfirmed key is a MITM risk, same rule as `arvolo contacts trust`.
@@ -260,13 +300,21 @@ pub enum Request {
         force: bool,
     },
     /// Stop auto-downloading from a contact/id → [`Response::Ok`].
-    MarkUntrusted { who: String },
+    MarkUntrusted {
+        who: String,
+    },
     /// Silence an identity: its offers are dropped on arrival → [`Response::Ok`].
-    Block { who: String },
+    Block {
+        who: String,
+    },
     /// Let a blocked identity's offers through again → [`Response::Ok`].
-    Unblock { who: String },
+    Unblock {
+        who: String,
+    },
     /// Approve a contact's pending advertised display name → [`Response::Ok`].
-    AcceptName { who: String },
+    AcceptName {
+        who: String,
+    },
     /// The log of finished transfers, newest first → [`Response::History`].
     ListHistory,
     /// Forget the whole history log → [`Response::Cleared`] with the count.
@@ -274,7 +322,9 @@ pub enum Request {
     /// Set (or clear, with an empty string) the display name advertised inside
     /// offers this daemon sends → [`Response::Ok`]. Applies immediately to the
     /// running engine, and persists to config like `arvolo me name`.
-    SetMyName { name: String },
+    SetMyName {
+        name: String,
+    },
     /// Everything on the settings screen: the effective relay and download folder,
     /// where they came from, and the raw `config.toml` values behind them
     /// → [`Response::Config`].
@@ -289,7 +339,9 @@ pub enum Request {
     /// [`Request::ListContacts`]: the book is read from disk and is instant,
     /// while this is a network round trip per contact, and folding the two would
     /// make every address-book refresh wait on a relay.
-    Presence { ids: Vec<String> },
+    Presence {
+        ids: Vec<String>,
+    },
     /// What the configured relay is and what version it says it is
     /// → [`Response::RelayInfo`].
     ///
@@ -331,7 +383,9 @@ pub enum Request {
     /// Abandon a pairing session started above → [`Response::Ok`]. Also what a UI
     /// sends when its pairing sheet is closed: an unattended `device pair` would
     /// otherwise keep offering this device's identity secret for its full window.
-    CancelPairing { session: String },
+    CancelPairing {
+        session: String,
+    },
     /// Ask the daemon to exit cleanly → [`Response::Ok`] (sent before it goes).
     /// What `arvolo daemon stop` and the GUI's restart use, instead of hunting
     /// the pidfile for a process to signal.
@@ -445,11 +499,18 @@ pub enum Response {
     /// `AcceptRefusal`'s stable words — what a client acts on — and `message` the
     /// engine's own sentence, for showing when it has nothing better.
     ///
-    /// Only ever sent in answer to an `AcceptOffer { typed_refusal: true }`, so a
-    /// client too old to know this variant can never receive it.
+    /// Only ever sent in answer to a request that set `typed_refusal: true`
+    /// (`AcceptOffer`, `CreateLink`), so a client too old to know this variant
+    /// can never receive it.
     Refused {
         code: String,
         message: String,
+        /// The number behind a `tooLarge`: the relay's per-file cap in bytes, when
+        /// the relay named one. A window shows it in the reader's units; the
+        /// sentence in `message` already names it for everyone else. Absent on
+        /// every other code, and from a daemon that predates it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit_bytes: Option<u64>,
     },
     Ok,
     Error(String),
@@ -645,6 +706,13 @@ pub struct TransferDto {
     /// one. Not ours, and not translatable — a diagnostic from another machine.
     #[serde(default)]
     pub waiting_detail: Option<String>,
+    /// The failure's stable code (`FailReason::code`) on a failed row, for a
+    /// client that translates it; `None` where there is none to look up.
+    #[serde(default)]
+    pub fail_code: Option<String>,
+    /// The words from elsewhere inside that reason.
+    #[serde(default)]
+    pub fail_detail: Option<String>,
     /// Whether pausing this row would do anything.
     ///
     /// Not every running transfer can be held — a mailbox pickup is one fetch that
@@ -752,6 +820,10 @@ pub struct HistoryDto {
     pub status: String,
     /// Unix seconds when the record was written.
     pub created: u64,
+    /// `FailReason::code` for a failed record, else empty. `default` for the
+    /// records and daemons that predate it.
+    #[serde(default)]
+    pub fail_code: String,
 }
 
 /// Something this client left on a relay and can still withdraw: a public download
@@ -1058,6 +1130,10 @@ pub enum EventDto {
     Failed {
         id: u64,
         error: String,
+        /// `FailReason::code`, or empty. `default` so the stream from an older
+        /// daemon still decodes.
+        #[serde(default)]
+        code: String,
     },
     Cancelled {
         id: u64,
@@ -1188,6 +1264,8 @@ impl From<&Transfer> for TransferDto {
             offer_status: (!t.offer_status.is_empty()).then(|| t.offer_status.clone()),
             waiting_code: (!t.waiting_code.is_empty()).then(|| t.waiting_code.clone()),
             waiting_detail: (!t.waiting_detail.is_empty()).then(|| t.waiting_detail.clone()),
+            fail_code: (!t.fail_code.is_empty()).then(|| t.fail_code.clone()),
+            fail_detail: (!t.fail_detail.is_empty()).then(|| t.fail_detail.clone()),
             can_pause: Some(t.can_pause),
         }
     }
@@ -1270,9 +1348,10 @@ impl From<&ManagerEvent> for EventDto {
                 id: *id,
                 reason: reason.clone(),
             },
-            ManagerEvent::Failed { id, error } => EventDto::Failed {
+            ManagerEvent::Failed { id, error, code } => EventDto::Failed {
                 id: *id,
                 error: error.clone(),
+                code: code.clone(),
             },
             ManagerEvent::Cancelled { id } => EventDto::Cancelled { id: *id },
             ManagerEvent::CodeReady { id, code } => EventDto::CodeReady {
@@ -1306,6 +1385,7 @@ mod tests {
                 paths: vec!["a.txt".into(), "b/".into()],
                 note: "have a look".into(),
                 deposit: false,
+                live_only: false,
                 ttl: None,
                 max: None,
                 password: None,
@@ -1336,6 +1416,7 @@ mod tests {
                 paths: vec!["a.txt".into()],
                 note: "hi".into(),
                 deposit: false,
+                live_only: false,
                 ttl: None,
                 max: None,
                 password: None,
@@ -1514,8 +1595,9 @@ mod tests {
                 EventDto::Failed {
                     id: 5,
                     error: "boom".into(),
+                    code: String::new(),
                 },
-                r#"{"failed":{"id":5,"error":"boom"}}"#,
+                r#"{"failed":{"id":5,"error":"boom","code":""}}"#,
             ),
             (EventDto::Cancelled { id: 6 }, r#"{"cancelled":{"id":6}}"#),
             // The one event carrying address-book stamps. Field order is part of
@@ -1591,6 +1673,49 @@ mod tests {
             }
             other => panic!("expected an accept, got {other:?}"),
         }
+    }
+
+    /// The same guarantee for a link: a client that predates the flag asks the old
+    /// way and gets the sentence it can read, never a `Refused` it cannot parse.
+    #[test]
+    fn a_link_request_without_the_flag_still_asks_for_the_old_answer() {
+        let old = r#"{"create_link":{"path":"/tmp/x","ttl":null,"max":null}}"#;
+        match serde_json::from_str::<Request>(old).unwrap() {
+            Request::CreateLink {
+                path,
+                typed_refusal,
+                ..
+            } => {
+                assert_eq!(path, "/tmp/x");
+                assert!(!typed_refusal, "not asked for, not sent");
+            }
+            other => panic!("expected a link request, got {other:?}"),
+        }
+    }
+
+    /// A refusal from before the limit travelled still reads, and one with no
+    /// limit to name does not write an empty field for an older client to trip on.
+    #[test]
+    fn a_refusal_reads_with_and_without_its_limit() {
+        let old = r#"{"refused":{"code":"needsPassword","message":"give it"}}"#;
+        match serde_json::from_str::<Response>(old).unwrap() {
+            Response::Refused { limit_bytes, .. } => assert_eq!(limit_bytes, None),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        let bare = serde_json::to_string(&Response::Refused {
+            code: "p2pOff".into(),
+            message: "no".into(),
+            limit_bytes: None,
+        })
+        .unwrap();
+        assert!(!bare.contains("limit_bytes"), "{bare}");
+        let sized = serde_json::to_string(&Response::Refused {
+            code: "tooLarge".into(),
+            message: "too big".into(),
+            limit_bytes: Some(64),
+        })
+        .unwrap();
+        assert!(sized.contains("\"limit_bytes\":64"), "{sized}");
     }
 
     /// A daemon that predates the address-book stamps sends an offer without them,
@@ -1749,6 +1874,7 @@ mod tests {
             transferred: 4242,
             status: "completed".into(),
             created: 1_700_000_000,
+            fail_code: String::new(),
         }]);
         let s = serde_json::to_string(&r).unwrap();
         assert_eq!(serde_json::from_str::<Response>(&s).unwrap(), r);

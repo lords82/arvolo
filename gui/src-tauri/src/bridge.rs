@@ -62,6 +62,43 @@ impl From<String> for AcceptFailed {
     }
 }
 
+/// A link that was not made, as a window needs it.
+///
+/// `code` is `tooLarge` when the relay will not hold a file this size, and empty
+/// for everything else; `limit_bytes` is the relay's cap when it named one, so the
+/// window can show it in the reader's units beside a sentence in their language
+/// rather than quote "413 Payload Too Large". `message` is what to show when the
+/// code says nothing to this window, exactly as before.
+#[derive(Debug, Clone, Serialize)]
+pub struct LinkFailed {
+    pub code: String,
+    pub message: String,
+    pub limit_bytes: Option<u64>,
+}
+
+impl From<anyhow::Error> for LinkFailed {
+    fn from(e: anyhow::Error) -> Self {
+        let refusal = arvolo_core::flow::TooLargeForRelay::of(&e);
+        LinkFailed {
+            code: refusal
+                .map(|_| arvolo_core::flow::TooLargeForRelay::CODE.to_string())
+                .unwrap_or_default(),
+            message: format!("{e:#}"),
+            limit_bytes: refusal.and_then(|r| r.limit),
+        }
+    }
+}
+
+impl From<String> for LinkFailed {
+    fn from(message: String) -> Self {
+        LinkFailed {
+            code: String::new(),
+            message,
+            limit_bytes: None,
+        }
+    }
+}
+
 /// Connect to the daemon, mapping the "no daemon" error to a UI-friendly string.
 /// The engine running inside this process, when there is one.
 ///
@@ -163,7 +200,10 @@ enum Picked {
     Path(PathBuf),
     /// `name` is what the receiver will see the file called; a descriptor has
     /// no path to derive one from.
-    Handle { file: std::fs::File, name: String },
+    Handle {
+        file: std::fs::File,
+        name: String,
+    },
 }
 
 /// The id → source registry behind [`PickedItemDto`]. Bounded FIFO: entries are
@@ -261,8 +301,28 @@ impl PickedFiles {
     /// More than one descriptor has no such route (several files are packed
     /// into an archive, and the packer reads paths), so those are spooled into
     /// the app's own storage first and sent from there.
+    ///
+    /// **Resolving is not consuming.** It was: every id was `remove`d, so the
+    /// first use of a selection destroyed it. Sending one file to two people is
+    /// two sends of the same selection (see `ComposeView`, 16a) — the first went
+    /// out and the second came back "stale file selection — pick the files
+    /// again", naming a file the user was still looking at. The same hole sat
+    /// under picking files and then making a link *and* sending them.
+    ///
+    /// Keeping the entry is not enough on its own, because a descriptor is read
+    /// once: `io::copy` leaves it at the end of the file, so a second resolve
+    /// would have spooled an empty copy — an error turned into a silently empty
+    /// send, which is worse. So a descriptor that gets spooled is **replaced by
+    /// the path it was spooled to**: from then on that id is a file on disk, and
+    /// resolves as many times as it is asked to.
+    ///
+    /// The one place that still consumes is the desktop's single-file hand-off,
+    /// which is a descriptor passed to the engine and genuinely one-shot.
     fn resolve(&self, ids: &[String], spool: Option<&std::path::Path>) -> Result<Resolved, String> {
         let mut inner = self.inner.lock().unwrap();
+        // Taken out under the lock and put back after, rather than resolved in
+        // place: the spooling below copies whole videos, and nobody else can
+        // pick a file while this holds the mutex.
         let mut picked = Vec::with_capacity(ids.len());
         for id in ids {
             picked.push(
@@ -279,7 +339,15 @@ impl PickedFiles {
             .filter(|p| matches!(p, Picked::Handle { .. }))
             .count();
         // One file, one descriptor: the whole point — nothing is copied.
-        if handles == 1 && picked.len() == 1 {
+        //
+        // Not on a phone. There the descriptor dies with the process, and a
+        // send that is still waiting for the recipient when the app is put
+        // away comes back to a record naming a file that was never a file
+        // ("due.txt is not a file"). So on a phone every pick becomes a copy
+        // in the app's own storage first — the folder `sweep_picked` clears
+        // once no send claims it — and the record names something that is
+        // still there tomorrow.
+        if handles == 1 && picked.len() == 1 && !cfg!(mobile) {
             let Some(Picked::Handle { file, name }) = picked.pop() else {
                 unreachable!("counted one handle")
             };
@@ -293,22 +361,55 @@ impl PickedFiles {
             });
         }
         let mut paths = Vec::with_capacity(picked.len());
-        for p in picked {
+        // What goes back under the same ids, so the next send of this same
+        // selection finds it. A spooled descriptor goes back as its path.
+        let mut back = Vec::with_capacity(picked.len());
+        let mut failed: Option<String> = None;
+        for (id, p) in ids.iter().zip(picked) {
+            if failed.is_some() {
+                back.push((id.clone(), p));
+                continue;
+            }
             match p {
-                Picked::Path(path) => paths.push(path.to_string_lossy().into_owned()),
+                Picked::Path(path) => {
+                    paths.push(path.to_string_lossy().into_owned());
+                    back.push((id.clone(), Picked::Path(path)));
+                }
                 Picked::Handle { mut file, name } => {
-                    let dir = spool.ok_or_else(|| {
-                        "several files from the picker need somewhere to be gathered".to_string()
-                    })?;
-                    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-                    let out = dir.join(&name);
-                    let mut w = std::fs::File::create(&out).map_err(|e| e.to_string())?;
-                    // Streamed, not read into memory: a picked video is as big
-                    // as the phone's storage allows.
-                    std::io::copy(&mut file, &mut w).map_err(|e| e.to_string())?;
-                    paths.push(out.to_string_lossy().into_owned());
+                    let spooled = (|| -> Result<PathBuf, String> {
+                        let dir = spool.ok_or_else(|| {
+                            "several files from the picker need somewhere to be gathered"
+                                .to_string()
+                        })?;
+                        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+                        let out = unclaimed_name(dir, &name);
+                        let mut w = std::fs::File::create(&out).map_err(|e| e.to_string())?;
+                        // Streamed, not read into memory: a picked video is as
+                        // big as the phone's storage allows.
+                        std::io::copy(&mut file, &mut w).map_err(|e| e.to_string())?;
+                        Ok(out)
+                    })();
+                    match spooled {
+                        Ok(out) => {
+                            paths.push(out.to_string_lossy().into_owned());
+                            back.push((id.clone(), Picked::Path(out)));
+                        }
+                        // Read once and spooled nowhere: the descriptor is spent,
+                        // and putting it back would hand the next send an empty
+                        // file. The id goes away and says so.
+                        Err(e) => failed = Some(e),
+                    }
                 }
             }
+        }
+        {
+            let mut inner = self.inner.lock().unwrap();
+            for (id, p) in back {
+                inner.by_id.insert(id, p);
+            }
+        }
+        if let Some(e) = failed {
+            return Err(e);
         }
         Ok(Resolved { paths, fds: None })
     }
@@ -493,10 +594,7 @@ fn adopt_copy(app: &tauri::AppHandle, path: PathBuf) -> PathBuf {
 }
 
 /// Open what the platform gave us instead of a path.
-fn open_content_uri(
-    app: &tauri::AppHandle,
-    url: tauri::Url,
-) -> Result<std::fs::File, String> {
+fn open_content_uri(app: &tauri::AppHandle, url: tauri::Url) -> Result<std::fs::File, String> {
     use tauri_plugin_fs::FsExt;
     app.fs()
         .open(
@@ -534,11 +632,7 @@ fn handed_name(file: &std::fs::File, url: &tauri::Url) -> String {
         .and_then(|s| s.last())
         .unwrap_or_default();
     let decoded = percent_decode(guess);
-    let tail = decoded
-        .rsplit(['/', ':'])
-        .next()
-        .unwrap_or_default()
-        .trim();
+    let tail = decoded.rsplit(['/', ':']).next().unwrap_or_default().trim();
     if tail.is_empty() {
         "file".to_string()
     } else {
@@ -594,6 +688,8 @@ pub async fn send_to(
     items: Vec<String>,
     note: String,
     device: Option<String>,
+    // «Aspetta che sia collegata» (13d): never the mailbox, see `Request::Push`.
+    live_only: bool,
 ) -> Result<u64, String> {
     let r = state.resolve(&items, spool(&app).as_deref())?;
     let mut c = client().await?;
@@ -603,7 +699,17 @@ pub async fn send_to(
     // file-access grants, so there is nothing to hand over; on a phone the
     // payload IS a descriptor, and `r.fds` is how it travels.
     let out = c
-        .push(to, r.paths, note, None, None, None, device, r.fds.clone())
+        .push(
+            to,
+            r.paths,
+            note,
+            None,
+            None,
+            None,
+            device,
+            live_only,
+            r.fds.clone(),
+        )
         .await;
     if out.is_err() {
         Resolved::abandon(&r.fds);
@@ -611,12 +717,51 @@ pub async fn send_to(
     out.or_else(err)
 }
 
-/// Where several picked descriptors are gathered so the archive packer can read
-/// them as files. Inside the app's own storage, and only ever written by
-/// [`PickedFiles::resolve`].
+/// Where picked descriptors are written out as files. On a phone it is the
+/// picked-copies folder, so a copy lives exactly as long as a send claims it
+/// (see [`sweep_picked`]); on a desktop, where only a multi-file pick from a
+/// `content://` picker ever lands here, the cache.
 fn spool(app: &tauri::AppHandle) -> Option<PathBuf> {
     use tauri::Manager as _;
+    #[cfg(mobile)]
+    if let Some(dir) = picked_dir(app) {
+        return Some(dir);
+    }
     app.path().app_cache_dir().ok().map(|d| d.join("outgoing"))
+}
+
+/// `name` inside `dir`, or `name-2`, `name-3`… when that is taken: a copy
+/// still claimed by an earlier send must not be overwritten under it.
+#[cfg_attr(not(target_os = "ios"), allow(dead_code))]
+pub(crate) fn unclaimed_in(dir: &std::path::Path, name: &str) -> PathBuf {
+    unclaimed_name(dir, name)
+}
+
+/// Take a file another app shared into the picked-copies folder — the same
+/// adoption a picked copy gets, for the same sweep.
+#[cfg(mobile)]
+pub(crate) fn adopt_shared(app: &tauri::AppHandle, path: PathBuf) -> PathBuf {
+    adopt_copy(app, path)
+}
+
+fn unclaimed_name(dir: &std::path::Path, name: &str) -> PathBuf {
+    let first = dir.join(name);
+    if !first.exists() {
+        return first;
+    }
+    let p = std::path::Path::new(name);
+    let stem = p
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| name.to_string());
+    let ext = p
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+    (2..)
+        .map(|n| dir.join(format!("{stem}-{n}{ext}")))
+        .find(|c| !c.exists())
+        .expect("an unbounded range has a free name")
 }
 
 /// `send --deposit`: straight to the recipient's mailbox, with the options that
@@ -747,7 +892,7 @@ pub async fn create_link(
     item: String,
     ttl: Option<u64>,
     max: Option<u32>,
-) -> Result<String, String> {
+) -> Result<String, LinkFailed> {
     let mut r = state.resolve(std::slice::from_ref(&item), spool(&app).as_deref())?;
     let mut c = client().await?;
     let out = c
@@ -756,7 +901,7 @@ pub async fn create_link(
     if out.is_err() {
         Resolved::abandon(&r.fds);
     }
-    out.or_else(err)
+    out.map_err(LinkFailed::from)
 }
 
 #[tauri::command]
@@ -1051,6 +1196,13 @@ pub struct PendingArvolo(pub std::sync::Mutex<Option<String>>);
 
 #[tauri::command]
 pub fn take_pending_ticket(state: tauri::State<'_, PendingArvolo>) -> Option<String> {
+    // Su Android il biglietto non arriva da argv ma da un file aperto con noi,
+    // e la coda è quella di `share_inbox`. Una porta sola per la schermata,
+    // qualunque sia la strada da cui è entrato.
+    #[cfg(target_os = "android")]
+    if let Some(t) = crate::share_inbox::take_ticket() {
+        return Some(t);
+    }
     state.0.lock().unwrap().take()
 }
 
@@ -1184,6 +1336,147 @@ pub async fn open_path(app: tauri::AppHandle, path: String) -> Result<(), String
     }
 }
 
+/// Offri un indirizzo al resto del telefono (18c: «Condividi»).
+///
+/// Solo iOS, e dichiarato: su Android il foglio di sistema è un `ACTION_SEND`
+/// che va scritto in Kotlin e non c'è ancora. Un comando che fallisce è meglio
+/// di uno che finge: la schermata chiede al telefono se sa condividere e
+/// disegna il bottone solo dove la risposta è sì.
+#[tauri::command]
+pub fn share_link(app: tauri::AppHandle, url: String) -> Result<(), String> {
+    // Solo un indirizzo, e solo i due schemi che un link di Arvolo può avere:
+    // quello che arriva di qui viene dalla webview, e una stringa qualunque
+    // offerta al foglio di sistema è una stringa qualunque consegnata a
+    // qualunque app il sistema elenchi.
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err("not a link".into());
+    }
+    #[cfg(target_os = "ios")]
+    {
+        return crate::ios_open::share_url(&app, &url);
+    }
+    #[cfg(target_os = "android")]
+    {
+        let _ = app;
+        return crate::photos::share_text(&url);
+    }
+    #[cfg(not(mobile))]
+    {
+        let _ = app;
+        Err("no share sheet here".into())
+    }
+}
+
+/// Metti una copia di un file ricevuto nella Galleria del telefono.
+///
+/// Due cose sono deliberate. La prima: il percorso deve essere **uno che il
+/// daemon stesso riconosce** come il posto dove è finito un trasferimento, come
+/// per `open_path` — il webview non nomina percorsi a piacere, e questa chiamata
+/// copia roba fuori dall'app. La seconda: restituisce l'identificatore
+/// dell'asset creato, perché «Togli dalla Galleria» deve poter togliere
+/// *esattamente quello* e non l'ultima foto del rullino.
+#[tauri::command]
+pub async fn photos_add(path: String) -> Result<String, String> {
+    #[cfg(mobile)]
+    {
+        let mut c = client().await?;
+        let known = c
+            .list()
+            .await
+            .or_else(err)?
+            .iter()
+            .any(|t| t.path.as_deref() == Some(path.as_str()));
+        if !known {
+            return Err(format!("path not addable from here: {path}"));
+        }
+        crate::photos::add(&path)
+    }
+    #[cfg(not(mobile))]
+    {
+        let _ = path;
+        Err("questo telefono non ce l'ha".into())
+    }
+}
+
+/// Togli la copia fatta da [`photos_add`]. Per id, non per percorso: la copia è
+/// un'altra cosa dal file: vive in un archivio separato e il file resta.
+#[tauri::command]
+pub async fn photos_remove(id: String) -> Result<(), String> {
+    #[cfg(mobile)]
+    {
+        crate::photos::remove(&id)
+    }
+    #[cfg(not(mobile))]
+    {
+        let _ = id;
+        Err("questo telefono non ce l'ha".into())
+    }
+}
+
+/// C'è una Galleria a cui aggiungere, su questa piattaforma? La finestra non ne
+/// ha una, e una preferenza che non può valere non va nemmeno mostrata.
+#[tauri::command]
+pub fn photos_available() -> bool {
+    cfg!(mobile)
+}
+
+/// Le ultime foto del telefono, per la griglia di «Cosa» (sezione 11). `None`
+/// dove non c'è una libreria da leggere. Lavoro di PhotoKit, quindi fuori dal
+/// reattore: sei miniature sincrone non devono fermare tutto il resto.
+#[tauri::command]
+pub async fn photos_recent(
+    limit: usize,
+    offset: usize,
+) -> Result<Option<Vec<crate::photos::Recent>>, String> {
+    #[cfg(mobile)]
+    {
+        // Una pagina alla volta, non una libreria intera.
+        //
+        // Qui c'era `limit.clamp(1, 24)`: la schermata ne chiedeva sessanta e
+        // ne tornavano ventiquattro, sempre, qualunque cosa chiedesse. Da fuori
+        // non sembrava un tetto — sembrava una galleria che finisce dopo due
+        // righe e mezza, cioè una libreria con dentro poche foto. Il tetto ci
+        // vuole (ogni tessera è un JPEG decodificato e spedito alla webview),
+        // ma va messo sulla *pagina*, non sul totale: ora si scorre e la
+        // schermata chiede la pagina dopo.
+        let limit = limit.clamp(1, 120);
+        tokio::task::spawn_blocking(move || crate::photos::recent(limit, offset))
+            .await
+            .map_err(|e| e.to_string())?
+    }
+    #[cfg(not(mobile))]
+    {
+        let _ = (limit, offset);
+        Ok(None)
+    }
+}
+
+/// Quelle foto come file che l'engine sa mandare: una copia temporanea per
+/// ognuna, registrata come un file scelto — stesso id opaco, stessa
+/// registrazione, perché da qui in poi è la stessa cosa.
+#[tauri::command]
+pub async fn photos_export(
+    state: tauri::State<'_, PickedFiles>,
+    ids: Vec<String>,
+) -> Result<Vec<PickedItemDto>, String> {
+    #[cfg(mobile)]
+    {
+        let mut out = Vec::with_capacity(ids.len());
+        for id in ids {
+            let path = tokio::task::spawn_blocking(move || crate::photos::export(&id))
+                .await
+                .map_err(|e| e.to_string())??;
+            out.push(state.register(path));
+        }
+        Ok(out)
+    }
+    #[cfg(not(mobile))]
+    {
+        let _ = (state, ids);
+        Err("questo telefono non ce l'ha".into())
+    }
+}
+
 #[cfg(test)]
 mod picked_tests {
     use super::*;
@@ -1199,6 +1492,55 @@ mod picked_tests {
             reg.resolve(&[a.id, "no-such-id".into()], None).is_err(),
             "one bad id must sink the call, not shrink it"
         );
+    }
+
+    /// Two people, one selection. *Scambia* sends to a group by sending once per
+    /// person (`ComposeView`, 16a), so the same ids are resolved again — and
+    /// while resolving consumed them, the second person's send came back "stale
+    /// file selection" for a file the sender was still looking at.
+    #[test]
+    fn the_same_selection_resolves_once_per_recipient() {
+        let reg = PickedFiles::new();
+        let a = reg.register(PathBuf::from("/tmp/a.txt"));
+        let first = reg.resolve(std::slice::from_ref(&a.id), None).unwrap();
+        let second = reg.resolve(std::slice::from_ref(&a.id), None).unwrap();
+        assert_eq!(
+            first.paths, second.paths,
+            "due invii della stessa scelta nominano lo stesso file"
+        );
+    }
+
+    /// And the descriptor case, which is the phone's: a picked file is read once,
+    /// so the copy it is spooled to has to *become* the selection. Two of them,
+    /// because a single descriptor on a desktop takes the hand-off route, which
+    /// is one-shot by construction.
+    #[test]
+    fn a_spooled_descriptor_becomes_the_file_it_was_spooled_to() {
+        let dir = std::env::temp_dir().join(format!("arvolo-picked-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("src.bin");
+        std::fs::write(&src, b"dodici byte!").unwrap();
+        let spool = dir.join("spool");
+
+        let reg = PickedFiles::new();
+        let a = reg.register_handle(std::fs::File::open(&src).unwrap(), "a.bin".into());
+        let b = reg.register_handle(std::fs::File::open(&src).unwrap(), "b.bin".into());
+        let ids = [a.id, b.id];
+        let first = reg.resolve(&ids, Some(&spool)).unwrap();
+        let second = reg.resolve(&ids, Some(&spool)).unwrap();
+        assert_eq!(
+            first.paths, second.paths,
+            "la seconda volta è lo stesso file, non una copia nuova"
+        );
+        for p in &second.paths {
+            assert_eq!(
+                std::fs::read(p).unwrap(),
+                b"dodici byte!",
+                "un descrittore già letto non deve diventare un file vuoto"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The id is minted, not derived: registering the same path twice yields two

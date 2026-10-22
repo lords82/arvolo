@@ -24,9 +24,9 @@
 //! a crash mid-copy leaves a pending row the system reaps rather than a truncated
 //! download in somebody's Downloads.
 
-use std::path::PathBuf;
 #[cfg(target_os = "android")]
 use std::path::Path;
+use std::path::PathBuf;
 
 #[cfg(target_os = "android")]
 use anyhow::{anyhow, Context, Result};
@@ -71,7 +71,7 @@ impl SavePublisher for MediaStorePublisher {
 #[cfg(target_os = "android")]
 /// The VM and the activity, from what the windowing layer already holds. Both
 /// are process-wide and outlive any transfer.
-fn context() -> Result<(JavaVM, *mut std::ffi::c_void)> {
+pub(crate) fn context() -> Result<(JavaVM, *mut std::ffi::c_void)> {
     use tao::platform::android::prelude::*;
     let ctx = main_android_context().context("no Android context yet")?;
     let vm = unsafe { JavaVM::from_raw(ctx.java_vm.cast()) }.context("attach to the VM")?;
@@ -207,8 +207,8 @@ fn copy_into(
     // below closes it exactly once when it drops.
     let fd = env.call_method(&pfd, "detachFd", "()I", &[])?.i()?;
     let mut out = unsafe { std::fs::File::from_raw_fd(fd) };
-    let mut input = std::fs::File::open(staged)
-        .with_context(|| format!("read {}", staged.display()))?;
+    let mut input =
+        std::fs::File::open(staged).with_context(|| format!("read {}", staged.display()))?;
     std::io::copy(&mut input, &mut out).context("copy into Downloads")?;
     // Flush before the pending flag clears, or another app can open a file whose
     // last block is still in a buffer.
@@ -218,7 +218,12 @@ fn copy_into(
 }
 
 #[cfg(target_os = "android")]
-fn put_string(env: &mut jni::JNIEnv<'_>, values: &JObject<'_>, key: &str, v: &str) -> Result<()> {
+pub(crate) fn put_string(
+    env: &mut jni::JNIEnv<'_>,
+    values: &JObject<'_>,
+    key: &str,
+    v: &str,
+) -> Result<()> {
     let k = env.new_string(key)?;
     let v = env.new_string(v)?;
     env.call_method(
@@ -231,7 +236,12 @@ fn put_string(env: &mut jni::JNIEnv<'_>, values: &JObject<'_>, key: &str, v: &st
 }
 
 #[cfg(target_os = "android")]
-fn put_int(env: &mut jni::JNIEnv<'_>, values: &JObject<'_>, key: &str, v: i32) -> Result<()> {
+pub(crate) fn put_int(
+    env: &mut jni::JNIEnv<'_>,
+    values: &JObject<'_>,
+    key: &str,
+    v: i32,
+) -> Result<()> {
     let k = env.new_string(key)?;
     let boxed = env.new_object("java/lang/Integer", "(I)V", &[JValue::Int(v)])?;
     env.call_method(

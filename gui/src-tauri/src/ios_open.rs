@@ -42,7 +42,34 @@ pub fn share(app: &tauri::AppHandle, path: &str) -> Result<(), String> {
     .map_err(|e| format!("{e}"))
 }
 
+/// Lo stesso foglio, ma con un indirizzo invece di un file (18c).
+///
+/// `NSURL::URLWithString` e non `fileURLWithPath`: la differenza non è di forma
+/// — un `file://` offre «salva in File» e «apri con», un `https://` offre
+/// Messaggi, Mail, WhatsApp. È la seconda che serve a un link pubblico, che
+/// esiste per essere mandato a qualcuno.
+pub fn share_url(app: &tauri::AppHandle, url: &str) -> Result<(), String> {
+    let url = url.to_string();
+    app.run_on_main_thread(move || {
+        if let Err(e) = present_items(|| {
+            let s = NSString::from_str(&url);
+            NSURL::URLWithString(&s).map(|u| unsafe { Retained::cast_unchecked::<AnyObject>(u) })
+        }) {
+            eprintln!("arvolo: could not offer {url}: {e}");
+        }
+    })
+    .map_err(|e| format!("{e}"))
+}
+
 fn present(path: &str) -> Result<(), String> {
+    let path = path.to_string();
+    present_items(|| {
+        let url = NSURL::fileURLWithPath(&NSString::from_str(&path));
+        Some(unsafe { Retained::cast_unchecked::<AnyObject>(url) })
+    })
+}
+
+fn present_items(item: impl FnOnce() -> Option<Retained<AnyObject>>) -> Result<(), String> {
     let mtm = MainThreadMarker::new().ok_or("not on the main thread")?;
     let ui = UIApplication::sharedApplication(mtm);
 
@@ -61,9 +88,8 @@ fn present(path: &str) -> Result<(), String> {
         .rootViewController()
         .ok_or("the window has no view controller")?;
 
-    let url = NSURL::fileURLWithPath(&NSString::from_str(path));
-    let items: Retained<NSArray<AnyObject>> =
-        NSArray::from_retained_slice(&[unsafe { Retained::cast_unchecked::<AnyObject>(url) }]);
+    let one = item().ok_or("nothing to share")?;
+    let items: Retained<NSArray<AnyObject>> = NSArray::from_retained_slice(&[one]);
     let sheet = unsafe {
         UIActivityViewController::initWithActivityItems_applicationActivities(
             UIActivityViewController::alloc(mtm),

@@ -384,7 +384,7 @@ fn spawn_intake(
                     history::record_transfer(&manager, id, "deposited");
                     crate::deposits::record_from_event(Some(id), &info);
                 }
-                Ok(ManagerEvent::Failed { id, error }) => {
+                Ok(ManagerEvent::Failed { id, error, .. }) => {
                     history::record_transfer(&manager, id, &format!("failed: {error}"))
                 }
                 Ok(ManagerEvent::Cancelled { id }) => {

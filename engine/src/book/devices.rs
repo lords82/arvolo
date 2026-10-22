@@ -60,15 +60,30 @@ pub fn save_devices(d: &Devices) -> Result<()> {
 }
 
 /// The default name for a machine that has never been named: its hostname, or
-/// the OS if even that is unavailable. Editable afterwards, on the machine
-/// itself — see the authorship rule in `core::sync`.
+/// what the platform is if even that is unavailable. Editable afterwards, on
+/// the machine itself — see the authorship rule in `core::sync`.
+///
+/// A phone has no hostname worth the name: iOS answers `localhost`, which is
+/// not a name a person can pick out of a list and not a machine anyone can aim
+/// a send at. That answer counts as "unavailable" and the platform's own word
+/// stands in for it.
 pub fn default_device_name() -> String {
     let host = gethostname::gethostname().to_string_lossy().to_string();
     let host = host.trim().trim_end_matches(".local").to_string();
-    if host.is_empty() {
-        std::env::consts::OS.to_string()
+    if host.is_empty() || host.eq_ignore_ascii_case("localhost") {
+        platform_device_name().to_string()
     } else {
         host
+    }
+}
+
+/// What a machine is called when it cannot say: the word on its box.
+pub fn platform_device_name() -> &'static str {
+    match std::env::consts::OS {
+        "ios" => "iPhone",
+        "android" => "Android",
+        "macos" => "Mac",
+        other => other,
     }
 }
 

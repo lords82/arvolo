@@ -1,0 +1,34 @@
+            <!-- Arvolo in the system share sheet: `npm run mobile:patch` puts
+                 this inside the main activity. Any type, one or many — what is
+                 shared is copied into the app's storage and offered to Scambia
+                 with the files already in hand (see `Shared.kt`). -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+
+            <!-- Un `.arvolo` aperto da un'altra app. Due filtri, non uno,
+                 perché Android abbina un `content://` **per tipo MIME** e un
+                 `file://` per estensione: chi passa il file da una chat o dalla
+                 posta dichiara un tipo, chi lo passa dal filesystem no. Senza
+                 il secondo, Arvolo non compare in «Apri con» proprio da dove un
+                 biglietto si apre più spesso. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="content" />
+                <data android:mimeType="application/x-arvolo-ticket" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="file" />
+                <data android:scheme="content" />
+                <data android:host="*" />
+                <data android:mimeType="*/*" />
+                <data android:pathPattern=".*\\.arvolo" />
+            </intent-filter>

@@ -61,6 +61,11 @@ pub struct HistoryRecord {
     /// back at the next launch, which is a control that undoes itself.
     #[serde(default)]
     pub hidden: bool,
+    /// The failure's stable code (`FailReason::code`), for a client that says
+    /// the reason in its own language; empty for the rest, and for every record
+    /// written before this field existed.
+    #[serde(default)]
+    pub fail_code: String,
 }
 
 fn now_secs() -> u64 {
@@ -89,6 +94,7 @@ pub fn record(
     status: &str,
     path: Option<String>,
     saved_uri: Option<String>,
+    fail_code: String,
 ) -> Result<HistoryRecord> {
     let seed = format!("{}:{name}:{status}", now_nanos());
     let id = HEXLOWER.encode(&Hash::new(seed.as_bytes()).as_bytes()[..6]);
@@ -104,6 +110,7 @@ pub fn record(
         path,
         saved_uri,
         hidden: false,
+        fail_code,
     };
     write_record(&rec)?;
     Ok(rec)
@@ -140,6 +147,7 @@ pub fn record_transfer(manager: &arvolo_core::manager::TransferManager, id: u64,
         status,
         t.path.as_ref().map(|p| p.display().to_string()),
         t.saved_uri.clone(),
+        t.fail_code.clone(),
     );
 }
 
@@ -197,9 +205,9 @@ pub fn restore_board(manager: &arvolo_core::manager::TransferManager, limit: usi
             // "failed: <reason>", and anything a later version writes that this
             // one does not know: a row that says it did not finish is closer to
             // the truth than no row at all.
-            other => TransferStatus::Failed(
-                other.strip_prefix("failed: ").unwrap_or(other).to_string(),
-            ),
+            other => {
+                TransferStatus::Failed(other.strip_prefix("failed: ").unwrap_or(other).to_string())
+            }
         };
         let row = FinishedRow {
             direction: if rec.direction == "send" {

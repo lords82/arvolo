@@ -92,23 +92,25 @@ rebuilt, still needs the same native edges).
 Today's interface assumes a 980×670 window, a pointer and a keyboard. None of
 those exist on a phone, so the adaptation is designed deliberately:
 
-- **Navigation**: the rail becomes a bottom **tab bar** — *Casella*, *People*,
-  **Send** as the center action, *Codes*, *You*. Six rail places don't fit
-  five tabs, so they fold rather than drop: Transfers and History merge into
-  **Casella**, one row per correspondent showing the latest exchange and
-  opening a thread with everything before it; "Links and deposits" and "Your
-  devices" move under *You*. Nothing is lost — see *Parity with the desktop*
-  below.
-- **The two verbs get primary**: Send is the tab bar's center button; Receive
-  (paste a code / scan a QR) is the *Codes* tab, one tap from anywhere.
-  Drag-and-drop disappears; the platform **share sheet** and file/photo
-  pickers replace it.
-- **Sheets go full-screen** and gain swipe-to-dismiss; `⌘K` and every
-  keyboard shortcut disappear (a search field stays); hover states become
-  press states; row actions move into swipe actions and long-press menus.
-- **Touch and platform**: 44 pt minimum targets, safe-area insets (notch,
-  home indicator), on-screen keyboard pushing layouts, pull-to-refresh
-  instead of a refresh button.
+- **Navigation**: the rail becomes a bottom **tab bar** — *Attività*, *Persone*,
+  **Scambia** in the middle, *Invia*, *Impostazioni*. Six rail places don't fit
+  five tabs, so they fold rather than drop: Transfers and History are the two
+  halves of **Attività**; "Link e depositi" is the tray glyph on that screen and
+  a row in Impostazioni; "I tuoi dispositivi" is in Impostazioni and, for
+  everyday use, already inside Scambia. Nothing is lost — see *Parity with the
+  desktop* below.
+- **The middle of the bar is a camera, not a sheet**: *Scambia* opens the
+  viewfinder already looking, with your machines, your own code and a typed
+  code in a sheet under it. *Invia* is the one entry in the bar that does
+  something rather than going somewhere. Drag-and-drop disappears; the platform
+  **share sheet** and file/photo pickers replace it.
+- **Sheets are cards** (the screen behind steps back, a pull puts them away)
+  and the camera's sheet has two detents; `⌘K` and every keyboard shortcut
+  disappear (search is a dock at the bottom); hover states become press
+  states; row actions move into swipe actions and a held row's context menu.
+- **Touch and platform**: 44 pt minimum targets, safe-area insets (all four
+  sides), the keyboard measured and kept clear of, pull-to-refresh on every
+  root screen, Dynamic Type, haptics on the system's own occasions.
 - **Tablets are the same app, wider**: past a breakpoint the tab bar goes back
   to being a rail and the sheets become two columns. Same features, one
   codebase, no separate tablet design.
@@ -117,14 +119,211 @@ those exist on a phone, so the adaptation is designed deliberately:
   restyled where touch demands it. The claude.ai/design project holding the
   26 synced components is where the phone variants get designed first.
 
-**The design of record** is `gui/.design-sync/mobile/casella.dc.html` — a copy
-of the "Arvolo Mobile 1c — Casella" canvas in the *Proposte app mobile Arvolo*
-project on claude.ai/design. It shows the five tabs, the Casella list, the
-thread, the send sheet, the incoming sheet, deposits and links, search, and the
-pairing onboarding, all built from the real design system bundle. It is a
-**starting point, not a specification**: where parity and the mockup disagree,
-parity wins and the screen gets redrawn. The earlier three-layout exploration
-(A/B/C) is superseded and was deleted.
+**The design of record** is `gui/.design-sync/mobile/scambia.dc.html` — a copy
+of the "Arvolo Mobile 2 — Scambia" canvas on claude.ai/design, built from the
+real design system bundle. It supersedes `casella.dc.html` beside it, which is
+kept for the reasoning it carries. Where parity and the canvas disagree, parity
+still wins and the screen gets redrawn.
+
+What that canvas settles, and what the app is built to (2026-10-02):
+
+- **Five places: Attività, Persone, _Scambia_, Invia, Impostazioni** — and the
+  disc in the middle is a *place*, not a sheet. It opens the camera already
+  looking, because the two things a phone is picked up for are showing a square
+  and reading one.
+- **Scambia is the camera with a sheet over it**: your own machines (a tap sends
+  to one — no door to open, no fingerprint to compare), your own code with how
+  much is already waiting to be given, a cold row for anything one of your
+  machines has left you, the people you met recently, and last the keyboard.
+- **Attività is one list in time order**, not two directions: on a phone a
+  direction is two tinted words at the start of a line. Waiting decisions first,
+  then what is in flight, then what finished today; *Cronologia* is the other
+  half of the same segmented control rather than a place of its own.
+- **Link e depositi** is reached from the tray glyph on Attività (and from
+  Impostazioni); **search** is the magnifier beside it, which is the only search
+  a phone has — there is no field in the bar to put one in.
+
+Three things in the canvas the platform or the engine does not support yet, and
+they are the open ends rather than oversights:
+
+- **No torch button.** `tauri-plugin-barcode-scanner` exposes no torch.
+- **A square read in Scambia is always tried as a transfer.** A contact-swap
+  code and a send code are the same shape on the wire, so nothing local can tell
+  them apart; swapping contacts stays a button in *Persone* (7k's "inquadrare da
+  Scambia fa lo stesso" needs the daemon to try both).
+- **A device card cannot say "same network" or "off, via relay"** (5a), and the
+  cold row cannot name *which* of your machines left you something. Presence is
+  a relay beacon per **identity**, and all your machines share one; `last_seen`
+  is a sync round, explicitly not a presence light. The cards say when a machine
+  was last seen, in words. Per-device presence needs a device id in the beacon —
+  the same thing device-targeted sending already wanted.
+- **Section 6 (photos and videos into the Gallery) is not built.** It needs a
+  publisher that can write to MediaStore / Photos and a preference the engine
+  honours; nothing in the GUI can stand in for it.
+
+### Sections 11 and 12: one road, three places (2026-10-04)
+
+The canvas grew two sections and the owner asked for the app to match them —
+**and, asked explicitly, to match the canvas's own controls too**, which undid
+the one-day iOS 26 "Liquid Glass" experiment of 2026-10-03 (flat bar, bordered
+buttons and full-screen sheets are back; what stayed is the behaviour the
+canvas does not draw: pull-to-refresh on root screens, Dynamic Type through
+`--dt`, the keyboard measured into `--kb`, dragging the bottom sheets, haptics
+on the system's occasions).
+
+- **The bar is three places** — Attività, **Scambia** in the middle (disc 60,
+  overhanging 22), Persone. *Invia* is gone: it and Scambia asked "a chi"
+  twice. **Impostazioni is behind the gear** every root screen carries at the
+  top right (`.root-head` / `.act-tool`), as a pushed screen with the title on
+  the page (12b) and no bar under it.
+- **Scambia is the only place a send or a receive starts from** (11a):
+  *Ce l'ho qui davanti* (a black card; the camera is behind it, `CameraView`,
+  route `camera`), *I tuoi dispositivi* (three cards), *Persone* (three faces
+  and *Rubrica*), *Chiunque abbia il link*. Two questions in a fixed order —
+  with whom, then what — each asked once: from Condividi the files are already
+  in hand (11e, `composeFiles`), from a person's row the recipient is
+  (`startCompose`).
+- **Cosa is one screen** (`ComposeView`, route `compose`, 11b–11d): the
+  recipient block, a 3×2 grid of the last pictures (`photos_recent`, PhotoKit
+  on iOS — Android still answers "no library", so the grid is simply absent
+  there), *File* and *Appunti* (`clipboard_peek`/`clipboard_pick`: the
+  clipboard as a `.txt` or `.png`), the line that says what will happen, and
+  one button that says verb, quantity and recipient. The transport is the app's
+  choice among the sealed ones; the link is public and therefore its own
+  answer with an ink button and a "Link pronto" sheet. *Altri modi* (codice,
+  ticket, casella) opens the full sheet, only for a person.
+- **Link e depositi live in Attività** as the middle half, *Lasciati* (12a):
+  public links and what waits in mailboxes, a tap on a row for the link, the
+  revocation or the details (the 7c action sheet). Impostazioni holds only
+  settings: who you are, I tuoi dispositivi, Ricevuti, Aspetto e lingua, Rete,
+  Avanzate (12b).
+- **The phone's palette is iOS's** (canvas tweak `data-palette="ios"`, taken
+  2026-10-04): grouped background `#f2f2f7` with white surfaces, black ink,
+  the system blue and orange for the two directions, the system font; dark is
+  pure black with `#1c1c1e` surfaces. All of it under `.app-phone` in
+  `theme.css` — the window keeps its warm paper. It replaced the canvas's
+  earlier "dark v2" phone palette.
+- **Share from another app** (11g's third road, 2026-10-04): Arvolo is in the
+  system share sheet on both platforms. Android: an `ACTION_SEND` /
+  `ACTION_SEND_MULTIPLE` intent filter and `Shared.kt`, which copies the
+  `content://` streams (and shared text, as a `.txt`) into the app's storage
+  while the grant is live and calls `Java_it_termox_arvolo_Shared_onShared`.
+  iOS: a share-extension target (`ShareExtension`, Swift) that copies the
+  attachments into the App Group `group.it.termox.arvolo` and opens
+  `arvolo://shared`. Both land in `src-tauri/src/share_inbox.rs`, which queues
+  the paths and nudges the page (`shared://arrived`); the page *pulls* with
+  `take_pending_shared` at launch, on coming to the front and on the nudge —
+  a share can land before any page exists to listen (Android's cold start, or
+  an extension that could not open the app). The files are adopted into the
+  picked-copies folder and registered like a pick; Scambia opens with them in
+  hand (11e). **The native halves live under `src-tauri/mobile/` and are put
+  into the gitignored `gen/` by `npm run mobile:patch`** — run it after every
+  `tauri android|ios init` (it also carries the iOS script-phase path fix in
+  `project.yml` and regenerates the Xcode project).
+- **A picked file outlives a restart** (2026-10-04): on a phone every pick,
+  descriptor or not, is copied into the picked-copies folder before the send
+  is queued, so a send still waiting for its recipient when the app is killed
+  resumes from a path that is still there. The fd hand-off stays the desktop's.
+- **A mailbox pickup cannot be lost to a crash** (2026-10-04): the client
+  fetches with `?hold=1` and acks (`POST /v1/fetch/{claim}/ack`) only once the
+  file is written, and the inbox offer is acked at the same moment rather than
+  on accept. An app killed mid-fetch comes back to the offer still in its inbox
+  and the deposit still on the relay (relay ≥ the build that advertises
+  `"hold":true` in `/v1/features`; an older relay burns on read as before).
+- **Failures say why in the reader's language** (2026-10-04): `FailReason` in
+  core carries a stable code beside the sentence (`sourceMissing`,
+  `recipientCancelled`, `expiredOnRelay`, `depositGone`, `noSpace`,
+  `network`); the row, the event and the history record carry it, the GUI
+  translates it (`failed.*`, guarded by `failed.test.ts`), and anything without
+  a code still shows the engine's own words.
+- **Left out on purpose, to be asked of the canvas**: *Accetta
+  automaticamente*, the typed code («Hai un codice scritto?») and «Prendi
+  quello che un tuo dispositivo ti ha lasciato» — the owner chose not to place
+  them until the design says where. And a square read in the camera is still
+  always a *receive*: «Inquadra e partono» (11e) needs the engine to tell a
+  contact code from a send code.
+
+### Sections 13–16: Scambia remade, with the TermoX identity (2026-10-04, evening)
+
+The canvas moved on four times in one afternoon and the last word wins. The
+chain, for anyone reading the frames: 13 ("La schermata di invio, rifatta")
+put people and devices in one grid and gave the search field the job of
+reading a received code; 14 ("Invio, più carattere") brought the TermoX
+identity — night blue `#090735`, water blue `#3C78BF`, Plus Jakarta for titles
+and numbers, Inter for text, a cold grey ground — and made the bar a floating
+island; 15 ("Il blu come in 14b, e l'invio non blocca") kept the night blue to
+the camera card and the send sheet and moved the transfer out of the way into a
+card over the bar; 16 ("Più trasferimenti insieme") made that card one card for
+any number, and let one send go to several people. 14a/14c/14d/14e are
+superseded by 15; 13a by 15a; 13b by 14b; 13c ("Altri modi": the spoken code
+and the ticket) has no entry point left in 15a and is **not built**.
+
+What the phone does now, screen by screen:
+
+- **Scambia (15a).** A navy camera card ("Ce l'ho davanti / Inquadra il suo
+  quadrato") opens the windowed scanner. Under it a field that filters the two
+  grids by name and, when what is typed has the shape of a code (`dddd-word-word`,
+  `arvc…`, `arvm…` — `shapeOf` in `ReceiveSheet.tsx`), turns into the 13e box:
+  what it recognised, a password field for a mailbox ticket, and *Ricevi*. Then
+  the Prendi row when one of your own machines left something the daemon did
+  not take by itself (parked offers whose sender is your own id); then *I tuoi
+  dispositivi* as 64px squares (green dot when seen in the last eleven minutes,
+  a blue count when something of theirs is waiting, a dashed *Link* square last)
+  and *Persone* as 64px discs (blue ring and dot when the relay says online,
+  "in linea" / when you last exchanged / nothing under the name). Eight faces,
+  then *Rubrica*.
+- **More than one person (16a).** Holding a face turns the faces into boxes and
+  shows every contact; the navy bar over the island counts them and says how
+  many are online; *Avanti* goes to *Cosa* with `{kind: "group"}` — one send per
+  name, same message, same options.
+- **Cosa (14b).** Back, the capsule with who (ring on when online, options
+  behind the sliders), the three chips — Foto (the library, sixty tiles,
+  numbered in the order they are tapped), File (what is in hand plus "Scegli un
+  file…"), Appunti — and the navy sheet at the foot: two tilted thumbnails, the
+  count, the "how it arrives" line, the message field (people only) and the
+  round send button. After the send you are back on Scambia; the card says the
+  rest.
+- **Opzioni (13d).** TTL (1h/1d/7d/30d), pickups (a stepper), password, and
+  apart from them *Aspetta che sia collegata*. The mailbox rules make the send a
+  `deposit` (the live path cannot carry them); the switch makes it a
+  `send … live_only`, a new flag through IPC → `TransferManager::send_to` that
+  keeps the delivery loop off both relay routes — no parking, no mailbox — and
+  reports `WaitingReason::ForThem` while the recipient is away. The flag is
+  persisted with the held send (`SendToRecord.live_only`; the previous record
+  shape still decodes).
+- **The card over the bar (15b–15d, 16b–16d).** `TransferDock` in
+  `views/TransferCard.tsx`, mounted by `App.tsx` on every root. It shows what
+  is moving (`active | preparing | offered | stalled | paused`) and, for four
+  seconds, what just stopped moving — green ring and tick, "Arrivato a Sara",
+  *Fatto* — then leaves; the row stays in Attività. Several rows pile their
+  rings (light blue arriving, blue leaving, green arrived) and the text says who
+  is in the mailbox. Tapping opens the sheet: one transfer gets the big
+  percentage, its file row, Pausa/Annulla; several get the total, *In uscita* /
+  *In arrivo* lanes, and a row tap opens the row's own actions. The page keeps
+  `--dock` of room under it while the card is up.
+- **The island (15a).** `.tabbar` is a 64px white capsule 22px in from the
+  sides, Scambia a navy pill that always carries its name, a blue dot over
+  Attività while something is moving or waiting.
+
+Palette and type live under `.app-phone` in `theme.css`. The canvas declares its
+own palette as `--x-*` variables in the helmet, in two sets, and both are
+mirrored there. The light one is the TermoX identity: night blue `#090735`,
+water blue `#3C78BF`, cold grey ground `#f7f8fa`.
+
+**The dark one is neutral, not navy**: ground `#0c0c0e`, surfaces `#17171a` and
+`#222226`, ink `#f2f2f4` — and the filled card (`--x-navy`, the camera card, the
+send sheet, the transfer card) becomes `#1f1f24`. Night blue is a colour of the
+light: on a black screen a blue card is the only coloured thing there is, so the
+canvas turns it off. What stays lit is only what lives *on* the card and is the
+same in both: `#3C78BF`, the scan line `#5a93d2`, the green `#3fbf8a`, the light
+blue of what is arriving `#9cc4ef`, the red `#ff9a94`, and the disc inside a ring
+(`#1a1850`), which the canvas keeps literal in both. Frame 14e ("Scambia, scuro",
+a night-blue ground) is superseded: 15 replaces it and 16 says the dark "will
+follow the palette of the other screens".
+
+Inter and Plus Jakarta are bundled from `@fontsource-variable`. "in linea" rather
+than the canvas's "collegata/collegato": the app does not know anybody's gender,
+and the neutral word is the one deviation.
 
 ## Onboarding
 
@@ -144,14 +343,14 @@ acceptance criteria for v1, one line per desktop place:
 
 | Desktop | Phone |
 | --- | --- |
-| Transfers — active, queued, stalled, pause/resume, cancel, retry | Casella rows and the thread sheet; pause/resume and cancel as swipe actions |
-| History — everything past, searchable | the same threads, scrolled back; full-text search from the Casella app bar |
+| Transfers — active, queued, stalled, pause/resume, cancel, retry | Attività, one list in time order; pause/resume and cancel as swipe actions, "Pausa a tutto" on the heading |
+| History — everything past, searchable | *Cronologia*, the other half of Attività; search from the magnifier beside the title |
 | People — add, pair, verify fingerprint, trust, block, rename, forget, per-contact relay | People tab, verbs under the row menu; fingerprint compared out loud as on the desktop |
 | Your devices — pair, rename, forget, send to a device | under *You*, same actions; a paired phone is a send target like any other |
 | Links and deposits — create, list, extend, revoke | under *You*, full sheet; creating a link is a send option |
 | Settings — name, fingerprint, public id, theme, language, relay, download folder, seeding, identity | under *You*, plus the phone-only switches (push, auto-save, Wi-Fi only, foreground service). The download folder is the one row that is **read-only** — see *Where received files land* |
 | Send — files, folders, several recipients, a code, a public link | the Send tab and the platform share sheet, which replaces drag-and-drop |
-| Receive — paste a code, scan a QR, open an `arvolo send --link` URL | the Codes tab (show/scan) and URL handling in-app |
+| Receive — paste a code, scan a QR, open an `arvolo send --link` URL | *Scambia*: the camera is the screen, the typed code is in the sheet under it, and URL handling is in-app |
 | Incoming offers — accept, decline, choose where to save | the incoming sheet, reached from the notification or the Casella banner |
 | Swarm seeding | **on, gated**: Wi-Fi and charging by default, and on iOS only while the app is in the foreground |
 
@@ -376,10 +575,10 @@ Made 2026-08-27, widening the scope to full parity:
 
    **The frame is a phone's now.** Below 560px (`PHONE_QUERY` in `gui/src/phone.ts`,
    and the same number in `theme.css`) the rail is replaced by a bottom bar:
-   Transfers · People · **Send** · Receive · Settings, with Send filled and in
-   the middle where a thumb reaches. The three places that did not fit — links
-   and deposits, history, your devices — are under Settings, so a phone still
-   reaches everything a desktop does. The header and the bar keep clear of the
+   Attività · Persone · **Scambia** · Invia · Impostazioni, with Scambia filled
+   and in the middle where a thumb reaches. The places that did not fit — links
+   and deposits, your devices — are a glyph on Attività and rows in
+   Impostazioni, so a phone still reaches everything a desktop does. The header and the bar keep clear of the
    status bar and the gesture bar, and the first screen no longer asks anyone to
    drag a file onto a telephone.
 

@@ -45,6 +45,9 @@ pub(super) struct Held {
     /// the same reason as `target`: it belongs to the send, and a pause/resume or
     /// a restart has to route to the same place the first attempt did.
     pub(super) relay: Option<String>,
+    /// Never the mailbox: the loop waits for them to be online and goes direct,
+    /// or keeps waiting. See `TransferManager::send_to`.
+    pub(super) live_only: bool,
     /// Flipped by [`TransferManager::pause`] so the running loop, once its token is
     /// cancelled, knows to pause (keep the transfer) rather than cancel (drop it).
     pub(super) pause_flag: Arc<std::sync::atomic::AtomicBool>,
@@ -85,6 +88,12 @@ pub(super) struct Inner {
     /// `pause` flips it to false *before* cancelling so the fetch slips away
     /// like a drop (tail kept warm) instead of telling the sender to stop.
     pub(super) recv_aborts: Mutex<HashMap<u64, Arc<std::sync::atomic::AtomicBool>>>,
+    /// Inbox offers whose ack waits on the download they started: transfer id →
+    /// offer id. A mailbox pickup acks only once its bytes are on disk (or the
+    /// deposit is known gone), so that an app killed mid-fetch finds the offer
+    /// still in its inbox and the deposit still on the relay — see
+    /// `Mailbox::fetch_plan_held` in the relay for the other half.
+    pub(super) deferred_acks: Mutex<HashMap<u64, String>>,
     /// Delivery state for active/paused `send --to` transfers (for pause/resume).
     pub(super) held: Mutex<HashMap<u64, Held>>,
     /// What each live chunked download is fetching, as
@@ -253,6 +262,23 @@ impl Inner {
             t.status = status;
             clear_waiting_code(t);
         }
+    }
+
+    /// End a transfer with a reason: the status, the code beside it, and the
+    /// event — in that order, so nothing reads the event before the row says
+    /// the same thing. The one door every failure goes through.
+    pub(super) fn fail(&self, id: u64, reason: &super::FailReason) {
+        let text = reason.text();
+        self.set_status(id, TransferStatus::Failed(text.clone()));
+        if let Some(t) = self.transfers.lock().unwrap().get_mut(&id) {
+            t.fail_code = reason.code().to_string();
+            t.fail_detail = reason.detail().unwrap_or("").to_string();
+        }
+        self.emit(ManagerEvent::Failed {
+            id,
+            error: text,
+            code: reason.code().to_string(),
+        });
     }
 
     /// Record why a send is waiting, as the code a client translates. Set right

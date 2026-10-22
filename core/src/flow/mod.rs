@@ -17,11 +17,11 @@ mod storage;
 pub use archive::pack_tar;
 pub use offline::{
     claim_info, claim_status, deposit_offline, fetch_offline, fetch_offline_with_progress,
-    revoke_offline, ClaimInfo, ClaimStatus, DepositError, Deposited,
+    human_size, revoke_offline, ClaimInfo, ClaimStatus, DepositError, Deposited, TooLargeForRelay,
 };
 // Shared with the link path, which deposits through its own request but has to read
 // the same granted-TTL answer off it.
-pub(crate) use offline::granted_ttl;
+pub(crate) use offline::{blob_limit, granted_ttl};
 pub use recv::{
     default_out, discard_incomplete, recv_chunked, safe_download_name, ChunkSource, RecvCancel,
     RecvEvent, RecvOutcome,

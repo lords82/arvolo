@@ -1,100 +1,129 @@
-// Who you are, and the few things that follow from it.
+// Impostazioni, come la sezione 12 del design le riordina: dall'ingranaggio in
+// alto, con il titolo nella pagina; chi sei, e poi due gruppi — le cose tue
+// (dispositivi, dove vanno i ricevuti) e come funziona l'app (aspetto e lingua,
+// rete, avanzate). Niente altro: link, depositi e cronologia sono invii ancora
+// vivi, non regolazioni, e stanno in Attività.
 //
-// The desktop's settings window is a window: a dozen controls, grouped, all
-// visible because there is room. The design of record does not put that on a
-// phone. It opens with the identity — the thing this whole app is about, and the
-// thing somebody on the other end checks — then the one decision a phone
-// actually changes (what arrives without asking), then the places the bottom bar
-// had no room for, then a line saying which build this is.
-//
-// Everything else the desktop offers is one row in, behind the identity at the
-// top: that row *is* the way to the settings, and it opens on the name and the
-// id it was tapped for. There used to be a second row saying the same thing at
-// the bottom — two doors onto one screen, which is a menu describing itself
-// rather than a screen you can find your way around.
+// L'identità è prima ed è *intera* — le parole dell'impronta a una misura che
+// si legge al telefono, su due righe, perché è l'unica cosa per cui servono.
 
+import { useEffect, useState } from "react";
+import { fire, useStore } from "../store";
 import { useT } from "../i18n";
-import { useStore } from "../store";
+import { haptic } from "../haptics";
 import { Avatar, ShortId } from "../ui/Bits";
 import { Icon } from "../ui/Icons";
-import { Place } from "../ui/Rows";
 
 export function YouView() {
   const t = useT();
   const push = useStore((s) => s.push);
   const status = useStore((s) => s.status);
   const config = useStore((s) => s.config);
-  const devices = useStore((s) => s.devices);
-  const deposits = useStore((s) => s.deposits);
+  const save = useStore((s) => s.saveConfig);
+  const loadConfig = useStore((s) => s.loadConfig);
+  const loadDevices = useStore((s) => s.loadDevices);
   const guiVersion = useStore((s) => s.guiVersion);
 
-  const name = status?.display_name || t("you.unnamed");
-  // What the engine falls back to here, said again on this side: a row that
-  // showed "Fidati" while a phone was in fact asking would be the screen
-  // disagreeing with the app. See `AutoAccept::default_here`.
-  const policy = config?.auto_accept || "never";
-  const live = deposits.filter((d) => !d.expired).length;
+  useEffect(() => {
+    fire(loadDevices());
+    fire(loadConfig());
+  }, [loadDevices, loadConfig]);
+
+  // Il nome che mostri si scrive dove si legge: il blocco in testa (12b) è un
+  // campo. Si salva quando si esce dal campo, come ogni riga che si scrive.
+  const [name, setName] = useState("");
+  const [dirty, setDirty] = useState(false);
+  useEffect(() => {
+    if (!config) return;
+    setName((n) => (dirty ? n : config.display_name));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [config]);
+  const commitName = () => {
+    if (!dirty || !config) return;
+    const next = name.trim();
+    setDirty(false);
+    if (next === config.display_name) return;
+    fire(
+      save({ display_name: next ? { set: next } : "clear" }).then(() => haptic.did())
+    );
+  };
+  const shown = status?.display_name || t("you.unnamed");
+  // Otto parole, quattro per riga: così le disegna il canvas (12b), ed è la
+  // forma in cui si dettano.
+  const words = (status?.fingerprint || "").split(/[\s-]+/).filter(Boolean);
+  const half = Math.ceil(words.length / 2);
+  const line1 = words.slice(0, half).join(" ");
+  const line2 = words.slice(half).join(" ");
+
+  const row = (label: string, glyph: JSX.Element, onClick: () => void) => (
+    <button className="big-row r60" onClick={onClick}>
+      <span className="row-glyph">{glyph}</span>
+      <span className="grow" style={{ minWidth: 0 }}>
+        <span className="big-row-title truncate">{label}</span>
+      </span>
+      <Icon.ChevronRight size={16} className="ios-chev" />
+    </button>
+  );
 
   return (
-    <div className="ios-page you">
-      {/* The identity, first and whole. It is what the person on the other end
-          checks, and burying it three taps into a settings screen would be
-          saying it is a preference. */}
-      <div className="ios-group">
-        <button className="you-me" onClick={() => push("advanced")}>
-          <Avatar name={name} id={status?.public_id} size={44} />
-          <span className="grow" style={{ minWidth: 0 }}>
-            <span className="truncate you-name">{name}</span>
-            {status?.public_id ? <ShortId value={status.public_id} /> : null}
+    <div className="ios-page">
+      <h2 className="page-title">{t("title.settings")}</h2>
+
+      {/* Chi sei, intero: il nome si scrive qui, l'impronta si legge. */}
+      <div className="me-block">
+        <Avatar name={shown} id={status?.public_id} size={60} />
+        <span className="grow" style={{ minWidth: 0 }}>
+          <input
+            className="me-name me-name-input"
+            value={name}
+            maxLength={64}
+            placeholder={t("you.unnamed")}
+            aria-label={t("settings.nameLabel")}
+            onChange={(e) => {
+              setName(e.currentTarget.value);
+              setDirty(true);
+            }}
+            onBlur={commitName}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") e.currentTarget.blur();
+            }}
+          />
+          <span className="me-words mono" style={{ display: "block" }}>
+            {line1 || "…"}
+            {line2 ? (
+              <>
+                <br />
+                {line2}
+              </>
+            ) : null}
           </span>
-          <Icon.ChevronRight size={16} />
-        </button>
-        {/* Directly under the identity, and not filed under "elsewhere", because
-            it is not somewhere else: your other machines are the same person as
-            the name above them — one id, one mailbox — and the row that adds one
-            hands over this device's identity secret. It belongs to the identity
-            it changes. */}
-        <Place
-          label={t("title.devices")}
-          note={devices.length ? String(devices.length) : undefined}
-          onClick={() => push("devices")}
-        />
+        </span>
       </div>
 
-      {/* The one decision that is different on a phone. A row saying what is in
-          force, pushing to where the three answers are — see `AutoAccept` in the
-          engine, where the same three words become the rule. */}
-      <div className="ios-head">{t("you.receiving")}</div>
       <div className="ios-group">
-        <Place
-          label={t("settings.autoAcceptTitle")}
-          note={t(
-            policy === "never"
-              ? "settings.autoAcceptNever"
-              : policy === "everyone"
-                ? "settings.autoAcceptEveryone"
-                : "settings.autoAcceptTrusted"
-          )}
-          onClick={() => push("autoAccept")}
-        />
+        {row(t("title.devices"), <Icon.Devices size={20} />, () => push("devices"))}
+        {row(t("received.title"), <Icon.Receive size={20} />, () => push("received"))}
       </div>
 
-      <div className="ios-head">{t("you.elsewhere")}</div>
       <div className="ios-group">
-        <Place
-          label={t("title.deposits")}
-          note={live ? t("you.liveCount", live) : undefined}
-          onClick={() => push("deposits")}
-        />
-        <Place label={t("title.history")} onClick={() => push("history")} />
+        {/* Una luna, un'antenna e una chiave — non due ingranaggi. `Icon.Settings`
+            è una ruota dentata a otto raggi e `Icon.Sun` un sole a otto raggi:
+            a 20px sono lo stesso disegno, e due righe su tre si distinguevano
+            solo leggendole. Il canvas (12b) dà luna, nuvola e chiave; l'antenna
+            resta perché è il glifo che il relay ha in tutta l'app. */}
+        {row(t("settings.appearanceLanguage"), <Icon.Moon size={20} />, () => push("appearance"))}
+        {row(t("settings.network"), <Icon.Relay size={20} />, () => push("network"))}
+        {row(t("settings.advanced"), <Icon.Key size={20} />, () => push("advanced"))}
       </div>
 
-      {/* Not "in the keychain": the identity is a file in this app's private
-          storage. It will be the keychain when something puts it there, and a
-          line that said so first would be the app claiming a guarantee it does
-          not have. */}
       <div className="ios-foot you-foot">
         {t("you.footer", guiVersion || "…")}
+        {status?.public_id ? (
+          <>
+            {" · "}
+            <ShortId value={status.public_id} />
+          </>
+        ) : null}
       </div>
     </div>
   );

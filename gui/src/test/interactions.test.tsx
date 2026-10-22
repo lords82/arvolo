@@ -1747,6 +1747,30 @@ describe("settings", () => {
 // ---------------------------------------------------------------------------
 
 describe("the failure notice", () => {
+  it("a file the relay will not hold is said plainly, with the relay's limit", async () => {
+    render(<App />);
+    useStore.setState({
+      actionError:
+        "Couldn't create the link: this relay does not accept files this large",
+      actionRefusal: { code: "tooLarge", limitBytes: 5 * 1024 ** 3 },
+    });
+    await waitFor(() => expect(toastText()).toContain("5.0 GB"));
+    expect(toastText()).toContain("does not accept files this large");
+    // The word "relay" in the sentence used to route this to "set up a relay",
+    // which the reader has — it is the one that just refused them.
+    expect(toastText()).not.toContain("Settings");
+  });
+
+  it("the same refusal from a relay that named no limit still says what it means", async () => {
+    render(<App />);
+    useStore.setState({
+      actionError: "Couldn't create the link: this relay does not accept files this large",
+      actionRefusal: { code: "tooLarge", limitBytes: null },
+    });
+    await waitFor(() => expect(toastText()).toContain("does not accept files this large"));
+    expect(toastText()).not.toContain("limit is");
+  });
+
   it("138. it can be dismissed", async () => {
     render(<App />);
     useStore.setState({ actionError: "something went wrong" });
