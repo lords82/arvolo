@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.15.0-rc2 — deposits that pick up where they stopped
+## v0.15.0 — deposits that pick up where they stopped
 
 ### Added
 
