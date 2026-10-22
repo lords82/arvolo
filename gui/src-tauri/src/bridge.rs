@@ -220,7 +220,7 @@ struct PickedInner {
 
 /// What a set of picked ids resolves to for the daemon: the payload strings it
 /// names, and — when the payload is a descriptor rather than a path — the
-/// hand-off that carries it. See `fdpass::IN_PROCESS`.
+/// hand-off that carries it. See `inproc::IN_PROCESS`.
 pub struct Resolved {
     pub paths: Vec<String>,
     pub fds: Option<arvolo_ipc::client::FdHandoff>,
@@ -232,7 +232,7 @@ impl Resolved {
     /// session.
     fn abandon(fds: &Option<arvolo_ipc::client::FdHandoff>) {
         if let Some(h) = fds {
-            arvolo_ipc::fdpass::drop_stashed(&h.token);
+            arvolo_ipc::inproc::drop_stashed(&h.token);
         }
     }
 }
@@ -350,11 +350,11 @@ impl PickedFiles {
             let Some(Picked::Handle { file, name }) = picked.pop() else {
                 unreachable!("counted one handle")
             };
-            let token = arvolo_ipc::fdpass::stash_files(vec![file]);
+            let token = arvolo_ipc::inproc::stash_files(vec![file]);
             return Ok(Resolved {
                 paths: vec![name],
                 fds: Some(arvolo_ipc::client::FdHandoff {
-                    socket: arvolo_ipc::fdpass::IN_PROCESS.to_string(),
+                    socket: arvolo_ipc::inproc::IN_PROCESS.to_string(),
                     token,
                 }),
             });

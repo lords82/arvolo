@@ -1341,17 +1341,17 @@ async fn adopt_source(
 ) -> arvolo_core::source::SendSource {
     // The phone's hand-off: same two fields, same one-shot collection, but the
     // engine is inside the app that opened the file, so there is no socket to
-    // cross. See `fdpass::IN_PROCESS` — and note this arm is not unix-gated,
+    // cross. See `inproc::IN_PROCESS` — and note this arm is not unix-gated,
     // because what it answers is a `content://` URI, which has no path to fall
     // back to on any platform.
-    if fd_socket.as_deref() == Some(arvolo_ipc::fdpass::IN_PROCESS) {
+    if fd_socket.as_deref() == Some(arvolo_ipc::inproc::IN_PROCESS) {
         let Some(token) = &fd_token else {
             return payload.into();
         };
         if !single_plain_file {
             return payload.into();
         }
-        return match arvolo_ipc::fdpass::take_stashed(token) {
+        return match arvolo_ipc::inproc::take_stashed(token) {
             Ok(mut files) if !files.is_empty() => {
                 arvolo_core::source::SendSource::handle(files.remove(0), payload.to_string_lossy())
             }

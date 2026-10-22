@@ -28,6 +28,8 @@ pub mod client;
 #[cfg(unix)]
 pub mod fdpass;
 
+pub mod inproc;
+
 use std::path::PathBuf;
 
 /// The config directory holding the socket and ledgers. Mirrors the CLI's
