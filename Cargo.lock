@@ -206,7 +206,7 @@ checksum = "f02882884d3e1bc524fb12c79f107f6ad0e1cfd498c536ffb494301740995dfe"
 
 [[package]]
 name = "arvolo-cli"
-version = "0.15.0-rc1"
+version = "0.15.0-rc2"
 dependencies = [
  "anyhow",
  "arvolo-core",
@@ -236,7 +236,7 @@ dependencies = [
 
 [[package]]
 name = "arvolo-core"
-version = "0.15.0-rc1"
+version = "0.15.0-rc2"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -272,7 +272,7 @@ dependencies = [
 
 [[package]]
 name = "arvolo-engine"
-version = "0.15.0-rc1"
+version = "0.15.0-rc2"
 dependencies = [
  "anyhow",
  "arvolo-core",
@@ -289,7 +289,7 @@ dependencies = [
 
 [[package]]
 name = "arvolo-gui"
-version = "0.15.0-rc1"
+version = "0.15.0-rc2"
 dependencies = [
  "anyhow",
  "arvolo-core",
@@ -330,7 +330,7 @@ dependencies = [
 
 [[package]]
 name = "arvolo-ipc"
-version = "0.15.0-rc1"
+version = "0.15.0-rc2"
 dependencies = [
  "anyhow",
  "arvolo-core",
@@ -344,7 +344,7 @@ dependencies = [
 
 [[package]]
 name = "arvolo-relay"
-version = "0.15.0-rc1"
+version = "0.15.0-rc2"
 dependencies = [
  "anyhow",
  "arvolo-core",
