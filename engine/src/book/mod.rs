@@ -656,32 +656,34 @@ mod tests {
 
     #[test]
     fn display_name_config_escapes_special_chars() {
-        // A name with quotes / unicode / a leading '#' must round-trip through the
-        // config file intact (TOML-escaped, not truncated or misparsed) and must not
-        // corrupt the file into an unreadable state.
+        // A name with quotes / unicode / a leading '#' must round-trip through
+        // `me.toml` intact (TOML-escaped, not truncated or misparsed) and must not
+        // corrupt the file into an unreadable state. A control character is the
+        // one exception, and on purpose: the name is rendered on somebody else's
+        // screen, so it is sanitised on the way in, like a device rename.
         let _guard = crate::testlock::ENV
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("ARVOLO_CONFIG_DIR", dir.path());
 
-        for name in [
-            "O'Brien \"the Boss\"",
-            "名前",
-            "# not a comment",
-            "a = b",
-            "line\ttab",
-        ] {
+        for name in ["O'Brien \"the Boss\"", "名前", "# not a comment", "a = b"] {
             set_my_display_name(name).unwrap();
             assert_eq!(my_display_name(), name, "round-trips: {name:?}");
         }
+        set_my_display_name("line\ttab").unwrap();
+        assert_eq!(
+            my_display_name(),
+            crate::text::sanitize_display("line\ttab"),
+            "a control character does not survive into an advertised name"
+        );
 
         std::env::remove_var("ARVOLO_CONFIG_DIR");
     }
 
     #[test]
     fn set_display_name_replaces_not_duplicates() {
-        // Repeated sets must edit the single line in place, never accumulate.
+        // Repeated sets must edit the single entry in place, never accumulate.
         let _guard = crate::testlock::ENV
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -691,7 +693,7 @@ mod tests {
         set_my_display_name("One").unwrap();
         set_my_display_name("Two").unwrap();
         set_my_display_name("Three").unwrap();
-        let text = std::fs::read_to_string(config_path()).unwrap();
+        let text = std::fs::read_to_string(me_path()).unwrap();
         let occurrences = text
             .lines()
             .filter(|l| {

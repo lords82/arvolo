@@ -17,6 +17,11 @@ use arvolo_engine::start::{start, Options, Running};
 use arvolo_ipc::client::DaemonClient;
 use tokio_util::sync::CancellationToken;
 
+/// Every test here points `ARVOLO_CONFIG_DIR` at its own directory, and the
+/// variable is one per process: run side by side, one test's engine reads
+/// another's address book and history. Held for the whole of each test.
+static ENV: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// A fresh installation in a temp dir, with an engine running inside this test.
 ///
 /// The relay is a port nothing listens on: the inbox subscription retries in the
@@ -52,6 +57,7 @@ async fn engine_restoring(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_client_with_no_socket_answers_the_same_way() {
+    let _env = ENV.lock().await;
     let dir = tempfile::tempdir().unwrap();
     let (running, shutdown) = engine(dir.path()).await;
 
@@ -90,6 +96,7 @@ async fn a_client_with_no_socket_answers_the_same_way() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn events_arrive_without_a_connection_to_carry_them() {
+    let _env = ENV.lock().await;
     let dir = tempfile::tempdir().unwrap();
     let (running, shutdown) = engine(dir.path()).await;
 
@@ -121,6 +128,7 @@ async fn events_arrive_without_a_connection_to_carry_them() {
 /// themselves sitting in Documents, saying otherwise.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_phone_opens_its_mailbox_and_finds_what_arrived_before() {
+    let _env = ENV.lock().await;
     let dir = tempfile::tempdir().unwrap();
     std::env::set_var("ARVOLO_CONFIG_DIR", dir.path());
     std::env::remove_var("ARVOLO_IDENTITY");
@@ -181,6 +189,7 @@ async fn a_phone_opens_its_mailbox_and_finds_what_arrived_before() {
 /// test rather than a platform's choice.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn nothing_comes_back_unless_the_embedder_asks() {
+    let _env = ENV.lock().await;
     let dir = tempfile::tempdir().unwrap();
     std::env::set_var("ARVOLO_CONFIG_DIR", dir.path());
     std::env::remove_var("ARVOLO_IDENTITY");
