@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
@@ -259,6 +259,7 @@ pub(super) fn persist_held_record(inner: &Inner, id: u64, paused: bool, reason: 
                 note: h.note.clone(),
                 target: h.target,
                 relay: h.relay.clone(),
+                live_only: h.live_only,
             },
         );
     }
@@ -486,6 +487,7 @@ pub(super) async fn deliver_to(
     name: String,
     archive: bool,
     note: String,
+    live_only: bool,
     pause_flag: Arc<std::sync::atomic::AtomicBool>,
 ) {
     // The offer outlives the individual attempts now (see `deliver_to_inner`), so
@@ -503,6 +505,7 @@ pub(super) async fn deliver_to(
         &name,
         archive,
         &note,
+        live_only,
         &pause_flag,
         &mut standing,
     )
@@ -539,11 +542,15 @@ async fn deliver_to_inner(
     name: &str,
     archive: bool,
     note: &str,
+    live_only: bool,
     pause_flag: &Arc<std::sync::atomic::AtomicBool>,
     standing: &mut Option<StandingOffer>,
 ) {
     use std::time::{Duration, Instant};
     let mut too_big = false;
+    // Said once, the first time the loop finds nobody: a `live_only` send that
+    // is waiting has to say so, and saying it every turn would churn the row.
+    let mut told_for_them = false;
     // Sticky: the relay is already holding this transfer in resumable form, so the
     // mailbox is not a fallback any more — it is a second, worse copy. Set only by
     // a *complete* offload (see [`LiveOutcome::Offloaded`]); a capped or failed one
@@ -747,7 +754,14 @@ async fn deliver_to_inner(
         // `offloaded` keeps this whole branch shut afterwards. So there is no
         // delivered set to subtract here — only what the relay already holds, which
         // `park_on_relay` asks it for.
-        if park_now && !too_big && !offloaded && standing.is_some() {
+        // `live_only` shuts both relay routes below — parking the pieces and the
+        // sealed mailbox copy alike: the sender said nothing goes on a relay.
+        if live_only {
+            if !online && !told_for_them {
+                set_waiting(inner, id, WaitingReason::ForThem);
+                told_for_them = true;
+            }
+        } else if park_now && !too_big && !offloaded && standing.is_some() {
             if let Some(out) = park_on_relay(
                 inner, id, cancel, relay, recipient, payload, name, archive, &prep,
             )
@@ -768,7 +782,7 @@ async fn deliver_to_inner(
             // Couldn't park it all (capped, refused, unreachable): fall through to
             // the mailbox, which is what the user asked for a route to.
         }
-        if !too_big && !offloaded && (park_now || Instant::now() >= next_relay_try) {
+        if !live_only && !too_big && !offloaded && (park_now || Instant::now() >= next_relay_try) {
             // Interruptible: the upload is the longest thing this loop does, and a
             // cancel that is only noticed once it *finishes* is a cancel that does
             // nothing for as long as the file takes — minutes on a big one, with the
@@ -790,6 +804,7 @@ async fn deliver_to_inner(
             let deposit_relay = inner.relay.as_deref().unwrap_or(relay);
             let attempt = deposit_offline_and_offer(
                 inner,
+                id,
                 deposit_relay,
                 relay,
                 recipient,
@@ -818,7 +833,7 @@ async fn deliver_to_inner(
                     );
                     return;
                 }
-                Err(flow::DepositError::TooLarge) => {
+                Err(flow::DepositError::TooLarge(_)) => {
                     too_big = true;
                     set_waiting(inner, id, WaitingReason::TooLarge);
                 }
@@ -1208,9 +1223,7 @@ pub(super) async fn serve_live_once(
         let _ = presence::retract_offer(&inner.client, relay, recipient, &offer_id, &poster_token)
             .await;
         *standing = None;
-        return LiveOutcome::Fatal(anyhow::anyhow!(
-            "the recipient cancelled the transfer on their side"
-        ));
+        return LiveOutcome::Fatal(anyhow::Error::new(FailReason::RecipientCancelled));
     }
     if cancel.is_cancelled() {
         return LiveOutcome::Cancelled;
@@ -1378,7 +1391,11 @@ pub(super) struct ParkOutcome {
 /// relay it was uploaded to, so a cross-relay deposit needs both.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn deposit_offline_and_offer(
-    inner: &Inner,
+    inner: &Arc<Inner>,
+    // The transfer this deposit belongs to: its upload state — the seal and the
+    // relay session — is kept under this id, so a retry carries on from what
+    // the relay already has instead of starting the file over.
+    id: u64,
     deposit_relay: &str,
     offer_relay: &str,
     recipient: &PublicId,
@@ -1390,17 +1407,33 @@ pub(super) async fn deposit_offline_and_offer(
     let size = payload.len().unwrap_or(0);
     let ttl = opts.ttl.unwrap_or(OFFLINE_TTL_SECS);
     let max = opts.max.unwrap_or(OFFLINE_MAX_DOWNLOADS);
-    let deposited = flow::deposit_offline(
+    let (seal, session) =
+        uploads::mailbox_seal(inner, id, payload, recipient, opts.password.as_deref())
+            .map_err(flow::DepositError::Fatal)?;
+    let cipher_len =
+        crate::upload::SealedLayout::mailbox(payload.clone(), seal.key, seal.size).len();
+    let hooks = uploads::TransferHooks::new(inner, id, payload, cipher_len, seal.size);
+    let deposited = flow::deposit_offline_with(
         payload,
         name,
-        recipient,
+        &seal,
         &inner.me,
         deposit_relay,
         ttl,
         max,
-        opts.password.as_deref(),
+        session,
+        &hooks.hooks(),
     )
-    .await?;
+    .await;
+    // Whatever the relay said, the upload is either done or will never be: only
+    // a dropped connection, or a relay with no room right now, is worth coming
+    // back to with the same seal and session.
+    match &deposited {
+        Err(flow::DepositError::Unavailable(_)) | Err(flow::DepositError::Busy) => {}
+        Ok(_) => uploads::forget(inner, id, false),
+        Err(_) => uploads::forget(inner, id, true),
+    }
+    let deposited = deposited?;
     let claim = deposited.ticket.claim.clone();
     let ticket = deposited.ticket.encode();
     // From here on the relay's answer replaces our request. Posting the offer with
@@ -1591,9 +1624,7 @@ pub(super) async fn confirm_offline_delivery(
                 return;
             }
             Verdict::Expired => {
-                let msg = "expired on the relay — the recipient never collected it".to_string();
-                inner.set_status(id, TransferStatus::Failed(msg.clone()));
-                inner.emit(ManagerEvent::Failed { id, error: msg });
+                inner.fail(id, &FailReason::ExpiredOnRelay);
                 retire_record(&inner, id);
                 return;
             }
@@ -1743,6 +1774,7 @@ pub(super) fn spawn_offline_confirm(
         ttl_secs: _,
     } = out;
     inner.set_progress(id, size);
+    inner.set_ticket(id, ticket.clone());
     inner.set_status(id, TransferStatus::Deposited);
 
     // Read the row once, for the event and the record both.
@@ -1780,6 +1812,7 @@ pub(super) fn spawn_offline_confirm(
             offer_id: offer_id.clone(),
             poster_token: poster_token.clone(),
             ticket,
+            link: None,
         },
     });
 
@@ -2117,6 +2150,48 @@ pub(super) async fn serve_session(
     }
 }
 
+/// Hand a finished download to the embedder's publisher, and keep what it
+/// answered.
+///
+/// `None` — the row stays pointed at the path the download wrote to — covers
+/// three different situations that all want the same behaviour: there is no
+/// publisher (every desktop), the download did not finish whole (a partial has
+/// nowhere to go yet), or publishing failed.
+///
+/// That last one is deliberately not fatal. Publishing happens *after* the bytes
+/// are down and verified: it is a move between two stores, and a full public
+/// volume or a permission the user has since revoked is worth a warning, not
+/// throwing away a download that may have taken an hour. The file stays in
+/// staging, the row still says where it is, and a client can offer to try again.
+pub(super) fn publish_completed(inner: &Inner, id: u64, staged: &Path) -> Option<SavedLocation> {
+    let publisher = inner.publisher.get()?;
+    let name = staged.file_name()?.to_string_lossy().into_owned();
+    match publisher.publish(staged, &name) {
+        Ok(saved) => {
+            if let Some(uri) = saved.as_uri() {
+                inner.set_saved_uri(id, uri.to_string());
+            }
+            Some(saved)
+        }
+        Err(e) => {
+            tracing::warn!("transfer {id}: {name} stays in staging, publishing it failed: {e:#}");
+            None
+        }
+    }
+}
+
+/// The path a finished receive's row should point at: what the publisher answered
+/// when one did and answered with a path, and otherwise where the download wrote.
+/// A URI is not a path — it rides on `saved_uri` instead, and leaves this `None`
+/// rather than naming a file that is no longer there.
+pub(super) fn resting_path(published: &Option<SavedLocation>, wrote: PathBuf) -> Option<PathBuf> {
+    match published {
+        Some(SavedLocation::Path(p)) => Some(p.clone()),
+        Some(SavedLocation::Uri(_)) => None,
+        None => Some(wrote),
+    }
+}
+
 /// Finalize a transfer's state and emit the terminal event.
 pub(super) fn finish(inner: &Inner, id: u64, cancelled: bool, result: Result<Option<PathBuf>>) {
     // Terminal state: drop any resume record so a restart doesn't re-start it.
@@ -2126,9 +2201,16 @@ pub(super) fn finish(inner: &Inner, id: u64, cancelled: bool, result: Result<Opt
         // The counters belonged to the share, and the share is over. Left behind
         // they would be inherited by whatever id came round to that number next.
         remove_share(dir, id);
+        // A share that ended while still being prepared.
+        remove_pending_share(dir, id);
     }
     // Drop any held `send --to` delivery state (memory + its durable record).
     drop_held(inner, id);
+    // And any upload it was making: a relay session left open would hold the
+    // relay's space until its idle deadline for a file nobody will finish.
+    // After a success there is no session left, so this only ever abandons
+    // what a cancel or a failure interrupted.
+    uploads::forget(inner, id, true);
     // Terminal: this download stops answering for its content. A completed one
     // deliberately included — the file may since have been deleted, and telling
     // somebody "you already have this" is a different feature with a different way
@@ -2148,9 +2230,7 @@ pub(super) fn finish(inner: &Inner, id: u64, cancelled: bool, result: Result<Opt
             inner.emit(ManagerEvent::Completed { id, path });
         }
         Err(e) => {
-            let msg = format!("{e:#}");
-            inner.set_status(id, TransferStatus::Failed(msg.clone()));
-            inner.emit(ManagerEvent::Failed { id, error: msg });
+            inner.fail(id, &FailReason::classify(&e));
         }
     }
 }

@@ -1,0 +1,17 @@
+<!-- The foreground layer of the adaptive icon: the glyph alone, on nothing.
+     Android composes it over `ic_launcher_background` and then masks the pair
+     to whatever shape the launcher uses, so the tile is not drawn here.
+     The canvas is 108dp of which only the middle 72 is guaranteed to survive
+     the mask, and the parallax crops further still. So the glyph is sized to
+     fill the same 624/1024 of *that* 72dp window as it fills of the square
+     tile — scale 4.15 — and centred on its ink rather than on its box: the
+     mark is taller than it is wide and 6 units lower than centre, and a glyph
+     centred on the box sits visibly low inside a circle. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <g transform="translate(304.5 329.4) scale(4.15)"
+     fill="none" stroke="#faf8f6" stroke-width="10.5"
+     stroke-linecap="round" stroke-linejoin="round">
+  <path d="M36 8 L50 30 L64 8"/>
+  <path d="M18 42 L50 80 L82 42"/>
+  </g>
+</svg>

@@ -206,10 +206,11 @@ checksum = "f02882884d3e1bc524fb12c79f107f6ad0e1cfd498c536ffb494301740995dfe"
 
 [[package]]
 name = "arvolo-cli"
-version = "0.14.1"
+version = "0.15.0-rc2"
 dependencies = [
  "anyhow",
  "arvolo-core",
+ "arvolo-engine",
  "arvolo-ipc",
  "arvolo-relay",
  "axum",
@@ -235,7 +236,7 @@ dependencies = [
 
 [[package]]
 name = "arvolo-core"
-version = "0.14.1"
+version = "0.15.0-rc2"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -247,6 +248,7 @@ dependencies = [
  "der 0.8.0-rc.9",
  "ed25519",
  "ed25519-dalek",
+ "futures-util",
  "hpke",
  "iroh",
  "iroh-quinn-proto",
@@ -269,38 +271,66 @@ dependencies = [
 ]
 
 [[package]]
-name = "arvolo-gui"
-version = "0.14.1"
+name = "arvolo-engine"
+version = "0.15.0-rc2"
 dependencies = [
  "anyhow",
  "arvolo-core",
  "arvolo-ipc",
+ "data-encoding",
+ "gethostname",
+ "serde",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "toml 0.8.2",
+ "tracing",
+]
+
+[[package]]
+name = "arvolo-gui"
+version = "0.15.0-rc2"
+dependencies = [
+ "anyhow",
+ "arvolo-core",
+ "arvolo-engine",
+ "arvolo-ipc",
  "block2",
  "data-encoding",
+ "jni 0.21.1",
  "libc",
  "objc2",
  "objc2-app-kit",
+ "objc2-core-foundation",
  "objc2-foundation",
+ "objc2-photos",
+ "objc2-ui-kit",
  "objc2-user-notifications",
  "rand 0.9.4",
  "serde",
  "serde_json",
+ "tao",
  "tauri",
  "tauri-build",
  "tauri-plugin-autostart",
+ "tauri-plugin-barcode-scanner",
  "tauri-plugin-dialog",
+ "tauri-plugin-fs",
+ "tauri-plugin-haptics",
  "tauri-plugin-notification",
  "tauri-plugin-opener",
  "tauri-plugin-updater",
+ "tempfile",
  "time",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
 ]
 
 [[package]]
 name = "arvolo-ipc"
-version = "0.14.1"
+version = "0.15.0-rc2"
 dependencies = [
  "anyhow",
  "arvolo-core",
@@ -314,7 +344,7 @@ dependencies = [
 
 [[package]]
 name = "arvolo-relay"
-version = "0.14.1"
+version = "0.15.0-rc2"
 dependencies = [
  "anyhow",
  "arvolo-core",
@@ -4387,6 +4417,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "objc2-photos"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d6ea9a706f18e32cf8a0723e99855af4f135282891e07259301bae9135ae3872"
+dependencies = [
+ "bitflags 2.13.0",
+ "block2",
+ "dispatch2",
+ "objc2",
+ "objc2-core-foundation",
+ "objc2-foundation",
+]
+
+[[package]]
 name = "objc2-quartz-core"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6648,6 +6692,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "tauri-plugin-barcode-scanner"
+version = "2.4.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3b68f0e3782b61a6e16a67380be40226e2b7233f3e36dadf6e5d03f07d2e7b3"
+dependencies = [
+ "log",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-plugin",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "tauri-plugin-dialog"
 version = "2.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6687,6 +6745,20 @@ dependencies = [
  "thiserror 2.0.18",
  "toml 1.1.2+spec-1.1.0",
  "url",
+]
+
+[[package]]
+name = "tauri-plugin-haptics"
+version = "2.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "01b167d598ada05c599f4460595108c8d1aa636030a97d19796c1bcda97d881d"
+dependencies = [
+ "log",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-plugin",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

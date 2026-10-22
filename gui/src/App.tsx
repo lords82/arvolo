@@ -6,12 +6,13 @@
 // report the app's own health — a daemon that cannot be reached, and a daemon
 // whose version no longer matches this build.
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { enable as autostartEnable } from "@tauri-apps/plugin-autostart";
-import { onArvoloTicket, onPickedFiles } from "./ipc";
+import { onArvoloTicket, onPickedFiles, onSharedArrived } from "./ipc";
+import type { PickedItem } from "./types";
 import { api } from "./ipc";
-import { fire, TITLE_KEY, useStore, type Route } from "./store";
+import { fire, phoneTitle, TITLE_KEY, useStore, type Route } from "./store";
 import { isBusy, shouldAnnounce } from "./update";
 import { fmtBytes } from "./format";
 import { useT } from "./i18n";
@@ -19,6 +20,27 @@ import { Icon } from "./ui/Icons";
 import { Button, IconButton, modKey, TextInput } from "./ui/Primitives";
 import { ToastHost, toast } from "./ui/Toasts";
 import { Rail } from "./views/Rail";
+import { TabBar } from "./views/TabBar";
+import { TransferDock } from "./views/TransferCard";
+import { ActivityView } from "./views/ActivityView";
+import { CodesView } from "./views/CodesView";
+import { ExchangeView } from "./views/ExchangeView";
+import { CameraView } from "./views/CameraView";
+import { ComposeView } from "./views/ComposeView";
+import { NetworkView } from "./views/NetworkView";
+import { ReceivedView } from "./views/ReceivedView";
+import { FinishedSheet } from "./overlays/FinishedSheet";
+import { YouView } from "./views/YouView";
+import { AutoAcceptView } from "./views/AutoAcceptView";
+import { AppearanceView } from "./views/AppearanceView";
+import { IdentityView } from "./views/IdentityView";
+import { AdvancedView } from "./views/AdvancedView";
+import { ThreadSheet } from "./overlays/ThreadSheet";
+import { useIsPhone, installDynamicType, isPhoneNow } from "./phone";
+import { tookBack } from "./backstack";
+import { useEdgeBack } from "./edgeback";
+import { usePullToRefresh } from "./ui/pullRefresh";
+import { installKeyboardInset } from "./keyboard";
 import { TransfersView } from "./views/TransfersView";
 import { PeopleView } from "./views/PeopleView";
 import { DepositsView } from "./views/DepositsView";
@@ -37,7 +59,93 @@ import { CommandPalette } from "./overlays/CommandPalette";
  *  screens would be worse than no field. */
 const SEARCHABLE: Route[] = ["transfers"];
 
+/** Which screen a place is, on each platform.
+ *
+ *  A function rather than an expression inside the render because a push has to
+ *  draw *two* screens for the length of the animation: the one arriving and the
+ *  one being left behind. */
+/** Roots that draw their own head (title and tools) rather than the frame's. */
+const ROOT_HEADS: Route[] = ["transfers", "exchange", "people"];
+/** Pushed screens whose title is on the page, not in the bar (12b, 11b). */
+const PAGE_TITLED: Route[] = ["compose", "settings", "network"];
+
+function viewFor(route: Route, isPhone: boolean) {
+  return route === "transfers"
+    ? isPhone
+      ? ActivityView
+      : TransfersView
+    : route === "people"
+      ? PeopleView
+      : route === "exchange"
+        ? ExchangeView
+      : route === "camera"
+        ? CameraView
+      : route === "compose"
+        ? ComposeView
+      : route === "network"
+        ? NetworkView
+      : route === "codes"
+        ? CodesView
+        : route === "autoAccept"
+          ? AutoAcceptView
+        : route === "received"
+          ? ReceivedView
+        : route === "appearance"
+          ? AppearanceView
+        : route === "identity"
+          ? IdentityView
+          : route === "deposits"
+            ? DepositsView
+            : route === "history"
+              ? HistoryView
+              : route === "devices"
+                ? DevicesView
+                : // The desktop lands on its settings window; a phone lands on
+                  // *You*, and the window it reaches from there is the phone's
+                  // own — lists, not a page of captioned fields.
+                  route === "settings" && isPhone
+                  ? YouView
+                  : route === "advanced" && isPhone
+                    ? AdvancedView
+                    : SettingsView;
+}
+
 export function App() {
+  const isPhone = useIsPhone();
+  // The phone class goes on the document element, and **only** there.
+  //
+  // It has to be on <html> at all because sheets, menus and alerts render
+  // through portals into `document.body`, and a phone style scoped under a div
+  // they are not inside is a style they silently lose. It has to be *only* there
+  // because of the palette: the phone's colours are declared on `.app-phone`,
+  // and the dark ones on `.app-phone[data-theme="dark"]` — one selector naming
+  // two things that live on the same element. While the class was also on the
+  // app's own div, that div matched the light declaration and not the dark one
+  // (it carries no `data-theme`), so it re-declared the light palette *under* a
+  // root that had just been told to be dark: choosing Dark by hand on a phone
+  // whose system was light changed the sheets and nothing else.
+  //
+  // Laid out before the paint, not after it: `useEffect` would let one frame of
+  // the window's layout through on a phone, which is a visible flash of a rail
+  // and a two-column board at every launch.
+  useLayoutEffect(() => {
+    document.documentElement.classList.toggle("app-phone", isPhone);
+    // And the system's text size with it (`installDynamicType`), and where the
+    // keyboard is (`installKeyboardInset`).
+    const stops = isPhone ? [installDynamicType(), installKeyboardInset()] : [];
+    return () => {
+      stops.forEach((stop) => stop());
+      document.documentElement.classList.remove("app-phone");
+    };
+  }, [isPhone]);
+  const stack = useStore((s) => s.stack);
+  const personOpen = useStore((s) => s.personOpen);
+  const threadKey = useStore((s) => s.threadKey);
+  const back = useStore((s) => s.back);
+  // Whether the title is still the big one under the bar, or has been handed up
+  // into it. Reset on arrival: a new screen starts at the top of itself.
+  const [bigTitle, setBigTitle] = useState(true);
+  const viewRef = useRef<HTMLElement>(null);
   const t = useT();
   const init = useStore((s) => s.init);
   const connected = useStore((s) => s.connected);
@@ -45,9 +153,68 @@ export function App() {
   const guiVersion = useStore((s) => s.guiVersion);
   const loadError = useStore((s) => s.loadError);
   const actionError = useStore((s) => s.actionError);
+  const actionRefusal = useStore((s) => s.actionRefusal);
   const dismissActionError = useStore((s) => s.dismissActionError);
   const reload = useStore((s) => s.reload);
   const route = useStore((s) => s.route);
+  // The screen being left behind, for as long as it takes to leave it.
+  //
+  // Switching *tabs* sets nothing: this platform cross-cuts between roots with
+  // no animation at all, and a slide there would claim a depth that is not
+  // there. Only going in and coming out of a stack moves.
+  const [leaving, setLeaving] = useState<{ route: Route; dir: "push" | "pop" } | null>(
+    null
+  );
+  const seen = useRef({ route, depth: 1 });
+  // A screen you have just arrived at starts at the top of itself.
+  useEffect(() => setBigTitle(true), [route]);
+  useEffect(() => {
+    const was = seen.current;
+    seen.current = { route, depth: stack.length };
+    if (!isPhone || was.route === route) return;
+    const dir =
+      stack.length > was.depth ? "push" : stack.length < was.depth ? "pop" : null;
+    if (!dir) return;
+    setLeaving({ route: was.route, dir });
+    // Slightly longer than the animation: taking the old screen away a frame
+    // early is a flicker at the very end of the movement, which is the one part
+    // of it people watch.
+    const done = window.setTimeout(() => setLeaving(null), 380);
+    return () => window.clearTimeout(done);
+  }, [route, stack.length, isPhone]);
+  // The way back a thumb actually uses.
+  //
+  // Two of them, for two platforms. On iOS the drag from the left edge is the
+  // app's to implement — the system does not take it, and a stack without it is
+  // one you have to climb by aiming at a corner. On Android that edge *is* the
+  // system's back gesture, and it arrives here as a history pop, which is why
+  // `push` leaves an entry behind for it to pop.
+  // Anywhere there is a way back, and not only one screen in. A person's card
+  // and a mailbox thread are layers rather than routes — the stack does not grow
+  // for them — but they are screens you were taken *to*, they carry a back
+  // button, and `back()` already knows to close the topmost one first. A gesture
+  // that worked on four screens and not on the two you reach most often reads as
+  // a gesture that does not work.
+  const canGoBack = stack.length > 1 || !!personOpen || !!threadKey;
+  useEdgeBack(viewRef, isPhone && canGoBack, () => window.history.back());
+  // Pull down on a root screen to ask again. Not one screen in, where the top
+  // of the page is a group rather than a list, and not on the camera.
+  const pageRef = useRef<HTMLDivElement>(null);
+  const refresh = useStore((s) => s.refresh);
+  usePullToRefresh(
+    pageRef,
+    isPhone && stack.length === 1 && route !== "exchange",
+    refresh
+  );
+  useEffect(() => {
+    // Layers first — a sheet, an alert, a menu, a thread — and only then the
+    // stack. `backstack` holds what is open and knows which pops are its own.
+    const onPop = () => {
+      if (!tookBack()) back();
+    };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, [back]);
   const go = useStore((s) => s.go);
   const search = useStore((s) => s.search);
   const setSearch = useStore((s) => s.setSearch);
@@ -58,6 +225,7 @@ export function App() {
   const setPaletteOpen = useStore((s) => s.setPaletteOpen);
   const clearFinished = useStore((s) => s.clearFinished);
   const transfers = useStore((s) => s.transfers);
+  const peerLabel = useStore((s) => s.peerLabel);
   const update = useStore((s) => s.update);
   const startUpdate = useStore((s) => s.startUpdate);
   const dismissUpdate = useStore((s) => s.dismissUpdate);
@@ -98,6 +266,54 @@ export function App() {
     [transfers]
   );
   const announceUpdate = shouldAnnounce(update.info, update.dismissed, busy);
+
+  // Read the board again whenever the app comes back to the front.
+  //
+  // The store seeds one snapshot at boot and then lives on events. A window
+  // that is only ever hidden behind another window keeps receiving them, so on
+  // a desktop this changes nothing. A phone does not: the system suspends the
+  // process, and every event emitted while it slept is emitted to nobody. What
+  // came back was the screen exactly as it was left — a transfer frozen at the
+  // percentage it had when the app went away, an arrival that never appeared.
+  // Nothing was broken underneath; there was simply no one listening, and no
+  // one asking either.
+  useEffect(() => {
+    const onWake = () => {
+      if (!document.hidden) fire(reload());
+    };
+    document.addEventListener("visibilitychange", onWake);
+    window.addEventListener("focus", onWake);
+    return () => {
+      document.removeEventListener("visibilitychange", onWake);
+      window.removeEventListener("focus", onWake);
+    };
+  }, [reload]);
+
+  // Coming back from sleep.
+  //
+  // Going *to* sleep is not decided here, and deliberately: leaving the app is
+  // not the moment to stop working. Android keeps the process alive and a
+  // transfer simply carries on — a 40 MB file finishes while the phone is in a
+  // pocket. iOS gives the app a stretch of time and then freezes it, and the
+  // native side spends that stretch transferring and stops cleanly at the end
+  // of it (see `ios_background`). Either way, what is stopped is stopped with a
+  // mark saying the machine did it.
+  //
+  // This is the other half: on the way back, start again exactly what that
+  // stopping stopped — and nothing a person paused on purpose. Cheap and quiet
+  // when there is nothing to resume, which is the common case.
+  useEffect(() => {
+    if (!isPhone) return;
+    const onVisible = () => {
+      // Tell the native side either way: on iOS it is what asks for the time
+      // that keeps a transfer alive past the moment you leave, and what gives
+      // that time back on the way in.
+      fire(api.windowHidden(document.hidden));
+      if (!document.hidden) fire(api.resumeSuspendedTransfers());
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, [isPhone]);
 
   // Boot the store (snapshot + event subscription) once. `init` is async, so an
   // unmount can land before it resolves — track that and dispose the listeners
@@ -233,17 +449,38 @@ export function App() {
     return () => un?.();
   }, []);
 
-  // The registered result of a drop, from the window handler in Rust.
+  // Files handed to the app from outside — dropped on the window, or shared
+  // from another app's share sheet. On a phone they come first and the
+  // question is "a chi?": the design of record's 11e, Scambia with the files
+  // already in hand. A share is *pulled*, at launch and on coming back to the
+  // front, because it can land before this page exists to listen.
   useEffect(() => {
-    let un: (() => void) | undefined;
-    onPickedFiles((items) => {
-      if (items.length) openSheet(items);
-    })
-      .then((f) => {
-        un = f;
-      })
-      .catch(() => {});
-    return () => un?.();
+    const inHand = (items: PickedItem[]) => {
+      if (!items.length) return;
+      if (isPhoneNow()) {
+        useStore.getState().setComposeFiles(items);
+        useStore.getState().go("exchange");
+      } else openSheet(items);
+    };
+    const pullShared = () => {
+      if (!isPhoneNow()) return;
+      api
+        .takePendingShared()
+        .then((items) => inHand(items ?? []))
+        .catch(() => {});
+    };
+    const uns: (() => void)[] = [];
+    onPickedFiles(inHand).then((f) => uns.push(f)).catch(() => {});
+    onSharedArrived(pullShared).then((f) => uns.push(f)).catch(() => {});
+    const onVisible = () => {
+      if (!document.hidden) pullShared();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    pullShared();
+    return () => {
+      uns.forEach((f) => f());
+      document.removeEventListener("visibilitychange", onVisible);
+    };
   }, [openSheet]);
 
   // A `.arvolo` handed to the app is something to RECEIVE: dropped on the
@@ -274,12 +511,21 @@ export function App() {
   // The raw daemon string stays (it is the truth), but the toast leads with what
   // to DO about it and carries the button that does it — the action affordance
   // existed in Toasts from the start and no caller ever used it.
+  //
+  // A typed refusal is read first, because the keyword tests below are guesses
+  // about English: a file the relay will not hold mentions "relay", and the guess
+  // would send the reader to set up the relay they already have.
   useEffect(() => {
     if (!actionError) return;
     const low = actionError.toLowerCase();
     let action: { label: string; run: () => void } | undefined;
     let hint = "";
-    if (low.includes("no daemon") || low.includes("daemon")) {
+    if (actionRefusal?.code === "tooLarge") {
+      hint =
+        actionRefusal.limitBytes !== null
+          ? t("app.errHintTooLarge", fmtBytes(actionRefusal.limitBytes))
+          : t("app.errHintTooLargeNoLimit");
+    } else if (low.includes("no daemon") || low.includes("daemon")) {
       action = { label: t("app.restart"), run: () => fire(restartDaemon()) };
       hint = t("app.errHintDaemon");
     } else if (low.includes("relay")) {
@@ -290,27 +536,34 @@ export function App() {
     }
     toast.bad(t("app.actionFailed"), hint ? `${hint} — ${actionError}` : actionError, action);
     dismissActionError();
-  }, [actionError, dismissActionError, t, go, restartDaemon]);
+  }, [actionError, actionRefusal, dismissActionError, t, go, restartDaemon]);
 
-  const View =
-    route === "transfers"
-      ? TransfersView
-      : route === "people"
-        ? PeopleView
-        : route === "deposits"
-          ? DepositsView
-          : route === "history"
-            ? HistoryView
-            : route === "devices"
-              ? DevicesView
-              : SettingsView;
+  // The desktop keeps every screen it had. Where a phone wants a different one —
+  // and Transfers is the case: two columns of files against one list of people —
+  // it gets its own, and the desktop never sees it.
+  const View = viewFor(route, isPhone);
+
+  // *Scambia* has no bar of its own: the camera is the screen, from the status
+  // bar down, and a title over a viewfinder is a label on a window. What the
+  // place is called is said by the disc in the tab bar, which is lit while you
+  // are here. Everything else on the screen is in the sheet the view draws.
+  // The camera draws no bar of its own and no header: the viewfinder is the
+  // screen, and the way back floats over it (see `CameraView`).
+  const bare = isPhone && route === "camera";
+  // Cosa (14b) carries its own way out in the capsule row: no bar over it.
+  const headless = isPhone && route === "compose";
 
   return (
-    <div className="app">
-      <Rail />
+    <div className={`app${bare ? " app-bare" : ""}`}>
+      {isPhone ? null : <Rail />}
 
       <div className="main">
         {/* --- health banners ------------------------------------------ */}
+        {/* A wrapper that is nothing on a desktop (`display: contents`) and, on
+            a phone, the tray these hang from under the bar. They cannot be rows
+            of the column any more: the column is one cell now, with the view
+            filling it and the glass laid over the top. */}
+        <div className="banners">
         {!connected && (
           <div className="banner bad" role="status">
             <Icon.Alert size={14} className="tone-bad" />
@@ -407,9 +660,19 @@ export function App() {
           <div className="banner" role="status">
             <Icon.Receive size={14} className="tone-in" />
             <span className="grow">
-              {pendingOffers.length === 1
-                ? t("app.offerWaiting")
-                : t("app.offersWaiting", pendingOffers.length)}
+              {pendingOffers.length !== 1
+                ? t("app.offersWaiting", pendingOffers.length)
+                : // Name them when we know the name. "Somebody wants to send you
+                  // a file" about a contact you verified last week reads as a
+                  // warning about a stranger — and the one thing this banner is
+                  // for is deciding whether to open it.
+                  (() => {
+                    const who = pendingOffers[0];
+                    const name = who.peer || peerLabel(who.peerId ?? null, who.senderName);
+                    return name && name !== "unknown"
+                      ? t("app.offerWaitingFrom", name)
+                      : t("app.offerWaiting");
+                  })()}
             </span>
             <Button
               size="sm"
@@ -424,13 +687,40 @@ export function App() {
             </Button>
           </div>
         )}
+        </div>
 
         {/* --- header --------------------------------------------------- */}
-        <header className="header">
-          <h1>{t(TITLE_KEY[route])}</h1>
+        {bare || headless ? null : (
+        <header
+          className={`header${
+            isPhone ? ` nav${bigTitle && stack.length === 1 ? " big" : ""}` : ""
+          }`}
+        >
+          {/* A back button, and the name of where it goes. Apple's own: the
+              chevron alone is a guess, and the label is what turns a stack into
+              somewhere you can read your way out of. */}
+          {isPhone && stack.length > 1 && (
+            <button className="nav-back" onClick={() => window.history.back()}>
+              <Icon.ChevronLeft size={19} />
+              <span className="truncate">
+                {t(phoneTitle(stack[stack.length - 2]))}
+              </span>
+            </button>
+          )}
+          {/* The phone calls this place what the design calls it: the mailbox is
+              the thing you open to see who has written, and on that screen the
+              rows are people rather than files. */}
+          {/* Le schermate spinte che hanno il titolo nella pagina (12b, 11b)
+              tengono in barra solo la via d'uscita. */}
+          {isPhone && stack.length > 1 && PAGE_TITLED.includes(route) ? null : (
+            <h1>{t(isPhone ? phoneTitle(route) : TITLE_KEY[route])}</h1>
+          )}
           <div className="spacer" />
 
-          {SEARCHABLE.includes(route) && (
+          {/* A 240px field is a third of a phone. The same search is a tap away
+              as a glyph, and it searches everything rather than filtering one
+              list. */}
+          {SEARCHABLE.includes(route) && !isPhone && (
             <div style={{ width: 240 }}>
               <TextInput
                 id="app-search"
@@ -442,35 +732,117 @@ export function App() {
             </div>
           )}
 
-          {route === "transfers" && finishedCount > 0 && (
+          {/* A desktop toolbar's leftover. On a phone the bar is a title and two
+              glyphs; clearing what has finished is a thing you go and do, not
+              something that stands between the title and the search. */}
+          {!isPhone && route === "transfers" && finishedCount > 0 && (
             <Button size="sm" onClick={() => fire(clearFinished())}>
               <Icon.Trash size={13} />
               {t("app.clearFinished", finishedCount)}
             </Button>
           )}
 
-          <IconButton
-            label={t("app.palette", modKey)}
-            onClick={() => setPaletteOpen(true)}
-          >
-            <Icon.Search size={15} />
-          </IconButton>
-          <Button
-            size="sm"
-            variant="primary"
-            onClick={() => openSheet([])}
-            title={t("app.sendShortcut", modKey)}
-          >
-            <Icon.Send size={13} />
-            {t("app.send")}
-          </Button>
+          {/* Search, and a "+" that belongs to the screen it is on: on the
+              address book it adds a person (a menu of the ways in — see
+              `PeopleBarMenu`), everywhere else it starts a send. One glyph,
+              the screen's own meaning, which is how this platform's bars
+              work — Mail's compose and Contacts' add are the same corner. */}
+          {/* No magnifier. A command palette is a keyboard's idea — it exists
+              to reach a thing without leaving the keys, and a phone has no keys
+              to leave. What it searched for is two taps away regardless: people
+              have their own tab with a search field in it, and the places are
+              four rows deep at most. A glyph that opens a search across an app
+              this small is chrome standing in for navigation. */}
+          {/* Only the address book keeps a button up here, and it is not a send:
+              it is the two ways a person gets *into* the book. Sending moved to
+              the middle of the tab bar, where the thumb is, and a second way to
+              start the same sheet — in the corner furthest from it — was one
+              more thing on screen saying what the disc already says. */}
+          {/* Persone draws its own head now, with the "+" beside the gear. */}
+
+          {/* Both are already in the bottom bar on a phone, and one of them is
+              named after a key combination nobody can press there. */}
+          {isPhone ? null : (
+            <>
+              <IconButton
+                label={t("app.palette", modKey)}
+                onClick={() => setPaletteOpen(true)}
+              >
+                <Icon.Search size={15} />
+              </IconButton>
+              <Button
+                size="sm"
+                variant="primary"
+                onClick={() => openSheet([])}
+                title={t("app.sendShortcut", modKey)}
+              >
+                <Icon.Send size={13} />
+                {t("app.send")}
+              </Button>
+            </>
+          )}
         </header>
+        )}
 
         {/* --- the screen ----------------------------------------------- */}
-        <main className="view">
-          <View />
+        <main ref={viewRef} className={`view${isPhone ? " staged" : ""}`}>
+          {leaving && (
+            <div className={`page leaving ${leaving.dir}`} aria-hidden>
+              {(() => {
+                const Gone = viewFor(leaving.route, isPhone);
+                return <Gone />;
+              })()}
+            </div>
+          )}
+          <div
+            ref={pageRef}
+            className={`page${stack.length > 1 ? " stacked" : ""}${headless ? " headless" : ""}${
+              leaving ? ` entering ${leaving.dir}` : ""
+            }`}
+            onScroll={
+              // On the page, because the page is what scrolls here. The bar
+              // takes the title over as the large one passes under the glass,
+              // not at the first pixel of scroll: the two saying the same name
+              // at once is the one state the handoff exists to prevent.
+              isPhone && !leaving
+                ? (e) => setBigTitle(e.currentTarget.scrollTop < 34)
+                : undefined
+            }
+          >
+            {/* One box holding the screen, so there is something for the pull
+                at the top and the bottom to stretch — see `.page-fill`. */}
+            <div className={isPhone ? "page-fill" : undefined}>
+              {/* Above the first row, uncovered by the bounce — see `.ptr`. */}
+              {isPhone && stack.length === 1 && !bare && (
+                <div className="ptr" aria-hidden>
+                  <span className="ptr-ring" />
+                </div>
+              )}
+              {/* The home draws its own head — the brand, not the name of the
+                  place (see `HomeView`). Everywhere else keeps the platform's
+                  large title. */}
+              {/* The three roots draw their own head — title plus the tools
+                  beside it (11a, 12a); anything else that lands as a root
+                  still gets the platform's large title. */}
+              {isPhone && stack.length === 1 && !ROOT_HEADS.includes(route) && !bare && (
+                <h2 className="large-title">{t(phoneTitle(route))}</h2>
+              )}
+              <View />
+            </div>
+          </div>
         </main>
       </div>
+
+      {/* Only on a root: the pushed screens of sections 11 and 12 have no bar
+          under them, and their own band of buttons where it would be. */}
+      {isPhone && stack.length === 1 ? <TabBar /> : null}
+      {/* Quello che sta passando, sopra la barra (15b): su ogni radice, mai
+          sotto una schermata pushata o la camera. */}
+      {isPhone && stack.length === 1 && !bare ? <TransferDock /> : null}
+      {isPhone ? <ThreadSheet /> : null}
+      {/* Quello che è appena arrivato, guardato una volta. Solo sul telefono:
+          una finestra ha la riga sotto gli occhi e non ha una Galleria. */}
+      {isPhone ? <FinishedSheet /> : null}
 
       {/* --- overlays ---------------------------------------------------- */}
       <SendSheet />

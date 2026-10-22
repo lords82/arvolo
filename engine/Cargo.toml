@@ -1,0 +1,31 @@
+[package]
+name = "arvolo-engine"
+description = "Arvolo's client engine: the address book, config and daemon logic, without a socket or a terminal"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["file-transfer", "p2p", "e2ee"]
+categories = ["network-programming", "cryptography"]
+
+[dependencies]
+arvolo-core.workspace = true
+# The wire shapes the daemon answers in. One direction only: `arvolo-ipc` knows
+# nothing about the engine, so the CLI and the GUI can keep speaking the
+# protocol without linking this crate.
+arvolo-ipc.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+tokio-util = "0.7"
+tracing.workspace = true
+data-encoding = "2"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+# Just the hostname, for the default name of this machine in the device register.
+gethostname = "0.5"
+
+[dev-dependencies]
+tempfile = "3"
+tokio-util = "0.7"

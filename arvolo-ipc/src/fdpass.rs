@@ -31,6 +31,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+
+use crate::inproc::random_token;
 use sendfd::{RecvWithFd, SendWithFd};
 
 /// SCM_RIGHTS payloads are bounded by the kernel (253 on Linux); stay far below.
@@ -165,21 +167,11 @@ pub fn fd_path(file: &std::fs::File) -> PathBuf {
     PathBuf::from(format!("/dev/fd/{}", file.as_raw_fd()))
 }
 
-fn random_token() -> String {
-    // No rand dep here; pairing (not secrecy) is the job — see `serve_one`.
-    use std::hash::{Hash, Hasher};
-    static SALT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    std::process::id().hash(&mut h);
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .hash(&mut h);
-    let a = h.finish();
-    SALT.fetch_add(a | 1, std::sync::atomic::Ordering::Relaxed)
-        .hash(&mut h);
-    format!("{a:016x}{:016x}", h.finish())
-}
+// The same hand-off without a socket lives in `crate::inproc`, which every
+// platform has: a phone's engine runs inside the app on Android as on iOS, and
+// the daemon answers those requests on Windows too. Re-exported here for the
+// call sites that already spell it this way.
+pub use crate::inproc::{drop_stashed, stash_files, take_stashed, IN_PROCESS};
 
 #[cfg(test)]
 mod tests {

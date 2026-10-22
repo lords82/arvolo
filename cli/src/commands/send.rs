@@ -10,6 +10,7 @@ use arvolo_core::flow::{self, SendEvent};
 use arvolo_core::manager::{ManagerEvent, TransferManager};
 use arvolo_core::transfer::RelayChoice;
 
+use crate::ipc;
 use crate::{book, sessions};
 
 use crate::output::vprintln;
@@ -80,11 +81,27 @@ pub(crate) async fn send_cmd(opts: SendOpts) -> Result<()> {
                     .to_string_lossy()
                     .into_owned();
                 let (handoff, _offer) = crate::commands::daemon::offer_sources(&opts.paths);
+                // Subscribed first, so an upload that finishes quickly cannot
+                // announce its URL before anyone is listening.
+                let events = crate::commands::daemon::daemon_events().await.ok();
                 match client
                     .create_link(abs, Some(opts.ttl), opts.max, handoff)
                     .await
                 {
-                    Ok(url) => {
+                    Ok(started) => {
+                        let url = match (started, events) {
+                            (ipc::client::Background::Done(url), _) => url,
+                            (ipc::client::Background::Running(id), Some(events)) => {
+                                wait_for_link(events, id).await?
+                            }
+                            (ipc::client::Background::Running(id), None) => {
+                                eprintln!(
+                                    "The link is uploading as transfer {id}; `arvolo status` \
+                                     shows it, and its URL when it is done."
+                                );
+                                return Ok(());
+                            }
+                        };
                         println!("{url}");
                         eprintln!("\nAnyone with the link can download it in a browser.");
                         eprintln!("Listed in `arvolo status`; `arvolo cancel <id>` withdraws it.");
@@ -112,6 +129,53 @@ pub(crate) async fn send_cmd(opts: SendOpts) -> Result<()> {
         TicketOut::File
     };
     ticket_cmd(opts.paths, opts.relay, opts.foreground, out).await
+}
+
+/// Follow a link the daemon is uploading until it has a URL, showing how far
+/// it has got. The upload belongs to the daemon: interrupting this only stops
+/// watching, and `arvolo status` still shows the row and, later, its URL.
+async fn wait_for_link(mut events: ipc::client::EventStream, id: u64) -> Result<String> {
+    use ipc::protocol::EventDto;
+    let mut last_pct = u64::MAX;
+    loop {
+        match events.next().await? {
+            Some(EventDto::Progress {
+                id: e,
+                transferred,
+                total_size,
+            }) if e == id && total_size > 0 => {
+                let pct = transferred.saturating_mul(100) / total_size;
+                if pct != last_pct {
+                    last_pct = pct;
+                    eprint!(
+                        "\r↑ uploading {pct:>3}%  ({} of {})   ",
+                        human_size(transferred),
+                        human_size(total_size)
+                    );
+                }
+            }
+            Some(EventDto::Waiting { id: e, reason, .. }) if e == id => {
+                eprint!("\r… {reason}   ");
+            }
+            Some(EventDto::LinkReady { id: e, link }) if e == id => {
+                if last_pct != u64::MAX {
+                    eprintln!();
+                }
+                return Ok(link);
+            }
+            Some(EventDto::Failed { id: e, error, .. }) if e == id => {
+                anyhow::bail!("the link could not be created: {error}")
+            }
+            Some(EventDto::Cancelled { id: e }) if e == id => {
+                anyhow::bail!("the link was cancelled")
+            }
+            Some(_) => {}
+            None => anyhow::bail!(
+                "lost the daemon while the link was uploading — `arvolo status` shows \
+                 whether it is still going"
+            ),
+        }
+    }
 }
 
 /// The habit guard for the old `send <who> <paths…>` shape: with `--to` gone
@@ -255,6 +319,7 @@ pub(crate) async fn push(
             archive,
             note.to_string(),
             None,
+            false,
             theirs,
         )
         .await
@@ -324,7 +389,7 @@ pub(crate) async fn push(
                         record_history(&manager, id, &format!("paused: {reason}"));
                         break;
                     }
-                    Ok(ManagerEvent::Failed { id: eid, error }) if eid == id => {
+                    Ok(ManagerEvent::Failed { id: eid, error, .. }) if eid == id => {
                         if let Some(p) = progress.take() { p.finish(); }
                         eprintln!("✗ failed: {error}");
                         record_history(&manager, id, &format!("failed: {error}"));

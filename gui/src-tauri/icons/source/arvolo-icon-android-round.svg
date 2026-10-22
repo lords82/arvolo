@@ -1,0 +1,13 @@
+<!-- Android's `ic_launcher_round`, for the launchers that ask for a circle
+     instead of masking one. Same glyph and same inset as the square tile, so a
+     phone that shows round icons and one that shows squircles show the mark at
+     the same size. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <circle cx="512" cy="512" r="512" fill="#F97316"/>
+  <g transform="translate(200 200) scale(6.24)"
+     fill="none" stroke="#faf8f6" stroke-width="10.5"
+     stroke-linecap="round" stroke-linejoin="round">
+  <path d="M36 8 L50 30 L64 8"/>
+  <path d="M18 42 L50 80 L82 42"/>
+  </g>
+</svg>

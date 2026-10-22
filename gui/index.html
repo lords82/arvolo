@@ -2,7 +2,19 @@
 <html lang="it">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- `viewport-fit=cover` is what makes `env(safe-area-inset-*)` mean anything:
+         without it the system reserves the notch and the home indicator itself,
+         the page never learns their size, and the app is letterboxed on a phone.
+         With it the page fills the screen and keeps its own content clear of
+         them — see the PHONE block in theme.css. -->
+    <!-- `interactive-widget=resizes-content` asks the engine to shrink the
+         layout viewport under the keyboard rather than cover the page with it.
+         Honoured by Chrome's web view; WebKit ignores it, which is why the
+         keyboard is also measured by hand — see `src/keyboard.ts`. -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content"
+    />
     <title>Arvolo</title>
   </head>
   <body>

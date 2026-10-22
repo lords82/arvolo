@@ -151,7 +151,7 @@ export function SettingsView() {
           // Only on success: a field still marked clean after a refused write
           // would disable Save and strand the edit.
           setDirty((d) => ({ ...d, name: false }));
-          toast.ok(t("settings.nameSaved"), t("settings.nameSavedDetail"));
+          toast.echo(t("settings.nameSaved"), t("settings.nameSavedDetail"));
         })
         .finally(() => setBusy(false))
     );
@@ -233,6 +233,13 @@ export function SettingsView() {
           )}
         </Field>
       </div>
+
+      {/* Two blocks that used to live here — what arrives on its own, and the
+          places the bottom bar had no room for — are gone rather than moved:
+          this screen is now only ever drawn on a desktop, and there they were
+          `isPhone` from the day they were written. Their phone homes are
+          `YouView` and `AutoAcceptView`; everything else this window holds has
+          been redrawn as lists in `AdvancedView`. */}
 
       {/* ---- appearance ----------------------------------------------- */}
       <div className="card card-pad stack">

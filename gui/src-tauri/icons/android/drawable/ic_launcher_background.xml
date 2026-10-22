@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The tile the adaptive icon is drawn on: one colour, the app's own orange.
+     A vector with artwork in it would be a second drawing to keep in step with
+     the SVGs next door, for something no launcher ever shows moving. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android">
+    <solid android:color="#F97316" />
+</shape>

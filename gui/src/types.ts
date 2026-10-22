@@ -48,6 +48,11 @@ export interface TransferDto {
    *  on the event that announced it — a window that starts after a download
    *  finished must still be able to open it. */
   path?: string | null;
+  /** The platform's own handle for a completed receive whose file cannot be named
+   *  by path — an Android content:// URI. Where it is set, `path` is null and
+   *  this is what "open" and "share" act on. Both null on a finished receive means
+   *  the file is still in the app's staging: publishing it failed. */
+  saved_uri?: string | null;
   /** How far the inbox offer for a deposited send has got. Same vocabulary as a
    *  deposit's `offer_status`; null when there is nothing to say. */
   offer_status?: string | null;
@@ -56,6 +61,8 @@ export interface TransferDto {
    *  saying it — this is what we translate. Null for a row that is not waiting,
    *  absent from a daemon that predates the field. */
   waiting_code?: string | null;
+  fail_code?: string;
+  fail_detail?: string;
   /** The relay's own message quoted inside a "relayRetry" reason. */
   waiting_detail?: string | null;
   /** Whether pausing this row would do anything. A mailbox pickup and a share
@@ -63,6 +70,11 @@ export interface TransferDto {
    *  that predates the field, where the fallback is to keep offering the button:
    *  the worst case is that daemon's own behaviour. */
   can_pause?: boolean | null;
+  /** A link transfer's browser URL, once its upload has landed. Absent for
+   *  everything else, and from an older daemon. */
+  link?: string | null;
+  /** A mailbox deposit's `arvm…` ticket, once it is on the relay. */
+  ticket?: string | null;
   /** What the sender of an incoming transfer calls themselves, carried over from
    *  the offer. Absent from a send, a pasted ticket, and an older daemon — and a
    *  claim either way, never evidence. */
@@ -133,6 +145,8 @@ export interface HistoryDto {
   status: string;
   /** Unix seconds. */
   created: number;
+  /** The failure's stable code, or empty — see `UITransfer.failCode`. */
+  fail_code?: string;
 }
 
 /** Something left on a relay that can still be taken back: a public download link,
@@ -214,6 +228,9 @@ export interface ConfigDto {
   download_dir_from_env: boolean;
   display_name: string;
   sync: boolean;
+  /** What arrives without being asked about: "never" | "trusted" | "everyone".
+   *  Empty from a daemon that predates the setting, which behaved as "trusted". */
+  auto_accept: string;
   seed: boolean | null;
   swarm: string;
   concurrency: number | null;
@@ -233,6 +250,7 @@ export interface ConfigPatch {
   download_dir?: Setting<string>;
   display_name?: Setting<string>;
   sync?: Setting<boolean>;
+  auto_accept?: Setting<string>;
   seed?: Setting<boolean>;
   swarm?: Setting<string>;
   concurrency?: Setting<number>;
@@ -330,6 +348,10 @@ export type EngineEvent =
   | { type: "progress"; id: number; transferred: number; total_size: number }
   | { type: "completed"; id: number; path: string | null }
   | { type: "deposited"; id: number }
+  /** A link's upload landed: here is the URL to share. */
+  | { type: "link_ready"; id: number; link: string }
+  /** A share finished preparing: here is its `arvc…` ticket. */
+  | { type: "ticket_ready"; id: number; ticket: string }
   /** Reading and encrypting the payload: nothing on the wire yet, and the
    *  recipient has not been offered anything. */
   | { type: "preparing"; id: number }
@@ -351,7 +373,7 @@ export type EngineEvent =
       offer_status?: string;
     }
   | { type: "paused"; id: number; reason: string }
-  | { type: "failed"; id: number; error: string }
+  | { type: "failed"; id: number; error: string; code?: string }
   | { type: "cancelled"; id: number }
   /** A short pairing code is live for this send (fresh, or restored on restart). */
   | { type: "code_ready"; id: number; code: string }
@@ -434,16 +456,41 @@ export interface UITransfer {
   /** The relay's own message quoted inside a "relayRetry" reason. Shown as it
    *  arrived: it is another machine's diagnostic, not our prose. */
   waitingDetail?: string;
+  /** For a failed row: the daemon's stable code for `reason`, which is what
+   *  gets translated. Absent for a failure that has none, and against a
+   *  daemon too old to send one — `reason` is the fallback both times. */
+  failCode?: string;
+  /** The words from elsewhere inside a failure (a path, the transport's own
+   *  message), interpolated into the translated frame. */
+  failDetail?: string;
   /** Whether this row can be held. False for a mailbox pickup and a share, where
    *  the button would ask for something the daemon refuses. */
   canPause: boolean;
+  /** A link's URL, once uploaded — what the panel that started it shows. */
+  link?: string;
+  /** What to hand over once it exists: a share's `arvc…` ticket when its
+   *  preparation ends, a deposit's `arvm…` when it is on the relay. */
+  ticket?: string;
   /** Completed-receive path (for "open folder"). */
   path?: string;
+  /** E dove è finito quando il posto non ha un percorso: su Android MediaStore
+   *  restituisce una `content://` e nient'altro. Un file c'è, è intero e lo
+   *  vedono tutte le app — solo, non si apre per percorso. */
+  savedUri?: string;
   /** When the transfer began (ms). Comes from the engine's `created`; only a row
    *  the daemon cannot date (an offer, or a pre-`created` daemon) falls back to
    *  the moment we first saw it. Stamping "now" for everything filed yesterday's
    *  transfers under "Oggi" on every restart. */
   firstSeen: number;
+  /** Whether `firstSeen` is the *engine's* date or our own guess.
+   *
+   *  The distinction only matters where the date is printed rather than sorted
+   *  by. A phone restores its board from the log at every launch, and rows
+   *  written by a version that did not record `created` come back undated: with
+   *  the fallback silently in place, every one of them said "a few seconds ago"
+   *  — a whole screen of transfers from last month claiming to be from this
+   *  minute. A row that does not know when it happened says nothing about it. */
+  stamped: boolean;
   /** Manual list position (defaults to firstSeen; "Sposta su/giù" swaps it). */
   rank: number;
   /** Smoothed throughput in bytes/sec, derived from progress events. */
@@ -470,6 +517,19 @@ export interface PickedItem {
   size: number;
   isDir: boolean;
 }
+
+/** One of the last pictures on the phone, as `photos_recent` lists them: an
+ *  opaque id the native side can turn into a file (`photos_export`), and a
+ *  small thumbnail as a data URL — small on purpose, these are tiles. */
+export interface RecentPhoto {
+  id: string;
+  name: string;
+  isVideo: boolean;
+  /** Seconds, for a video; 0 for a picture. */
+  duration: number;
+  thumb: string;
+}
+
 
 /** A release on offer, as `check_update` reports it. */
 export interface UpdateInfo {

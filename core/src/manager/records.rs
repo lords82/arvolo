@@ -66,9 +66,43 @@ pub(super) fn paused_marker_path(dir: &Path, id: u64) -> PathBuf {
     dir.join(format!("dl-paused-{id}"))
 }
 
+/// Who stopped it. The difference decides what a restart does: a person who
+/// paused something meant it to stay paused, and the machine that paused it
+/// because the phone was about to be put to sleep meant the opposite.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PausedBy {
+    /// A person pressed pause. It stays paused until they say otherwise.
+    User,
+    /// The app was going to be suspended and stopped cleanly first, so the
+    /// partial and its record survive. Resumed on the way back.
+    System,
+}
+
 pub(super) fn mark_paused(dir: &Path, id: u64) {
+    mark_paused_by(dir, id, PausedBy::User)
+}
+
+/// The marker file's *contents* say who: it was empty before this, and an empty
+/// marker still reads as a person's pause — which is the safe way round for
+/// anything already on disk at an upgrade. A file that exists is paused; what is
+/// in it only decides whether a restart picks it back up.
+pub(super) fn mark_paused_by(dir: &Path, id: u64, by: PausedBy) {
     let _ = std::fs::create_dir_all(dir);
-    let _ = std::fs::write(paused_marker_path(dir, id), []);
+    let body: &[u8] = match by {
+        PausedBy::User => b"",
+        PausedBy::System => b"system",
+    };
+    let _ = std::fs::write(paused_marker_path(dir, id), body);
+}
+
+/// Who paused the download with this id, if anyone did.
+pub(super) fn paused_by(dir: &Path, id: u64) -> Option<PausedBy> {
+    let body = std::fs::read(paused_marker_path(dir, id)).ok()?;
+    Some(if body == b"system" {
+        PausedBy::System
+    } else {
+        PausedBy::User
+    })
 }
 
 pub(super) fn clear_paused(dir: &Path, id: u64) {
@@ -231,6 +265,28 @@ pub(super) struct SendToRecord {
     /// a cross-relay recipient becomes unreachable precisely on the retry path
     /// built to keep reaching them. `None` means "ours", as everywhere else.
     pub(super) relay: Option<String>,
+    /// Never the mailbox (see `TransferManager::send_to`). Carried across a
+    /// restart for the same reason `target` is: a send that had to be restored
+    /// is exactly the one that has been waiting, and a restored copy that fell
+    /// back to the relay would do precisely what the sender said not to.
+    #[serde(default)]
+    pub(super) live_only: bool,
+}
+
+/// [`SendToRecord`] as written before `live_only`, under the same prefix. Read
+/// when the current shape does not decode (postcard needs the trailing byte).
+#[derive(serde::Deserialize)]
+struct SendToRecordV3 {
+    id: u64,
+    recipient: Vec<u8>,
+    payload: String,
+    name: String,
+    archive: bool,
+    paused: bool,
+    reason: String,
+    note: String,
+    target: Option<crate::sync::DeviceId>,
+    relay: Option<String>,
 }
 
 /// [`SendToRecord`] as written before it carried a relay, and before that a
@@ -290,7 +346,31 @@ pub(super) fn remove_sendto(dir: &Path, id: u64) {
 /// old files are read in the shapes they could have been written in, rewritten
 /// under the new prefix, and unlinked — so this costs one pass, once.
 pub(super) fn load_sendtos(dir: &Path) -> Vec<SendToRecord> {
-    let mut out: Vec<SendToRecord> = load_records(dir, "sendto2-");
+    // The current prefix, in its current shape or the one just before it: a
+    // record written without `live_only` is one byte short for the new shape
+    // and must not be dropped for it — it is a send still owed to somebody.
+    let mut out: Vec<SendToRecord> = record_paths(dir, "sendto2-")
+        .into_iter()
+        .filter_map(|p| std::fs::read(&p).ok())
+        .filter_map(|b| {
+            postcard::from_bytes::<SendToRecord>(&b).ok().or_else(|| {
+                let r: SendToRecordV3 = postcard::from_bytes(&b).ok()?;
+                Some(SendToRecord {
+                    id: r.id,
+                    recipient: r.recipient,
+                    payload: r.payload,
+                    name: r.name,
+                    archive: r.archive,
+                    paused: r.paused,
+                    reason: r.reason,
+                    note: r.note,
+                    target: r.target,
+                    relay: r.relay,
+                    live_only: false,
+                })
+            })
+        })
+        .collect();
 
     for path in record_paths(dir, legacy_sendto_glob()) {
         let Ok(bytes) = std::fs::read(&path) else {
@@ -323,6 +403,7 @@ fn decode_legacy_sendto(bytes: &[u8]) -> Option<SendToRecord> {
             note: r.note,
             target: r.target,
             relay: None,
+            live_only: false,
         });
     }
     let r: SendToRecordV1 = postcard::from_bytes(bytes).ok()?;
@@ -337,6 +418,7 @@ fn decode_legacy_sendto(bytes: &[u8]) -> Option<SendToRecord> {
         note: r.note,
         target: None,
         relay: None,
+        live_only: false,
     })
 }
 
@@ -623,6 +705,55 @@ pub(super) struct CodeRecord {
     /// budget back.
     pub(super) sessions_done: u32,
     pub(super) failures: u32,
+}
+
+/// A share still being prepared — read and hashed — so that a daemon that stops
+/// in the middle starts it again instead of losing it. Its ticket does not
+/// exist yet, so nothing handed out depends on it, and preparing again (with a
+/// fresh key) is a faithful restart.
+///
+/// With the pairing code it was claimed with, when there is one: that code has
+/// already been printed, and losing the share would leave it pointing at
+/// nothing. Removed once the share is served (its [`SendRecord`] and
+/// [`CodeRecord`] take over) or ends.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(super) struct PendingShareRecord {
+    pub(super) id: u64,
+    pub(super) payload: String,
+    pub(super) name: String,
+    pub(super) archive: bool,
+    pub(super) seed_relay: Option<String>,
+    pub(super) code: Option<PendingCodeRecord>,
+}
+
+/// The claimed code of a [`PendingShareRecord`]: enough to reattach to its slot.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(super) struct PendingCodeRecord {
+    pub(super) shown: String,
+    pub(super) slot: String,
+    pub(super) secret: String,
+    pub(super) relay: String,
+    pub(super) owner_token: Vec<u8>,
+    pub(super) max_sessions: Option<u32>,
+}
+
+pub(super) fn pending_share_path(dir: &Path, id: u64) -> PathBuf {
+    dir.join(format!("pshare-{id}.pc"))
+}
+
+pub(super) fn persist_pending_share(dir: &Path, rec: &PendingShareRecord) {
+    if let Ok(bytes) = postcard::to_allocvec(rec) {
+        let _ = std::fs::create_dir_all(dir);
+        let _ = write_record_private(&pending_share_path(dir, rec.id), &bytes);
+    }
+}
+
+pub(super) fn remove_pending_share(dir: &Path, id: u64) {
+    let _ = std::fs::remove_file(pending_share_path(dir, id));
+}
+
+pub(super) fn load_pending_shares(dir: &Path) -> Vec<PendingShareRecord> {
+    load_records(dir, "pshare-")
 }
 
 pub(super) fn code_record_path(dir: &Path, id: u64) -> PathBuf {

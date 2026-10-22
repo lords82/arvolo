@@ -19,6 +19,8 @@
 import { useEffect, useState } from "react";
 import { useStore } from "../store";
 import { useT } from "../i18n";
+import { useIsPhone } from "../phone";
+import { scanOne } from "../scan";
 import { Icon } from "../ui/Icons";
 import { Button, Field, TextInput } from "../ui/Primitives";
 import { CodeHero } from "../ui/Bits";
@@ -42,6 +44,7 @@ const SUB = {
 
 export function PairSheet() {
   const t = useT();
+  const isPhone = useIsPhone();
   const pairing = useStore((s) => s.pairing);
   const start = useStore((s) => s.startPairing);
   const cancel = useStore((s) => s.cancelPairing);
@@ -78,7 +81,14 @@ export function PairSheet() {
   };
 
   const finish = async () => {
-    if (pairing.needsRestart) {
+    // The identity on disk has changed and the engine is still holding the old
+    // one. On a desktop that engine is a daemon in another process and can be
+    // restarted from here. On a phone it *is* this app — there is nothing to
+    // restart but the app itself, and asking the daemon to do it returned the
+    // one thing a person can do nothing with: "the engine runs inside the app
+    // on this platform", under a red "it did not work", after a pairing that
+    // had in fact worked perfectly.
+    if (pairing.needsRestart && !isPhone) {
       await restartDaemon();
       toast.info(t("pair.restarting"), t("pair.restartingDetail"));
     }
@@ -98,7 +108,7 @@ export function PairSheet() {
           <>
             <div className="spacer" />
             <Button variant="primary" onClick={finish} data-autofocus>
-              {pairing.needsRestart
+              {pairing.needsRestart && !isPhone
                 ? t("pair.restartAndClose")
                 : t("common.done")}
             </Button>
@@ -149,7 +159,10 @@ export function PairSheet() {
               className="card card-pad t-sm"
               style={{ borderColor: "var(--amber)" }}
             >
-              {t("pair.needsRestart")}
+              {/* Two different sentences, because two different things have to
+                  happen: a window can restart the daemon it spawned, and a
+                  phone can only be reopened by the person holding it. */}
+              {t(isPhone ? "pair.needsReopen" : "pair.needsRestart")}
             </div>
           )}
         </div>
@@ -204,6 +217,35 @@ export function PairSheet() {
             </div>
           )}
 
+          {/* The other half of the same exchange, on the same screen.
+              Swapping contacts is *one* act between two people standing
+              together, and it was split into two menu entries that exclude each
+              other — so both had to guess opposite roles before either could
+              see that the camera existed at all. Whoever points first decides
+              who hosts; the code above stays up for the other case.
+
+              Contacts only. The device panels stay apart on purpose: one of
+              them gives away this machine's identity secret, and that is not a
+              button to land on by pointing a camera. */}
+          {isPhone && !isDevice && (
+            <>
+              <div className="hint">{t("pair.orScanTheirs")}</div>
+              <Button
+                onClick={async () => {
+                  const got = await scanOne();
+                  if (!got) return;
+                  // Retires the hosting session and puts up the joining panel;
+                  // the code lands in the field there, where it can be checked
+                  // and the contact named before anything is exchanged.
+                  await start("contact_join");
+                  setCode(got);
+                }}
+              >
+                <Icon.Qr size={15} /> {t("pair.scanTheirs")}
+              </Button>
+            </>
+          )}
+
           {!isDevice && <div className="hint">{t("pair.contactNote")}</div>}
         </div>
       )}
@@ -225,19 +267,36 @@ export function PairSheet() {
                 hint={t("pair.codeHint")}
               >
                 {({ id, describedBy }) => (
-                  <TextInput
-                    id={id}
-                    data-autofocus
-                    aria-describedby={describedBy}
-                    className="mono"
-                    big
-                    spellCheck={false}
-                    autoCapitalize="off"
-                    autoCorrect="off"
-                    value={code}
-                    onChange={(e) => setCode(e.currentTarget.value)}
-                    placeholder="4821-crater-mango"
-                  />
+                  <div className="hstack-sm">
+                    <TextInput
+                      id={id}
+                      data-autofocus
+                      aria-describedby={describedBy}
+                      className="mono"
+                      big
+                      spellCheck={false}
+                      autoCapitalize="off"
+                      autoCorrect="off"
+                      value={code}
+                      onChange={(e) => setCode(e.currentTarget.value)}
+                      placeholder="4821-crater-mango"
+                    />
+                    {/* The other side is showing a QR. On a phone the way to
+                        read one is to point at it — typing a code off a screen
+                        held up in front of you is the fallback, not the
+                        method. */}
+                    {isPhone && (
+                      <Button
+                        size="sm"
+                        onClick={async () => {
+                          const got = await scanOne();
+                          if (got) setCode(got);
+                        }}
+                      >
+                        <Icon.Qr size={15} /> {t("codes.scan")}
+                      </Button>
+                    )}
+                  </div>
                 )}
               </Field>
 

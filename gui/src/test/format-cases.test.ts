@@ -41,6 +41,7 @@ function t(over: Partial<UITransfer> = {}): UITransfer {
     swarmPeers: 0,
     downloadPeers: 0,
     firstSeen: Date.now(),
+    stamped: true,
     rank: 1,
     copiesServed: 0,
     bytesServed: 0,

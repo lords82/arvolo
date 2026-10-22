@@ -38,7 +38,9 @@ export function shapeOf(raw: string): Shape {
   return "unknown";
 }
 
-const EXPLAIN = {
+/** What we tell the user we are about to try, per shape. Exported because the
+ *  phone's *Ricevi* screen says the same sentences about the same strings. */
+export const EXPLAIN = {
   empty: "receive.explainEmpty",
   code: "receive.explainCode",
   chunk: "receive.explainChunk",
@@ -78,7 +80,7 @@ export function ReceiveSheet() {
     setBusy(true);
     try {
       await receive(value.trim(), out?.id ?? null, password || null);
-      toast.ok(t("receive.started"), t("receive.startedDetail"));
+      toast.echo(t("receive.started"), t("receive.startedDetail"));
     } catch {
       // The store's `act` already reported it.
     } finally {
@@ -92,6 +94,22 @@ export function ReceiveSheet() {
       onClose={close}
       title={t("receive.title")}
       subtitle={t("receive.subtitle")}
+      bar={{
+        cancel: (
+          <button className="bar-btn" onClick={close} disabled={busy}>
+            {t("common.cancel")}
+          </button>
+        ),
+        confirm: (
+          <button
+            className="bar-btn strong"
+            onClick={submit}
+            disabled={!value.trim() || busy}
+          >
+            {t("receive.submit")}
+          </button>
+        ),
+      }}
       footer={
         <>
           <div className="spacer" />

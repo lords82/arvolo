@@ -140,13 +140,16 @@ async fn seeded_chunks_leave_no_room_to_deposit() {
     );
 
     // On the relay that now holds one nominal 16 MiB chunk, the same 8 MiB no
-    // longer fits in what is left. Refused as too large *for the remaining budget*
-    // rather than 507, because the streaming deposit bounds itself as it writes —
-    // the point is that the seeded chunk is what shrank the room.
+    // longer fits in what is left. The streaming deposit bounds itself as it
+    // writes, and the point is that the seeded chunk is what shrank the room.
+    // Refused as *full* (507), not as too large (413): the file is under the
+    // per-blob cap and will fit once something expires, and a client reads 507
+    // as "try again later" and 413 as "never" — which is why the two bounds are
+    // answered apart.
     let status = deposit_8mib(&relay).await;
     assert_eq!(
         status,
-        reqwest::StatusCode::PAYLOAD_TOO_LARGE,
+        reqwest::StatusCode::INSUFFICIENT_STORAGE,
         "a deposit must see the chunks the relay is already holding"
     );
 

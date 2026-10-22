@@ -1,0 +1,13 @@
+<!-- iOS, regular cut. Full bleed and square-cornered on purpose: the system
+     draws the superellipse itself and an icon that arrives with its own corners
+     gets them rounded twice. Opaque for the same reason every iOS icon is —
+     alpha in an app icon is rejected at submission. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <rect width="1024" height="1024" fill="#F97316"/>
+  <g transform="translate(200 200) scale(6.24)"
+     fill="none" stroke="#faf8f6" stroke-width="10.5"
+     stroke-linecap="round" stroke-linejoin="round">
+  <path d="M36 8 L50 30 L64 8"/>
+  <path d="M18 42 L50 80 L82 42"/>
+  </g>
+</svg>

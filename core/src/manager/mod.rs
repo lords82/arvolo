@@ -30,10 +30,13 @@ use crate::flow::{self, RecvEvent};
 use crate::presence::{self, InboxSubscription};
 use crate::transfer::RelayChoice;
 
+mod publish;
 mod records;
 mod state;
+mod uploads;
 mod work;
 
+pub use publish::{SavePublisher, SavedLocation};
 use records::*;
 use state::*;
 use work::*;
@@ -58,6 +61,30 @@ pub struct MailboxOpts {
     /// Which of our own devices the offer is aimed at — see [`Offer::target`].
     /// `None` = any of them, which is what every send to somebody else is.
     pub target: Option<crate::sync::DeviceId>,
+}
+
+/// A pairing code claimed for a share that is still being prepared: answered
+/// once the ticket exists. See [`TransferManager::serve_code`].
+struct PendingCode {
+    shown: String,
+    host: code::CodeHost,
+    max_sessions: Option<u32>,
+    /// Claimed by a previous run: the slot has to be reattached (or reclaimed)
+    /// before it is hosted, as for any restored code.
+    restored: bool,
+}
+
+impl PendingCode {
+    fn record(&self) -> PendingCodeRecord {
+        PendingCodeRecord {
+            shown: self.shown.clone(),
+            slot: self.host.slot.clone(),
+            secret: self.host.secret.clone(),
+            relay: self.host.relay.clone(),
+            owner_token: self.host.owner_token.to_vec(),
+            max_sessions: self.max_sessions,
+        }
+    }
 }
 
 /// Direction of a transfer, from this client's point of view.
@@ -157,6 +184,17 @@ pub enum WaitingReason {
     /// having a moment", this one is "you are on a network that lets nothing
     /// through".
     NoRoute,
+    /// The sender asked for a direct transfer and nothing else (`live_only`),
+    /// and the recipient is not online: the send waits for them, and the relay
+    /// is never spent. Its own reason rather than silence, because a row that
+    /// says nothing for an hour looks stuck rather than patient.
+    ForThem,
+    /// An upload to the relay — a link, or a deposit asked for explicitly —
+    /// lost its connection, and will carry on from where it stopped once the
+    /// relay answers again. Carries the transport's own words, like
+    /// [`Self::RelayRetry`]; a different reason because there is no recipient
+    /// to fall back to and nothing starts over.
+    UploadRetry(String),
 }
 
 impl WaitingReason {
@@ -171,6 +209,8 @@ impl WaitingReason {
             WaitingReason::RelayCapped(_) => "relayCapped",
             WaitingReason::OffloadFailed(_) => "offloadFailed",
             WaitingReason::NoRoute => "noRoute",
+            WaitingReason::ForThem => "forThem",
+            WaitingReason::UploadRetry(_) => "uploadRetry",
         }
     }
 
@@ -197,6 +237,12 @@ impl WaitingReason {
             WaitingReason::NoRoute => "this network reaches no relay — sending on the \
                  local network only, and waiting for a better connection"
                 .into(),
+            WaitingReason::ForThem => {
+                "waiting for them to be online — direct only, nothing on the relay".into()
+            }
+            WaitingReason::UploadRetry(why) => format!(
+                "{why} — the upload carries on from where it stopped once the relay answers"
+            ),
         }
     }
 
@@ -207,11 +253,136 @@ impl WaitingReason {
         match self {
             WaitingReason::RelayRetry(why)
             | WaitingReason::RelayCapped(why)
-            | WaitingReason::OffloadFailed(why) => Some(why),
+            | WaitingReason::OffloadFailed(why)
+            | WaitingReason::UploadRetry(why) => Some(why),
             _ => None,
         }
     }
 }
+
+/// Why a transfer failed: a stable code, and the sentence that goes with it.
+///
+/// The same arrangement as [`WaitingReason`], for the same reader. A failure
+/// used to be whatever `anyhow` chain ended the transfer, printed as it came:
+/// right for the CLI, which is English by design, and raw English in a window
+/// that had translated everything around it. The code is what a client looks
+/// up; the sentence is what it falls back to, and what an older client — which
+/// knows nothing of the code — still shows.
+///
+/// Not every failure has a code. The engine fails in more ways than a person
+/// can act on, and a code is only worth minting where the next thing to do is
+/// different: pick the file again, ask the sender again, free some space, find
+/// a connection. Everything else is [`Self::Other`], carrying the engine's own
+/// words, and a client shows those as they are.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FailReason {
+    /// The file to send is no longer where it was when it was picked.
+    SourceMissing(String),
+    /// They said no, on the wire and on purpose.
+    RecipientCancelled,
+    /// A deposit nobody collected before the relay let it go.
+    ExpiredOnRelay,
+    /// The relay no longer holds what this was taking: collected already,
+    /// expired, or withdrawn. The sentence is ours, not the relay's.
+    DepositGone(String),
+    /// No room left on this device to write what was arriving.
+    NoSpace,
+    /// The connection went away mid-transfer. Carries the transport's own
+    /// words, which are not ours to translate.
+    Network(String),
+    /// Everything else, as the engine put it.
+    Other(String),
+}
+
+impl FailReason {
+    /// The stable code a client translates. Empty for [`Self::Other`], which has
+    /// nothing to look up: a client shows the sentence.
+    pub fn code(&self) -> &'static str {
+        match self {
+            FailReason::SourceMissing(_) => "sourceMissing",
+            FailReason::RecipientCancelled => "recipientCancelled",
+            FailReason::ExpiredOnRelay => "expiredOnRelay",
+            FailReason::DepositGone(_) => "depositGone",
+            FailReason::NoSpace => "noSpace",
+            FailReason::Network(_) => "network",
+            FailReason::Other(_) => "",
+        }
+    }
+
+    /// The English sentence: what the CLI prints and a client falls back to.
+    pub fn text(&self) -> String {
+        match self {
+            FailReason::SourceMissing(p) => {
+                format!("the file is no longer where it was picked ({p})")
+            }
+            FailReason::RecipientCancelled => {
+                "the recipient cancelled the transfer on their side".to_string()
+            }
+            FailReason::ExpiredOnRelay => {
+                "expired on the relay — the recipient never collected it".to_string()
+            }
+            FailReason::DepositGone(why) | FailReason::Other(why) => why.clone(),
+            FailReason::NoSpace => "no space left on this device".to_string(),
+            FailReason::Network(why) => format!("the connection dropped: {why}"),
+        }
+    }
+
+    /// The words from elsewhere inside the sentence, for a client that
+    /// translates the frame around them.
+    pub fn detail(&self) -> Option<&str> {
+        match self {
+            FailReason::SourceMissing(p) => Some(p),
+            FailReason::Network(why) => Some(why),
+            _ => None,
+        }
+    }
+
+    /// Read a reason off the error that ended a transfer.
+    ///
+    /// Walks the chain for the typed causes the engine plants on purpose
+    /// (`NotAFile`, a `FailReason` used as context) and for the two the
+    /// standard library and the HTTP client already type for us: a file that
+    /// is not there, a disk that is full, a connection that went. Anything
+    /// else is [`Self::Other`] with the whole chain, which is what was shown
+    /// before any of this existed.
+    pub fn classify(e: &anyhow::Error) -> FailReason {
+        for cause in e.chain() {
+            if let Some(r) = cause.downcast_ref::<FailReason>() {
+                return r.clone();
+            }
+            if let Some(n) = cause.downcast_ref::<crate::source::NotAFile>() {
+                return FailReason::SourceMissing(n.0.display().to_string());
+            }
+            if let Some(io) = cause.downcast_ref::<std::io::Error>() {
+                match io.kind() {
+                    std::io::ErrorKind::NotFound => {
+                        return FailReason::SourceMissing(io.to_string());
+                    }
+                    std::io::ErrorKind::StorageFull => return FailReason::NoSpace,
+                    _ => {}
+                }
+                // `StorageFull` is unstable on some toolchains' classification;
+                // ENOSPC is the number that never changes.
+                if io.raw_os_error() == Some(28) {
+                    return FailReason::NoSpace;
+                }
+            }
+            if let Some(r) = cause.downcast_ref::<reqwest::Error>() {
+                if r.is_connect() || r.is_timeout() || r.is_request() || r.is_body() {
+                    return FailReason::Network(r.to_string());
+                }
+            }
+        }
+        FailReason::Other(format!("{e:#}"))
+    }
+}
+
+impl std::fmt::Display for FailReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.text())
+    }
+}
+impl std::error::Error for FailReason {}
 
 /// Why an accept did not happen, when the answer is a **refusal** rather than a
 /// failure.
@@ -305,6 +476,24 @@ impl std::fmt::Display for AcceptRefusal {
 
 impl std::error::Error for AcceptRefusal {}
 
+/// What [`TransferManager::adopt_finished`] needs to put a past transfer back on
+/// the list: everything a finished row shows, and nothing a live one would need.
+#[derive(Clone, Debug)]
+pub struct FinishedRow {
+    pub direction: Direction,
+    pub peer: Option<PublicId>,
+    pub name: String,
+    pub total_size: u64,
+    pub transferred: u64,
+    pub status: TransferStatus,
+    /// Unix seconds when it happened — not when it was restored. A mailbox sorted
+    /// by "now" would put every past transfer at the top of today, every launch.
+    pub created: u64,
+    /// Where a received file came to rest, so the row can still offer to open it.
+    pub path: Option<PathBuf>,
+    pub saved_uri: Option<String>,
+}
+
 /// A snapshot of one transfer, for a UI list.
 #[derive(Clone, Debug)]
 pub struct Transfer {
@@ -374,6 +563,16 @@ pub struct Transfer {
     /// it. "Downloaded, and now find it yourself" is a strange thing for the
     /// window that downloaded it to say.
     pub path: Option<PathBuf>,
+    /// The platform's own handle for a completed receive, when the file does not
+    /// live anywhere a client can `open()` — an Android `content://` URI, and
+    /// nothing else so far. `None` everywhere a path is the answer, which is every
+    /// desktop and iOS.
+    ///
+    /// Beside `path` rather than replacing it so that a client written before any
+    /// of this reads exactly what it always did. When both are `None` on a finished
+    /// receive, the file is still in the app's staging: publishing failed, and the
+    /// row is the only thing that knows.
+    pub saved_uri: Option<String>,
     /// [`WaitingReason::code`] while the status is
     /// [`Waiting`](TransferStatus::Waiting); empty otherwise.
     ///
@@ -386,6 +585,25 @@ pub struct Transfer {
     /// The relay's own words inside a [`WaitingReason::RelayRetry`], for a client
     /// translating the sentence around them. Empty when there are none.
     pub waiting_detail: String,
+    /// [`FailReason::code`] while the status is [`Failed`](TransferStatus::Failed);
+    /// empty otherwise, and empty for a failure that has no code.
+    pub fail_code: String,
+    /// The words from elsewhere inside that reason — see [`FailReason::detail`].
+    pub fail_detail: String,
+    /// The browser URL of a link transfer, once its upload has finished. `None`
+    /// for everything else, and for a link still uploading.
+    ///
+    /// On the row, and not only in [`ManagerEvent::LinkReady`], for the reason
+    /// `path` is: a window that opens after the upload finished rebuilds its
+    /// rows from the list, and a link row that forgot its URL is useless.
+    pub link: Option<String>,
+    /// What to hand over, once there is something: the `arvc…` ticket of a
+    /// share when its preparation ends, and the sender's own `arvm…` ticket of
+    /// a mailbox deposit when it is on the relay. On the row for the same
+    /// reason as `link`. An `arvm…` is not a secret the way the revoke token is
+    /// (see [`DepositInfo::ticket`]); an `arvc…` is the share itself, and goes
+    /// exactly where the answer to the request that started it always went.
+    pub ticket: Option<String>,
     /// Whether [`TransferManager::pause`] would actually do something.
     ///
     /// Not every transfer can be held: a pickup from the mailbox is one fetch that
@@ -459,6 +677,9 @@ pub struct DepositInfo {
     /// only in the front-end's receipt — which is why an empty one here must
     /// never overwrite a stored one).
     pub ticket: String,
+    /// The browser URL, for a link deposit; `None` for a mailbox one. A link's
+    /// receipt is filed under its own kind, and this is what tells them apart.
+    pub link: Option<String>,
 }
 
 /// Events emitted as transfers and offers progress. Cloneable for [`broadcast`].
@@ -532,10 +753,25 @@ pub enum ManagerEvent {
     /// A send was paused (by the user, or automatically after a long failure to
     /// deliver). It stays put until `resume`d or `cancel`led. `reason` explains why.
     Paused { id: u64, reason: String },
-    /// A transfer failed.
-    Failed { id: u64, error: String },
+    /// A transfer failed. `code` is [`FailReason::code`] — empty where the
+    /// failure has none — and `error` the sentence.
+    Failed {
+        id: u64,
+        error: String,
+        code: String,
+    },
     /// A transfer was cancelled.
     Cancelled { id: u64 },
+    /// A link upload finished: the file is on the relay and `info.link` is the
+    /// URL to share. Followed by [`Completed`](ManagerEvent::Completed) for the
+    /// same id. Carries the whole receipt for the same reason
+    /// [`Deposited`](ManagerEvent::Deposited) does — and like it, crosses the
+    /// IPC boundary as no more than what is safe to hand any subscriber.
+    LinkReady { id: u64, info: DepositInfo },
+    /// A share finished preparing: `ticket` is what to hand over, and it is
+    /// being served. Before this the row is
+    /// [`Preparing`](TransferStatus::Preparing) and there is no ticket yet.
+    TicketReady { id: u64, ticket: String },
     /// A short pairing code is live and listening for receivers. Raised on the
     /// first claim and again after a restart, so a front-end can show the code
     /// without having to have seen the command that created it.
@@ -599,6 +835,7 @@ impl TransferManager {
                 transfers: Mutex::new(HashMap::new()),
                 cancels: Mutex::new(HashMap::new()),
                 recv_aborts: Mutex::new(HashMap::new()),
+                deferred_acks: Mutex::new(HashMap::new()),
                 held: Mutex::new(HashMap::new()),
                 download_content: Mutex::new(HashMap::new()),
                 pending: Mutex::new(HashMap::new()),
@@ -610,7 +847,9 @@ impl TransferManager {
                 state_dir,
                 inbox,
                 display_name: Mutex::new(String::new()),
+                publisher: std::sync::OnceLock::new(),
                 device_id: Mutex::new(None),
+                uploads: Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -621,6 +860,16 @@ impl TransferManager {
     /// [`Offer::sender_name`](crate::presence::Offer::sender_name).
     pub fn set_display_name(&self, name: String) {
         *self.inner.display_name.lock().unwrap() = name;
+    }
+
+    /// Hand the engine the platform's say in where finished downloads come to
+    /// rest (see [`SavePublisher`]). Call once at startup, before any transfer.
+    ///
+    /// Only a mobile shell has one. Never calling it is the desktop, and leaves
+    /// every download exactly where `download_dir` put it. A second call is
+    /// ignored: two publishers would mean two answers to "where did it go?".
+    pub fn set_publisher(&self, publisher: Arc<dyn SavePublisher>) {
+        let _ = self.inner.publisher.set(publisher);
     }
 
     /// Tell the engine which device it is running on. Call once at startup, before
@@ -683,6 +932,104 @@ impl TransferManager {
     /// A snapshot of one transfer by id, if still tracked.
     pub fn get(&self, id: u64) -> Option<Transfer> {
         self.inner.transfers.lock().unwrap().get(&id).cloned()
+    }
+
+    /// Every file a send would still need if it were resumed.
+    ///
+    /// For an embedder that **made** those files and has to know which of them it
+    /// may throw away. On a phone the picker does not hand over the file the
+    /// person chose: it hands over a copy, in the app's own storage, and that
+    /// copy is the send's payload for as long as the send exists — across app
+    /// restarts, since a send resumes from its record. Nobody was deleting them,
+    /// and two videos were 146 MB of an app's storage doing nothing.
+    ///
+    /// Read from the records on disk rather than from the live list, because the
+    /// question is asked at startup, before anything is live, and because it is
+    /// the records that decide what comes back.
+    pub fn sources_still_needed(&self) -> Vec<PathBuf> {
+        let Some(dir) = self.inner.state_dir.clone() else {
+            return Vec::new();
+        };
+        let mut out: Vec<PathBuf> = Vec::new();
+        out.extend(
+            load_sendtos(&dir)
+                .into_iter()
+                .map(|r| PathBuf::from(r.payload)),
+        );
+        out.extend(load_sends(&dir).into_iter().map(|r| PathBuf::from(r.path)));
+        // A preparation is a send that has been hashed and not yet handed over;
+        // its payload is the same file, and a restart in that window is exactly
+        // when the sweep would run.
+        out.extend(
+            load_preps(&dir)
+                .into_iter()
+                .map(|r| PathBuf::from(r.payload)),
+        );
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// Put a transfer that is already over back on the list.
+    ///
+    /// For an embedder whose engine does not outlive the window. A desktop daemon
+    /// runs for weeks, so "what the manager holds" and "what has happened
+    /// recently" are the same list; on a phone the engine dies with the app, and
+    /// a mailbox rebuilt only from the resume records — which exist for
+    /// *unfinished* work — comes back empty. Every file the person received was
+    /// still there on disk and the screen said nothing had ever happened.
+    ///
+    /// The record it is rebuilt from is the embedder's ([`crate`] has no history
+    /// log), so this takes the fields rather than a path to read them from. It
+    /// allocates a fresh id like any other row: the ids are per-run and nothing
+    /// outside the run refers to them.
+    ///
+    /// Refuses anything that is not over — a row restored as Active would be a
+    /// transfer nobody is driving, with a progress bar that never moves.
+    pub fn adopt_finished(&self, row: FinishedRow) -> Option<u64> {
+        if !matches!(
+            row.status,
+            TransferStatus::Completed | TransferStatus::Failed(_) | TransferStatus::Cancelled
+        ) {
+            return None;
+        }
+        let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
+        let mut transfers = self.inner.transfers.lock().unwrap();
+        transfers.insert(
+            id,
+            Transfer {
+                id,
+                created: row.created,
+                direction: row.direction,
+                peer: row.peer,
+                name: row.name,
+                total_size: row.total_size,
+                transferred: row.transferred,
+                status: row.status,
+                swarm_peers: 0,
+                pieces_from_peers: 0,
+                download_peers: 0,
+                code: None,
+                copies_served: 0,
+                bytes_served: 0,
+                last_pickup: 0,
+                from_download: 0,
+                share_started: 0,
+                offer_status: String::new(),
+                sender_name: String::new(),
+                path: row.path,
+                saved_uri: row.saved_uri,
+                waiting_code: String::new(),
+                waiting_detail: String::new(),
+                fail_code: String::new(),
+                fail_detail: String::new(),
+                link: None,
+                ticket: None,
+                can_pause: false,
+            },
+        );
+        prune_finished(&mut transfers, MAX_FINISHED_RETAINED);
+        Some(id)
     }
 
     /// Drop every finished (completed/failed/cancelled) transfer from the list and
@@ -776,8 +1123,13 @@ impl TransferManager {
                     offer_status: String::new(),
                     sender_name: String::new(),
                     path: None,
+                    saved_uri: None,
                     waiting_code: String::new(),
                     waiting_detail: String::new(),
+                    fail_code: String::new(),
+                    fail_detail: String::new(),
+                    link: None,
+                    ticket: None,
                     // Answered per snapshot in `list`, where the record on disk and
                     // the held sends can be read; the stored row never carries a
                     // stale yes.
@@ -896,6 +1248,12 @@ impl TransferManager {
     /// `relay` is the recipient's, when they listen somewhere other than we do.
     /// Everything it routes — the presence probe, the offer, the mailbox notice —
     /// has to reach *them*; the payload itself is P2P and never goes through it.
+    ///
+    /// `live_only` turns the mailbox off for this send: nothing is ever parked
+    /// on a relay, not after the grace period and not when the recipient is
+    /// away — the send waits for them (`Waiting`, [`WaitingReason::ForThem`])
+    /// and goes direct the moment they are online. For a file too big to park,
+    /// or one that must not sit on a relay even for a minute.
     #[allow(clippy::too_many_arguments)]
     pub async fn send_to(
         &self,
@@ -905,6 +1263,7 @@ impl TransferManager {
         archive: bool,
         note: String,
         target: Option<crate::sync::DeviceId>,
+        live_only: bool,
         relay: Option<String>,
     ) -> Result<u64> {
         let source = payload.into();
@@ -932,6 +1291,7 @@ impl TransferManager {
                 note: note.clone(),
                 target,
                 relay: theirs,
+                live_only,
                 pause_flag: pause_flag.clone(),
                 deposit_now: Default::default(),
                 attempt: Default::default(),
@@ -949,6 +1309,7 @@ impl TransferManager {
             name,
             archive,
             note,
+            live_only,
             pause_flag,
         ));
         Ok(id)
@@ -959,11 +1320,15 @@ impl TransferManager {
     ///
     /// This is `send --mailbox`: send-and-forget. It differs from
     /// [`send_to`](Self::send_to) in more than the presence check — there is no
-    /// held record and no retry loop, so the attempt either lands or fails, once.
-    /// That is deliberate. A held send is restored from disk after a restart, and
-    /// restoring one carrying a password would mean writing that password into the
-    /// state directory; retrying without it would silently deposit unprotected.
-    /// Neither is acceptable, so an explicit deposit simply doesn't become held.
+    /// held record, so it does not come back after a restart. That is deliberate.
+    /// A held send is restored from disk, and restoring one carrying a password
+    /// would mean writing that password into the state directory; retrying
+    /// without it would silently deposit unprotected. Neither is acceptable, so
+    /// an explicit deposit simply doesn't become held.
+    ///
+    /// Within one run it does wait out a dropped connection, and carries the
+    /// upload on from where it stopped: the password is already sealed into the
+    /// upload's key by then, so nothing has to be asked again or written down.
     ///
     /// With a cross-relay recipient the two halves come apart: the blob goes to
     /// **our** relay (we pay for that storage, and the `arvm…` names it, so they
@@ -979,7 +1344,46 @@ impl TransferManager {
         opts: MailboxOpts,
         relay: Option<String>,
     ) -> Result<(u64, String)> {
-        let payload = payload.into();
+        let (id, run) = self.start_deposit(recipient, payload.into(), name, note, opts, relay)?;
+        run.await
+            .map(|ticket| (id, ticket))
+            .map_err(|msg| anyhow::anyhow!("{msg}"))
+    }
+
+    /// [`deposit_to`](Self::deposit_to) without waiting for it: returns the
+    /// transfer id at once and lets the upload run as a transfer. The `arvm…`
+    /// ticket arrives with [`ManagerEvent::Deposited`].
+    ///
+    /// What a front-end calls. Waiting on the whole upload inside one request is
+    /// what made a large deposit look like a stuck daemon: the client gave up on
+    /// the answer long before the relay had the file.
+    pub fn deposit_to_detached(
+        &self,
+        recipient: &PublicId,
+        payload: impl Into<crate::source::SendSource>,
+        name: String,
+        note: String,
+        opts: MailboxOpts,
+        relay: Option<String>,
+    ) -> Result<u64> {
+        let (id, run) = self.start_deposit(recipient, payload.into(), name, note, opts, relay)?;
+        tokio::spawn(run);
+        Ok(id)
+    }
+
+    /// Register a deposit's row and build the task that carries it out.
+    fn start_deposit(
+        &self,
+        recipient: &PublicId,
+        payload: crate::source::SendSource,
+        name: String,
+        note: String,
+        opts: MailboxOpts,
+        relay: Option<String>,
+    ) -> Result<(
+        u64,
+        impl std::future::Future<Output = std::result::Result<String, String>> + Send + 'static,
+    )> {
         let mine = self.inner.relay.clone();
         let deposit_relay = mine
             .clone()
@@ -989,47 +1393,23 @@ impl TransferManager {
         let size = payload.len().unwrap_or(0);
         let (id, cancel) =
             self.register(Direction::Send, Some(recipient.clone()), name.clone(), size);
-
-        // No local TTL is computed here on purpose: the deadline comes back from the
-        // deposit (`DepositOutcome::ttl_secs`), because only the relay knows how much
-        // of `opts.ttl` it agreed to keep.
-        // Selected against the row's own token, or `cancel(id)` would fire a
-        // token nothing awaits: the upload would run to completion and the row
-        // would flip to Deposited — blob on the relay, offer in the recipient's
-        // inbox — after the user had been shown "annullamento in corso".
-        let deposit = deposit_offline_and_offer(
-            &self.inner,
-            &deposit_relay,
-            &offer_relay,
-            recipient,
-            &payload,
-            &name,
-            &note,
-            &opts,
+        // No local TTL is computed here on purpose: the deadline comes back from
+        // the deposit (`DepositOutcome::ttl_secs`), because only the relay knows
+        // how much of `opts.ttl` it agreed to keep. The row's own token goes in,
+        // or `cancel(id)` would fire a token nothing awaits.
+        let run = uploads::run_deposit(
+            self.inner.clone(),
+            id,
+            cancel,
+            deposit_relay,
+            offer_relay,
+            recipient.clone(),
+            payload,
+            name,
+            note,
+            opts,
         );
-        let outcome = tokio::select! {
-            _ = cancel.cancelled() => {
-                finish(&self.inner, id, true, Ok(None));
-                anyhow::bail!("deposit cancelled");
-            }
-            r = deposit => r,
-        };
-        match outcome {
-            Ok(out) => {
-                let ticket = out.ticket.clone();
-                // The relay's granted TTL, not the one `opts` asked for: it clamps to
-                // its own maximum, and a record deadlined off the request would keep
-                // watching (and keep telling the user about) a blob already reaped.
-                let expires = unix_now().saturating_add(out.ttl_secs);
-                spawn_offline_confirm(&self.inner, id, deposit_relay, offer_relay, out, expires);
-                Ok((id, ticket))
-            }
-            Err(e) => {
-                let msg = format!("{e}");
-                finish(&self.inner, id, false, Err(anyhow::anyhow!("{msg}")));
-                Err(anyhow::anyhow!("{msg}"))
-            }
-        }
+        Ok((id, run))
     }
 
     /// Stop waiting for the recipient to accept and park the file on the relay now.
@@ -1204,6 +1584,7 @@ impl TransferManager {
                 h.name,
                 h.archive,
                 h.note,
+                h.live_only,
                 h.pause_flag,
             ));
             return true;
@@ -1347,6 +1728,7 @@ impl TransferManager {
         if let Some(rec) = &prep {
             *slot.lock().unwrap() = work::rebuild_prep(rec, &source);
         }
+        let upload = uploads::take_upload_record(&self.inner, rec.id, &rec.payload);
         self.inner.held.lock().unwrap().insert(
             id,
             Held {
@@ -1357,12 +1739,18 @@ impl TransferManager {
                 note: rec.note.clone(),
                 target: rec.target,
                 relay: rec.relay.clone(),
+                live_only: rec.live_only,
                 pause_flag: pause_flag.clone(),
                 deposit_now: Default::default(),
                 attempt: Default::default(),
                 prep: slot.clone(),
             },
         );
+        // The mailbox upload it had under way, re-filed under the id it now has —
+        // after the held entry, which is what makes it worth writing down again.
+        if let Some(r) = upload {
+            uploads::remember(&self.inner, id, r, &source);
+        }
         // Re-key the preparation onto the id it now belongs to, or the next restart
         // finds an orphan and sweeps it — losing across two restarts what survived
         // one. Only when it actually survived the guard.
@@ -1408,6 +1796,7 @@ impl TransferManager {
                 rec.name,
                 rec.archive,
                 rec.note,
+                rec.live_only,
                 pause_flag,
             ));
         }
@@ -1460,21 +1849,134 @@ impl TransferManager {
         archive: bool,
         seed_relay: Option<String>,
     ) -> Result<(u64, String)> {
-        let payload = payload.into();
-        let session = flow::prepare_send(
-            payload.clone(),
-            &name,
-            archive,
-            None,
-            seed_relay,
-            RelayChoice::from_env(),
-        )
-        .await
-        .context("prepare send")?;
+        // Subscribed before the share exists, so a preparation that ends
+        // quickly cannot announce its ticket to nobody.
+        let mut events = self.subscribe();
+        let id = self.start_share(payload.into(), name, archive, seed_relay, None);
+        loop {
+            match events.recv().await {
+                Ok(ManagerEvent::TicketReady { id: e, ticket }) if e == id => {
+                    return Ok((id, ticket))
+                }
+                Ok(ManagerEvent::Failed { id: e, error, .. }) if e == id => {
+                    anyhow::bail!("{error}")
+                }
+                Ok(ManagerEvent::Cancelled { id: e }) if e == id => {
+                    anyhow::bail!("cancelled while preparing")
+                }
+                Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                Err(broadcast::error::RecvError::Closed) => {
+                    anyhow::bail!("the engine stopped while preparing")
+                }
+            }
+        }
+    }
+
+    /// [`serve_ticket`](Self::serve_ticket) without waiting for the ticket:
+    /// returns the transfer id at once, while the payload is still being read
+    /// and hashed. The ticket follows as [`ManagerEvent::TicketReady`] and stays
+    /// on the row.
+    ///
+    /// What a front-end calls. The preparation reads and encrypts the whole
+    /// file — about two minutes per 15 GB on a fast disk — and an answer that
+    /// waits for it outlives every client's patience, which is how a working
+    /// daemon came to be reported as a stuck one.
+    pub fn serve_ticket_detached(
+        &self,
+        payload: impl Into<crate::source::SendSource>,
+        name: String,
+        archive: bool,
+        seed_relay: Option<String>,
+    ) -> u64 {
+        self.start_share(payload.into(), name, archive, seed_relay, None)
+    }
+
+    /// Register a share's row, then prepare and serve it in the background —
+    /// and, with `code`, host a pairing code for it once its ticket exists.
+    fn start_share(
+        &self,
+        payload: crate::source::SendSource,
+        name: String,
+        archive: bool,
+        seed_relay: Option<String>,
+        code: Option<PendingCode>,
+    ) -> u64 {
+        let size = payload.len().unwrap_or(0);
+        let (id, cancel) = self.register(Direction::Send, None, name.clone(), size);
+        self.inner.set_status_live(id, TransferStatus::Preparing);
+        self.inner.emit(ManagerEvent::Preparing { id });
+        if let Some(dir) = &self.inner.state_dir {
+            persist_pending_share(
+                dir,
+                &PendingShareRecord {
+                    id,
+                    payload: payload.label(),
+                    name: name.clone(),
+                    archive,
+                    seed_relay: seed_relay.clone(),
+                    code: code.as_ref().map(PendingCode::record),
+                },
+            );
+        }
+        // The code is live from the moment it is claimed — printed, and on the
+        // row — even though it answers only once the share is prepared.
+        if let Some(c) = &code {
+            self.inner.set_code(id, Some(c.shown.clone()));
+        }
+        let this = self.clone();
+        tokio::spawn(async move {
+            let prep = flow::prepare_send(
+                payload.clone(),
+                &name,
+                archive,
+                None,
+                seed_relay,
+                RelayChoice::from_env(),
+            );
+            let prepared = tokio::select! {
+                _ = cancel.cancelled() => None,
+                r = prep => Some(r),
+            };
+            let session = match prepared {
+                None => {
+                    if let Some(c) = code {
+                        let _ = c.host.close().await;
+                    }
+                    finish(&this.inner, id, true, Ok(None));
+                    return;
+                }
+                Some(Err(e)) => {
+                    if let Some(c) = code {
+                        let _ = c.host.close().await;
+                    }
+                    finish(&this.inner, id, false, Err(e.context("prepare send")));
+                    return;
+                }
+                Some(Ok(s)) => s,
+            };
+            let ticket = this.begin_serving(id, cancel, &payload, session);
+            if let Some(c) = code {
+                this.host_code(id, &ticket, c);
+            }
+            // The send and code records have taken over.
+            if let Some(dir) = &this.inner.state_dir {
+                remove_pending_share(dir, id);
+            }
+        });
+        id
+    }
+
+    /// The share is prepared: write it down so a restart resumes it, start
+    /// serving, and hand out the ticket.
+    fn begin_serving(
+        &self,
+        id: u64,
+        cancel: CancellationToken,
+        payload: &crate::source::SendSource,
+        session: flow::SendSession,
+    ) -> String {
         let ticket = session.ticket.clone();
-        let total = session.total_size;
         let node_seed = session.node_seed();
-        let (id, cancel) = self.register(Direction::Send, None, name, total);
 
         // Persist so the daemon can resume serving this ticket after a restart —
         // the same content key (carried in the ticket) + node seed reproduce the
@@ -1500,9 +2002,14 @@ impl TransferManager {
             );
             persist_share(dir, id, &stats);
         }
-
+        self.inner.set_status_live(id, TransferStatus::Active);
+        self.inner.set_ticket(id, ticket.clone());
+        self.inner.emit(ManagerEvent::TicketReady {
+            id,
+            ticket: ticket.clone(),
+        });
         tokio::spawn(serve_session(self.inner.clone(), session, id, cancel));
-        Ok((id, ticket))
+        ticket
     }
 
     /// Serve an anonymous ticket **and** host a short pairing code for it in the
@@ -1512,6 +2019,9 @@ impl TransferManager {
     /// `max_sessions` is `Some(1)` for the default one-shot code and `None` for
     /// `--keep`. Needs a relay that speaks rendezvous v2: a v1 slot cannot outlive
     /// the process that claimed it, which is the whole point here.
+    ///
+    /// Returns as soon as the code is claimed: the payload is prepared in the
+    /// background, and the code starts answering receivers once it is.
     pub async fn serve_code(
         &self,
         payload: impl Into<crate::source::SendSource>,
@@ -1531,18 +2041,29 @@ impl TransferManager {
         let (shown, host) = code::claim_code(&relay)
             .await
             .context("claim a pairing code")?;
+        let id = self.start_share(
+            payload,
+            name,
+            archive,
+            Some(relay),
+            Some(PendingCode {
+                shown: shown.clone(),
+                host,
+                max_sessions,
+                restored: false,
+            }),
+        );
+        Ok((id, shown))
+    }
 
-        let (id, ticket) = match self
-            .serve_ticket(payload, name, archive, Some(relay.clone()))
-            .await
-        {
-            Ok(v) => v,
-            Err(e) => {
-                let _ = host.close().await;
-                return Err(e);
-            }
-        };
-
+    /// Start answering a claimed code with `ticket`, for transfer `id`.
+    fn host_code(&self, id: u64, ticket: &str, c: PendingCode) {
+        let PendingCode {
+            shown,
+            host,
+            max_sessions,
+            restored,
+        } = c;
         let opts = code::HostOpts {
             max_sessions,
             ..code::HostOpts::default()
@@ -1553,8 +2074,8 @@ impl TransferManager {
             secret: host.secret.clone(),
             relay: host.relay.clone(),
             owner_token: host.owner_token.to_vec(),
-            payload: ticket.into_bytes(),
-            shown: shown.clone(),
+            payload: ticket.as_bytes().to_vec(),
+            shown,
             max_sessions,
             max_failures: opts.max_failures,
             sessions_done: 0,
@@ -1562,6 +2083,12 @@ impl TransferManager {
         };
         if let Some(dir) = &self.inner.state_dir {
             persist_code(dir, &rec);
+        }
+        // A slot claimed by a previous run is reattached first, exactly as a
+        // restored code is.
+        if restored {
+            self.resume_code(rec, id);
+            return;
         }
         // A child of the transfer's own token: `arvolo cancel <id>` retires the
         // code with the send, while the daemon merely exiting leaves the slot
@@ -1582,7 +2109,6 @@ impl TransferManager {
             code::HostState::default(),
             cancel,
         ));
-        Ok((id, shown))
     }
 
     /// Bring a persisted code back after a restart, alongside the send it belongs
@@ -1965,9 +2491,16 @@ impl TransferManager {
             }
         }
 
-        // Ack the offer now that we've taken ownership of it (best-effort).
-        if let Some(sub) = &self.inner.inbox {
-            let _ = sub.ack(offer_id).await;
+        // Ack the offer now that we've taken ownership of it (best-effort) — for
+        // a live offer, where the ack is what wakes the sender. A mailbox offer
+        // is acked by the fetch itself, once the file is written: acked here, an
+        // app killed mid-fetch came back to no offer and, on an older relay, no
+        // deposit either.
+        let mailbox = !crate::chunked::ChunkTicket::looks_like(&offer.offer.ticket);
+        if !mailbox {
+            if let Some(sub) = &self.inner.inbox {
+                let _ = sub.ack(offer_id).await;
+            }
         }
 
         // Already fetching this very send? Then this offer is the sender saying where
@@ -2003,6 +2536,7 @@ impl TransferManager {
             offer.offer.name.clone(),
             offer.offer.size,
             password,
+            mailbox.then(|| offer_id.to_string()),
         );
         // Carry the sender's claim about themselves onto the transfer: accepting
         // consumes the offer, and this is the last moment it exists to be copied.
@@ -2027,12 +2561,13 @@ impl TransferManager {
         name: String,
         size: u64,
     ) -> u64 {
-        self.start_download_with_password(ticket, out_path, peer, name, size, None)
+        self.start_download_with_password(ticket, out_path, peer, name, size, None, None)
     }
 
     /// [`start_download`](Self::start_download) for a password-protected offline
     /// (`arvm…`) ticket: the password unwraps the content key on fetch. Ignored for
     /// a chunked ticket, whose key travels in the ticket itself.
+    #[allow(clippy::too_many_arguments)]
     pub fn start_download_with_password(
         &self,
         ticket: String,
@@ -2041,8 +2576,15 @@ impl TransferManager {
         name: String,
         size: u64,
         password: Option<String>,
+        // The inbox offer to ack once the fetch has written the file — see
+        // `Inner::deferred_acks`. Recorded before the task exists, so it cannot
+        // finish first.
+        ack_offer: Option<String>,
     ) -> u64 {
         let (id, cancel) = self.register(Direction::Recv, peer.clone(), name.clone(), size);
+        if let Some(offer) = ack_offer {
+            self.inner.deferred_acks.lock().unwrap().insert(id, offer);
+        }
 
         // Persist a resume record for chunked downloads (offline one-shots aren't
         // worth resuming — they just re-fetch from the mailbox).
@@ -2100,12 +2642,37 @@ impl TransferManager {
                 let result =
                     flow::fetch_offline(&ticket, Some(out_path.clone()), &me, password.as_deref())
                         .await;
+                // The offer that started this is acked now — the file is here —
+                // or when there is nothing left on the relay to come back for.
+                // Any other failure leaves it in the inbox, for the next try.
+                let gone = result
+                    .as_ref()
+                    .is_err_and(|e| matches!(FailReason::classify(e), FailReason::DepositGone(_)));
+                if result.is_ok() || gone {
+                    let offer = inner.deferred_acks.lock().unwrap().remove(&id);
+                    if let (Some(offer), Some(sub)) = (offer, &inner.inbox) {
+                        let _ = sub.ack(&offer).await;
+                    }
+                } else {
+                    inner.deferred_acks.lock().unwrap().remove(&id);
+                }
                 match result {
                     Ok((path, n)) => {
                         // No per-chunk progress for a one-shot mailbox fetch — record
                         // the fetched size so the history isn't "0 B".
                         inner.set_progress(id, n as u64);
-                        finish(&inner, id, cancelled.is_cancelled(), Ok(Some(path)));
+                        // A mailbox pickup is the *ordinary* way a file reaches a
+                        // phone, so it publishes like any other finished receive.
+                        // Not when it was cancelled: that row is not a delivery.
+                        let published = (!cancelled.is_cancelled())
+                            .then(|| publish_completed(&inner, id, &path))
+                            .flatten();
+                        finish(
+                            &inner,
+                            id,
+                            cancelled.is_cancelled(),
+                            Ok(resting_path(&published, path)),
+                        );
                     }
                     Err(e) => finish(&inner, id, false, Err(e)),
                 }
@@ -2181,6 +2748,15 @@ impl TransferManager {
                 },
             )
             .await;
+            // Where the platform wants this to live, if the embedder has an opinion
+            // (mobile only — see `SavePublisher`). Ahead of the seeding block on
+            // purpose: publishing *moves* the file, and a seed aimed at where it
+            // used to be serves nothing.
+            let published = result
+                .as_ref()
+                .ok()
+                .filter(|o| o.is_complete())
+                .and_then(|o| publish_completed(&inner, id, o.path()));
             // Seed-after-complete: on a clean finish, keep serving the payload to
             // the swarm (opt-in via ARVOLO_SEED). Persisted, so it survives a
             // restart. For an archive `saved` is the unpacked directory, so we seed
@@ -2198,7 +2774,22 @@ impl TransferManager {
                             let tar = flow::archive_stage_path(&t.chunks);
                             mgr.seed_file(tar, ticket.clone(), true);
                         }
-                        _ => mgr.seed_file(outcome.path().to_path_buf(), ticket.clone(), false),
+                        _ => match &published {
+                            // Published: seed from where the file now lives, not
+                            // from the staging path it has just left.
+                            Some(SavedLocation::Path(p)) => {
+                                mgr.seed_file(p.clone(), ticket.clone(), false)
+                            }
+                            // Published with no path to open: seeding it means
+                            // asking the platform for a descriptor and reading
+                            // through that (`SendSource::Handle`). Not wired up
+                            // until there is a mobile shell to ask, so this row
+                            // does not seed rather than seeding the wrong file.
+                            Some(SavedLocation::Uri(_)) => {}
+                            None => {
+                                mgr.seed_file(outcome.path().to_path_buf(), ticket.clone(), false)
+                            }
+                        },
                     }
                 }
             }
@@ -2234,13 +2825,81 @@ impl TransferManager {
                     &inner,
                     id,
                     receive_ended_cancelled(&result),
-                    result.map(|o| Some(o.into_path())),
+                    result.map(|o| resting_path(&published, o.into_path())),
                 );
                 if discard {
                     flow::discard_incomplete(&ticket, &out_path);
                 }
             }
         });
+    }
+
+    /// Stop everything that is moving, because this process is about to be put
+    /// to sleep and would otherwise be frozen mid-transfer.
+    ///
+    /// A phone suspends an app that goes to the background; what happens to a
+    /// transfer that is running at that moment is that its connection dies
+    /// somewhere the app cannot see, and it comes back as a failure — with the
+    /// partial kept but its resume record gone, so the only way on is for the
+    /// sender to offer it again. Pausing first turns that into a stop this app
+    /// can undo: the partial *and* the record stay, and the marker says the
+    /// machine did it, so both [`resume_suspended`](Self::resume_suspended) and
+    /// the next launch know to pick it back up.
+    ///
+    /// Returns the ids it stopped.
+    pub fn suspend_running(&self) -> Vec<u64> {
+        let running: Vec<u64> = self
+            .inner
+            .transfers
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|t| {
+                // What is actually in flight. A send that is only *waiting* on a
+                // relay is not burning a connection and has its own retry;
+                // stopping it would be stopping nothing.
+                matches!(t.status, TransferStatus::Active | TransferStatus::Preparing)
+            })
+            .map(|t| t.id)
+            .collect();
+        let mut stopped = Vec::new();
+        for id in running {
+            if self.pause(id) {
+                // `pause` wrote the marker as a person's; say who it really was,
+                // now that it exists.
+                if let Some(dir) = &self.inner.state_dir {
+                    if paused_marker_path(dir, id).exists() {
+                        mark_paused_by(dir, id, PausedBy::System);
+                    }
+                }
+                stopped.push(id);
+            }
+        }
+        stopped
+    }
+
+    /// Start again everything [`suspend_running`](Self::suspend_running) stopped
+    /// — and nothing a person stopped.
+    ///
+    /// Returns the ids it restarted.
+    pub fn resume_suspended(&self) -> Vec<u64> {
+        let Some(dir) = self.inner.state_dir.clone() else {
+            return Vec::new();
+        };
+        let paused: Vec<u64> = self
+            .inner
+            .transfers
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|t| matches!(t.status, TransferStatus::Paused(_)))
+            .map(|t| t.id)
+            .collect();
+        paused
+            .into_iter()
+            .filter(|id| paused_by(&dir, *id) == Some(PausedBy::System))
+            .filter(|id| self.resume(*id))
+            .collect()
     }
 
     /// Re-start every persisted, not-yet-finished chunked download (called once at
@@ -2288,11 +2947,54 @@ impl TransferManager {
             remove_sendto(&dir, rec.id);
             self.restore_sendto(rec, prep);
         }
+        // Links still uploading when the last run ended: carried on, from where
+        // the relay says they stand when the file is unchanged.
+        let links = uploads::load_link_records(&dir);
+        let n = n + links.len();
+        for rec in links {
+            uploads::remove_link_record(&dir, rec.id);
+            self.restore_link(rec);
+        }
+        // Shares the last run was still preparing: prepared again from the
+        // start (their ticket was never handed out), with the code they had
+        // already printed reattached once they are ready.
+        let pending = load_pending_shares(&dir);
+        let n = n + pending.len();
+        for rec in pending {
+            remove_pending_share(&dir, rec.id);
+            let code = rec.code.and_then(|c| {
+                let owner_token = <[u8; 32]>::try_from(c.owner_token.as_slice()).ok()?;
+                Some(PendingCode {
+                    shown: c.shown,
+                    host: code::CodeHost {
+                        slot: c.slot,
+                        secret: c.secret,
+                        relay: c.relay,
+                        owner_token,
+                    },
+                    max_sessions: c.max_sessions,
+                    restored: true,
+                })
+            });
+            self.start_share(
+                crate::source::SendSource::Path(PathBuf::from(&rec.payload)),
+                rec.name,
+                rec.archive,
+                rec.seed_relay,
+                code,
+            );
+        }
+        // Whatever upload state is left belonged to a transfer that did not come
+        // back. It holds a content key, and its relay session holds space.
+        uploads::sweep_upload_records(&dir);
         for rec in downloads {
-            // A download the user paused comes back Paused (awaiting them); an active
-            // one resumes fetching. Read the marker before dropping the stale record —
-            // `remove_download` clears the marker too.
-            let was_paused = is_paused_marked(&dir, rec.id);
+            // A download **the user** paused comes back Paused, awaiting them; one
+            // the system stopped on its way to sleep, and one that was simply
+            // interrupted, resume fetching. That difference is the whole of what a
+            // person means by "it should pick up where it left off, except the one
+            // I stopped on purpose". Read the marker before dropping the stale
+            // record — `remove_download` clears the marker too.
+            let was_paused = paused_by(&dir, rec.id) == Some(PausedBy::User);
             remove_download(&dir, rec.id);
             if was_paused {
                 self.restore_paused_download(rec);
@@ -2530,6 +3232,7 @@ mod held_prep_tests {
                 note: String::new(),
                 target: None,
                 relay: None,
+                live_only: false,
                 pause_flag: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 deposit_now: Default::default(),
                 attempt: Default::default(),
@@ -2822,6 +3525,46 @@ mod pause_download_tests {
     /// pause marker is set. A real user cancel (no marker) and every terminal outcome
     /// stay terminal. Getting this wrong either loses a paused download or leaves a
     /// cancelled one un-droppable.
+    /// The difference a phone depends on: a stop the machine made on its way to
+    /// sleep is undone on the way back, and a stop a person made is not. Both
+    /// are the same marker file, so the thing that tells them apart has to
+    /// survive a restart — which is why it is written *in* the marker rather
+    /// than remembered in memory that a suspended app does not keep.
+    #[test]
+    fn a_pause_remembers_who_made_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+
+        mark_paused(d, 1);
+        assert_eq!(paused_by(d, 1), Some(PausedBy::User));
+
+        mark_paused_by(d, 2, PausedBy::System);
+        assert_eq!(paused_by(d, 2), Some(PausedBy::System));
+
+        // Nothing paused reads as nobody, not as a person.
+        assert_eq!(paused_by(d, 3), None);
+    }
+
+    /// Markers written before this existed are empty files, and an empty marker
+    /// has to keep meaning what it used to: a person's pause. Reading it as the
+    /// system's would silently restart, on the next launch, a download somebody
+    /// deliberately stopped.
+    #[test]
+    fn an_old_empty_marker_still_means_a_person() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(paused_marker_path(dir.path(), 9), []).unwrap();
+        assert_eq!(paused_by(dir.path(), 9), Some(PausedBy::User));
+    }
+
+    /// And clearing still clears, whoever wrote it.
+    #[test]
+    fn resuming_removes_the_mark_whoever_left_it() {
+        let dir = tempfile::tempdir().unwrap();
+        mark_paused_by(dir.path(), 4, PausedBy::System);
+        clear_paused(dir.path(), 4);
+        assert_eq!(paused_by(dir.path(), 4), None);
+    }
+
     #[test]
     fn a_download_parks_as_paused_exactly_when_it_should() {
         let p = PathBuf::from("/tmp/x");
@@ -3119,6 +3862,84 @@ mod waiting_reason_tests {
         assert_eq!(WaitingReason::TooLarge.detail(), None);
     }
 
+    /// What the phone may throw away, and what it must not.
+    ///
+    /// The picker on a phone hands over a *copy* of the file somebody chose, and
+    /// that copy is the send's payload for as long as the send could still
+    /// resume — which is across app restarts, because a send resumes from the
+    /// record naming this path. The embedder deletes the rest; this is the list
+    /// that stops it deleting the wrong one.
+    #[test]
+    fn a_send_still_on_disk_claims_the_file_it_would_resume_from() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        let m = TransferManager::with_state_dir(
+            Identity::generate(),
+            None,
+            dir.path().to_path_buf(),
+            Some(state.clone()),
+        );
+        assert!(
+            m.sources_still_needed().is_empty(),
+            "nothing is claimed before anything is sent"
+        );
+
+        persist_sendto(
+            &state,
+            &SendToRecord {
+                id: 7,
+                recipient: vec![0; 32],
+                payload: "/app/picked/IMG_5629.mov".into(),
+                name: "IMG_5629.mov".into(),
+                archive: false,
+                paused: true,
+                reason: String::new(),
+                note: String::new(),
+                target: None,
+                relay: None,
+                live_only: false,
+            },
+        );
+
+        let needed = m.sources_still_needed();
+        assert!(
+            needed.contains(&PathBuf::from("/app/picked/IMG_5629.mov")),
+            "a paused send still needs the copy it would resume from: {needed:?}"
+        );
+    }
+
+    /// And once the record is gone, so is the claim — which is what makes the
+    /// sweep a rule rather than a timer.
+    #[test]
+    fn a_send_that_is_over_claims_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        let m = TransferManager::with_state_dir(
+            Identity::generate(),
+            None,
+            dir.path().to_path_buf(),
+            Some(state.clone()),
+        );
+        persist_sendto(
+            &state,
+            &SendToRecord {
+                id: 8,
+                recipient: vec![0; 32],
+                payload: "/app/picked/gone.mov".into(),
+                name: "gone.mov".into(),
+                archive: false,
+                paused: false,
+                reason: String::new(),
+                note: String::new(),
+                target: None,
+                relay: None,
+                live_only: false,
+            },
+        );
+        remove_sendto(&state, 8);
+        assert!(m.sources_still_needed().is_empty());
+    }
+
     /// A code must not outlive the wait it explains. The row goes active, the
     /// status says so, and a client reading the code without re-checking the
     /// status would otherwise still be told the file is "offered".
@@ -3138,5 +3959,62 @@ mod waiting_reason_tests {
             active.waiting_code, "",
             "an active row must not still explain why it was waiting"
         );
+    }
+}
+
+#[cfg(test)]
+mod pending_share_tests {
+    use super::*;
+
+    /// A daemon that stops while a share is still being read and hashed brings
+    /// it back and finishes it: the request that started it has already
+    /// answered, and a printed code may already point at it.
+    #[tokio::test]
+    async fn a_share_interrupted_while_preparing_is_prepared_again() {
+        let state = tempfile::tempdir().unwrap();
+        let dl = tempfile::tempdir().unwrap();
+        let f = state.path().join("photo.jpg");
+        std::fs::write(&f, vec![4u8; 70_000]).unwrap();
+        persist_pending_share(
+            state.path(),
+            &PendingShareRecord {
+                id: 7,
+                payload: f.display().to_string(),
+                name: "photo.jpg".into(),
+                archive: false,
+                seed_relay: None,
+                code: None,
+            },
+        );
+
+        let m = TransferManager::with_state_dir(
+            Identity::generate(),
+            None,
+            dl.path().to_path_buf(),
+            Some(state.path().to_path_buf()),
+        );
+        let mut events = m.subscribe();
+        assert!(m.resume_incomplete() >= 1);
+        let ticket = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+            loop {
+                if let Ok(ManagerEvent::TicketReady { ticket, .. }) = events.recv().await {
+                    return ticket;
+                }
+            }
+        })
+        .await
+        .expect("prepared again");
+        assert!(ticket.starts_with("arvc"));
+        let row = m
+            .list()
+            .into_iter()
+            .find(|t| t.name == "photo.jpg")
+            .unwrap();
+        assert_eq!(row.ticket.as_deref(), Some(ticket.as_str()));
+        assert!(
+            load_pending_shares(state.path()).is_empty(),
+            "the send record has taken over"
+        );
+        assert_eq!(load_sends(state.path()).len(), 1);
     }
 }

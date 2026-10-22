@@ -819,7 +819,8 @@ describe("the send panel", () => {
       .mockResolvedValue([pick("scelto.txt")]);
     await openSend();
     fireEvent.click(screen.getByText("Files…"));
-    await waitFor(() => expect(spy).toHaveBeenCalledWith(false));
+    // Not a folder, and not the photo library: this is the document picker.
+    await waitFor(() => expect(spy).toHaveBeenCalledWith(false, false));
     expect(await screen.findByText("scelto.txt")).toBeDefined();
   });
 
@@ -1097,6 +1098,71 @@ describe("the send panel", () => {
     expect(
       await screen.findByText("https://relay.test/dl/abc#key")
     ).toBeTruthy();
+  });
+
+  it("130b. a link still uploading shows how far it has got, then its address", async () => {
+    harness.uploadAs = 77;
+    useStore.setState({ sheetPicks: [pick("a.txt")] });
+    render(<App />);
+    fireEvent.click(await screen.findByText("Link"));
+    fireEvent.click(screen.getByText(en["send.submitLink"]));
+    // No address yet — the relay does not have the file — and the panel says
+    // so, rather than sitting on a spinner that reads like a stuck daemon.
+    expect(await screen.findByText(en["send.uploadingNote"])).toBeTruthy();
+    act(() => {
+      harness.emit({
+        started: { id: 77, direction: "send", name: "a.txt", total_size: 1000 },
+      });
+      harness.emit({ progress: { id: 77, transferred: 400, total_size: 1000 } });
+    });
+    expect(
+      await screen.findByText(en["send.uploadingTitle"]("400 B", "1000 B"))
+    ).toBeTruthy();
+    act(() => {
+      harness.emit({ link_ready: { id: 77, link: "https://relay.test/dl/xyz#k" } });
+    });
+    expect(await screen.findByText("https://relay.test/dl/xyz#k")).toBeTruthy();
+    expect(screen.queryByText(en["send.uploadingNote"])).toBeNull();
+  });
+
+  it("a deposit still uploading turns into its ticket when it lands", async () => {
+    harness.uploadAs = 78;
+    harness.snapshot.contacts = [dto.contact({ name: "proj" })];
+    useStore.setState({ sheetPicks: [pick("a.txt")] });
+    render(<App />);
+    fireEvent.click(await screen.findByText("proj"));
+    fireEvent.click(screen.getByLabelText(en["send.depositLabel"]));
+    fireEvent.click(await screen.findByText(en["send.submitDeposit"]));
+    expect(await screen.findByText(en["send.uploadingNote"])).toBeTruthy();
+    // The event says only that it landed; the ticket is read off the row.
+    harness.snapshot.transfers = [
+      dto.transfer({ id: 78, status: "deposited", ticket: MAILBOX_TICKET }),
+    ];
+    act(() => {
+      harness.emit({ deposited: { id: 78 } });
+    });
+    await waitFor(() =>
+      expect(screen.queryByText(en["send.uploadingNote"])).toBeNull()
+    );
+  });
+
+  it("a ticket still being prepared says so, then shows itself", async () => {
+    harness.uploadAs = 79;
+    useStore.setState({ sheetPicks: [pick("a.txt")] });
+    render(<App />);
+    fireEvent.click(await screen.findByText("Ticket"));
+    fireEvent.click(screen.getByText(en["send.submitTicket"]));
+    expect(await screen.findByText(en["send.preparingTitle"])).toBeTruthy();
+    act(() => {
+      harness.emit({
+        started: { id: 79, direction: "send", name: "a.txt", total_size: 10 },
+      });
+      harness.emit({ preparing: { id: 79 } });
+      harness.emit({ ticket_ready: { id: 79, ticket: P2P_TICKET } });
+    });
+    await waitFor(() =>
+      expect(screen.queryByText(en["send.preparingTitle"])).toBeNull()
+    );
   });
 
   it("131. a relay that refuses links says so instead of showing nothing", async () => {
@@ -1746,6 +1812,30 @@ describe("settings", () => {
 // ---------------------------------------------------------------------------
 
 describe("the failure notice", () => {
+  it("a file the relay will not hold is said plainly, with the relay's limit", async () => {
+    render(<App />);
+    useStore.setState({
+      actionError:
+        "Couldn't create the link: this relay does not accept files this large",
+      actionRefusal: { code: "tooLarge", limitBytes: 5 * 1024 ** 3 },
+    });
+    await waitFor(() => expect(toastText()).toContain("5.0 GB"));
+    expect(toastText()).toContain("does not accept files this large");
+    // The word "relay" in the sentence used to route this to "set up a relay",
+    // which the reader has — it is the one that just refused them.
+    expect(toastText()).not.toContain("Settings");
+  });
+
+  it("the same refusal from a relay that named no limit still says what it means", async () => {
+    render(<App />);
+    useStore.setState({
+      actionError: "Couldn't create the link: this relay does not accept files this large",
+      actionRefusal: { code: "tooLarge", limitBytes: null },
+    });
+    await waitFor(() => expect(toastText()).toContain("does not accept files this large"));
+    expect(toastText()).not.toContain("limit is");
+  });
+
   it("138. it can be dismissed", async () => {
     render(<App />);
     useStore.setState({ actionError: "something went wrong" });

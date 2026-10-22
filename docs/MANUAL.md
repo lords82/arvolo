@@ -234,6 +234,92 @@ stdout**, narration goes to stderr, so piping always yields exactly the thing.
 Add `-v` to any command to have it narrate what it's doing (`-vv`, `-vvv` for
 more). Run `arvolo <cmd> --help` for the full flag list.
 
+## Which way to send
+
+The flags are above; this is the part the flag list cannot say — **which shape to
+reach for, and what each one asks you to trust.** Seven of them, and they get
+easier to hold in mind once you see the two axes they sit on: **who it is
+addressed to** (sealed to one identity's key, or a bearer capability that anyone
+holding it can redeem) and **who holds the bytes** while it travels (you, the
+relay, or the other receivers). Everything else follows from those two.
+
+**1. `send --to <who>` — sealed, to one person.** The only addressed shape. The
+file is HPKE-sealed in auth mode to the recipient's key, so only they can open it
+*and* they learn authentically that it was you (`PROTOCOL.md` §2.2); a `--note`
+rides inside that sealed offer, where the relay cannot read it. Online, the bytes
+go straight P2P and no relay is touched at all; offline, it lands in their mailbox
+by itself. Reach for it whenever you know who you are sending to: it is the only
+shape with an authenticated sender, a delivery receipt (`arvolo status` says
+whether it merely *arrived* on a device or the recipient actually *took* it) and a withdrawal that really
+deletes. It is also the only one with **relay backfill** (§7.3) — close the laptop
+mid-transfer and the relay finishes the job. What it cannot do is be shared:
+one recipient, by construction.
+
+**2. `send --code` — the short code.** `4821-crater-mango@relay`: two words and a
+number, dictable down a phone line, scannable with `--qr`. The data still travels
+P2P — the relay only brokers the appointment, behind a SPAKE2 PAKE, so it sees
+neither the bytes nor enough to stand in the middle (§7.2). Reach for it when the
+other person is in the room or on the call and neither of you wants to add
+anything to any address book; it is also the front door of pairing. It asks for a
+reachable relay *for the rendezvous*, not for the data, and it is a bearer
+capability for as long as it is open — though three wrong guesses retire it.
+
+**3. `send` with no `--to` (or `--ticket`) — the ticket.** A `.arvolo` file beside
+the original, or the raw `arvc…` on stdout for pipes. Inside are the chunk hashes,
+the content key and your node address. Reach for it when you **already have a
+private channel** — a messenger, an internal chat, a USB stick on which the ticket
+weighs a few KB — and want no relay anywhere in the path (§7.1: a pure `arvc`
+transfer involves no relay to trust). Also when the same thing goes to twenty
+people: one ticket, twenty receivers. The cost is the bearer property — whoever
+gets the ticket can fetch — and that you must stay reachable unless the relay
+holds the pieces.
+
+**4. The mailbox — `--mailbox`, and the `arvm…` ticket.** Sealed to the recipient
+and parked on the relay: `--ttl` (7 days by default), `--max` (1 by default, so it
+burns on reading), an optional `--password`, revocable with `arvolo cancel`, and
+you can ask the relay whether it was collected (§7.4). Reach for it when the other
+side is asleep, switched off, or **is a phone** — store-and-forward is the whole
+architecture of the mobile client. Someone who intercepts an `arvm…` learns
+nothing, but can **burn** the one-shot download: a denial of service, never a
+disclosure.
+
+**5. `send --link` — the browser URL.** `https://<relay>/dl/<claim>#<key>`, with
+the key in the fragment browsers never send to the server. No Arvolo on the other
+side, no account, and it keeps working after you go offline. Reach for it when the
+recipient is not an Arvolo user at all. This is the **one** shape where the relay
+has to be trusted — it serves the JavaScript that decrypts (§7.6, §9.1(5)) — and
+whoever has the URL has the file.
+
+**6. The swarm — not a command, but what happens to a shared ticket.** On by
+default. Several receivers of one `arvc…` feed each other, rarest piece first,
+with the relay as one more source, resume across restarts and an endgame on the
+last few pieces (`SWARM-DESIGN.md`). It is what makes the same file to a team, a
+classroom or a conference not cost you N uploads. The receivers discover each
+other through the tracker, which means they see each other's node addresses;
+`ARVOLO_SWARM=off` declines that. A `send --to` is never part of a swarm — sealed
+1:1 sends stay 1:1.
+
+**7. Between your own machines — `--to me --device <name>`.** The address book
+travels with the identity, and the aim picks which of your machines takes it;
+without it, the first one awake does. See [Sending to yourself](#sending-to-yourself).
+
+And one thing that is not a shape but decides how all of them behave:
+**`listen` / `daemon`**. A presence beacon tells senders you are reachable, so
+they choose the live path over the mailbox, and your trust settings decide what
+comes in without being asked. The price is written plainly in §7.5: the beacon
+announces online/offline to anyone who knows your public id.
+
+| The question you are actually asking | The answer |
+|---|---|
+| I know who they are and have their key | `--to` — the only authenticated sender |
+| They are in the room, or on the call | `--code` (with `--qr`) |
+| They do not use Arvolo | `--link` |
+| I want no relay anywhere in the path | the ticket, over a channel you already trust |
+| They are away, and so am I in a minute | `--mailbox` |
+| Twenty people, the same file | one shared ticket; the swarm engages by itself |
+| My other machine | `--to me --device …` |
+| It has to survive my laptop closing | `--to` (backfill), `--mailbox`, or `--link` |
+
 ## Multiple devices
 
 Pairing shares **one identity** across your devices, so contacts see a single id

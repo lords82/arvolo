@@ -45,6 +45,9 @@ pub(super) struct Held {
     /// the same reason as `target`: it belongs to the send, and a pause/resume or
     /// a restart has to route to the same place the first attempt did.
     pub(super) relay: Option<String>,
+    /// Never the mailbox: the loop waits for them to be online and goes direct,
+    /// or keeps waiting. See `TransferManager::send_to`.
+    pub(super) live_only: bool,
     /// Flipped by [`TransferManager::pause`] so the running loop, once its token is
     /// cancelled, knows to pause (keep the transfer) rather than cancel (drop it).
     pub(super) pause_flag: Arc<std::sync::atomic::AtomicBool>,
@@ -85,6 +88,12 @@ pub(super) struct Inner {
     /// `pause` flips it to false *before* cancelling so the fetch slips away
     /// like a drop (tail kept warm) instead of telling the sender to stop.
     pub(super) recv_aborts: Mutex<HashMap<u64, Arc<std::sync::atomic::AtomicBool>>>,
+    /// Inbox offers whose ack waits on the download they started: transfer id →
+    /// offer id. A mailbox pickup acks only once its bytes are on disk (or the
+    /// deposit is known gone), so that an app killed mid-fetch finds the offer
+    /// still in its inbox and the deposit still on the relay — see
+    /// `Mailbox::fetch_plan_held` in the relay for the other half.
+    pub(super) deferred_acks: Mutex<HashMap<u64, String>>,
     /// Delivery state for active/paused `send --to` transfers (for pause/resume).
     pub(super) held: Mutex<HashMap<u64, Held>>,
     /// What each live chunked download is fetching, as
@@ -118,6 +127,15 @@ pub(super) struct Inner {
     /// offer ([`Offer::sender_name`]). Empty = don't advertise a name. Set once at
     /// startup via [`TransferManager::set_display_name`] before any `send_to`.
     pub(super) display_name: Mutex<String>,
+    /// The platform's say in where a finished download comes to rest (see
+    /// [`SavePublisher`]). Unset on every desktop, where a download is already
+    /// where it belongs; set once at startup by a mobile shell.
+    ///
+    /// A `OnceLock` rather than a `Mutex` because it is written once before any
+    /// transfer runs and read on every one that finishes: there is nothing to
+    /// serialize, and a publisher that could change mid-download would mean two
+    /// halves of one file going to two different places.
+    pub(super) publisher: std::sync::OnceLock<Arc<dyn SavePublisher>>,
     /// This device's local id, stamped on every offer we post
     /// ([`Offer::origin`](crate::presence::Offer::origin)) and handed to the inbox
     /// so it can drop our own offers back out of our own poll. `None` for a client
@@ -125,6 +143,9 @@ pub(super) struct Inner {
     /// from another of its devices'. Set at startup via
     /// [`TransferManager::set_device_id`], like the display name.
     pub(super) device_id: Mutex<Option<crate::sync::DeviceId>>,
+    /// What each upload in flight was sealed with and which relay session it
+    /// is filling — see `uploads.rs`. Keyed by transfer id.
+    pub(super) uploads: Mutex<HashMap<u64, super::uploads::Resumable>>,
 }
 
 impl Inner {
@@ -246,6 +267,23 @@ impl Inner {
         }
     }
 
+    /// End a transfer with a reason: the status, the code beside it, and the
+    /// event — in that order, so nothing reads the event before the row says
+    /// the same thing. The one door every failure goes through.
+    pub(super) fn fail(&self, id: u64, reason: &super::FailReason) {
+        let text = reason.text();
+        self.set_status(id, TransferStatus::Failed(text.clone()));
+        if let Some(t) = self.transfers.lock().unwrap().get_mut(&id) {
+            t.fail_code = reason.code().to_string();
+            t.fail_detail = reason.detail().unwrap_or("").to_string();
+        }
+        self.emit(ManagerEvent::Failed {
+            id,
+            error: text,
+            code: reason.code().to_string(),
+        });
+    }
+
     /// Record why a send is waiting, as the code a client translates. Set right
     /// after the status, which is why it does not clear itself.
     pub(super) fn set_waiting_code(&self, id: u64, code: &str, detail: &str) {
@@ -263,6 +301,14 @@ impl Inner {
         }
     }
 
+    /// Remember the platform handle a publisher gave a completed receive, for the
+    /// rows whose file cannot be named by path (see [`SavedLocation::Uri`]).
+    pub(super) fn set_saved_uri(&self, id: u64, uri: String) {
+        if let Some(t) = self.transfers.lock().unwrap().get_mut(&id) {
+            t.saved_uri = Some(uri);
+        }
+    }
+
     /// Record how far a deposited send's inbox offer has got, as last reported.
     pub(super) fn set_offer_status(&self, id: u64, status: &str) {
         if let Some(t) = self.transfers.lock().unwrap().get_mut(&id) {
@@ -273,6 +319,18 @@ impl Inner {
     pub(super) fn set_progress(&self, id: u64, transferred: u64) {
         if let Some(t) = self.transfers.lock().unwrap().get_mut(&id) {
             t.transferred = transferred;
+        }
+    }
+
+    pub(super) fn set_ticket(&self, id: u64, ticket: String) {
+        if let Some(t) = self.transfers.lock().unwrap().get_mut(&id) {
+            t.ticket = (!ticket.is_empty()).then_some(ticket);
+        }
+    }
+
+    pub(super) fn set_link(&self, id: u64, link: String) {
+        if let Some(t) = self.transfers.lock().unwrap().get_mut(&id) {
+            t.link = Some(link);
         }
     }
 

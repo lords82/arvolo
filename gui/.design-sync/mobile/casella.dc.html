@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="_ds/arvolo-design-system-6aa4e0c1-5b2c-49ff-bc98-2fafdfd17733/_ds_bundle.css">
+<link rel="stylesheet" href="_ds/arvolo-design-system-6aa4e0c1-5b2c-49ff-bc98-2fafdfd17733/styles.css">
+<script defer src="_ds/arvolo-design-system-6aa4e0c1-5b2c-49ff-bc98-2fafdfd17733/_ds_bundle.js"></script>
+<style>
+body{margin:0;background:#211d19;font-family:var(--font)}
+a{color:var(--in-strong)}a:hover{color:var(--in)}
+.phone{width:390px;height:844px;border-radius:46px;border:11px solid #0d0b09;background:var(--canvas);overflow:hidden;position:relative;display:flex;flex-direction:column;box-shadow:0 30px 70px rgba(0,0,0,.55)}
+.scr{flex:1;overflow:hidden;display:flex;flex-direction:column}
+.scroll{flex:1;overflow:auto;padding:10px 14px 16px;display:flex;flex-direction:column;gap:12px}
+.appbar{display:flex;align-items:center;gap:10px;padding:6px 14px 10px;border-bottom:1px solid var(--line)}
+.tabbar{display:flex;align-items:flex-end;justify-content:space-around;gap:2px;padding:8px 8px 22px;border-top:1px solid var(--line);background:var(--surface)}
+.tabi{min-width:56px;min-height:44px;background:none;border:0;display:flex;flex-direction:column;align-items:center;gap:3px;font:500 10.5px var(--font);color:var(--ink-mut);cursor:pointer;padding:4px 2px}
+.tabi[data-on="1"]{color:var(--ink)}
+.lrow{display:flex;gap:10px;align-items:flex-start;width:100%;background:none;border:0;padding:11px 2px;text-align:left;cursor:pointer;border-bottom:1px solid var(--line);color:var(--ink);font-family:var(--font)}
+.lrow:active{background:var(--surface-2)}
+.srow{display:flex;align-items:center;gap:10px;padding:12px 2px;border-bottom:1px solid var(--line);min-height:44px}
+.sheet2{position:absolute;inset:0;background:var(--canvas);display:flex;flex-direction:column;z-index:5}
+.chip{border:1px solid var(--line-strong);border-radius:var(--r-pill);padding:5px 11px;font-size:12px;color:var(--ink-sec);background:var(--surface);white-space:nowrap}
+.obtn{display:flex;align-items:center;gap:12px;width:100%;min-height:60px;padding:12px 14px;border:1px solid var(--line-strong);border-radius:var(--r-lg);background:var(--surface);color:var(--ink);font-family:var(--font);cursor:pointer;text-align:left;box-shadow:var(--shadow-1);transition:border-color var(--t) var(--ease),background var(--t) var(--ease),transform var(--t-fast) var(--ease)}
+.obtn:hover{border-color:var(--out-line);background:var(--surface-2)}
+.obtn:active{transform:scale(.99)}
+.obtn-i{width:34px;height:34px;flex:none;border-radius:var(--r-md);background:var(--out-soft);color:var(--out-strong);display:flex;align-items:center;justify-content:center}
+.sendbtn{display:flex;align-items:center;gap:12px;width:100%;min-height:56px;padding:10px 14px;border:0;border-radius:var(--r-lg);background:var(--out);color:#22160a;font-family:var(--font);cursor:pointer;box-shadow:var(--shadow-2);transition:filter var(--t) var(--ease),transform var(--t-fast) var(--ease)}
+.sendbtn:hover{filter:brightness(1.05)}
+.sendbtn:active{transform:scale(.99)}
+.sendbtn-i{width:34px;height:34px;flex:none;border-radius:var(--r-pill);background:rgba(34,22,10,.14);display:flex;align-items:center;justify-content:center}
+.thumb{width:64px;height:64px;border-radius:var(--r-md);background:var(--surface-3);border:1px solid var(--line);flex:none}
+</style>
+</helmet>
+
+<div style="min-height:100vh;display:flex;gap:34px;justify-content:center;align-items:flex-start;padding:44px 24px 60px">
+
+<div style="display:flex;flex-direction:column;gap:12px;align-items:center">
+<div class="phone">
+
+<div style="display:flex;align-items:center;justify-content:space-between;padding:12px 22px 2px;font-size:12.5px;font-weight:600;color:var(--ink)"><span>9:41</span><span style="letter-spacing:2px;color:var(--ink-mut)">••• ⌁ ▮</span></div>
+
+<div class="scr">
+
+<sc-if value="{{ isCasella }}" hint-placeholder-val="{{ true }}">
+<div class="appbar"><span class="t-title" style="flex:1">Casella</span>
+<x-import component-from-global-scope="Arvolo.IconButton" label="Cerca" onClick="{{ openCerca }}" hint-size="32px,32px"><x-import component-from-global-scope="Arvolo.Icon.Search" hint-size="16px,16px"></x-import></x-import>
+<x-import component-from-global-scope="Arvolo.IconButton" label="Nuovo invio" onClick="{{ openInvio }}" hint-size="32px,32px"><x-import component-from-global-scope="Arvolo.Icon.Plus" hint-size="16px,16px"></x-import></x-import>
+</div>
+<div class="scroll" style="gap:0">
+
+<sc-if value="{{ notifica }}" hint-placeholder-val="{{ true }}">
+<div class="card card-pad" style="margin:4px 0 10px;border-color:var(--in-line);background:var(--in-soft);display:flex;gap:10px;align-items:flex-start">
+<x-import component-from-global-scope="Arvolo.Icon.Receive" hint-size="16px,16px"></x-import>
+<div style="flex:1;min-width:0"><div style="font-size:13px;font-weight:600">Giulia ti ha mandato qualcosa</div><div class="t-xs t-mut">Risveglio senza contenuto · scaricato e decifrato sul telefono</div></div>
+<x-import component-from-global-scope="Arvolo.Button" size="sm" variant="in" onClick="{{ openArrivo }}" hint-size="64px,28px">Apri</x-import>
+</div>
+</sc-if>
+
+<button class="lrow" onClick="{{ openThread }}">
+<x-import component-from-global-scope="Arvolo.Avatar" name="Giulia" id="arv1gq7z" size="{{ av }}" ring="in" hint-size="36px,36px"></x-import>
+<div style="flex:1;min-width:0">
+<div style="display:flex;align-items:baseline;gap:8px"><span style="font-size:14px;font-weight:600;flex:1" class="truncate">Giulia</span><span class="t-xs t-mut">14:02</span></div>
+<div class="t-xs t-mut truncate" style="margin:1px 0 6px">↓ vacanze-2026.zip · 248 MB · in arrivo</div>
+<x-import component-from-global-scope="Arvolo.Progress" t="{{ txIn }}" hint-size="100%,6px"></x-import>
+</div>
+</button>
+
+<button class="lrow" onClick="{{ openThread }}">
+<x-import component-from-global-scope="Arvolo.Avatar" name="MacBook di Lorenzo" id="arv1lm22" size="{{ av }}" ring="out" hint-size="36px,36px"></x-import>
+<div style="flex:1;min-width:0">
+<div style="display:flex;align-items:baseline;gap:8px"><span style="font-size:14px;font-weight:600;flex:1" class="truncate">MacBook di Lorenzo</span><span class="t-xs t-mut">13:58</span></div>
+<div class="t-xs t-mut truncate" style="margin:1px 0 6px">↑ contratto-bozza.pdf · 4,8 MB · diretto</div>
+<x-import component-from-global-scope="Arvolo.Progress" t="{{ txOut }}" hint-size="100%,6px"></x-import>
+</div>
+</button>
+
+<button class="lrow" onClick="{{ openThread }}">
+<x-import component-from-global-scope="Arvolo.Avatar" name="Marco" id="arv1mk10" size="{{ av }}" hint-size="36px,36px"></x-import>
+<div style="flex:1;min-width:0">
+<div style="display:flex;align-items:baseline;gap:8px"><span style="font-size:14px;font-weight:600;flex:1" class="truncate">Marco</span><span class="t-xs t-mut">ieri</span></div>
+<div class="t-xs t-mut truncate" style="margin-top:1px">↑ rendiconto.zip · depositato, non ancora ritirato</div>
+<div style="margin-top:6px;display:flex;gap:6px"><x-import component-from-global-scope="Arvolo.Badge" kind="warn" hint-size="auto,20px">in attesa</x-import><x-import component-from-global-scope="Arvolo.Badge" kind="neutral" hint-size="auto,20px">scade fra 6 g</x-import></div>
+</div>
+</button>
+
+<button class="lrow" onClick="{{ openThread }}">
+<x-import component-from-global-scope="Arvolo.Avatar" name="Studio 3B" id="arv1s3b0" size="{{ av }}" hint-size="36px,36px"></x-import>
+<div style="flex:1;min-width:0">
+<div style="display:flex;align-items:baseline;gap:8px"><span style="font-size:14px;font-weight:600;flex:1" class="truncate">Studio 3B</span><span class="t-xs t-mut">lun</span></div>
+<div class="t-xs t-mut truncate" style="margin-top:1px">↓ 6 file · salvati in Download</div>
+</div>
+</button>
+
+<button class="lrow" style="border-bottom:0" onClick="{{ openThread }}">
+<div style="width:36px;height:36px;border-radius:var(--r-md);background:var(--surface-3);border:1px solid var(--line);display:flex;align-items:center;justify-content:center;flex:none"><x-import component-from-global-scope="Arvolo.Icon.Link" hint-size="16px,16px"></x-import></div>
+<div style="flex:1;min-width:0">
+<div style="display:flex;align-items:baseline;gap:8px"><span style="font-size:14px;font-weight:600;flex:1" class="truncate">Link pubblico</span><span class="t-xs t-mut">lun</span></div>
+<div class="t-xs t-mut truncate" style="margin-top:1px">2 download · scade fra 5 giorni</div>
+</div>
+</button>
+
+<div class="t-xs t-mut" style="padding:14px 2px 0">Scorri una riga per mettere in pausa, salvare o revocare.</div>
+</div>
+</sc-if>
+
+<sc-if value="{{ isPersone }}">
+<div class="appbar"><span class="t-title" style="flex:1">Persone</span>
+<x-import component-from-global-scope="Arvolo.IconButton" label="Aggiungi contatto" onClick="{{ goCodici }}" hint-size="32px,32px"><x-import component-from-global-scope="Arvolo.Icon.Plus" hint-size="16px,16px"></x-import></x-import>
+</div>
+<div class="scroll">
+<x-import component-from-global-scope="Arvolo.TextInput" placeholder="Cerca fra 12 contatti" hint-size="100%,38px"></x-import>
+<div class="card">
+<div class="srow" style="padding-left:12px;padding-right:12px">
+<x-import component-from-global-scope="Arvolo.Avatar" name="Giulia" id="arv1gq7z" size="{{ av }}" hint-size="36px,36px"></x-import>
+<div style="flex:1;min-width:0"><div style="font-size:14px;font-weight:600">Giulia</div><div class="t-xs t-mut">2 dispositivi · online</div></div>
+<x-import component-from-global-scope="Arvolo.TrustBadges" verified="{{ yes }}" trusted="{{ yes }}" hint-size="auto,20px"></x-import>
+</div>
+<div class="srow" style="padding-left:12px;padding-right:12px">
+<x-import component-from-global-scope="Arvolo.Avatar" name="Marco" id="arv1mk10" size="{{ av }}" hint-size="36px,36px"></x-import>
+<div style="flex:1;min-width:0"><div style="font-size:14px;font-weight:600">Marco</div><div class="t-xs t-mut">impronta da confrontare</div></div>
+<x-import component-from-global-scope="Arvolo.Badge" kind="warn" hint-size="auto,20px">da verificare</x-import>
+</div>
+<div class="srow" style="padding-left:12px;padding-right:12px;border-bottom:0">
+<x-import component-from-global-scope="Arvolo.Avatar" name="Studio 3B" id="arv1s3b0" size="{{ av }}" hint-size="36px,36px"></x-import>
+<div style="flex:1;min-width:0"><div style="font-size:14px;font-weight:600">Studio 3B</div><div class="t-xs t-mut">4 dispositivi</div></div>
+<x-import component-from-global-scope="Arvolo.TrustBadges" verified="{{ yes }}" hint-size="auto,20px"></x-import>
+</div>
+</div>
+
+<div class="card card-pad stack">
+<div class="section-head"><span class="t-head" style="flex:1">Marco — impronta</span><x-import component-from-global-scope="Arvolo.Badge" kind="trust" hint-size="auto,20px">SPAKE2</x-import></div>
+<x-import component-from-global-scope="Arvolo.Fingerprint" value="ancora muschio faro quarzo lino pioggia" hint-size="100%,60px"></x-import>
+<div class="t-xs t-mut">Leggetevela a voce, tutte e sei le parole, prima di fidarvi.</div>
+<div style="display:flex;gap:8px"><x-import component-from-global-scope="Arvolo.Button" variant="primary" block="{{ yes }}" hint-size="100%,40px">Coincide</x-import><x-import component-from-global-scope="Arvolo.Button" variant="danger" block="{{ yes }}" hint-size="100%,40px">Non coincide</x-import></div>
+</div>
+</div>
+</sc-if>
+
+<sc-if value="{{ isCodici }}">
+<div class="appbar"><span class="t-title" style="flex:1">Codici</span>
+<x-import component-from-global-scope="Arvolo.Badge" kind="ok" hint-size="auto,20px">attivo</x-import>
+</div>
+<div class="scroll" style="padding-left:8px;padding-right:8px">
+<x-import component-from-global-scope="Arvolo.Segmented" label="Modo" value="{{ codeMode }}" onChange="{{ setCodeMode }}" options="{{ codeOptions }}" block="{{ yes }}" hint-size="100%,34px"></x-import>
+<sc-if value="{{ showCode }}" hint-placeholder-val="{{ true }}">
+<x-import component-from-global-scope="Arvolo.CodeHero" value="riva-torre-vetro" qr="{{ yes }}" caption="Valido finché l'app resta in primo piano" hint-size="100%,300px"></x-import>
+<div style="display:flex;gap:8px"><x-import component-from-global-scope="Arvolo.Button" block="{{ yes }}" hint-size="100%,40px">Copia</x-import><x-import component-from-global-scope="Arvolo.Button" block="{{ yes }}" hint-size="100%,40px">Condividi</x-import></div>
+<div class="card card-pad t-xs t-mut">Se chiudi Arvolo il codice va in pausa: il trasferimento riprende da dove era quando riapri l'app.</div>
+</sc-if>
+<sc-if value="{{ showScan }}">
+<div style="height:300px;border-radius:var(--r-lg);background:#0d0b09;display:flex;align-items:center;justify-content:center"><div style="width:170px;height:170px;border:2px dashed rgba(255,255,255,.7);border-radius:var(--r-md)"></div></div>
+<div class="t-sm t-mut" style="text-align:center">Inquadra il QR mostrato dall'altro dispositivo</div>
+<x-import component-from-global-scope="Arvolo.Button" block="{{ yes }}" hint-size="100%,40px">Incolla un codice</x-import>
+</sc-if>
+</div>
+</sc-if>
+
+<sc-if value="{{ isTu }}">
+<div class="appbar"><span class="t-title" style="flex:1">Tu</span></div>
+<div class="scroll">
+<div class="card card-pad" style="display:flex;gap:12px;align-items:center">
+<x-import component-from-global-scope="Arvolo.Avatar" name="iPhone di Sara" id="arv1k4m97tqz" size="{{ avBig }}" hint-size="44px,44px"></x-import>
+<div style="flex:1;min-width:0"><div style="font-size:14px;font-weight:600">iPhone di Sara</div><x-import component-from-global-scope="Arvolo.ShortId" value="arv1k4m97tqzp3nd" hint-size="auto,16px"></x-import></div>
+</div>
+<div class="card">
+<x-import component-from-global-scope="Arvolo.SwitchRow" title="Notifiche push" desc="Il relay manda solo un risveglio: nessun nome, nessun mittente." checked="{{ push }}" onChange="{{ setPush }}" hint-size="100%,64px"></x-import>
+<x-import component-from-global-scope="Arvolo.SwitchRow" title="Salva automaticamente" desc="Solo dai contatti verificati." checked="{{ autosave }}" onChange="{{ setAutosave }}" hint-size="100%,64px"></x-import>
+<x-import component-from-global-scope="Arvolo.SwitchRow" title="Solo Wi-Fi" desc="I depositi grandi aspettano una rete senza limiti." checked="{{ wifi }}" onChange="{{ setWifi }}" hint-size="100%,64px"></x-import>
+</div>
+<div class="card">
+<div class="srow" style="padding-left:14px;padding-right:14px"><span style="flex:1;font-size:14px">I tuoi dispositivi</span><span class="t-sm t-mut">3</span><x-import component-from-global-scope="Arvolo.Icon.ChevronRight" hint-size="16px,16px"></x-import></div>
+<button class="srow" style="padding-left:14px;padding-right:14px;width:100%;background:none;border:0;border-bottom:1px solid var(--line);color:var(--ink);font-family:var(--font);cursor:pointer" onClick="{{ openDepositi }}"><span style="flex:1;font-size:14px;text-align:left">Depositi e link</span><span class="t-sm t-mut">2 attivi</span><x-import component-from-global-scope="Arvolo.Icon.ChevronRight" hint-size="16px,16px"></x-import></button>
+<div class="srow" style="padding-left:14px;padding-right:14px;border-bottom:0"><span style="flex:1;font-size:14px">Relay</span><span class="t-sm t-mut">predefinito</span><x-import component-from-global-scope="Arvolo.Icon.ChevronRight" hint-size="16px,16px"></x-import></div>
+</div>
+<div class="t-xs t-mut" style="padding:0 2px">Arvolo 1.0 · identità nel portachiavi del telefono</div>
+</div>
+</sc-if>
+
+</div>
+
+<div class="tabbar">
+<button class="tabi" data-on="{{ onCasella }}" onClick="{{ goCasella }}"><x-import component-from-global-scope="Arvolo.Icon.Transfers" hint-size="18px,18px"></x-import>Casella</button>
+<button class="tabi" data-on="{{ onPersone }}" onClick="{{ goPersone }}"><x-import component-from-global-scope="Arvolo.Icon.People" hint-size="18px,18px"></x-import>Persone</button>
+<button class="tabi" style="color:var(--ink)" onClick="{{ openInvio }}"><span style="width:46px;height:34px;border-radius:var(--r-pill);background:var(--out);color:#22160a;display:flex;align-items:center;justify-content:center"><x-import component-from-global-scope="Arvolo.Icon.Send" hint-size="18px,18px"></x-import></span>Invia</button>
+<button class="tabi" data-on="{{ onCodici }}" onClick="{{ goCodici }}"><x-import component-from-global-scope="Arvolo.Icon.Qr" hint-size="18px,18px"></x-import>Codici</button>
+<button class="tabi" data-on="{{ onTu }}" onClick="{{ goTu }}"><x-import component-from-global-scope="Arvolo.Icon.Settings" hint-size="18px,18px"></x-import>Tu</button>
+</div>
+
+<sc-if value="{{ sheetThread }}">
+<div class="sheet2">
+<div class="appbar" style="padding-top:16px">
+<x-import component-from-global-scope="Arvolo.IconButton" label="Chiudi" onClick="{{ closeSheet }}" hint-size="32px,32px"><x-import component-from-global-scope="Arvolo.Icon.Close" hint-size="16px,16px"></x-import></x-import>
+<x-import component-from-global-scope="Arvolo.Avatar" name="Giulia" id="arv1gq7z" size="{{ av }}" hint-size="36px,36px"></x-import>
+<div style="flex:1;min-width:0"><div style="font-size:15px;font-weight:600">Giulia</div><div class="t-xs t-mut">verificata · stessa rete, trasferimento diretto</div></div>
+</div>
+<div class="scroll">
+<div class="card card-pad stack" style="border-color:var(--in-line)">
+<div class="section-head"><span class="t-head" style="flex:1">In arrivo ora</span><x-import component-from-global-scope="Arvolo.Badge" kind="info" hint-size="auto,20px">248 MB</x-import></div>
+<div style="display:flex;gap:10px;align-items:center"><div class="thumb"></div><div style="min-width:0"><div style="font-size:14px;font-weight:600" class="truncate">vacanze-2026.zip</div><div class="t-xs t-mut" style="display:flex;gap:6px;align-items:center;margin-top:3px"><x-import component-from-global-scope="Arvolo.ExtChip" name="vacanze-2026.zip" hint-size="auto,16px"></x-import>3 file · scade fra 7 g</div></div></div>
+<x-import component-from-global-scope="Arvolo.Progress" t="{{ txIn }}" hint-size="100%,6px"></x-import>
+<div style="display:flex;gap:8px"><x-import component-from-global-scope="Arvolo.Button" variant="in" block="{{ yes }}" hint-size="100%,40px">Accetta e salva</x-import><x-import component-from-global-scope="Arvolo.Button" block="{{ yes }}" hint-size="100%,40px">Rifiuta</x-import></div>
+</div>
+<div class="t-label" style="padding:2px">Prima</div>
+<div class="card">
+<div class="srow" style="padding-left:12px;padding-right:12px"><div style="flex:1;min-width:0"><div style="font-size:13.5px;font-weight:600">note.md</div><div class="t-xs t-mut">↓ 8 KB · salvato in Download</div></div><x-import component-from-global-scope="Arvolo.Badge" kind="ok" hint-size="auto,20px">ricevuto</x-import></div>
+<div class="srow" style="padding-left:12px;padding-right:12px"><div style="flex:1;min-width:0"><div style="font-size:13.5px;font-weight:600">foto-cena.zip</div><div class="t-xs t-mut">↑ 40 MB · lun 18:11</div></div><x-import component-from-global-scope="Arvolo.Badge" kind="out" hint-size="auto,20px">consegnato</x-import></div>
+<div class="srow" style="padding-left:12px;padding-right:12px;border-bottom:0"><div style="flex:1;min-width:0"><div style="font-size:13.5px;font-weight:600">preventivo.pdf</div><div class="t-xs t-mut">↑ 1,1 MB · ritirato dal deposito</div></div><x-import component-from-global-scope="Arvolo.Badge" kind="out" hint-size="auto,20px">ritirato</x-import></div>
+</div>
+<x-import component-from-global-scope="Arvolo.Button" variant="primary" block="{{ yes }}" onClick="{{ openInvio }}" hint-size="100%,40px">Manda qualcosa a Giulia</x-import>
+</div>
+</div>
+</sc-if>
+
+<sc-if value="{{ sheetInvio }}">
+<div class="sheet2">
+<div class="appbar" style="padding-top:16px"><span class="t-title" style="flex:1">Nuovo invio</span>
+<x-import component-from-global-scope="Arvolo.IconButton" label="Chiudi" onClick="{{ closeSheet }}" hint-size="32px,32px"><x-import component-from-global-scope="Arvolo.Icon.Close" hint-size="16px,16px"></x-import></x-import>
+</div>
+<div class="scroll">
+<div class="t-label">A</div>
+<div style="display:flex;gap:8px;flex-wrap:wrap"><span class="chip" style="border-color:var(--out-line);background:var(--out-soft);color:var(--ink)">Giulia ✕</span><span class="chip">Lorenzo</span><span class="chip">Marco</span><span class="chip">Studio 3B</span><span class="chip">+ codice</span></div>
+<div class="t-label">Allegati</div>
+<div style="display:flex;gap:8px">
+<div class="thumb"></div><div class="thumb"></div><div class="thumb"></div>
+<div class="thumb" style="border-style:dashed;display:flex;align-items:center;justify-content:center"><x-import component-from-global-scope="Arvolo.Icon.Plus" hint-size="16px,16px"></x-import></div>
+</div>
+<div class="card card-pad stack-sm">
+<div style="display:flex;align-items:center;gap:8px"><span style="flex:1;font-size:13.5px;font-weight:600">Consegna</span><x-import component-from-global-scope="Arvolo.Badge" kind="out" hint-size="auto,20px">diretta se online</x-import></div>
+<div class="t-xs t-mut">Se Giulia non è raggiungibile, il file resta come deposito cifrato sul relay finché non lo ritira.</div>
+</div>
+<div class="card">
+<div class="srow" style="padding-left:14px;padding-right:14px"><span style="flex:1;font-size:14px">Scadenza deposito</span><span class="t-sm t-mut">7 giorni</span><x-import component-from-global-scope="Arvolo.Icon.ChevronDown" hint-size="16px,16px"></x-import></div>
+<div class="srow" style="padding-left:14px;padding-right:14px;border-bottom:0"><span style="flex:1;font-size:14px">Avvisami al ritiro</span><span class="t-sm t-mut">sì</span><x-import component-from-global-scope="Arvolo.Icon.ChevronDown" hint-size="16px,16px"></x-import></div>
+</div>
+<div style="flex:1"></div>
+<button class="sendbtn" onClick="{{ closeSheet }}">
+<span class="sendbtn-i"><x-import component-from-global-scope="Arvolo.Icon.Send" hint-size="18px,18px"></x-import></span>
+<span style="flex:1;min-width:0;text-align:left"><span style="display:block;font-size:15px;font-weight:650;letter-spacing:.1px">Invia a Giulia</span><span style="display:block;margin-top:2px;font-size:11.5px;opacity:.7">3 file · 26 MB · consegna diretta</span></span>
+<x-import component-from-global-scope="Arvolo.Icon.ChevronRight" hint-size="16px,16px"></x-import>
+</button>
+</div>
+</div>
+</sc-if>
+
+<sc-if value="{{ sheetArrivo }}">
+<div class="sheet2">
+<div class="appbar" style="padding-top:16px"><span class="t-title" style="flex:1">In arrivo</span>
+<x-import component-from-global-scope="Arvolo.IconButton" label="Chiudi" onClick="{{ closeSheet }}" hint-size="32px,32px"><x-import component-from-global-scope="Arvolo.Icon.Close" hint-size="16px,16px"></x-import></x-import>
+</div>
+<div class="scroll">
+<div class="card card-pad stack" style="border-color:var(--in-line)">
+<div style="display:flex;gap:12px;align-items:center">
+<x-import component-from-global-scope="Arvolo.Avatar" name="Giulia" id="arv1gq7z" size="{{ avBig }}" ring="in" hint-size="44px,44px"></x-import>
+<div style="flex:1;min-width:0"><div style="font-size:15px;font-weight:600">Giulia</div><div class="t-xs t-mut">impronta confermata il 3 marzo</div></div>
+<x-import component-from-global-scope="Arvolo.TrustBadges" verified="{{ yes }}" trusted="{{ yes }}" hint-size="auto,20px"></x-import>
+</div>
+<div class="divider"></div>
+<div style="display:flex;gap:10px;align-items:center"><div class="thumb"></div><div style="min-width:0"><div style="font-size:14px;font-weight:600" class="truncate">vacanze-2026.zip</div><div class="t-xs t-mut" style="margin-top:3px">248 MB · 3 file · trasferimento diretto, non passa dal relay</div></div></div>
+</div>
+<div class="card">
+<div class="srow" style="padding-left:14px;padding-right:14px;border-bottom:0"><span style="flex:1;font-size:14px">Salva in</span><span class="t-sm t-mut">Download</span><x-import component-from-global-scope="Arvolo.Icon.ChevronRight" hint-size="16px,16px"></x-import></div>
+</div>
+<div class="t-xs t-mut" style="padding:0 2px">Il contenuto viene decifrato solo dopo che accetti. Rifiutando, il deposito viene cancellato dal relay.</div>
+<div style="flex:1"></div>
+<x-import component-from-global-scope="Arvolo.Button" variant="in" block="{{ yes }}" onClick="{{ openThread }}" hint-size="100%,44px">Accetta e salva</x-import>
+<x-import component-from-global-scope="Arvolo.Button" variant="ghost" block="{{ yes }}" onClick="{{ closeSheet }}" hint-size="100%,40px">Rifiuta</x-import>
+</div>
+</div>
+</sc-if>
+
+<sc-if value="{{ sheetDepositi }}">
+<div class="sheet2">
+<div class="appbar" style="padding-top:16px"><span class="t-title" style="flex:1">Depositi e link</span>
+<x-import component-from-global-scope="Arvolo.IconButton" label="Chiudi" onClick="{{ closeSheet }}" hint-size="32px,32px"><x-import component-from-global-scope="Arvolo.Icon.Close" hint-size="16px,16px"></x-import></x-import>
+</div>
+<div class="scroll">
+<div class="t-label">Attivi</div>
+<div class="card card-pad stack-sm">
+<div style="display:flex;align-items:center;gap:8px"><span style="flex:1;font-size:14px;font-weight:600" class="truncate">rendiconto.zip</span><x-import component-from-global-scope="Arvolo.Badge" kind="warn" hint-size="auto,20px">non ritirato</x-import></div>
+<div class="t-xs t-mut">per Marco · 86 MB · scade fra 6 giorni</div>
+<x-import component-from-global-scope="Arvolo.Button" size="sm" variant="danger" hint-size="auto,32px">Revoca deposito</x-import>
+</div>
+<div class="card card-pad stack-sm">
+<div style="display:flex;align-items:center;gap:8px"><span style="flex:1;font-size:14px;font-weight:600" class="truncate">Link pubblico</span><x-import component-from-global-scope="Arvolo.Badge" kind="info" hint-size="auto,20px">2 download</x-import></div>
+<x-import component-from-global-scope="Arvolo.CopyField" value="https://arvolo.link/k4m9-7tqz" hint-size="100%,38px"></x-import>
+<div class="t-xs t-mut">brochure.pdf · scade fra 5 giorni · chiunque abbia il link può scaricare</div>
+<div style="display:flex;gap:8px"><x-import component-from-global-scope="Arvolo.Button" size="sm" hint-size="auto,32px">Prolunga</x-import><x-import component-from-global-scope="Arvolo.Button" size="sm" variant="danger" hint-size="auto,32px">Revoca</x-import></div>
+</div>
+<div class="t-label">Scaduti</div>
+<div class="card">
+<div class="srow" style="padding-left:12px;padding-right:12px;border-bottom:0"><div style="flex:1;min-width:0"><div style="font-size:13.5px;font-weight:600">bilancio.pdf</div><div class="t-xs t-mut">per Marco · cancellato dal relay il 10 ago</div></div><x-import component-from-global-scope="Arvolo.Badge" kind="bad" hint-size="auto,20px">scaduto</x-import></div>
+</div>
+</div>
+</div>
+</sc-if>
+
+<sc-if value="{{ sheetCerca }}">
+<div class="sheet2">
+<div class="appbar" style="padding-top:16px">
+<x-import component-from-global-scope="Arvolo.TextInput" placeholder="Cerca in tutta la cronologia" hint-size="100%,38px"></x-import>
+<x-import component-from-global-scope="Arvolo.Button" size="sm" variant="ghost" onClick="{{ closeSheet }}" hint-size="auto,32px">Annulla</x-import>
+</div>
+<div class="scroll" style="gap:10px">
+<div style="display:flex;gap:8px;flex-wrap:wrap"><span class="chip">pdf</span><span class="chip">&gt; 100 MB</span><span class="chip" style="border-color:var(--in-line);background:var(--in-soft);color:var(--ink)">ricevuti</span><span class="chip">questo mese</span></div>
+<div class="t-label">42 risultati</div>
+<div class="card">
+<div class="srow" style="padding-left:12px;padding-right:12px"><div style="flex:1;min-width:0"><div style="font-size:13.5px;font-weight:600">contratto-bozza.pdf</div><div class="t-xs t-mut">↑ Lorenzo · oggi 14:02</div></div><x-import component-from-global-scope="Arvolo.ExtChip" name="contratto-bozza.pdf" hint-size="auto,16px"></x-import></div>
+<div class="srow" style="padding-left:12px;padding-right:12px"><div style="flex:1;min-width:0"><div style="font-size:13.5px;font-weight:600">statuto.pdf</div><div class="t-xs t-mut">↓ Studio 3B · 12 ago</div></div><x-import component-from-global-scope="Arvolo.ExtChip" name="statuto.pdf" hint-size="auto,16px"></x-import></div>
+<div class="srow" style="padding-left:12px;padding-right:12px"><div style="flex:1;min-width:0"><div style="font-size:13.5px;font-weight:600">bilancio.pdf</div><div class="t-xs t-mut">↓ Marco · 3 ago · deposito scaduto</div></div><x-import component-from-global-scope="Arvolo.Badge" kind="bad" hint-size="auto,20px">scaduto</x-import></div>
+<div class="srow" style="padding-left:12px;padding-right:12px;border-bottom:0"><div style="flex:1;min-width:0"><div style="font-size:13.5px;font-weight:600">vacanze-2025.zip</div><div class="t-xs t-mut">↓ Giulia · 28 lug</div></div><x-import component-from-global-scope="Arvolo.ExtChip" name="vacanze-2025.zip" hint-size="auto,16px"></x-import></div>
+</div>
+</div>
+</div>
+</sc-if>
+
+</div>
+<div class="t-sm t-mut" style="text-align:center;color:#8d857a">App — tocca le tab, il pulsante Invia e le righe</div>
+</div>
+
+<div style="display:flex;flex-direction:column;gap:12px;align-items:center">
+<div class="phone">
+<div style="display:flex;align-items:center;justify-content:space-between;padding:12px 22px 2px;font-size:12.5px;font-weight:600;color:var(--ink)"><span>9:41</span><span style="letter-spacing:2px;color:var(--ink-mut)">••• ⌁ ▮</span></div>
+<div class="scroll" style="padding:26px 22px 30px;gap:16px">
+<div class="t-xs t-mut">Passo 2 di 3</div>
+<div class="t-title" style="font-size:26px;line-height:1.15">Aggiungi questo telefono alla tua identità</div>
+<div class="t-sm t-mut">Contatti, blocchi e cronologia arrivano insieme all'identità. Nessun account, nessuna email.</div>
+<div class="card card-pad" style="display:flex;gap:10px;align-items:center">
+<x-import component-from-global-scope="Arvolo.Avatar" name="Arvolo su MacBook" id="arv1lm22" size="{{ avBig }}" hint-size="44px,44px"></x-import>
+<div style="flex:1;min-width:0"><div style="font-size:14px;font-weight:600">Arvolo su MacBook</div><div class="t-xs t-mut">trovato sulla rete locale</div></div>
+<x-import component-from-global-scope="Arvolo.Button" size="sm" variant="primary" hint-size="auto,32px">Usa</x-import>
+</div>
+<button class="obtn" onClick="{{ goCodici }}">
+<span class="obtn-i"><x-import component-from-global-scope="Arvolo.Icon.Qr" hint-size="18px,18px"></x-import></span>
+<span style="flex:1;min-width:0;text-align:left"><span style="display:block;font-size:14.5px;font-weight:600">Scansiona il QR del desktop</span><span class="t-xs t-mut" style="display:block;margin-top:2px">La fotocamera si apre subito</span></span>
+<x-import component-from-global-scope="Arvolo.Icon.ChevronRight" hint-size="16px,16px"></x-import>
+</button>
+<button class="obtn" onClick="{{ goCodici }}">
+<span class="obtn-i"><x-import component-from-global-scope="Arvolo.Icon.Key" hint-size="18px,18px"></x-import></span>
+<span style="flex:1;min-width:0;text-align:left"><span style="display:block;font-size:14.5px;font-weight:600">Inserisci il codice a sei parole</span><span class="t-xs t-mut" style="display:block;margin-top:2px">Se il desktop non è a portata di mano</span></span>
+<x-import component-from-global-scope="Arvolo.Icon.ChevronRight" hint-size="16px,16px"></x-import>
+</button>
+<div style="flex:1"></div>
+<div class="divider"></div>
+<x-import component-from-global-scope="Arvolo.Button" variant="ghost" block="{{ yes }}" hint-size="100%,40px">Non ho altri dispositivi — crea identità nuova</x-import>
+</div>
+</div>
+<div class="t-sm t-mut" style="text-align:center;color:#8d857a">Onboarding — porta d'ingresso multi-dispositivo</div>
+</div>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;tema&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;chiaro&quot;,&quot;scuro&quot;],&quot;default&quot;:&quot;chiaro&quot;,&quot;tsType&quot;:&quot;string&quot;},&quot;notificaInArrivo&quot;:{&quot;editor&quot;:&quot;boolean&quot;,&quot;default&quot;:true,&quot;tsType&quot;:&quot;boolean&quot;}}">
+class Component extends DCLogic {
+  state = { tab: "casella", sheet: null, codeMode: "mostra", push: true, autosave: true, wifi: false };
+  componentDidMount() { this.applyTheme(); }
+  componentDidUpdate() { this.applyTheme(); }
+  applyTheme() {
+    const t = this.props.tema ?? "chiaro";
+    document.documentElement.setAttribute("data-theme", t === "scuro" ? "dark" : "light");
+  }
+  renderVals() {
+    const s = this.state;
+    const go = (tab) => () => this.setState({ tab, sheet: null });
+    return {
+      yes: true, av: 36, avBig: 44,
+      notifica: this.props.notificaInArrivo ?? true,
+      isCasella: s.tab === "casella", isPersone: s.tab === "persone",
+      isCodici: s.tab === "codici", isTu: s.tab === "tu",
+      onCasella: s.tab === "casella" ? "1" : "0", onPersone: s.tab === "persone" ? "1" : "0",
+      onCodici: s.tab === "codici" ? "1" : "0", onTu: s.tab === "tu" ? "1" : "0",
+      goCasella: go("casella"), goPersone: go("persone"), goCodici: go("codici"), goTu: go("tu"),
+      openInvio: () => this.setState({ sheet: "invio" }),
+      openThread: () => this.setState({ sheet: "thread" }),
+      openCerca: () => this.setState({ sheet: "cerca" }),
+      closeSheet: () => this.setState({ sheet: null }),
+      openArrivo: () => this.setState({ sheet: "arrivo" }),
+      openDepositi: () => this.setState({ sheet: "depositi" }),
+      sheetInvio: s.sheet === "invio", sheetThread: s.sheet === "thread", sheetCerca: s.sheet === "cerca",
+      sheetArrivo: s.sheet === "arrivo", sheetDepositi: s.sheet === "depositi",
+      codeMode: s.codeMode, showCode: s.codeMode === "mostra", showScan: s.codeMode === "scansiona",
+      setCodeMode: (v) => this.setState({ codeMode: v }),
+      codeOptions: [{ value: "mostra", label: "Mostra" }, { value: "scansiona", label: "Scansiona" }],
+      push: s.push, setPush: (v) => this.setState({ push: v }),
+      autosave: s.autosave, setAutosave: (v) => this.setState({ autosave: v }),
+      wifi: s.wifi, setWifi: (v) => this.setState({ wifi: v }),
+      txIn: { name: "vacanze-2026.zip", dir: "in", status: "active", size: 248000000, transferred: 44640000 },
+      txOut: { name: "contratto-bozza.pdf", dir: "out", status: "active", size: 4800000, transferred: 2976000 }
+    };
+  }
+}
+</script>
+</body>
+</html>

@@ -36,6 +36,8 @@ import { Badge, Button, Field, TextInput, TrustBadges } from "../ui/Primitives";
 import { Avatar, ClaimedName, ExtChip, Fingerprint } from "../ui/Bits";
 import { nameCollision, SaveSenderFields } from "../ui/SaveSenderFields";
 import { Sheet } from "../ui/Sheet";
+import { useIsPhone } from "../phone";
+import { haptic } from "../haptics";
 import { toast } from "../ui/Toasts";
 
 /** Reads which offer is on screen, and gives the body a fresh mount per offer.
@@ -52,6 +54,7 @@ export function IncomingDialog() {
 
 function IncomingBody({ offerId }: { offerId: string }) {
   const t = useT();
+  const isPhone = useIsPhone();
   const close = useStore((s) => s.closeIncoming);
   const transfers = useStore((s) => s.transfers);
   const contacts = useStore((s) => s.contacts);
@@ -105,7 +108,8 @@ function IncomingBody({ offerId }: { offerId: string }) {
       // with nothing on screen still able to explain the difference.
       if (willSave) await addContact(chosenName, tx.peerId!);
       await accept(offerId, out?.id ?? null, password || null);
-      toast.ok(t("incoming.started"), tx.name);
+      haptic.did();
+      toast.echo(t("incoming.started"), tx.name);
     } catch (e) {
       // The store already reported it. The one refusal worth reacting to here is
       // the missing password: it is recoverable, and the user has nowhere else
@@ -304,6 +308,14 @@ function IncomingBody({ offerId }: { offerId: string }) {
       )}
 
       {/* --- where ----------------------------------------------------- */}
+      {/* Not on a phone. There the destination is the app's own storage and
+          cannot be chosen — `pick_folders` does not exist on mobile, so the
+          button opened nothing — and what the field showed was
+          `/data/user/0/it.termox.arvolo/incoming`, a path that means something
+          to a filesystem and nothing to a person. Saying where files go is a
+          job for the screen that will let you open them; a dead control on the
+          one screen where a security decision is made is worse than silence. */}
+      {!isPhone && (
       <Field
         label={t("receive.whereLabel")}
         hint={out ? undefined : t("receive.whereHint", downloadDir || "…")}
@@ -330,6 +342,7 @@ function IncomingBody({ offerId }: { offerId: string }) {
           </div>
         )}
       </Field>
+      )}
 
       {/* --- act on the sender ----------------------------------------- */}
       {wasUnknown && (

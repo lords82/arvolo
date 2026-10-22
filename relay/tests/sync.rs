@@ -51,6 +51,7 @@ fn sample_snapshot() -> SyncSnapshot {
         names: vec![],
         devices: vec![],
         relays: vec![],
+        self_name: None,
     }
 }
 

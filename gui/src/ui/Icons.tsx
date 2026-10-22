@@ -6,14 +6,28 @@
 // cannot fetch an icon font, and shipping one as a binary would put 200 glyphs in
 // the bundle to use thirty.
 //
-// The geometry is deliberately plain — 1.6px strokes, round joins, 2px inset —
-// because these sit next to 12px labels and any more detail turns to mud.
+// The geometry is deliberately plain — 1.6px strokes at 16, round joins, 2px
+// inset — because these sit next to 12px labels and any more detail turns to
+// mud.
+//
+// The stroke is not a constant. A 16-unit path drawn at 24px scales its 1.6
+// stroke up to 2.4 *on screen*, which is not what the system's own glyphs do:
+// SF Symbols get heavier in absolute terms as they grow but lighter relative to
+// their size, so a 24pt symbol next to a 16pt one reads as the same weight.
+// `weight()` is that curve — 1.6px on screen at 16, 2.1 at 24, 2.35 at 28 —
+// expressed in viewBox units, so a 16px inline glyph is unchanged and a tab
+// glyph is a little lighter than it was.
 
 interface Props {
   size?: number;
   className?: string;
   /** Decorative by default; pass a label when the icon *is* the button. */
   label?: string;
+}
+
+/** Stroke width in viewBox units for a glyph drawn `size` px wide. */
+function weight(size: number): number {
+  return Math.round((16 / size) * (0.6 + size / 16) * 100) / 100;
 }
 
 function Svg({
@@ -29,7 +43,7 @@ function Svg({
       viewBox="0 0 16 16"
       fill="none"
       stroke="currentColor"
-      strokeWidth={1.6}
+      strokeWidth={weight(size)}
       strokeLinecap="round"
       strokeLinejoin="round"
       className={className}
@@ -88,10 +102,16 @@ export const Icon = {
       <rect x="11.4" y="6.6" width="3" height="6.8" rx="1" />
     </Svg>
   ),
+  /* Una ruota dentata, non un sole. Era un mozzo con otto raggi lunghi, cioè
+     lo stesso disegno di `Sun` a un paio di decimi di distanza: nella barra
+     in alto, che è la porta di Impostazioni, si leggeva come la luminosità.
+     La corona chiusa è ciò che fa la differenza — un sole non ce l'ha — e i
+     denti partono da lì invece che dal centro. */
   Settings: (p: Props) => (
     <Svg {...p}>
-      <circle cx="8" cy="8" r="2.1" />
-      <path d="M8 1.6v1.6M8 12.8v1.6M14.4 8h-1.6M3.2 8H1.6M12.5 3.5l-1.1 1.1M4.6 11.4l-1.1 1.1M12.5 12.5l-1.1-1.1M4.6 4.6 3.5 3.5" />
+      <circle cx="8" cy="8" r="5.3" />
+      <circle cx="8" cy="8" r="2.2" />
+      <path d="M8 1.5v1.2M8 13.3v1.2M14.5 8h-1.2M2.7 8H1.5M12.6 3.4l-.85.85M4.25 11.75l-.85.85M12.6 12.6l-.85-.85M4.25 4.25 3.4 3.4" />
     </Svg>
   ),
   Search: (p: Props) => (
@@ -163,6 +183,12 @@ export const Icon = {
       <path d="m6 3.6 4.4 4.4L6 12.4" />
     </Svg>
   ),
+  /** The way back, which on a phone is a chevron and a word. */
+  ChevronLeft: (p: Props) => (
+    <Svg {...p}>
+      <path d="M10 3.6 5.6 8l4.4 4.4" />
+    </Svg>
+  ),
   ChevronDown: (p: Props) => (
     <Svg {...p}>
       <path d="M3.6 6 8 10.4 12.4 6" />
@@ -188,6 +214,14 @@ export const Icon = {
   Folder: (p: Props) => (
     <Svg {...p}>
       <path d="M1.9 4.4a1.2 1.2 0 0 1 1.2-1.2h2.6l1.4 1.8h5a1.2 1.2 0 0 1 1.2 1.2v5.6a1.2 1.2 0 0 1-1.2 1.2H3.1a1.2 1.2 0 0 1-1.2-1.2z" />
+    </Svg>
+  ),
+  /** Photos and videos: the mountain-and-sun every picker uses for a library. */
+  Image: (p: Props) => (
+    <Svg {...p}>
+      <rect x="2" y="3.2" width="12" height="9.6" rx="1.6" />
+      <circle cx="5.6" cy="6.4" r="1.1" />
+      <path d="M2.4 11.4 6 8.2l2.3 2.1 2.4-2.6 2.9 3" />
     </Svg>
   ),
   Refresh: (p: Props) => (
@@ -258,9 +292,123 @@ export const Icon = {
       <path d="m2 5.8 6 3.8 6-3.8" />
     </Svg>
   ),
+  /** Attività: what is moving, both ways. Vertical rather than the rail's
+   *  left-and-right pair — on a phone the two directions are one list sorted by
+   *  time, and the glyph says "up and down" because that is what the list does. */
+  Activity: (p: Props) => (
+    <Svg {...p}>
+      <path d="M5 13V3M2.5 5.5 5 3l2.5 2.5" />
+      <path d="M11 3v10M8.5 10.5 11 13l2.5-2.5" />
+    </Svg>
+  ),
+  /** Scambia: a viewfinder, not a QR. The disc in the middle of the bar opens a
+   *  camera, and the thing a camera does is frame something. */
+  Scan: (p: Props) => (
+    <Svg {...p}>
+      <path d="M2 5V3a1 1 0 0 1 1-1h2M11 2h2a1 1 0 0 1 1 1v2M14 11v2a1 1 0 0 1-1 1h-2M5 14H3a1 1 0 0 1-1-1v-2" />
+      <path d="M4.5 8h7" />
+    </Svg>
+  ),
+  /** Link e depositi: an in-tray. What is left on a relay for somebody to come
+   *  and take, which is a tray rather than a chain. */
+  Tray: (p: Props) => (
+    <Svg {...p}>
+      <path d="M2 9h3.5l1 2h3l1-2H14M2 9l2-6h8l2 6v4H2z" />
+    </Svg>
+  ),
+  /** One of your machines, by what kind it is. `DeviceDto.platform` is the only
+   *  thing that picks between these, and it is for an icon and never a decision
+   *  — see the type. */
+  Laptop: (p: Props) => (
+    <Svg {...p}>
+      <rect x="1.5" y="3" width="13" height="8" rx="1.2" />
+      <path d="M1 13h14" />
+    </Svg>
+  ),
+  Desktop: (p: Props) => (
+    <Svg {...p}>
+      <rect x="1.5" y="2.5" width="13" height="9" rx="1.2" />
+      <path d="M5.5 14h5M8 11.5V14" />
+    </Svg>
+  ),
+  Phone: (p: Props) => (
+    <Svg {...p}>
+      <rect x="2" y="1.5" width="12" height="13" rx="1.5" />
+      <path d="M6 12.5h4" />
+    </Svg>
+  ),
   Command: (p: Props) => (
     <Svg {...p}>
       <path d="M5.6 2.4a1.8 1.8 0 1 0 1.8 1.8v7.6a1.8 1.8 0 1 0 1.8-1.8H4.2a1.8 1.8 0 1 0 1.8 1.8V4.2a1.8 1.8 0 1 0-1.8 1.8h7.6a1.8 1.8 0 1 0-1.8-1.8z" />
+    </Svg>
+  ),
+  /* -- Sezioni 13–16 ------------------------------------------------------ */
+  /** Le opzioni della casella (14b): due cursori. */
+  Sliders: (p: Props) => (
+    <Svg {...p}>
+      <path d="M3 4.5h10M3 11.5h10" />
+      <circle cx="6" cy="4.5" r="1.6" />
+      <circle cx="10.5" cy="11.5" r="1.6" />
+    </Svg>
+  ),
+  /** Quello che parte: su e a destra. */
+  ArrowUpRight: (p: Props) => (
+    <Svg {...p}>
+      <path d="M4 12 12 4M6.5 4H12v5.5" />
+    </Svg>
+  ),
+  /** Quello che arriva: giù e a sinistra. */
+  ArrowDownLeft: (p: Props) => (
+    <Svg {...p}>
+      <path d="M12 4 4 12M4 6.5V12h5.5" />
+    </Svg>
+  ),
+  /** Il link pubblico: un globo. */
+  Globe: (p: Props) => (
+    <Svg {...p}>
+      <circle cx="8" cy="8" r="6" />
+      <path d="M2 8h12M8 2c2 2 2 10 0 12M8 2c-2 2-2 10 0 12" />
+    </Svg>
+  ),
+  /** Arriva adesso, diretto: un fulmine. */
+  Bolt: (p: Props) => (
+    <Svg {...p}>
+      <path d="M9 1.5 4 9h4l-1 5.5L12 7H8z" />
+    </Svg>
+  ),
+  ChevronUp: (p: Props) => (
+    <Svg {...p}>
+      <path d="M3.5 10 8 5.5l4.5 4.5" />
+    </Svg>
+  ),
+  Tablet: (p: Props) => (
+    <Svg {...p}>
+      <rect x="2" y="1.5" width="12" height="13" rx="1.5" />
+      <path d="M6 12.5h4" />
+    </Svg>
+  ),
+  /** Diretto, da qui a lì: le onde. */
+  Wifi: (p: Props) => (
+    <Svg {...p}>
+      <path d="M2 6.5a9 9 0 0 1 12 0M4.2 9a5.6 5.6 0 0 1 7.6 0M6.4 11.4a2.3 2.3 0 0 1 3.2 0" />
+      <circle cx="8" cy="13.4" r="0.6" fill="currentColor" />
+    </Svg>
+  ),
+  /** In casella: un vassoio. */
+  Inbox: (p: Props) => (
+    <Svg {...p}>
+      <path d="M2 9h3.5l1 2h3l1-2H14M2 9l2-6h8l2 6v4H2z" />
+    </Svg>
+  ),
+  Clock: (p: Props) => (
+    <Svg {...p}>
+      <circle cx="8" cy="8" r="6" />
+      <path d="M8 4.5V8l2.5 1.5" />
+    </Svg>
+  ),
+  Download: (p: Props) => (
+    <Svg {...p}>
+      <path d="M8 2.5v8M4.5 7 8 10.5 11.5 7M3 13.5h10" />
     </Svg>
   ),
 };

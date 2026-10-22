@@ -14,9 +14,22 @@ import {
   useRef,
   type ReactNode,
 } from "react";
+import { createPortal } from "react-dom";
 import { useT } from "../i18n";
+import { useBackDismiss } from "../backstack";
+import { useIsPhone } from "../phone";
 import { Icon } from "./Icons";
 import { Button, IconButton } from "./Primitives";
+
+/** The bar you take hold of. 36×5 of ink in 44 of target, like the one the
+ *  camera's sheet already had. */
+export function SheetGrab() {
+  return (
+    <div className="sheet-grab" aria-hidden>
+      <span />
+    </div>
+  );
+}
 
 const FOCUSABLE =
   'a[href],button:not([disabled]),textarea:not([disabled]),input:not([disabled]),select:not([disabled]),[tabindex]:not([tabindex="-1"])';
@@ -86,6 +99,18 @@ interface SheetProps {
   placement?: "side" | "center";
   children: ReactNode;
   footer?: ReactNode;
+  /** The same decision, said the way a phone says it: one control on the left of
+   *  the top bar and one on the right, with the title between them. Given, a
+   *  phone uses this and drops the footer; a window ignores it and keeps the
+   *  footer, where a decision belongs when there is room under what it acts on. */
+  bar?: { cancel?: ReactNode; confirm?: ReactNode };
+  /** On a phone, arrive as a pushed screen — sliding in from the right, with a
+   *  back button naming this label — rather than as a modal. For *content* the
+   *  user drilled into (a contact, a share); a task to complete or abandon
+   *  stays modal, which is the platform's own split. The way out goes through
+   *  the history, so the system's back gesture and the button are one step.
+   *  Ignored on a desktop, where the same sheet stays the modal it was. */
+  pushFrom?: string;
   /** Extra control in the header, left of the close button. */
   headerAction?: ReactNode;
   /** Whether clicking the backdrop closes (default: yes).
@@ -105,38 +130,85 @@ export function Sheet({
   placement = "side",
   children,
   footer,
+  bar,
   headerAction,
+  pushFrom,
   dismissOnScrim = true,
 }: SheetProps) {
   const t = useT();
+  const isPhone = useIsPhone();
   const ref = useRef<HTMLDivElement>(null);
   useModal(ref, onClose, open);
+  // Escape closes this on a desktop; the phone's equivalent is the system's
+  // back, and it has to reach here rather than the screen underneath.
+  useBackDismiss(open && isPhone, onClose);
+  const pushed = isPhone && !!pushFrom;
   if (!open) return null;
-  return (
+  // Through a portal, whatever subtree asked for the sheet. `position: fixed`
+  // is only fixed to the viewport until an ancestor has a filter, a backdrop
+  // blur or a transform — then that ancestor becomes the containing block, and
+  // this app now has all three: a blurred bar, and pages that transform while
+  // they slide. A sheet opened from inside the bar was drawn *inside* the bar.
+  return createPortal(
     <>
-      <div className="scrim" onClick={dismissOnScrim ? onClose : undefined} />
+      {/* A pushed screen has no scrim: nothing shows around it to dim. */}
+      {!pushed && (
+        <div className="scrim" onClick={dismissOnScrim ? onClose : undefined} />
+      )}
       <div
         ref={ref}
-        className={`sheet ${placement}`}
+        className={`sheet ${pushed ? "pushscreen" : placement}`}
         role="dialog"
         aria-modal="true"
         aria-label={typeof title === "string" ? title : undefined}
         tabIndex={-1}
       >
-        <div className="sheet-head">
-          <div className="grow">
-            <div className="t-head">{title}</div>
-            {subtitle && <div className="hint">{subtitle}</div>}
+        {/* Two heads, one for each platform's idea of where a decision lives.
+            A window puts the buttons at the bottom of the sheet, under what they
+            act on; a phone puts them in the bar at the top, one on each side,
+            and gives the middle to the title. `bar` is a sheet saying it knows
+            how to be both — without it, the footer is used on both. And a
+            pushed screen gets neither: it gets the stack's own bar, back on the
+            left naming where it goes. */}
+        {pushed ? (
+          <div className="sheet-full-bar">
+            <button
+              className="nav-back"
+              onClick={() =>
+                window.history.length > 1 ? window.history.back() : onClose()
+              }
+            >
+              <Icon.ChevronLeft size={19} />
+              <span className="truncate">{pushFrom}</span>
+            </button>
+            <h2 className="truncate">{title}</h2>
+            <span className="bar-pad">{headerAction}</span>
           </div>
-          {headerAction}
-          <IconButton label={t("common.close")} onClick={onClose}>
-            <Icon.Close />
-          </IconButton>
-        </div>
+        ) : bar && isPhone ? (
+          <div className="sheet-head sheet-bar">
+            <span className="bar-left">{bar.cancel}</span>
+            <span className="t-head truncate">{title}</span>
+            <span className="bar-right">{bar.confirm}</span>
+          </div>
+        ) : (
+          <div className="sheet-head">
+            <div className="grow">
+              <div className="t-head">{title}</div>
+              {subtitle && <div className="hint">{subtitle}</div>}
+            </div>
+            {headerAction}
+            <IconButton label={t("common.close")} onClick={onClose}>
+              <Icon.Close />
+            </IconButton>
+          </div>
+        )}
         <div className="sheet-body">{children}</div>
-        {footer && <div className="sheet-foot">{footer}</div>}
+        {footer && !(bar && isPhone) && (
+          <div className="sheet-foot">{footer}</div>
+        )}
       </div>
-    </>
+    </>,
+    document.body
   );
 }
 
@@ -166,23 +238,32 @@ export function Confirm({
   onCancel,
 }: ConfirmProps) {
   const t = useT();
+  const isPhone = useIsPhone();
   const ref = useRef<HTMLDivElement>(null);
   const close = useCallback(() => {
     if (!busy) onCancel();
   }, [busy, onCancel]);
   useModal(ref, close, open);
+  // Back dismisses an alert the way Cancel does — never the way Confirm does.
+  useBackDismiss(open && isPhone, close);
   if (!open) return null;
-  return (
+  // Same portal as `Sheet`, same reason: an ancestor with a filter or a
+  // transform would otherwise become this dialog's viewport.
+  return createPortal(
     <>
       <div className="scrim" onClick={close} />
+      {/* `alert`, so the phone does not give this the full-screen treatment
+          every other sheet gets there: a confirmation is the one modal that
+          platform keeps small — a card in the middle, over what it asks about,
+          because the thing being confirmed is the context. */}
       <div
         ref={ref}
-        className="sheet center"
+        className="sheet center alert"
         role="alertdialog"
         aria-modal="true"
         aria-label={title}
         tabIndex={-1}
-        style={{ width: "min(440px, calc(100vw - 48px))" }}
+        style={isPhone ? undefined : { width: "min(440px, calc(100vw - 48px))" }}
       >
         <div className="sheet-body">
           <div className="t-head">{title}</div>
@@ -207,6 +288,7 @@ export function Confirm({
           </Button>
         </div>
       </div>
-    </>
+    </>,
+    document.body
   );
 }

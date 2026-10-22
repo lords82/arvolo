@@ -12,10 +12,12 @@
 import { useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { fire, useStore } from "../store";
+import { useIsPhone } from "../phone";
+import { SwipeRow } from "../ui/SwipeRow";
 import { depositMeta, fmtBytes } from "../format";
 import { useT } from "../i18n";
 import { Icon } from "../ui/Icons";
-import { Badge, Button, Empty } from "../ui/Primitives";
+import { Badge, Button, Empty, Segmented } from "../ui/Primitives";
 import { CodeHero, ExtChip } from "../ui/Bits";
 import { Confirm, Sheet } from "../ui/Sheet";
 import { toast } from "../ui/Toasts";
@@ -25,9 +27,11 @@ function DepositRow({ d }: { d: DepositDto }) {
   const t = useT();
   const revoke = useStore((s) => s.revokeDeposit);
   const revoking = useStore((s) => s.revoking.includes(d.id));
+  const reload = useStore((s) => s.loadDeposits);
   const peerLabel = useStore((s) => s.peerLabel);
   const [confirm, setConfirm] = useState(false);
   const [share, setShare] = useState(false);
+  const isPhone = useIsPhone();
 
   const m = depositMeta(d);
   const isLink = d.kind === "link";
@@ -40,7 +44,26 @@ function DepositRow({ d }: { d: DepositDto }) {
 
   return (
     <>
-      <div className="row" style={{ gridTemplateColumns: "38px 1fr auto" }}>
+      {/* Beside the name on a desktop, under it on a phone. A badge and two
+          buttons in the third column leave a name three characters wide —
+          which is what this row looked like on a phone: "re…", "Attiv". */}
+      <SwipeRow
+        actions={
+          isPhone
+            ? [
+                {
+                  label: m.revocable ? t("deposits.revoke") : t("common.remove"),
+                  danger: true,
+                  run: () => setConfirm(true),
+                },
+              ]
+            : []
+        }
+      >
+      <div
+        className={`row ${isPhone ? "row-stacked" : ""}`}
+        style={isPhone ? undefined : { gridTemplateColumns: "38px 1fr auto" }}
+      >
         <ExtChip name={d.name} />
         <div className="row-main">
           <div className="row-name truncate" title={d.name}>
@@ -64,7 +87,7 @@ function DepositRow({ d }: { d: DepositDto }) {
             </span>
           </div>
         </div>
-        <div className="hstack-sm">
+        <div className="hstack-sm dep-actions">
           <Badge kind={isLink ? "dev" : "info"}>
             {isLink ? (
               <>
@@ -89,11 +112,24 @@ function DepositRow({ d }: { d: DepositDto }) {
               — and no sender — can open it, and no `#fragment` could carry the
               key. A label that promises a URL where none can exist is worse than
               a longer word. */}
-          {handover && (
-            <Button size="sm" onClick={() => setShare(true)}>
-              <Icon.Link size={13} />{" "}
-              {t(isLink ? "deposits.share" : "deposits.shareTicket")}
+          {/* The third state — "the relay did not answer" — is the only one with
+              something to *do* about it that is not destructive: ask again. It
+              is offered here rather than as a refresh button over the whole
+              list, because the doubt belongs to this row and the reader is
+              looking at it. And the handover button is withheld while the doubt
+              lasts: a QR for a file that may already be gone is exactly the
+              confident-looking lie this screen exists to avoid. */}
+          {d.present === null ? (
+            <Button size="sm" onClick={() => fire(reload())}>
+              <Icon.Refresh size={13} /> {t("deposits.askAgain")}
             </Button>
+          ) : (
+            handover && (
+              <Button size="sm" onClick={() => setShare(true)}>
+                <Icon.Link size={13} />{" "}
+                {t(isLink ? "deposits.share" : "deposits.shareTicket")}
+              </Button>
+            )
           )}
           <Button
             size="sm"
@@ -106,6 +142,7 @@ function DepositRow({ d }: { d: DepositDto }) {
           </Button>
         </div>
       </div>
+      </SwipeRow>
 
       {/* The panel that produced it, brought back. Same address, same QR, same
           caption — something handed out twice must look identical both times, or
@@ -194,12 +231,23 @@ export function DepositsView() {
   const error = useStore((s) => s.depositsError);
   const reload = useStore((s) => s.loadDeposits);
   const openSheet = useStore((s) => s.openSheet);
+  const isPhone = useIsPhone();
+  const [kind, setKind] = useState<"link" | "sealed">("link");
 
   const links = deposits.filter((d) => d.kind === "link");
   const sealed = deposits.filter((d) => d.kind !== "link");
 
   return (
     <div className="stack">
+      {/* A sentence and two buttons abreast is a desktop toolbar; on a phone it
+          squeezed the sentence into a three-word column. Here the sentence is
+          just a sentence, refreshing happens on arriving, and the one verb is a
+          row of its own — at the end, where this platform puts "add". */}
+      {isPhone ? (
+        <div className="ios-foot">
+          {t("deposits.intro")}
+        </div>
+      ) : (
       <div className="hstack">
         <div className="grow t-sm t-sec">{t("deposits.intro")}</div>
         <Button size="sm" onClick={() => fire(reload())} busy={loading}>
@@ -215,6 +263,7 @@ export function DepositsView() {
           <Icon.Send size={13} /> {t("deposits.createLink")}
         </Button>
       </div>
+      )}
 
       {error && (
         <div className="card card-pad card-err t-sm">
@@ -236,6 +285,46 @@ export function DepositsView() {
             {t("deposits.emptyBody")}
           </Empty>
         </div>
+      ) : isPhone ? (
+        /* One list at a time, chosen from a pair of pills that carry their own
+           counts. The two kinds are not two halves of one thing — a public link
+           is a URL anybody can fetch, a sealed deposit is a blob only one person
+           can open — and on a phone two stacked sections meant scrolling past
+           the kind you were not looking for to reach the one you were. */
+        <>
+          <Segmented
+            chips
+            label={t("deposits.kindLabel")}
+            value={kind}
+            onChange={setKind}
+            options={[
+              {
+                value: "link",
+                label: `${t("deposits.sectionLinks")} · ${links.length}`,
+              },
+              {
+                value: "sealed",
+                label: `${t("deposits.sectionSealed")} · ${sealed.length}`,
+              },
+            ]}
+          />
+          <div className="ios-group">
+            {(kind === "link" ? links : sealed).map((d) => (
+              <DepositRow key={d.id} d={d} />
+            ))}
+            {(kind === "link" ? links : sealed).length === 0 && (
+              <div className="ios-row" style={{ cursor: "default" }}>
+                <span className="grow t-sec">
+                  {t(
+                    kind === "link"
+                      ? "deposits.noneLinks"
+                      : "deposits.noneSealed"
+                  )}
+                </span>
+              </div>
+            )}
+          </div>
+        </>
       ) : (
         <>
           {links.length > 0 && (
@@ -265,6 +354,19 @@ export function DepositsView() {
             </div>
           )}
         </>
+      )}
+
+      {/* The verb, in the band this design gives every screen. */}
+      {isPhone && deposits.length > 0 && (
+        <div className="phone-actions">
+          <Button
+            variant="in"
+            size="lg"
+            onClick={() => openSheet([], undefined, "link")}
+          >
+            <Icon.Link size={15} /> {t("deposits.createLink")}
+          </Button>
+        </div>
       )}
     </div>
   );

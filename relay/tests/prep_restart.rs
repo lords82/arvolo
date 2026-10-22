@@ -146,6 +146,7 @@ async fn a_restarted_send_is_the_same_send_unless_the_payload_moved_on() {
                 false,
                 String::new(),
                 None,
+                false,
                 None,
             )
             .await

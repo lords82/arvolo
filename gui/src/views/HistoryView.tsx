@@ -7,12 +7,13 @@
 
 import { useMemo, useState } from "react";
 import { fire, useStore } from "../store";
-import { fmtBytes } from "../format";
+import { fmtBytes, failText } from "../format";
 import { locale, t as translate, useLang, useT } from "../i18n";
 import { Icon } from "../ui/Icons";
 import { Button, Empty, Segmented, TextInput } from "../ui/Primitives";
 import { ExtChip } from "../ui/Bits";
 import { Confirm } from "../ui/Sheet";
+import { useIsPhone } from "../phone";
 import type { HistoryDto } from "../types";
 
 type Filter = "all" | "send" | "recv";
@@ -53,7 +54,7 @@ function dayLabel(unixSecs: number): string {
 
 /** Split a daemon status into a word and its tone. `failed: …` carries its
  *  reason after the colon and that reason is the useful half. */
-function outcome(status: string): { text: string; tone: string; detail?: string } {
+function outcome(status: string, failCode?: string): { text: string; tone: string; detail?: string } {
   if (status === "completed")
     return { text: translate("history.completed"), tone: "ok" };
   if (status === "cancelled")
@@ -65,7 +66,9 @@ function outcome(status: string): { text: string; tone: string; detail?: string 
     return {
       text: translate("history.failed"),
       tone: "bad",
-      detail: rest.join(":").trim(),
+      // The code, where the record has one, says it in the reader's language;
+      // the sentence after the colon is the fallback.
+      detail: failText(failCode, undefined, rest.join(":").trim()),
     };
   // Anything the engine invents that this build has not learned yet: name the
   // fact, and keep the raw string as the detail rather than putting an
@@ -80,7 +83,7 @@ function outcome(status: string): { text: string; tone: string; detail?: string 
 function Row({ h }: { h: HistoryDto }) {
   const t = useT();
   const peerLabel = useStore((s) => s.peerLabel);
-  const o = outcome(h.status);
+  const o = outcome(h.status, h.fail_code);
   const out = h.direction === "send";
   return (
     <div className={`row dir-${out ? "out" : "in"} is-done`}>
@@ -116,7 +119,7 @@ function Row({ h }: { h: HistoryDto }) {
   );
 }
 
-export function HistoryView() {
+export function HistoryView({ query }: { query?: string } = {}) {
   const t = useT();
   // Not for a string on this screen — for the day headings, which `dayLabel`
   // builds through `Intl` and the memo below caches.
@@ -128,9 +131,16 @@ export function HistoryView() {
   const clear = useStore((s) => s.clearHistory);
   const peerLabel = useStore((s) => s.peerLabel);
 
+  const isPhone = useIsPhone();
   const [filter, setFilter] = useState<Filter>("all");
-  const [q, setQ] = useState("");
+  const [own, setOwn] = useState("");
   const [confirmClear, setConfirmClear] = useState(false);
+  /** Who is searching. The desktop has a field of its own, in the row of
+   *  controls above the log. On a phone the log is half of *Attività* and the
+   *  magnifier that filters it belongs to that screen, so the query is handed
+   *  down — one field, filtering both halves, rather than a second one that only
+   *  ever appeared under the first. */
+  const q = query ?? own;
 
   const groups = useMemo(() => {
     const needle = q.trim().toLowerCase();
@@ -152,40 +162,58 @@ export function HistoryView() {
     return Array.from(map.values()).sort((a, b) => b.when - a.when);
   }, [history, filter, q, peerLabel, lang]);
 
+  const choices = [
+    { value: "all" as Filter, label: t("history.filterAll") },
+    { value: "send" as Filter, label: t("history.filterSent") },
+    { value: "recv" as Filter, label: t("history.filterReceived") },
+  ];
+
   return (
     <div className="stack">
-      <div className="hstack wrap">
+      {/* One control, the width of the screen, and nothing beside it.
+          Everything else that stood in this row on a desktop is either already
+          somewhere else on a phone or does not need a button at all: the search
+          is the one in the bar, the refresh happens on arriving here, and
+          emptying the log is a destructive thing, which this platform puts at
+          the far end of what it destroys rather than above it. */}
+      {isPhone ? (
         <Segmented
+          block
           label={t("history.filterLabel")}
           value={filter}
           onChange={setFilter}
-          options={[
-            { value: "all", label: t("history.filterAll") },
-            { value: "send", label: t("history.filterSent") },
-            { value: "recv", label: t("history.filterReceived") },
-          ]}
+          options={choices}
         />
-        <div className="grow" style={{ maxWidth: 280 }}>
-          <TextInput
-            value={q}
-            onChange={(e) => setQ(e.currentTarget.value)}
-            placeholder={t("history.searchPlaceholder")}
-            aria-label={t("history.searchLabel")}
+      ) : (
+        <div className="hstack wrap">
+          <Segmented
+            label={t("history.filterLabel")}
+            value={filter}
+            onChange={setFilter}
+            options={choices}
           />
+          <div className="grow" style={{ maxWidth: 280 }}>
+            <TextInput
+              value={q}
+              onChange={(e) => setOwn(e.currentTarget.value)}
+              placeholder={t("history.searchPlaceholder")}
+              aria-label={t("history.searchLabel")}
+            />
+          </div>
+          <div className="spacer grow" />
+          <Button size="sm" onClick={() => fire(reload())} busy={loading}>
+            <Icon.Refresh size={13} /> {t("common.refresh")}
+          </Button>
+          <Button
+            size="sm"
+            variant="danger"
+            disabled={!history.length}
+            onClick={() => setConfirmClear(true)}
+          >
+            <Icon.Trash size={13} /> {t("history.clear")}
+          </Button>
         </div>
-        <div className="spacer grow" />
-        <Button size="sm" onClick={() => fire(reload())} busy={loading}>
-          <Icon.Refresh size={13} /> {t("common.refresh")}
-        </Button>
-        <Button
-          size="sm"
-          variant="danger"
-          disabled={!history.length}
-          onClick={() => setConfirmClear(true)}
-        >
-          <Icon.Trash size={13} /> {t("history.clear")}
-        </Button>
-      </div>
+      )}
 
       {error && (
         <div className="card card-pad card-err t-sm">
@@ -209,19 +237,44 @@ export function HistoryView() {
           </Empty>
         </div>
       ) : (
-        groups.map((g) => (
-          <div key={g.label + g.when} className="section">
-            <div className="section-head">
-              <span className="t-label">{g.label}</span>
-              <span className="t-xs t-mut tnum">{g.items.length}</span>
+        groups.map((g) =>
+          isPhone ? (
+            <div key={g.label + g.when}>
+              <div className="ios-head hstack-sm">
+                <span>{g.label}</span>
+                <span className="count-soft tnum">{g.items.length}</span>
+              </div>
+              <div className="ios-group">
+                {g.items.map((h) => (
+                  <Row key={h.id} h={h} />
+                ))}
+              </div>
             </div>
-            <div className="card rows">
-              {g.items.map((h) => (
-                <Row key={h.id} h={h} />
-              ))}
+          ) : (
+            <div key={g.label + g.when} className="section">
+              <div className="section-head">
+                <span className="t-label">{g.label}</span>
+                <span className="t-xs t-mut tnum">{g.items.length}</span>
+              </div>
+              <div className="card rows">
+                {g.items.map((h) => (
+                  <Row key={h.id} h={h} />
+                ))}
+              </div>
             </div>
-          </div>
-        ))
+          )
+        )
+      )}
+
+      {isPhone && history.length > 0 && (
+        <div className="ios-group">
+          <button
+            className="ios-row destructive"
+            onClick={() => setConfirmClear(true)}
+          >
+            {t("history.clear")}
+          </button>
+        </div>
       )}
 
       <Confirm

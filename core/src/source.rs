@@ -20,6 +20,21 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 
+/// A path that was supposed to be a file and is not — gone, or never one.
+///
+/// Typed rather than a sentence so the manager can tell "the thing you picked
+/// is no longer there" apart from every other way a send can fail, and say so
+/// in the reader's language (see `manager::FailReason`).
+#[derive(Debug, Clone)]
+pub struct NotAFile(pub PathBuf);
+
+impl std::fmt::Display for NotAFile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} is not a file", self.0.display())
+    }
+}
+impl std::error::Error for NotAFile {}
+
 /// A cloneable description of a send's byte source. `From<&Path>`/`From<PathBuf>`
 /// keep every existing call site written in paths compiling unchanged.
 #[derive(Clone)]

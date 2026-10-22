@@ -101,3 +101,65 @@ async fn a_relay_that_serves_ciphertext_cross_origin_advertises_it() {
         "features document must advertise cors: {doc}"
     );
 }
+
+/// The cap a deposit is held to is the cap the relay advertises, and the 413
+/// that enforces it names the same figure in a header — so a sender can refuse
+/// a file before uploading it, and say how large is too large after.
+///
+/// Set through the environment like the other cap tests, and read back through
+/// the client's own probe: the point is the number surviving the hand-written
+/// document and the hand-written parse, not the arithmetic.
+#[tokio::test]
+async fn the_advertised_blob_cap_is_the_one_a_deposit_is_held_to() {
+    std::env::set_var("ARVOLO_MAX_BLOB_BYTES", "64");
+    let relay = spawn_relay().await;
+
+    assert_eq!(
+        arvolo_core::link::relay_max_blob_bytes(&relay).await,
+        Some(64),
+        "the probe must read the cap the relay was given"
+    );
+
+    let resp = reqwest::Client::new()
+        .post(format!("{relay}/v1/deposit?ttl=60"))
+        .header("x-arvolo-encapped-key", "")
+        .body(vec![0u8; 65])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(
+        resp.headers()
+            .get("x-arvolo-max-blob-bytes")
+            .and_then(|v| v.to_str().ok()),
+        Some("64"),
+        "the 413 must carry the cap"
+    );
+
+    // Exactly the cap still fits: the bound is "larger than", not "as large as".
+    let resp = reqwest::Client::new()
+        .post(format!("{relay}/v1/deposit?ttl=60"))
+        .header("x-arvolo-encapped-key", "")
+        .body(vec![0u8; 64])
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "{}", resp.status());
+
+    // A relay with no per-blob cap says so with a zero, and the probe reads that
+    // as "no limit" rather than as a limit of nothing. Same test, not a second
+    // one: the cap is process-wide, and two tests setting it would race.
+    std::env::set_var("ARVOLO_MAX_BLOB_BYTES", "0");
+    let doc = reqwest::get(format!("{relay}/v1/features"))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        doc.replace(' ', "").contains("\"max_blob_bytes\":0"),
+        "features document must advertise the cap: {doc}"
+    );
+    assert_eq!(arvolo_core::link::relay_max_blob_bytes(&relay).await, None);
+    std::env::remove_var("ARVOLO_MAX_BLOB_BYTES");
+}

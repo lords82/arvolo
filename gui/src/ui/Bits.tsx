@@ -8,6 +8,7 @@ import { useT, type TFn } from "../i18n";
 import { Icon } from "./Icons";
 import { IconButton } from "./Primitives";
 import { barClass, extOf, extTint, pct, shortId } from "../format";
+import { useIsPhone } from "../phone";
 import type { ContactDto, UITransfer } from "../types";
 
 // ---- Avatar ---------------------------------------------------------------
@@ -26,13 +27,36 @@ const HUES = [
   "#8a6a10",
 ];
 
-/** Deterministic colour from an identity. The same person is the same colour on
+/** The same eight slots, in the phone's family.
+ *
+ *  The window is warm — an off-white desk, amber for what is leaving — and a
+ *  mustard or brick avatar belongs there. The phone is TermoX navy and blue, and
+ *  in that room the warm half of the ramp reads as a foreign object: a column of
+ *  address-book faces came out mustard, brick and olive against a cool ground,
+ *  which is the first thing that says "this is not the design".
+ *
+ *  Slot, not colour, is what stays stable: a person hashes to the same *index*
+ *  everywhere, and each skin paints that index in its own family. So a face keeps
+ *  its position in the ramp across devices while belonging to the screen it is
+ *  drawn on. */
+const HUES_COOL = [
+  "#3c78bf",
+  "#2e2a78",
+  "#6b4fbb",
+  "#4a4fb0",
+  "#0a6ba1",
+  "#0d6d66",
+  "#2f6f8b",
+  "#57608a",
+];
+
+/** Deterministic colour from an identity. The same person is the same slot on
  *  every machine and across restarts, which is the only thing that makes an
  *  avatar worth having: it becomes a second, pre-verbal handle on who this is. */
-export function avatarColor(seed: string): string {
+export function avatarColor(seed: string, cool = false): string {
   let h = 0;
   for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) >>> 0;
-  return HUES[h % HUES.length];
+  return (cool ? HUES_COOL : HUES)[h % HUES.length];
 }
 
 function initials(name: string): string {
@@ -55,13 +79,14 @@ export function Avatar({
   size?: number;
   ring?: "out" | "in";
 }) {
+  const isPhone = useIsPhone();
   return (
     <span
       className={`avatar ${ring ? `ring-${ring}` : ""}`}
       style={{
         width: size,
         height: size,
-        background: avatarColor(id || name),
+        background: avatarColor(id || name, isPhone),
         fontSize: Math.round(size * 0.38),
       }}
       aria-hidden="true"
@@ -88,7 +113,7 @@ async function writeClipboard(text: string): Promise<boolean> {
   }
 }
 
-function useCopy() {
+export function useCopy() {
   const [state, setState] = useState<"idle" | "ok" | "fail">("idle");
   const timer = useRef<number>();
   useEffect(() => () => window.clearTimeout(timer.current), []);
@@ -143,9 +168,24 @@ export function CopyField({
   wrap?: boolean;
   mono?: boolean;
 }) {
+  // Four lines of base32 is not something anybody reads; it is something they
+  // copy. A window has the width to print it and be done, and a phone does not
+  // — there it becomes the ends of it, which is what a person checks against
+  // another screen anyway, with the whole of it a tap away in the clipboard.
+  // Tapping the shortened form opens it out, for the one time in a hundred
+  // somebody wants to see all of it.
+  const [full, setFull] = useState(false);
+  const isPhone = useIsPhone();
+  const short = isPhone && !full && value.length > 24;
   return (
-    <div className={`copyfield ${wrap ? "wrap" : ""}`}>
-      <code className={mono ? "mono" : ""}>{value}</code>
+    <div className={`copyfield ${wrap && !short ? "wrap" : ""}`}>
+      {short ? (
+        <code className="mono" onClick={() => setFull(true)}>
+          {shortId(value)}
+        </code>
+      ) : (
+        <code className={mono ? "mono" : ""}>{value}</code>
+      )}
       <CopyButton value={value} />
     </div>
   );
@@ -158,19 +198,23 @@ export function CodeHero({
   value,
   small,
   qr = true,
+  qrSize = 148,
   caption,
 }: {
   value: string;
   /** For long values (tickets), which cannot be read out and only need scanning. */
   small?: boolean;
   qr?: boolean;
+  /** How big the square is. A code held up across a table wants more than one
+   *  sitting beside a form — see the design's 7g, which draws it at 212. */
+  qrSize?: number;
   caption?: ReactNode;
 }) {
   const t = useT();
   const { state, copy } = useCopy();
   return (
     <div className="code-hero">
-      {qr && <QrCode value={value} size={148} />}
+      {qr && <QrCode value={value} size={qrSize} />}
       <div className={`value ${small ? "sm" : ""}`}>{value}</div>
       {caption && <div className="hint" style={{ textAlign: "center" }}>{caption}</div>}
       <button className="btn btn-sm" onClick={() => copy(value)}>

@@ -1,21 +1,17 @@
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use arvolo_core::manager::{ManagerEvent, TransferManager};
 use tokio_util::sync::CancellationToken;
 
-use crate::{book, sync};
+use crate::book;
 
 use crate::ipc;
-use crate::notify;
 use crate::output::vprintln;
 
 use crate::ui::*;
 use crate::util::*;
-
-use crate::commands::receive::record_history;
 
 /// Run the persistent background engine behind a local control socket.
 /// The control channel the daemon listens on: a bound socket on unix, the first
@@ -131,8 +127,7 @@ pub(crate) async fn daemon(
     relay: Option<String>,
     no_sync: bool,
 ) -> Result<()> {
-    use std::collections::HashMap;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
     // The control channel FIRST, before any engine work: opening it is also what
     // claims the right to be the only daemon, and a losing twin must not get as
@@ -144,352 +139,56 @@ pub(crate) async fn daemon(
     std::fs::remove_file(stop_marker_path()).ok();
 
     let relay = require_relay(relay)?;
-    let me = my_identity()?;
-    let my_id = encode_id(&me.public());
-    let download_dir = download_dir
-        .or_else(book::default_download_dir)
-        .unwrap_or_else(book::default_home_downloads);
-    std::fs::create_dir_all(&download_dir).context("create download dir")?;
 
-    // Persist resumable downloads here so a daemon restart picks them back up.
-    let state_dir = book::config_dir().join("transfers");
-    let manager = TransferManager::with_state_dir(
-        me,
-        Some(relay.clone()),
-        download_dir.clone(),
-        Some(state_dir),
-    );
-    manager.set_display_name(book::my_display_name());
-    manager.set_device_id(book::load_or_init_device());
-    let inbox = manager.spawn_inbox()?;
-    let _auto_sync =
-        (!no_sync && book::sync_enabled()).then(|| sync::spawn_auto_sync(relay.clone()));
+    // Made here rather than by the engine: this crate is what serves front-ends,
+    // so it is what counts them — and what reads the count, to decide whether a
+    // notification of its own would be the second one for the same file.
+    let front_ends: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
+    let shutdown = daemon_shutdown_signal();
+
+    let running = arvolo_engine::start::start(arvolo_engine::start::Options {
+        download_dir,
+        relay: relay.clone(),
+        auto_sync: !no_sync,
+        announce: Arc::new(crate::announce::Terminal {
+            front_ends: front_ends.clone(),
+        }),
+        shutdown: shutdown.clone(),
+        // The desktop writes downloads where they belong the first time; only a
+        // phone has to move them afterwards.
+        publisher: None,
+        // The board picks up where it left off, here too.
+        //
+        // This daemon outlives the window it serves (see the GUI's `daemon.rs`),
+        // so most of the time there is nothing to put back — the list was never
+        // lost. What this answers is the case where it *was*: a reboot, an
+        // update, a `restart`. Before it, the board came back empty and the
+        // morning's transfers were only in the history screen, which reads as
+        // having lost them.
+        //
+        // Runs once, at start, against an empty list, so it cannot duplicate a
+        // live row; `resume_incomplete` above has already claimed anything still
+        // unfinished, and the log only holds what ended.
+        restore_board: 300,
+        front_ends,
+    })
+    .await?;
 
     // Advisory pidfile for service tooling (not the guard).
     let pidfile = book::config_dir().join("daemon.pid");
     std::fs::write(&pidfile, format!("{}\n", std::process::id())).ok();
 
-    // Offers awaiting the user's approval. In M1 every offer parks here (no trust
-    // policy yet); a subscribed front-end lists and accepts/rejects them.
-    let pending: Arc<Mutex<HashMap<String, ipc::protocol::OfferDto>>> =
-        Arc::new(Mutex::new(HashMap::new()));
-
-    // How many front-ends hold an event subscription open. Shared with the IPC
-    // server, which maintains it, and read here to decide whether this daemon
-    // should raise the desktop notification itself or leave it to the UI.
-    let front_ends: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
-
-    // Events the daemon raises itself rather than relaying from the engine. Made
-    // here, and handed to the IPC server, rather than made inside it: the intake
-    // task below also has things to announce — an offer taken because the sender is
-    // trusted, one superseded by a re-post, one dropped because the sender is
-    // blocked — and it starts before the server exists. Without this the removals
-    // it makes were invisible, and an attached window kept a row (and a button)
-    // pointing at an offer the daemon had already disposed of.
-    let side_events: tokio::sync::broadcast::Sender<ipc::protocol::EventDto> =
-        tokio::sync::broadcast::channel(64).0;
-
-    // Engine task: park incoming offers and persist finished transfers to history,
-    // whether or not a front-end is attached.
-    {
-        let mut events = manager.subscribe();
-        let front_ends = front_ends.clone();
-        let manager = manager.clone();
-        let pending = pending.clone();
-        let side_events = side_events.clone();
-        tokio::spawn(async move {
-            loop {
-                match events.recv().await {
-                    Ok(ManagerEvent::OfferReceived {
-                        id,
-                        from,
-                        name,
-                        size,
-                        note,
-                        sender_name,
-                        relay,
-                    }) => {
-                        let from_b32 = encode_id(&from);
-                        // Blocked senders are dropped before anything else: no name
-                        // observed, no offer parked, no notification. Doing it here
-                        // rather than at the prompt is the point — a block that still
-                        // queued the offer would only move the chore, not remove it.
-                        if book::is_blocked(&from_b32) {
-                            tracing::debug!("dropping offer from blocked sender {from_b32}");
-                            manager.reject_offer(&id).await;
-                            // Say so: the arrival already reached the front-ends
-                            // (they subscribe to the engine, not to this task), so
-                            // silence here would leave a row for an offer that is
-                            // gone. Same reason as the two removals below.
-                            let _ = side_events
-                                .send(ipc::protocol::EventDto::OfferGone { id: id.clone() });
-                            continue;
-                        }
-                        // Record any advertised-name change durably (surfaced later in
-                        // `contacts list` / to an attached front-end); never blocks.
-                        book::observe_advertised_name(&from_b32, &sender_name);
-                        // And where to answer them. Only for a contact we already
-                        // have, so an offer cannot enrol a stranger into the book.
-                        if let Some(r) = book::learn_sender_relay(&from_b32, &relay) {
-                            tracing::debug!("{from_b32} now listens on {r}");
-                        }
-                        // Supersede any older parked offer for the same (sender, file).
-                        let superseded = superseded_ids(&pending.lock().unwrap(), &from_b32, &name);
-                        for old in &superseded {
-                            pending.lock().unwrap().remove(old);
-                            manager.reject_offer(old).await;
-                            // And tell the windows, which cannot see this map. Their
-                            // own rule for spotting a re-post is a comparison of
-                            // sender and filename; this is the fact behind it, so a
-                            // row cannot outlive the offer it stands for.
-                            let _ = side_events
-                                .send(ipc::protocol::EventDto::OfferGone { id: old.clone() });
-                        }
-                        let status = book::sender_status(&from_b32);
-                        let who = status.name.clone().unwrap_or_else(|| from_b32.clone());
-                        // Trusted sender → auto-download. Everyone else parks and
-                        // waits for the user's approval (the default).
-                        //
-                        // "Everyone else" excludes ourselves. An offer that opens
-                        // and authenticates as our own identity can only have been
-                        // sealed by something holding our identity secret — another
-                        // of our devices — so there is nobody here to be asked to
-                        // trust. Asking would mean asking the user's permission to
-                        // receive what the user just sent, from the other side of
-                        // the same desk. It is deliberately NOT folded into
-                        // `trusted` — that is a fact about the identity, not a
-                        // standing decision about a contact, and the two are revoked
-                        // by completely different means — but both live behind
-                        // [`auto_accepts`], because the front-ends are told the
-                        // answer and must be told the same one.
-                        let own_device = is_self(&from_b32);
-                        // Set when an automatic take was refused and this offer is
-                        // going back in front of the user. The windows were told, on
-                        // the arrival itself, that this one needed no answer — so
-                        // they drew nothing, and parking it silently would leave the
-                        // question in a map nobody is looking at.
-                        let mut refused_to_a_question = false;
-                        if auto_accepts(&from_b32) {
-                            let size_h = human_size(size);
-                            if own_device {
-                                eprintln!(
-                                    "⬇ auto-downloading {} ({size_h}) from another of your devices",
-                                    sanitize_display(&name)
-                                );
-                            } else {
-                                eprintln!(
-                                    "⬇ auto-downloading {} ({size_h}) from trusted {who}",
-                                    sanitize_display(&name)
-                                );
-                            }
-                            // Auto-accept, but still surface a notification so the
-                            // user knows a trusted download is happening — unless a
-                            // front-end is attached and will say so itself.
-                            if should_self_notify(&front_ends) {
-                                if own_device {
-                                    notify::auto_downloading_own_device(&name, &size_h);
-                                } else {
-                                    notify::auto_downloading(&name, &who, &size_h);
-                                }
-                            }
-                            match manager.accept_offer(&id, None).await {
-                                // Same ledger, same rule as the IPC accept: a
-                                // receipt is recorded when the transfer is taken,
-                                // never when the offer merely turns up.
-                                Ok(_) => {
-                                    book::record_seen(&from_b32);
-                                    // The offer is spent. A front-end that drew it
-                                    // as an arrival has nothing more to do with it,
-                                    // and one that (wrongly) drew it as a question
-                                    // must lose the question rather than keep a
-                                    // button wired to an id we have consumed.
-                                    let _ = side_events.send(ipc::protocol::EventDto::OfferGone {
-                                        id: id.clone(),
-                                    });
-                                    continue;
-                                }
-                                // Refused, and the engine still has the offer: the
-                                // deposit wants a password, or P2P is off and this
-                                // one is a direct transfer. Automatic was the wrong
-                                // answer, not the file — so fall through and ask,
-                                // which is where the password field lives. Asking
-                                // the engine rather than reading the error keeps
-                                // this right for a refusal nobody has typed yet.
-                                Err(e) if manager.is_pending(&id) => {
-                                    eprintln!("   … not automatically: {e:#}");
-                                    eprintln!("     asking instead.");
-                                    refused_to_a_question = true;
-                                }
-                                // Failed after the offer was taken: there is nothing
-                                // left to accept, so there is no question to ask.
-                                // Say it out loud — this is the one place where a
-                                // window shows nothing by design, so silence here is
-                                // a file that never arrived and never said so. The
-                                // sender's next re-post is another chance.
-                                Err(e) => {
-                                    eprintln!("   ✗ could not auto-accept: {e:#}");
-                                    notify::auto_download_failed(&name, &who, &format!("{e:#}"));
-                                    let _ = side_events.send(ipc::protocol::EventDto::OfferGone {
-                                        id: id.clone(),
-                                    });
-                                    continue;
-                                }
-                            }
-                        }
-                        {
-                            let size_h = human_size(size);
-                            // Announce an *arrival*, not a re-posting. A sender whose
-                            // live attempt keeps failing — the recipient's presence
-                            // beacon says online, nobody ever connects — posts a fresh
-                            // offer on every retry, and the list above already keeps
-                            // only the newest. Saying so again each time turned one
-                            // file into eighty-four notifications and eighty-four log
-                            // lines, all about the same thing still waiting.
-                            let repeat = !superseded.is_empty();
-                            if repeat {
-                                tracing::debug!(
-                                    "offer for {name} from {who} re-posted (superseding \
-                                     {} earlier one(s)) — not announcing again",
-                                    superseded.len()
-                                );
-                            } else {
-                                eprintln!(
-                                    "📨 offer waiting: {name} ({size_h}) from {who} — take it with `arvolo recv {}`",
-                                    crate::handles::short(&id)
-                                );
-                                // Nudge the user with a desktop notification (best-effort;
-                                // no-op on headless hosts, where the log line above stands
-                                // in). A attached front-end does its own, in its own words.
-                                if should_self_notify(&front_ends) {
-                                    notify::offer_awaiting(&name, &who, &size_h);
-                                }
-                            }
-                            // Say it again, as a question this time.
-                            //
-                            // Only after a refused automatic take: every other offer
-                            // reached the front-ends already, on the engine's own
-                            // event, and a second one would draw the row twice. This
-                            // one they were told to ignore. `auto` is false because
-                            // that is now true — the daemon tried and is asking —
-                            // and the book stamps are filled here because a side
-                            // event does not pass through the fan-out that adds them.
-                            if refused_to_a_question {
-                                let _ = side_events.send(ipc::protocol::EventDto::OfferReceived {
-                                    id: id.clone(),
-                                    from: from_b32.clone(),
-                                    name: name.clone(),
-                                    size,
-                                    note: note.clone(),
-                                    sender_name: sender_name.clone(),
-                                    auto: false,
-                                    fingerprint: book::fingerprint_of(&from_b32)
-                                        .unwrap_or_default(),
-                                    seen_count: book::seen_count(&from_b32),
-                                    known_name: book::known_name_of(&from_b32)
-                                        .map(|n| sanitize_display(&n))
-                                        .unwrap_or_default(),
-                                });
-                            }
-                            pending.lock().unwrap().insert(
-                                id.clone(),
-                                ipc::protocol::OfferDto {
-                                    id,
-                                    from: from_b32,
-                                    name,
-                                    size,
-                                    note,
-                                    sender_name,
-                                    // Stamped from the address book on the way out
-                                    // (`stamp_offer`), not here: the book moves while
-                                    // an offer waits.
-                                    ..Default::default()
-                                },
-                            );
-                        }
-                    }
-                    Ok(ManagerEvent::Completed { id, path }) => {
-                        if let Some(p) = &path {
-                            eprintln!("✓ saved {}", p.display());
-                        }
-                        record_history(&manager, id, "completed");
-                    }
-                    Ok(ManagerEvent::Deposited { id, info }) => {
-                        record_history(&manager, id, "deposited");
-                        crate::deposits::record_from_event(Some(id), &info);
-                    }
-                    Ok(ManagerEvent::Failed { id, error }) => {
-                        record_history(&manager, id, &format!("failed: {error}"))
-                    }
-                    Ok(ManagerEvent::Cancelled { id }) => record_history(&manager, id, "cancelled"),
-                    Ok(_) => {}
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                }
-            }
-        });
-    }
-
-    // Address-book watcher: `arvolo contacts add/remove/verify/trust/name` runs in
-    // its own process and edits the book files directly — the daemon never sees the
-    // call. Poll the book so an attached front-end is nudged to refetch, instead of
-    // showing a stale "Persone" grid until it happens to reconnect. This also covers
-    // the daemon's own writes (a `MarkVerified`, an approved advertised name).
-    {
-        let manager = manager.clone();
-        tokio::spawn(async move {
-            let mut last = book::book_stamp();
-            loop {
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                let now = book::book_stamp();
-                if now != last {
-                    last = now;
-                    manager.notify_contacts_changed();
-                }
-            }
-        });
-    }
-
-    // Advertised-name rows for identities nobody points at any more. Nothing
-    // produces them now — `contact_remove` clears its own row, and a sync merge
-    // sweeps what a sibling device's deletion stranded — but books written by
-    // older builds still carry them, and they would keep riding every snapshot.
-    // One sweep per start, best-effort: it reads two small TOMLs.
-    match book::prune_orphan_names() {
-        Ok(n) if n > 0 => tracing::debug!("pruned {n} orphan advertised-name record(s)"),
-        Err(e) => tracing::debug!("orphan-name sweep skipped: {e:#}"),
-        _ => {}
-    }
-
     eprintln!("arvolo daemon up.");
-    eprintln!("  identity: {my_id}");
+    eprintln!("  identity: {}", running.my_id);
     eprintln!("  relay:    {relay}");
     eprintln!("  channel:  {}", control_address());
-    eprintln!("  saving:   {}", download_dir.display());
-
-    // Resume any downloads that were in flight when the daemon last stopped — each
-    // continues from its partial file on disk, no re-accept needed.
-    let resumed = manager.resume_incomplete();
-    if resumed > 0 {
-        eprintln!("  resuming: {resumed} unfinished download(s)");
+    eprintln!("  saving:   {}", running.download_dir.display());
+    if running.resumed > 0 {
+        eprintln!("  resuming: {} unfinished download(s)", running.resumed);
     }
 
-    let shutdown = daemon_shutdown_signal();
-    let daemon = ipc::server::Daemon::new(
-        manager,
-        Some(relay),
-        download_dir,
-        pending,
-        front_ends,
-        side_events,
-        shutdown.clone(),
-    );
-    let pairings = daemon.pairings.clone();
-    let result = ipc::server::run(daemon, listener, shutdown).await;
-    // A hosted `device pair` offers this device's identity secret for its whole
-    // window. It must not outlive the daemon that was offering it.
-    pairings.cancel_all();
-
-    inbox.cancel();
+    let result = ipc::server::run(running.daemon.clone(), listener, shutdown).await;
+    running.stop();
     close_control();
     std::fs::remove_file(&pidfile).ok();
     result
@@ -724,81 +423,6 @@ pub(crate) fn acquire_instance_lock(path: &std::path::Path) -> Result<std::fs::F
         );
     }
     Ok(file)
-}
-
-/// The daemon raises desktop notifications only when no front-end holds an
-/// event subscription — an attached UI announces offers in its own words.
-fn should_self_notify(front_ends: &AtomicUsize) -> bool {
-    front_ends.load(Ordering::SeqCst) == 0
-}
-
-/// The parked offers a newly arrived one replaces: same sender, same file.
-///
-/// A live→mailbox fallback posts a fresh offer and retracts the stale live one,
-/// and a sender whose live attempt keeps failing re-posts on every retry — so the
-/// id churns while the file does not, and accepting a stale copy would download
-/// nothing. Keep only the newest.
-///
-/// Lifted out of the intake loop, which needs a relay and a real sender to reach,
-/// so the rule can be tested on its own. It is also kept, independently, at the
-/// other end of the socket (the desktop app drops rows by the same sender+name
-/// comparison): two implementations of one rule, and this is the one that decides.
-fn superseded_ids(
-    pending: &std::collections::HashMap<String, ipc::protocol::OfferDto>,
-    from: &str,
-    name: &str,
-) -> Vec<String> {
-    pending
-        .values()
-        .filter(|o| o.from == from && o.name == name)
-        .map(|o| o.id.clone())
-        .collect()
-}
-
-#[cfg(test)]
-mod intake_tests {
-    use super::superseded_ids;
-    use crate::ipc::protocol::OfferDto;
-    use std::collections::HashMap;
-
-    fn offer(id: &str, from: &str, name: &str) -> OfferDto {
-        OfferDto {
-            id: id.into(),
-            from: from.into(),
-            name: name.into(),
-            size: 1,
-            ..Default::default()
-        }
-    }
-
-    /// What counts as "the same file, again" — the rule that keeps a re-posting
-    /// sender from filling the list with one file, and the reason an id the user
-    /// was shown can stop existing while the file is still on its way.
-    #[test]
-    fn a_re_post_supersedes_only_the_same_sender_and_file() {
-        let mut pending = HashMap::new();
-        for o in [
-            offer("old", "anna", "arrivo.zip"),
-            offer("other-file", "anna", "altro.zip"),
-            offer("other-sender", "bruno", "arrivo.zip"),
-        ] {
-            pending.insert(o.id.clone(), o);
-        }
-
-        assert_eq!(
-            superseded_ids(&pending, "anna", "arrivo.zip"),
-            vec!["old".to_string()],
-            "same sender, same file: the older offer is spent"
-        );
-        assert!(
-            superseded_ids(&pending, "anna", "mai-visto.zip").is_empty(),
-            "a file we have not seen from them supersedes nothing"
-        );
-        assert!(
-            superseded_ids(&pending, "carla", "arrivo.zip").is_empty(),
-            "the same filename from somebody else is a different offer"
-        );
-    }
 }
 
 #[cfg(all(test, unix))]
@@ -1180,11 +804,48 @@ pub(crate) async fn serve_ticket_via_daemon(
         .collect::<Result<Vec<_>>>()
         .context("no such file or folder to serve")?;
     let (handoff, _offer) = offer_sources(&paths);
-    let (id, ticket) = client
+    // Subscribed first, so a preparation that ends quickly cannot announce its
+    // ticket before anyone is listening.
+    let events = daemon_events().await.ok();
+    let started = client
         .serve_ticket(paths_s, seed_relay, handoff)
         .await
         .context("daemon rejected the serve")?;
+    let (id, ticket) = match (started, events) {
+        (ipc::client::Background::Done(done), _) => done,
+        (ipc::client::Background::Running(id), Some(events)) => {
+            (id, wait_for_ticket(events, id).await?)
+        }
+        (ipc::client::Background::Running(id), None) => anyhow::bail!(
+            "the daemon is preparing the share as transfer {id}, but its events could \
+             not be followed here — `arvolo status` shows it"
+        ),
+    };
     Ok((handle_for(&mut client, id).await, ticket))
+}
+
+/// Wait for a share the daemon is preparing to have its ticket. Reading and
+/// hashing a large file takes minutes, and a terminal that sat silent for them
+/// would look exactly like the hang this replaced, so it says what it is doing.
+async fn wait_for_ticket(mut events: ipc::client::EventStream, id: u64) -> Result<String> {
+    use ipc::protocol::EventDto;
+    eprintln!("Preparing the file (reading and hashing it)…");
+    loop {
+        match events.next().await? {
+            Some(EventDto::TicketReady { id: e, ticket }) if e == id => return Ok(ticket),
+            Some(EventDto::Failed { id: e, error, .. }) if e == id => {
+                anyhow::bail!("the share could not be prepared: {error}")
+            }
+            Some(EventDto::Cancelled { id: e }) if e == id => {
+                anyhow::bail!("the share was cancelled while it was being prepared")
+            }
+            Some(_) => {}
+            None => anyhow::bail!(
+                "lost the daemon while it was preparing the share — `arvolo status` shows \
+                 whether it is still going"
+            ),
+        }
+    }
 }
 
 /// Hand a pairing code to the daemon: it hosts the rendezvous *and* serves the
@@ -1273,7 +934,9 @@ pub(crate) async fn push_via_daemon(
     };
     eprintln!("Handing off to the daemon (sending to {shown_to})…");
     let id = client
-        .push(to, paths_s, note, ttl, max, password, device, handoff)
+        .push(
+            to, paths_s, note, ttl, max, password, device, false, handoff,
+        )
         .await
         .context("daemon rejected the push")?;
     let shown = handle_for(&mut client, id).await;
@@ -1310,11 +973,16 @@ mod share_line_tests {
             last_pickup: 0,
             from_download: 0,
             path: None,
+            saved_uri: None,
             sender_name: String::new(),
             offer_status: None,
             waiting_code: None,
             waiting_detail: None,
             can_pause: None,
+            fail_code: None,
+            fail_detail: None,
+            link: None,
+            ticket: None,
         }
     }
 
@@ -1342,24 +1010,5 @@ mod share_line_tests {
         assert_eq!(transfer_state(&dto(false, 0, "active")), "active");
         let failed = "failed: relay unreachable";
         assert_eq!(transfer_state(&dto(true, 0, failed)), failed);
-    }
-}
-
-// Last module in the file on purpose: the two above are unix-only, so on Windows
-// this is the only test module, and anything below it would trip
-// `clippy::items_after_test_module`.
-#[cfg(test)]
-mod notify_tests {
-    use super::should_self_notify;
-    use std::sync::atomic::AtomicUsize;
-
-    // Regression: this used to read `!front_ends.load(..) > 0` — a bitwise NOT
-    // on usize, true for every count — so the daemon notified on top of the
-    // GUI and every offer rang twice.
-    #[test]
-    fn daemon_stays_quiet_while_a_front_end_is_attached() {
-        assert!(should_self_notify(&AtomicUsize::new(0)));
-        assert!(!should_self_notify(&AtomicUsize::new(1)));
-        assert!(!should_self_notify(&AtomicUsize::new(3)));
     }
 }

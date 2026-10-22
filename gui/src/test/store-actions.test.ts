@@ -25,6 +25,13 @@ async function boot(expectConnected = true) {
     pauseAll: false,
     sheetPicks: null,
     incomingOfferId: null,
+    // Where the app opens. Left out, every test inherited whatever screen the
+    // one before it had navigated to — which is fine until a test pushes, and
+    // then the next one starts one screen deep with no way to know it.
+    route: "transfers",
+    stack: ["transfers"],
+    threadKey: null,
+    personOpen: null,
   });
   const dispose = await useStore.getState().init();
   disposers.push(dispose);
@@ -228,15 +235,39 @@ describe("ticket", () => {
 describe("link", () => {
   it("78. returns the public URL, fragment key included", async () => {
     await boot();
-    const url = await s().link("/a.txt", null, null);
+    const { url } = await s().link("/a.txt", null, null);
     expect(url).toContain("#");
     expect(url).toContain("/dl/");
+  });
+
+  it("78b. a link still uploading comes back as its transfer, and its URL lands on the row", async () => {
+    await boot();
+    harness.uploadAs = 41;
+    const started = await s().link("/a.txt", null, null);
+    expect(started).toEqual({ id: 41, url: "" });
+    harness.emit({
+      started: { id: 41, direction: "send", name: "a.txt", total_size: 10 },
+    });
+    harness.emit({ link_ready: { id: 41, link: "https://relay.test/dl/q#k" } });
+    expect(s().transfers["t41"]?.link).toBe("https://relay.test/dl/q#k");
   });
 
   it("79. a refusal surfaces rather than yielding an unusable link", async () => {
     await boot();
     harness.fail = new Set(["createLink"]);
     await expect(s().link("/a.txt", null, null)).rejects.toThrow();
+    expect(s().actionRefusal, "a plain failure carries no code").toBeNull();
+  });
+
+  it("79b. a file the relay will not hold keeps its code and the relay's limit", async () => {
+    await boot();
+    harness.refuse = { createLink: { code: "tooLarge", limitBytes: 5 * 1024 ** 3 } };
+    await expect(s().link("/big.iso", null, null)).rejects.toThrow();
+    expect(s().actionRefusal).toEqual({ code: "tooLarge", limitBytes: 5 * 1024 ** 3 });
+    // Dismissing the sentence dismisses its code with it: a stale code against
+    // the next, unrelated failure would translate it as the wrong thing.
+    s().dismissActionError();
+    expect(s().actionRefusal).toBeNull();
   });
 });
 
@@ -619,5 +650,83 @@ describe("clearFinished", () => {
 
     expect(row("t1")).toBeUndefined();
     expect(row("oo1"), "an undecided arrival is not history").toBeTruthy();
+  });
+});
+
+describe("the way back, on a phone", () => {
+  // Android's back is the system's, and it arrives here as a history pop — so
+  // every screen has to have left an entry behind, and one press has to undo
+  // exactly one screen. A thread that did neither let the back gesture walk
+  // straight past an open person and pop the list underneath them, which from
+  // the first screen means leaving the app.
+  it("102. takes an open thread away before it touches the stack", async () => {
+    await boot();
+    s().push("settings");
+    s().openThread("p1");
+    expect(s().threadKey).toBe("p1");
+
+    s().back();
+    expect(s().threadKey, "the thread goes first").toBeNull();
+    expect(s().route, "and the screen under it is still there").toBe("settings");
+
+    s().back();
+    expect(s().route).toBe("transfers");
+    expect(s().stack).toHaveLength(1);
+  });
+
+  // The entry the system's back pops is left by whatever is open, not by the
+  // store — see `backstack`, and the tests for it in backstack.test.ts.
+
+  it("106. a transfer the engine took by itself asks who it is from", async () => {
+    // Accepting by hand carries the person over from the offer. Nothing does
+    // that for a file the engine takes on its own — a trusted contact's, or one
+    // of your own machines' — and the event that announces it says only id,
+    // name and size. The row sat there as "Somebody", with a question mark for
+    // a face, until something else happened to reload.
+    harness.snapshot.contacts = [dto.contact({ name: "giulia", id: PEER_ID })];
+    await boot();
+    // What the daemon would say if asked: this transfer is from Giulia.
+    harness.snapshot.transfers = [
+      dto.transfer({ id: 77, direction: "recv", peer: PEER_ID }),
+    ];
+    // What the event says: id, name, size. Nothing about who.
+    harness.emit({
+      started: { id: 77, direction: "recv", name: "da-me.bin", total_size: 10 },
+    });
+    expect(row("t77").peerId, "the event carried nobody").toBeUndefined();
+    await vi.waitFor(() => expect(row("t77").peer).toBe("giulia"), {
+      timeout: 3000,
+    });
+  });
+
+  it("105. pushing to a screen fetches what that screen shows", async () => {
+    // A phone reaches every inner screen by pushing and never by `go`, so for
+    // as long as only `go` fetched, those screens opened and stayed empty:
+    // "Your devices" said "loading…" for as long as anybody cared to look.
+    await boot();
+    const before = harness.recorder.listHistory;
+    s().push("history");
+    await vi.waitFor(() =>
+      expect(harness.recorder.listHistory).toBe(before + 1)
+    );
+  });
+
+  it("104. a person's page goes before a thread, which goes before the stack", async () => {
+    // The palette can open a person over anything — including over an open
+    // thread. Back then has three things above the root, and takes them
+    // topmost first.
+    await boot();
+    s().push("settings");
+    s().openThread("p1");
+    s().openPerson("Giulia");
+
+    s().back();
+    expect(s().personOpen).toBeNull();
+    expect(s().threadKey, "the thread is still under it").toBe("p1");
+    s().back();
+    expect(s().threadKey).toBeNull();
+    expect(s().route).toBe("settings");
+    s().back();
+    expect(s().route).toBe("transfers");
   });
 });

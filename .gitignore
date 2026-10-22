@@ -10,3 +10,15 @@ docs/IDENTITY-ENTERPRISE.md
 .idea/
 .vscode/
 *.swp
+
+# La chiave di firma Android, in chiaro. Sta qui dentro — accanto al progetto,
+# non in una cartella di sistema che un backup dimentica — e **non** nei commit:
+# questo repo è pubblico, e chi ha questa chiave può firmare un aggiornamento
+# che i telefoni accettano come se venisse da noi. La copia versionata è cifrata
+# e sta in `gui/src-tauri/mobile/android/release-key.tar.gpg`; la passphrase sta
+# qui e in Vaultwarden, e solo lì.
+.secrets/
+
+# Gli artefatti da installare a mano (APK, bundle). Si rifanno, e un APK da
+# 47 MB in un repo è 47 MB per sempre.
+dist/

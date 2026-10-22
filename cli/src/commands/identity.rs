@@ -37,6 +37,15 @@ pub(crate) fn me(plain: bool) -> Result<()> {
     } else {
         eprintln!("display name: {name}");
     }
+    // Printed next to it precisely because the two get confused: the line above
+    // is what other people see and is the same on every machine holding this
+    // identity, while this one names *this* computer and never leaves it.
+    let device = book::load_devices()
+        .devices
+        .get(&arvolo_core::sync::device_key(&book::load_or_init_device()))
+        .map(|r| r.name.clone())
+        .unwrap_or_else(book::default_device_name);
+    eprintln!("this device: {device} (only you see this — `arvolo device`)");
     eprintln!("(identity stored at {})", identity_path().display());
     Ok(())
 }
@@ -53,11 +62,13 @@ pub(crate) async fn name_cmd(name: Option<String>) -> Result<()> {
             }
         }
         Some(n) => {
-            // Through the daemon when one runs: it advertises the name inside
-            // every offer, and its config watcher does not watch config.toml —
-            // a name written only to the file kept the OLD one on the air until
-            // the next restart. (`SetMyName` persists to the file too.) Without
-            // a daemon the file is the whole state, so writing it is enough.
+            // Through the daemon when one runs, so the change is on the air at
+            // once rather than at the next restart. (`SetMyName` persists it and
+            // stamps the sync register, same as the direct call below.) The
+            // daemon's book watcher would catch a direct write within the second
+            // — it watches `me.toml` — but only because the name now lives in a
+            // ledger; asking the daemon remains the one path that does not depend
+            // on that.
             if let Some(mut client) = crate::commands::daemon::daemon_client().await {
                 client.set_my_name(n.clone()).await?;
             } else {

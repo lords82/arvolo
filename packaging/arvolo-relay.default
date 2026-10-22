@@ -22,5 +22,10 @@
 #ARVOLO_MAX_TOTAL_BLOB_BYTES=53687091200   # 50 GiB across all blobs
 #ARVOLO_MAX_SESSION_RELAY_BYTES=536870912  # 512 MiB seed offload per transfer
 
+# Resumable uploads (docs/PROTOCOL.md §7.4.1): how many may be open at once, or
+# turn them off and have clients use the single-request deposit.
+#ARVOLO_MAX_OPEN_UPLOADS=256
+#ARVOLO_DISABLE_UPLOAD_SESSIONS=1
+
 # New rendezvous (short-code) slots per IP per hour; 0 turns the limit off.
 #ARVOLO_RZ_CLAIMS_PER_HOUR=10

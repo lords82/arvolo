@@ -253,7 +253,9 @@ pub async fn prepare_send_reusing(
     // Only a path can be pre-checked; a handed-off descriptor IS the proof of
     // access, and may have no visible path at all.
     if let crate::source::SendSource::Path(p) = &source {
-        anyhow::ensure!(p.is_file(), "{} is not a file", p.display());
+        if !p.is_file() {
+            return Err(crate::source::NotAFile(p.clone()).into());
+        }
     }
     let reuse = match prep.take() {
         Some(p) => p,
@@ -348,7 +350,9 @@ pub async fn resume_send(
     expected: &ChunkTicket,
     relay: RelayChoice,
 ) -> Result<SendSession> {
-    anyhow::ensure!(path.is_file(), "{} is not a file", path.display());
+    if !path.is_file() {
+        return Err(crate::source::NotAFile(path.to_path_buf()).into());
+    }
     // `Some` rebinds the original node id so the *old* ticket reconnects; `None`
     // (e.g. resuming from a plain ticket, which carries no transport secret) uses
     // a fresh id — the caller then serves the reprinted ticket.

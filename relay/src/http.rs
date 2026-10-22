@@ -26,6 +26,8 @@ use crate::state::{
 };
 use crate::util::{constant_time_eq, now_unix, random_claim};
 
+mod upload;
+
 const ENCAPPED_KEY_HEADER: &str = "x-arvolo-encapped-key";
 /// Base32 BLAKE3 hash of the revoke token, sent at deposit (optional).
 const REVOKE_HASH_HEADER: &str = "x-arvolo-revoke-hash";
@@ -47,6 +49,11 @@ const INBOX_HAVE_HEADER: &str = "x-arvolo-have";
 /// 24-hour blob, which the recipient discovers as a 404 on the second day. A client
 /// too old to read it is no worse off than before.
 const GRANTED_TTL_HEADER: &str = "x-arvolo-ttl";
+/// On a 413 to `/v1/deposit`: the per-blob cap this relay enforces, in bytes.
+/// The one number a sender can act on — a bare "too large" says neither how
+/// large is too large nor whether a smaller file would do — and the same figure
+/// `/v1/features` advertises as `max_blob_bytes`, for a client that asks first.
+const MAX_BLOB_HEADER: &str = "x-arvolo-max-blob-bytes";
 
 // ---- HTTP layer -----------------------------------------------------------
 
@@ -242,13 +249,20 @@ async fn dl_manifest_handler() -> impl IntoResponse {
 /// shape here is load-bearing. Adding a field is safe for all of them;
 /// reordering or reformatting the existing ones is not — which is why `cors` is
 /// appended after `version` rather than slotted in beside the other two flags.
+///
+/// `max_blob_bytes` is the per-blob cap `/v1/deposit` enforces (`0` = none), so a
+/// sender can refuse a file *before* encrypting and uploading all of it only to
+/// be told no at the end — and can say in its refusal what the limit is, which a
+/// 413 alone never did (`core::link::relay_max_blob_bytes`).
 async fn features_handler(State(state): State<AppState>) -> impl IntoResponse {
     (
         [(axum::http::header::CONTENT_TYPE, "application/json")],
         format!(
-            "{{\"links\":{},\"rz2\":true,\"have\":true,\"version\":\"{}\",\"cors\":true}}",
+            "{{\"links\":{},\"rz2\":true,\"have\":true,\"hold\":true,\"version\":\"{}\",\"cors\":true,\"max_blob_bytes\":{},\"upload\":{}}}",
             state.links_enabled,
-            arvolo_core::VERSION
+            arvolo_core::VERSION,
+            max_blob_bytes(),
+            state.uploads_enabled
         ),
     )
 }
@@ -347,11 +361,22 @@ async fn swarm_peers_handler(
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/v1/deposit", post(deposit_handler))
+        // The resumable form of the same deposit — see `http/upload.rs`. Exempt
+        // from the body limit for the same reason: an append streams to disk.
+        .route("/v1/upload", post(upload::open_handler))
+        .route(
+            "/v1/upload/{id}",
+            get(upload::status_handler)
+                .patch(upload::append_handler)
+                .delete(upload::abort_handler),
+        )
+        .route("/v1/upload/{id}/commit", post(upload::commit_handler))
         .route("/v1/features", get(features_handler))
         .route(
             "/v1/fetch/{claim}",
             get(fetch_handler).options(fetch_options_handler),
         )
+        .route("/v1/fetch/{claim}/ack", post(fetch_ack_handler))
         .route("/v1/entry/{claim}", axum::routing::delete(revoke_handler))
         .route("/v1/entry/{claim}/status", get(entry_status_handler))
         .route("/v1/addr", get(addr_handler))
@@ -1426,11 +1451,14 @@ async fn deposit_handler(
     // memory — enforcing the per-blob size cap as we go (`0` = unlimited) and the
     // remaining aggregate budget. On any error or overflow the partial file is
     // removed.
-    let cap = match max_blob_bytes() as u64 {
-        0 => remaining_total,
-        per_blob => per_blob.min(remaining_total),
-    };
-    let cap = usize::try_from(cap).unwrap_or(usize::MAX);
+    // The two bounds are kept apart because they call for different answers: past
+    // the per-blob cap the file will never fit here (413, with the cap, so the
+    // sender can say how large is too large); past the remaining budget it is the
+    // relay that is full right now, which clears as deposits expire (507, which
+    // the client already reads as "try again later"). Folding both into one
+    // number turned a full relay into a "too large" the sender could do nothing
+    // about.
+    let per_blob = max_blob_bytes() as u64;
     let claim = mb.new_claim();
     let path = mb.blob_path(&claim);
     let mut file = tokio::fs::File::create(&path).await.map_err(|e| {
@@ -1458,10 +1486,24 @@ async fn deposit_handler(
             }
         };
         written = written.saturating_add(chunk.len() as u64);
-        if cap != 0 && written > cap as u64 {
+        if per_blob != 0 && written > per_blob {
+            let _ = tokio::fs::remove_file(&path).await;
+            // Built by hand rather than through the error tuple because the cap
+            // travels in a header, and the tuple has nowhere to put one.
+            return Ok((
+                StatusCode::PAYLOAD_TOO_LARGE,
+                [(MAX_BLOB_HEADER, per_blob.to_string())],
+                format!("blob too large (this relay accepts up to {per_blob} bytes)"),
+            )
+                .into_response());
+        }
+        if written > remaining_total {
             return Err(abort(
                 &path,
-                (StatusCode::PAYLOAD_TOO_LARGE, "blob too large".into()),
+                (
+                    StatusCode::INSUFFICIENT_STORAGE,
+                    "relay at storage capacity".into(),
+                ),
             )
             .await);
         }
@@ -1595,17 +1637,29 @@ async fn fetch_options_handler() -> Response {
     resp
 }
 
+/// `?hold=1` on a fetch: serve the bytes, spend nothing. The fetcher acks with
+/// `POST /v1/fetch/{claim}/ack` once the file is safely written — see
+/// [`crate::mailbox::Mailbox::fetch_plan_held`] for why that moment matters.
+#[derive(Deserialize)]
+struct FetchQuery {
+    #[serde(default)]
+    hold: u8,
+}
+
 async fn fetch_handler(
     State(state): State<AppState>,
     AxumPath(claim): AxumPath<String>,
+    Query(q): Query<FetchQuery>,
 ) -> Result<Response, (StatusCode, String)> {
     // Metadata decision under the DB lock (fast); the blob file is then read
     // off-lock and off the async worker via tokio::fs, so one large/slow download
     // can't hold the SQLite mutex and stall every other relay request.
-    let plan = state
-        .mailbox
-        .fetch_plan(&claim, now_unix())
-        .map_err(err_response)?;
+    let plan = if q.hold != 0 {
+        state.mailbox.fetch_plan_held(&claim, now_unix())
+    } else {
+        state.mailbox.fetch_plan(&claim, now_unix())
+    }
+    .map_err(err_response)?;
     // Stream the blob straight off disk — never buffer a whole (possibly multi-GB)
     // file in memory. Open first, then, for a burn-after-read claim, unlink the
     // path immediately: the open handle keeps the bytes alive until this response
@@ -1645,6 +1699,20 @@ async fn fetch_handler(
     );
     cross_origin_headers(&mut resp);
     Ok(resp)
+}
+
+/// The second half of a held fetch: the download is counted now, and a
+/// one-shot deposit burned. `404` once it is gone, which a fetcher that
+/// already has the bytes can ignore.
+async fn fetch_ack_handler(
+    State(state): State<AppState>,
+    AxumPath(claim): AxumPath<String>,
+) -> Result<String, (StatusCode, String)> {
+    state
+        .mailbox
+        .ack_fetch(&claim, now_unix())
+        .map_err(err_response)?;
+    Ok("acked".into())
 }
 
 /// Seed (backfill) a P2P blob into the relay's store. Body = the sender's blob

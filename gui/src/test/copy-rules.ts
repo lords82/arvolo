@@ -49,10 +49,60 @@ export const LANG_SLACK: Record<string, number> = {
  *  generous hides real cases, a wrong default that is strict shows up at once. */
 const CATEGORY: Record<string, Cat> = {
   // Body text under a heading, or a whole explanatory block on its own.
+  // The build line at the foot of *You*: a whole sentence, read once, by
+  // somebody who went looking for it.
+  "you.footer": "secondary",
+  // Le frasi di spiegazione delle sezioni 11 e 12: la riga sotto «Pubblico»
+  // e l'introduzione di «Lasciati».
+  "compose.publicSub": "secondary",
+  // Sezioni 13–16: la riga sotto un codice riconosciuto, le note in fondo ai
+  // fogli, la spiegazione dell'interruttore «Aspetta», e la riga «come arriva»
+  // nel foglio blu — tutte frasi lette una volta.
+  "code.sub.code": "secondary",
+  "code.sub.chunk": "secondary",
+  "code.sub.mailbox": "secondary",
+  "code.note": "secondary",
+  "compose.howWait": "secondary",
+  "compose.howMailbox": "secondary",
+  "compose.howGroup": "secondary",
+  "compose.howSelf": "secondary",
+  "compose.howLink": "secondary",
+  "compose.nothingPicked": "secondary",
+  // Le due righe sotto l'indirizzo in `IdentityView`: cos'è, e perché non c'è
+  // un quadrato da inquadrare. Si leggono una volta, da chi è andato a
+  // cercarle.
+  // Il riassunto della giornata: una riga di stato, non un titolo — e da
+  // quando nomina ogni uscita (non riusciti, annullati, in casella) il
+  // fallback a `title` la tagliava per quello che non è.
+  "activity.endedToday": "status",
+  // La riga sotto i due bottoni di «Link pronto» (18c): dove ritrovare il link
+  // per revocarlo. Secondo livello per costruzione — si legge una volta, da chi
+  // si sta chiedendo «e se cambio idea?».
+  "compose.linkWhereBack": "secondary",
+  "identity.what": "secondary",
+  "identity.noQr": "secondary",
+  "exchange.searchPlaceholder": "secondary",
+  "exchange.takeTitle": "secondary",
+  "xfer.bgNote": "secondary",
+  "xfer.rowNote": "secondary",
+  "xfer.waitingMailbox": "secondary",
+  "xfer.inMailboxWaiting": "secondary",
+  "waiting.forThem": "secondary",
+  // What a failed row says under its name: a sentence, read once.
+  "failed.sourceMissing": "secondary",
+  "failed.recipientCancelled": "secondary",
+  "failed.expiredOnRelay": "secondary",
+  "failed.depositGone": "secondary",
+  "failed.noSpace": "secondary",
+  "failed.network": "secondary",
+  "activity.leftIntro": "secondary",
   "send.pickerEmpty": "secondary",
   "send.noRelay": "secondary",
   "send.linkTooMany": "secondary",
   "settings.relayLocked": "secondary",
+  // The sentence under a group in the phone's settings, which is where this
+  // platform puts the explanation that a desktop puts beside the field.
+  "adv.copyHint": "secondary",
   "settings.downloadDirEnv": "secondary",
   // A toast's second line. `common.*` is otherwise all micro-labels, which is
   // why the prefix alone reads it as one.
@@ -60,7 +110,26 @@ const CATEGORY: Record<string, Cat> = {
   // Captions under a code, and the notice above the restart button.
   "pair.captionDevice": "secondary",
   "pair.captionContact": "secondary",
+  // The same slot on the phone's code screen: what to do with the square and
+  // the words under it, read once by somebody holding the phone up.
+  "codes.readItOut": "secondary",
+  // And the line under the address book's one filled action: what the swap is
+  // for, which is the half the verb above it cannot carry.
+  "people.swapBoth": "secondary",
+  // The heading over the one choice in *Ricevuti* is a sentence in the canvas,
+  // not a micro-label: it says who the rule covers, which is the half "Foto e
+  // video" leaves out.
+  "received.photosLabel": "secondary",
+  // Where what just arrived went: a state, reported.
+  "received.wentToGallery": "status",
   "pair.needsRestart": "secondary",
+  "pair.needsReopen": "secondary",
+  // The line under the code that says the exchange works from either side.
+  "pair.orScanTheirs": "secondary",
+  // What to do about a camera the system will not hand over.
+  "scan.noPermissionHow": "secondary",
+  // Where a blocked person went, said in the toast that says they were blocked.
+  "people.blockedWhere": "secondary",
   // A consent checkbox: its label is the sentence being agreed to, so it is one.
   "pair.understood": "secondary",
   // States, not headings.
@@ -167,7 +236,9 @@ export function categorise(key: string): Cat {
   // naming each one here would be a list that grows with the next dialog.
   if (/confirm/i.test(key) && !/(Title|Label|Cancel)$/.test(key))
     return "confirmBody";
-  if (/(Hint|Desc|Body|Note|Detail|Blurb|Warn[A-Z]|explain)/i.test(key))
+  // `*Foot` with them: the line under a group *is* the second level, by
+  // construction — it is the slot this platform puts the explanation in.
+  if (/(Hint|Desc|Body|Note|Detail|Blurb|Foot|Warn[A-Z]|explain)/i.test(key))
     return "secondary";
   if (/^(blurb|sub)/i.test(key.split(".")[1] ?? "")) return "secondary";
   if (/^store\.err/.test(key)) return "error";

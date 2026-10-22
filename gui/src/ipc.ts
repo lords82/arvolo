@@ -1,4 +1,4 @@
-import type { PickedItem } from "./types";
+import type { PickedItem, RecentPhoto } from "./types";
 // Typed wrappers over the Tauri command bridge + the engine event channel.
 
 import { invoke } from "@tauri-apps/api/core";
@@ -37,24 +37,50 @@ export function asAcceptError(e: unknown): AcceptError {
   return Object.assign(new Error(message), { code });
 }
 
+/** An action the daemon refused, carrying its word for why and, for a file the
+ *  relay will not hold, the relay's cap in bytes.
+ *
+ *  `code` is empty for a plain failure — and for a daemon too old to send one,
+ *  where the only thing left to read is the sentence. `limitBytes` is `null`
+ *  unless the code is `tooLarge` and the relay named its limit. */
+export type Refusal = Error & { code: string; limitBytes: number | null };
+
+export function asRefusal(e: unknown): Refusal {
+  const raw = e as
+    | { code?: unknown; message?: unknown; limit_bytes?: unknown }
+    | null;
+  const message =
+    typeof raw?.message === "string" ? raw.message : String(e ?? "");
+  const code = typeof raw?.code === "string" ? raw.code : "";
+  const limitBytes =
+    typeof raw?.limit_bytes === "number" && raw.limit_bytes > 0
+      ? raw.limit_bytes
+      : null;
+  return Object.assign(new Error(message), { code, limitBytes });
+}
+
 export const api = {
   status: () => invoke<StatusDto>("status"),
   listTransfers: () => invoke<TransferDto[]>("list_transfers"),
   listPending: () => invoke<OfferDto[]>("list_pending"),
   listContacts: () => invoke<ContactDto[]>("list_contacts"),
   /** Open the native picker; resolves to registered items (empty = cancelled). */
-  pickFiles: (directory: boolean) =>
-    invoke<PickedItem[]>("pick_files", { directory }),
+  pickFiles: (directory: boolean, media = false) =>
+    invoke<PickedItem[]>("pick_files", { directory, media }),
   /** `device` aims it at one of our own machines; only meaningful when `to` is
    *  the reserved self recipient, and refused by the daemon otherwise. */
   sendTo: (
     to: string,
     items: string[],
     note: string,
-    device: string | null = null
-  ) => invoke<number>("send_to", { to, items, note, device }),
+    device: string | null = null,
+    /** Never the mailbox (13d): the send waits for them and goes direct. */
+    liveOnly = false
+  ) => invoke<number>("send_to", { to, items, note, device, liveOnly }),
   /** `send --deposit`: skip the live attempt, leave it in their mailbox. Returns
-   *  the `arvm…` ticket too, so it can also be handed over by other means. */
+   *  the transfer id at once; the `arvm…` ticket — for handing it over by other
+   *  means — lands on the transfer row with the upload. `ticket` is already
+   *  filled only against a daemon that uploads inside the call. */
   depositTo: (
     to: string,
     items: string[],
@@ -73,6 +99,9 @@ export const api = {
       password,
       device,
     }),
+  /** Answers at once with the share's id; `ticket` is empty while the file is
+   *  still being read and hashed, and arrives as `ticket_ready`. Filled only
+   *  against a daemon that prepares inside the call. */
   serveTicket: (items: string[], seedRelay: string | null) =>
     invoke<{ id: number; ticket: string }>("serve_ticket", {
       items,
@@ -80,8 +109,20 @@ export const api = {
     }),
   serveCode: (items: string[], relay: string | null, keep: boolean) =>
     invoke<{ id: number; code: string }>("serve_code", { items, relay, keep }),
+  /** Starts the link as a transfer and answers with its id at once; the URL
+   *  follows as a `link_ready` event. `url` is already filled only against a
+   *  daemon from before links were transfers, which uploads inside the call.
+   *
+   *  Rejects with a `Refusal`: the relay's size cap arrives as `tooLarge` with
+   *  `limitBytes`, so the notice can say how large is too large. */
   createLink: (item: string, ttl: number | null, max: number | null) =>
-    invoke<string>("create_link", { item, ttl, max }),
+    invoke<{ id: number | null; url: string }>("create_link", {
+      item,
+      ttl,
+      max,
+    }).catch((e) => {
+      throw asRefusal(e);
+    }),
   recv: (ticket: string, outItem: string | null, password: string | null) =>
     invoke<number>("recv", { ticket, outItem, password }),
   acceptOffer: async (
@@ -107,6 +148,11 @@ export const api = {
     invoke<void>("reject_offer", { offerId }),
   pause: (id: number) => invoke<void>("pause", { id }),
   resume: (id: number) => invoke<void>("resume", { id }),
+  /** Going to sleep, and coming back. See `bridge::suspend_transfers`. */
+  suspendTransfers: () => invoke<void>("suspend_transfers"),
+  resumeSuspendedTransfers: () => invoke<void>("resume_suspended_transfers"),
+  /** The window went away, or came back — see `window_hidden` in the backend. */
+  windowHidden: (hidden: boolean) => invoke<void>("window_hidden", { hidden }),
   cancel: (id: number) => invoke<void>("cancel", { id }),
   remove: (id: number) => invoke<void>("remove", { id }),
   clearFinished: () => invoke<number>("clear_finished"),
@@ -192,9 +238,32 @@ export const api = {
   // download folder, a received file, `config.toml` — are only known at runtime.
   // The Rust side checks the path against the daemon before opening it.
   openPath: (path: string) => invoke<void>("open_path", { path }),
+  /** Metti una copia di un file ricevuto nella Galleria del telefono, e tieni
+   *  l'identificatore che torna: «Togli dalla Galleria» deve poter togliere
+   *  esattamente quella copia. Il lato Rust rifiuta quello che non è una foto o
+   *  un video, ed è lui l'autorità sull'elenco dei formati. */
+  photosAdd: (path: string) => invoke<string>("photos_add", { path }),
+  photosRemove: (id: string) => invoke<void>("photos_remove", { id }),
+  /** C'è una Galleria su questa piattaforma? Una preferenza che non può valere
+   *  non va mostrata. */
+  photosAvailable: () => invoke<boolean>("photos_available"),
+  /** The last `limit` pictures and videos, newest first — or `null` where the
+   *  phone has no library to read (a desktop, a refused permission). */
+  photosRecent: (limit: number, offset = 0) =>
+    invoke<RecentPhoto[] | null>("photos_recent", { limit, offset }),
+  /** Those pictures as files the engine can send. */
+  photosExport: (ids: string[]) => invoke<PickedItem[]>("photos_export", { ids }),
+  /** Offer a link to the system's own share sheet. iOS only — see `share_link`;
+   *  the screen asks `canShareLink()` before drawing the button. */
+  shareLink: (url: string) => invoke<void>("share_link", { url }),
+  /** A line to the device console, for what a phone cannot otherwise be asked. */
+  note: (msg: string) => invoke<void>("note", { msg }),
   // The ticket of a .arvolo the app was LAUNCHED with (double click before the
   // window existed). One-shot: the backend hands it over once.
   takePendingTicket: () => invoke<string | null>("take_pending_ticket"),
+  /** What another app shared with Arvolo and nobody has taken yet, registered
+   *  as picked files. Empty on a desktop, which has no share sheet. */
+  takePendingShared: () => invoke<PickedItem[]>("take_pending_shared"),
   // Keep the native side (tray menu, arrival notifications) in the webview's
   // language — they used to be hardcoded Italian in a four-language app.
   setUiLanguage: (lang: string) => invoke<void>("set_ui_language", { lang }),
@@ -218,6 +287,12 @@ export function onEngineEvent(cb: (ev: EngineEvent) => void): Promise<UnlistenFn
 /** Files just dropped on the window, already registered on the Rust side. */
 export function onPickedFiles(cb: (items: PickedItem[]) => void): Promise<UnlistenFn> {
   return listen<PickedItem[]>("files://picked", (e) => cb(e.payload));
+}
+
+/** The nudge that something was shared from another app — the files are
+ *  fetched with `takePendingShared`, never carried by the event. */
+export function onSharedArrived(cb: () => void): Promise<UnlistenFn> {
+  return listen<void>("shared://arrived", () => cb());
 }
 
 /** Subscribe to *why* the daemon would not start, when it would not start. */

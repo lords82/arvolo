@@ -13,6 +13,8 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { createPortal } from "react-dom";
+import { useBackDismiss } from "../backstack";
 
 export interface MenuItem {
   key: string;
@@ -49,7 +51,11 @@ export function Menu({
     const el = ref.current;
     if (!el || !anchor) return;
     const a = anchor.getBoundingClientRect();
-    const m = el.getBoundingClientRect();
+    // Layout size, not the bounding rect: the phone opens the menu through a
+    // scale animation, and a bounding rect read on the first frame measures
+    // the shrunken menu — which then gets placed as if it were small and
+    // overflows the right edge of the screen when it grows.
+    const m = { width: el.offsetWidth, height: el.offsetHeight };
     const pad = 8;
     // Below by default; above when the bottom would clip. Right-aligned to the
     // trigger, then pulled back inside the window if that overflows.
@@ -99,7 +105,11 @@ export function Menu({
     };
   }, [onClose, anchor, enabled, active]);
 
-  return (
+  // Through a portal: `fixed` coordinates from `getBoundingClientRect` are
+  // viewport coordinates, and they only stay that way if no ancestor carries a
+  // filter or a transform — the blurred bar this menu now opens from carries
+  // both kinds of trouble.
+  return createPortal(
     <div
       ref={ref}
       className="menu"
@@ -143,7 +153,8 @@ export function Menu({
           </div>
         );
       })}
-    </div>
+    </div>,
+    document.body
   );
 }
 
@@ -160,6 +171,10 @@ export function MenuButton({
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLButtonElement>(null);
+  // A click outside closes this, and on a phone the system's back is that
+  // click: without a turn at it, back would dismiss the screen behind the menu
+  // and leave the menu hanging over whatever arrived.
+  useBackDismiss(open, () => setOpen(false));
   return (
     <>
       <button

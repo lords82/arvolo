@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use anyhow::{bail, Context, Result};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 
+use arvolo_core::flow::TooLargeForRelay;
 use arvolo_core::manager::AcceptRefusal;
 
 use crate::protocol::{
@@ -41,11 +42,67 @@ type Write = Box<dyn AsyncWrite + Unpin + Send>;
 /// relay it knows, in turn), short enough to be a bounded wait.
 const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
-/// An RPC connection to the running daemon.
+/// The answer to a request that a daemon may carry out in the background.
+///
+/// Uploading a whole file can take longer than any client should wait on one
+/// answer, so a current daemon starts it as a transfer and answers with its id.
+/// An older one does the work inside the request and answers with the result.
+/// Both are correct answers to the same request; the type makes the caller say
+/// what it does with each.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Background<T> {
+    /// Under way as this transfer; the result arrives as an event.
+    Running(u64),
+    /// Already done (an older daemon), with the result.
+    Done(T),
+}
+
+/// Something that answers requests with no socket in between.
+///
+/// The desktop has a daemon at the other end of a pipe. A phone has neither:
+/// the engine runs inside the app, and "asking the daemon" is a function call.
+/// Both are the same protocol and the same typed methods below, so the
+/// difference stops here rather than forking every caller.
+///
+/// The trait lives on this side of the line because the dependency only runs one
+/// way — the engine knows the protocol crate, and the protocol crate must not
+/// know the engine. It is implemented over there.
+///
+/// Hand-rolled boxed futures rather than an `async fn` in a trait: the returned
+/// future has to be nameable and `Send` to cross a spawn, and that is not what
+/// bare `async fn` in a trait gives you yet, on the version this workspace pins.
+pub trait Answer: Send + Sync {
+    /// Answer one request.
+    fn answer(&self, cmd: Request) -> BoxFuture<'_, Response>;
+    /// Listen to everything the same engine has to say.
+    fn events(&self) -> Box<dyn Events>;
+}
+
+/// An event subscription that is not a socket. See [`Answer::events`].
+pub trait Events: Send {
+    /// The next event, or `None` when the engine stops.
+    fn next(&mut self) -> BoxFuture<'_, Option<EventDto>>;
+}
+
+/// A future that can be boxed, named and sent — see [`Answer`].
+pub type BoxFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
+
+/// What carries a request to whoever answers it.
+enum Wire {
+    /// A local socket, or a named pipe on Windows: the daemon is another process.
+    Socket {
+        reader: Read,
+        writer: Write,
+        next_id: u32,
+    },
+    /// The engine, in this process.
+    Embedded(std::sync::Arc<dyn Answer>),
+}
+
+/// An RPC connection to the daemon — the one across a socket, or the one running
+/// inside this process.
 pub struct DaemonClient {
-    reader: Read,
-    writer: Write,
-    next_id: u32,
+    wire: Wire,
 }
 
 /// Open the control channel, however this platform carries one.
@@ -97,26 +154,54 @@ impl DaemonClient {
     pub async fn connect() -> Result<Self> {
         let (reader, writer) = open().await?;
         Ok(Self {
-            reader,
-            writer,
-            next_id: 1,
+            wire: Wire::Socket {
+                reader,
+                writer,
+                next_id: 1,
+            },
         })
     }
 
+    /// A client over an engine running in this process. Never fails: there is no
+    /// connection to refuse, which is the whole point on a platform that cannot
+    /// keep a daemon alive.
+    pub fn embedded(engine: std::sync::Arc<dyn Answer>) -> Self {
+        Self {
+            wire: Wire::Embedded(engine),
+        }
+    }
+
+    /// Whether this client is talking to another process.
+    pub fn is_remote(&self) -> bool {
+        matches!(self.wire, Wire::Socket { .. })
+    }
+
     async fn request(&mut self, cmd: Request) -> Result<Response> {
-        let id = self.next_id;
-        self.next_id = self.next_id.wrapping_add(1);
+        let (reader, writer, next_id) = match &mut self.wire {
+            // No framing, no timeout, no correlation id: the answer is the return
+            // value. The timeout below guards against a daemon that has stopped
+            // reading its socket, and an engine in this process either answers or
+            // is deadlocked with the caller.
+            Wire::Embedded(engine) => return Ok(engine.answer(cmd).await),
+            Wire::Socket {
+                reader,
+                writer,
+                next_id,
+            } => (reader, writer, next_id),
+        };
+        let id = *next_id;
+        *next_id = next_id.wrapping_add(1);
         let mut line = serde_json::to_string(&RequestEnvelope { id, cmd })?;
         line.push('\n');
         let exchange = async {
             // The write is inside the deadline too: a daemon that has stopped
             // reading fills the socket buffer, and then it is the *send* that
             // never returns.
-            self.writer.write_all(line.as_bytes()).await?;
-            self.writer.flush().await?;
+            writer.write_all(line.as_bytes()).await?;
+            writer.flush().await?;
             loop {
                 let mut resp = String::new();
-                let n = self.reader.read_line(&mut resp).await?;
+                let n = reader.read_line(&mut resp).await?;
                 if n == 0 {
                     bail!("daemon closed the connection");
                 }
@@ -205,6 +290,8 @@ impl DaemonClient {
         max: Option<u32>,
         password: Option<String>,
         device: Option<String>,
+        // Never fall back to the mailbox: wait for them, or stay waiting.
+        live_only: bool,
         fds: Option<FdHandoff>,
     ) -> Result<u64> {
         let (fd_socket, fd_token) = split(fds);
@@ -214,6 +301,8 @@ impl DaemonClient {
                 paths,
                 note,
                 deposit: false,
+                detach: false,
+                live_only,
                 ttl,
                 max,
                 password,
@@ -229,7 +318,11 @@ impl DaemonClient {
     }
 
     /// Deposit straight to the recipient's mailbox — `arvolo send --deposit`.
-    /// Returns the transfer id and the `arvm…` ticket for hand-delivery.
+    ///
+    /// A current daemon answers at once with the transfer id,
+    /// [`Background::Running`]; the `arvm…` ticket for hand-delivery is filed
+    /// with the deposit's receipt when the upload lands. A daemon from before
+    /// that answers at the end with both, [`Background::Done`].
     #[allow(clippy::too_many_arguments)]
     pub async fn deposit(
         &mut self,
@@ -241,7 +334,7 @@ impl DaemonClient {
         password: Option<String>,
         device: Option<String>,
         fds: Option<FdHandoff>,
-    ) -> Result<(u64, String)> {
+    ) -> Result<Background<(u64, String)>> {
         let (fd_socket, fd_token) = split(fds);
         match self
             .request(Request::Push {
@@ -249,6 +342,8 @@ impl DaemonClient {
                 paths,
                 note,
                 deposit: true,
+                detach: true,
+                live_only: false,
                 ttl,
                 max,
                 password,
@@ -258,7 +353,8 @@ impl DaemonClient {
             })
             .await?
         {
-            Response::Served { id, ticket } => Ok((id, ticket)),
+            Response::TransferId(id) => Ok(Background::Running(id)),
+            Response::Served { id, ticket } => Ok(Background::Done((id, ticket))),
             other => unexpected(other),
         }
     }
@@ -288,12 +384,16 @@ impl DaemonClient {
     }
 
     /// Serve an anonymous P2P ticket in the daemon; returns (transfer id, `arvc…`).
+    /// A current daemon answers at once with the share's transfer,
+    /// [`Background::Running`], and the ticket follows as
+    /// [`crate::protocol::EventDto::TicketReady`]; an older one prepares inside
+    /// the request and answers with both, [`Background::Done`].
     pub async fn serve_ticket(
         &mut self,
         paths: Vec<String>,
         seed_relay: Option<String>,
         fds: Option<FdHandoff>,
-    ) -> Result<(u64, String)> {
+    ) -> Result<Background<(u64, String)>> {
         let (fd_socket, fd_token) = split(fds);
         match self
             .request(Request::ServeTicket {
@@ -301,10 +401,12 @@ impl DaemonClient {
                 seed_relay,
                 fd_socket,
                 fd_token,
+                detach: true,
             })
             .await?
         {
-            Response::Served { id, ticket } => Ok((id, ticket)),
+            Response::TransferId(id) => Ok(Background::Running(id)),
+            Response::Served { id, ticket } => Ok(Background::Done((id, ticket))),
             other => unexpected(other),
         }
     }
@@ -333,15 +435,22 @@ impl DaemonClient {
         }
     }
 
-    /// Deposit a public browser download link for `path` (on the daemon's
-    /// filesystem); returns the shareable URL.
+    /// Start a public browser download link for `path` (on the daemon's
+    /// filesystem).
+    ///
+    /// A current daemon answers at once with the transfer that uploads it —
+    /// [`Background::Running`] — and the URL follows as
+    /// [`crate::protocol::EventDto::LinkReady`]. A daemon from before that
+    /// uploads inside the request and answers with the URL itself,
+    /// [`Background::Done`]: which one came back is the daemon's choice, and a
+    /// caller handles both.
     pub async fn create_link(
         &mut self,
         path: String,
         ttl: Option<u64>,
         max: Option<u32>,
         fds: Option<FdHandoff>,
-    ) -> Result<String> {
+    ) -> Result<Background<String>> {
         let (fd_socket, fd_token) = split(fds);
         match self
             .request(Request::CreateLink {
@@ -350,10 +459,30 @@ impl DaemonClient {
                 max,
                 fd_socket,
                 fd_token,
+                typed_refusal: true,
+                detach: true,
             })
             .await?
         {
-            Response::Link(url) => Ok(url),
+            Response::TransferId(id) => Ok(Background::Running(id)),
+            Response::Link(url) => Ok(Background::Done(url)),
+            // The refusal as itself, as on `accept_with_password`: a window reads
+            // the code and the limit off it, everyone else prints the sentence.
+            // `size` is not on the wire — the sentence already names it — so the
+            // typed value a caller gets back carries the limit and a zero size.
+            Response::Refused {
+                code,
+                message,
+                limit_bytes,
+            } => Err(if code == TooLargeForRelay::CODE {
+                anyhow::Error::new(TooLargeForRelay {
+                    size: 0,
+                    limit: limit_bytes,
+                })
+                .context(message)
+            } else {
+                anyhow::anyhow!(message)
+            }),
             other => unexpected(other),
         }
     }
@@ -402,6 +531,16 @@ impl DaemonClient {
         expect_ok(self.request(Request::Resume { id }).await?)
     }
 
+    /// Going to sleep: stop what is in flight so it can be picked up again.
+    pub async fn suspend(&mut self) -> Result<()> {
+        expect_ok(self.request(Request::Suspend).await?)
+    }
+
+    /// Awake: pick up exactly what the suspension stopped.
+    pub async fn resume_suspended(&mut self) -> Result<()> {
+        expect_ok(self.request(Request::ResumeSuspended).await?)
+    }
+
     /// Park a waiting send on the relay instead of waiting longer for an accept.
     pub async fn deposit_now(&mut self, id: u64) -> Result<()> {
         expect_ok(self.request(Request::DepositNow { id }).await?)
@@ -439,7 +578,7 @@ impl DaemonClient {
             // reading English. `{e:#}` still prints the same words for everyone
             // else. An unknown code (a daemon newer than this client) keeps the
             // message and loses only the ability to act on it.
-            Response::Refused { code, message } => Err(match AcceptRefusal::from_code(&code) {
+            Response::Refused { code, message, .. } => Err(match AcceptRefusal::from_code(&code) {
                 Some(r) => anyhow::Error::new(r),
                 None => anyhow::anyhow!(message),
             }),
@@ -645,27 +784,51 @@ impl DaemonClient {
         expect_ok(self.request(Request::CancelPairing { session }).await?)
     }
 
-    /// Turn this connection into an event stream. Sends `Subscribe`, consumes the
-    /// `Ok`, then yields pushed events until the daemon closes.
+    /// Turn this connection into an event stream.
+    ///
+    /// Across a socket that means sending `Subscribe`, consuming the `Ok`, and
+    /// then reading pushed events until the daemon closes — the connection is
+    /// spent for anything else. In this process it is simply a subscription: the
+    /// engine has one to give, and nothing needed sending to ask for it.
     pub async fn subscribe(mut self) -> Result<EventStream> {
+        if let Wire::Embedded(engine) = &self.wire {
+            return Ok(EventStream {
+                source: Source::Embedded(engine.events()),
+            });
+        }
         expect_ok(self.request(Request::Subscribe).await?)?;
-        Ok(EventStream {
-            reader: self.reader,
-        })
+        match self.wire {
+            Wire::Socket { reader, .. } => Ok(EventStream {
+                source: Source::Socket(reader),
+            }),
+            Wire::Embedded(_) => unreachable!("handled above"),
+        }
     }
+}
+
+/// Where a subscribed stream's events come from.
+enum Source {
+    Socket(Read),
+    Embedded(Box<dyn Events>),
 }
 
 /// A live stream of engine events from a subscribed connection.
 pub struct EventStream {
-    reader: Read,
+    source: Source,
 }
 
 impl EventStream {
     /// The next event, or `None` when the daemon closes the connection.
     pub async fn next(&mut self) -> Result<Option<EventDto>> {
+        let reader = match &mut self.source {
+            // Already an `EventDto`, and already stamped: nothing to parse and
+            // nothing that can be a variant we have never heard of.
+            Source::Embedded(events) => return Ok(events.next().await),
+            Source::Socket(reader) => reader,
+        };
         loop {
             let mut line = String::new();
-            let n = self.reader.read_line(&mut line).await?;
+            let n = reader.read_line(&mut line).await?;
             if n == 0 {
                 return Ok(None);
             }

@@ -1,0 +1,154 @@
+name: arvolo-gui
+options:
+  bundleIdPrefix: it.termox.arvolo
+  deploymentTarget:
+    iOS: 14.0
+fileGroups: [../../src]
+configs:
+  debug: debug
+  release: release
+settingGroups:
+  app:
+    base:
+      PRODUCT_NAME: Arvolo
+      PRODUCT_BUNDLE_IDENTIFIER: it.termox.arvolo
+      DEVELOPMENT_TEAM: D6FKBG7DZF
+targetTemplates:
+  app:
+    type: application
+    sources:
+      - path: Sources
+    scheme:
+      environmentVariables:
+        RUST_BACKTRACE: full
+        RUST_LOG: info
+    settings:
+      groups: [app]
+targets:
+  arvolo-gui_iOS:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+      - path: Assets.xcassets
+      # Linked through LIBRARY_SEARCH_PATHS, never copied: with a debug and a
+      # release libapp.a both on disk, "copy it as a resource" is two commands
+      # producing one file, and xcodebuild refuses.
+      - path: Externals
+        buildPhase: none
+      - path: arvolo-gui_iOS
+      - path: assets
+        buildPhase: resources
+        type: folder
+      - path: LaunchScreen.storyboard
+    info:
+      path: arvolo-gui_iOS/Info.plist
+      properties:
+        LSRequiresIPhoneOS: true
+        UILaunchStoryboardName: LaunchScreen
+        UIRequiredDeviceCapabilities: [arm64, metal]
+        # Solo in piedi, e su ogni formato. Le schermate sono disegnate per una
+        # colonna sola — la barra a isola, i fogli che salgono dal basso, la
+        # camera di Scambia con la scheda sopra — e coricate non diventano una
+        # versione larga: diventano la stessa colonna con metà dell'altezza e
+        # la tastiera che si mangia il resto. Il giorno in cui esisterà il
+        # layout largo (fase 8), questa è la riga da riaprire.
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+        CFBundleShortVersionString: 0.14.1
+        CFBundleVersion: "0.14.1"
+        # Il `.arvolo`: il biglietto che un invio lascia dietro di sé, nella
+        # forma in cui si manda per posta o si mette in una chat. Due
+        # dichiarazioni, e fanno due cose diverse.
+        #
+        # `UTExportedTypeDeclarations` dice che il tipo **è nostro**: lo inventa
+        # Arvolo, nessuno l'ha registrato prima, e senza questo il sistema lo
+        # tratta come un file qualunque senza nome né icona. Conforme a
+        # `public.plain-text` perché è esattamente quello — una riga di testo —
+        # e così resta leggibile anche da chi Arvolo non ce l'ha.
+        #
+        # `CFBundleDocumentTypes` dice che lo **apriamo noi**: è la riga per cui
+        # Arvolo compare in «Apri con» da File, da Mail e da qualunque app lo
+        # passi. `Owner` perché il tipo è nostro; `Viewer` perché lo leggiamo e
+        # non lo modifichiamo. Quello che succede dopo è già scritto: il file
+        # arriva come URL a `RunEvent::Opened`, `read_arvolo_ticket` lo legge e
+        # la GUI apre il pannello di ricezione col biglietto già dentro.
+        UTExportedTypeDeclarations:
+          - UTTypeIdentifier: it.termox.arvolo.ticket
+            UTTypeDescription: Arvolo ticket
+            UTTypeConformsTo:
+              - public.plain-text
+            UTTypeTagSpecification:
+              public.filename-extension:
+                - arvolo
+              public.mime-type:
+                - application/x-arvolo-ticket
+        CFBundleDocumentTypes:
+          - CFBundleTypeName: Arvolo ticket
+            CFBundleTypeRole: Viewer
+            LSHandlerRank: Owner
+            LSItemContentTypes:
+              - it.termox.arvolo.ticket
+    entitlements:
+      path: arvolo-gui_iOS/arvolo-gui_iOS.entitlements
+    scheme:
+      environmentVariables:
+        RUST_BACKTRACE: full
+        RUST_LOG: info
+    settings:
+      base:
+        ENABLE_BITCODE: false
+        ARCHS: [arm64]
+        VALID_ARCHS: arm64 
+        LIBRARY_SEARCH_PATHS[arch=x86_64]: $(inherited) $(PROJECT_DIR)/Externals/x86_64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/$(PLATFORM_NAME) $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/$(PLATFORM_NAME)
+        LIBRARY_SEARCH_PATHS[arch=arm64]: $(inherited) $(PROJECT_DIR)/Externals/arm64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/$(PLATFORM_NAME) $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/$(PLATFORM_NAME)
+        ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES: true
+        EXCLUDED_ARCHS[sdk=iphoneos*]: x86_64
+      groups: [app]
+    dependencies:
+      - target: ShareExtension
+      - framework: libapp.a
+        embed: false
+      - sdk: CoreGraphics.framework
+      - sdk: Metal.framework
+      - sdk: MetalKit.framework
+      - sdk: QuartzCore.framework
+      - sdk: Security.framework
+      - sdk: UIKit.framework
+      - sdk: WebKit.framework
+    preBuildScripts:
+      - script: SDK_LINK="$HOME/.arvolo-ios-sdk"; ln -sfn "${SDKROOT:?}" "$SDK_LINK"; npm run -- tauri ios xcode-script -v --platform ${PLATFORM_DISPLAY_NAME:?} --sdk-root "$SDK_LINK" --framework-search-paths "${FRAMEWORK_SEARCH_PATHS:?}" --header-search-paths "${HEADER_SEARCH_PATHS:?}" --gcc-preprocessor-definitions "${GCC_PREPROCESSOR_DEFINITIONS:-}" --configuration ${CONFIGURATION:?} ${FORCE_COLOR} ${ARCHS:?}
+        name: Build Rust Code
+        basedOnDependencyAnalysis: false
+        outputFiles:
+          - $(SRCROOT)/Externals/x86_64/${CONFIGURATION}/libapp.a
+          - $(SRCROOT)/Externals/arm64/${CONFIGURATION}/libapp.a
+  # Arvolo in the system share sheet — see mobile/ios/ShareExtension. A target
+  # of its own, as Apple wants it: a second process that writes into the App
+  # Group and opens the app.
+  ShareExtension:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: ShareExtension
+    # The plist is ours, whole (NSExtension and all), not generated: an `info:`
+    # block makes xcodegen write its own file at that path and the extension
+    # loses the dictionary iOS refuses to install it without.
+    entitlements:
+      path: ShareExtension/ShareExtension.entitlements
+    settings:
+      base:
+        INFOPLIST_FILE: ShareExtension/Info.plist
+        PRODUCT_NAME: Arvolo
+        PRODUCT_BUNDLE_IDENTIFIER: it.termox.arvolo.share
+        DEVELOPMENT_TEAM: D6FKBG7DZF
+        CODE_SIGN_STYLE: Automatic
+        SWIFT_VERSION: "5.0"
+        MARKETING_VERSION: 0.14.1
+        CURRENT_PROJECT_VERSION: 0.14.1
+        ARCHS: [arm64]
+        EXCLUDED_ARCHS[sdk=iphoneos*]: x86_64
+        TARGETED_DEVICE_FAMILY: "1,2"
+        GENERATE_INFOPLIST_FILE: false

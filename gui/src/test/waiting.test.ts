@@ -28,6 +28,8 @@ const KNOWN = [
   "relayCapped",
   "offloadFailed",
   "noRoute",
+  "forThem",
+  "uploadRetry",
 ] as const;
 
 function row(over: Partial<UITransfer> = {}): UITransfer {

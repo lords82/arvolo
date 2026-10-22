@@ -1,6 +1,21 @@
 # Changelog
 
-## Unreleased
+## v0.15.0-rc2 — deposits that pick up where they stopped
+
+### Added
+
+- **Deposits and links resume instead of starting over.** A file going up to the
+  relay — a browser link, a mailbox deposit, the mailbox fallback of a held
+  send — now travels as an upload session (`/v1/upload`): the relay keeps every
+  byte that reaches it, and when the connection drops the client asks where it
+  stands and sends only the rest. It works across a restart of the daemon too,
+  for the transfers that come back after one, as long as the file has not
+  changed. The encryption makes this sound rather than hopeful: every chunk's
+  nonce is its index, so the bytes made for a retry are the bytes the relay is
+  missing. A relay without sessions gets the single request it always got;
+  `ARVOLO_DISABLE_UPLOAD_SESSIONS=1` turns them off on purpose. See
+  `docs/PROTOCOL.md` §7.4.1. **Update the relay before the clients**, or they
+  keep using the single request.
 
 ### Changed
 
@@ -19,6 +34,38 @@
   answered rather than ignored.
 
 ### Fixed
+
+- **A ticket or a code for a large file timed out the same way a link did.**
+  Both read and hash the whole file before there is anything to hand over —
+  about two minutes per 15 GB on a fast disk — and the daemon did that inside
+  the request, so a window gave up after 60 seconds and called a working daemon
+  stuck. A code is now answered as soon as it is claimed, and starts pairing
+  once the file is ready; a ticket answers with its row, in *preparing*, and
+  arrives when it exists. A share interrupted while it is being prepared is
+  prepared again when the daemon comes back, with the code it had already
+  printed.
+
+- **A large link was reported as a stuck daemon while it was still uploading.**
+  Creating a link uploaded the whole file inside one request to the daemon, and
+  every client gives up on an answer after 60 seconds — so the window said "the
+  daemon is not responding, restart it" about a daemon that was working, and
+  restarting it is what would actually have lost the upload. The command line
+  went further and, on that error, started a second upload of its own. A link is
+  now a transfer like any other: the request answers with its id at once, the
+  row shows the progress, a dropped connection waits and resumes, and the URL
+  arrives when the relay has the file. An explicit mailbox deposit from a window
+  works the same way, and both no longer read the whole file into memory first.
+
+- **A file the relay would not hold was refused as "413 Payload Too Large", after
+  all of it had been uploaded.** The status said neither how large is too large
+  nor whether a smaller file would do, and the desktop app, finding the word
+  "relay" in it, told the reader to go and set up the relay they already had.
+  The relay now advertises its per-file cap (`max_blob_bytes` in `/v1/features`)
+  and names it on the refusal (`x-arvolo-max-blob-bytes`); a sender compares the
+  file against it before encrypting a byte, and says, in the reader's language
+  and units, that the server does not accept files this large and what its
+  limit is. A relay that was simply full answered the same 413; it answers 507
+  now, which the client already reads as "try again later".
 
 - **Pause and resume answered "Ok" for things they did not do.** Holding a
   transfer only means something when there is something to come back to: a

@@ -94,6 +94,7 @@ async fn send_and_let_them_see_it(
             false,
             String::new(),
             None,
+            false,
             None,
         )
         .await

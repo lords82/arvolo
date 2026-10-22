@@ -12,18 +12,24 @@
 //! knows about. See the comments there.
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter};
+use tauri::AppHandle;
+#[cfg(desktop)]
+use tauri::Emitter;
+#[cfg(desktop)]
 use tauri_plugin_updater::UpdaterExt;
 
+#[cfg(desktop)]
 use crate::daemon;
 
 /// Where releases live. Taken from the crate metadata rather than written out,
 /// so it cannot drift from `Cargo.toml` — and the `endpoints` in
 /// `tauri.conf.json` is the same host and repository spelled once more, which is
 /// the one copy that has to be kept in step by hand.
+#[cfg(desktop)]
 const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
 
 /// Progress of a running download, pushed to the webview.
+#[cfg(desktop)]
 const EV_UPDATE_PROGRESS: &str = "update://progress";
 
 /// What is on offer, as the UI needs it.
@@ -58,6 +64,7 @@ pub struct HeldBack {
 
 /// Bytes so far and, when the server said, the total.
 #[derive(Debug, Clone, Serialize)]
+#[cfg(desktop)]
 struct Progress {
     downloaded: u64,
     total: Option<u64>,
@@ -70,6 +77,7 @@ struct Progress {
 /// this user's relay can talk to" are not always the same version — see the
 /// compatibility check in the frontend. Every release publishes its own
 /// `latest.json` among its assets, so pinning is just a different URL.
+#[cfg(desktop)]
 fn updater(app: &AppHandle, pinned: Option<&str>) -> Result<tauri_plugin_updater::Updater, String> {
     let mut builder = app.updater_builder();
     if let Some(version) = pinned {
@@ -87,6 +95,21 @@ fn updater(app: &AppHandle, pinned: Option<&str>) -> Result<tauri_plugin_updater
 /// A failure here is a real error and is reported as one — but only the manual
 /// "check for updates" button shows it. The automatic check swallows it, because
 /// a laptop that was closed in a tunnel is not a thing to interrupt anyone about.
+/// Nothing to ask, where the store answers this question.
+///
+/// The updater plugin is registered on desktops only, and reaching for a Tauri
+/// state that was never managed is a *panic*, not an error — which is how a
+/// window on a phone took itself down asking whether it was up to date.
+#[cfg(mobile)]
+#[tauri::command]
+pub async fn check_update(
+    _app: AppHandle,
+    _pinned: Option<String>,
+) -> Result<Option<UpdateInfo>, String> {
+    Ok(None)
+}
+
+#[cfg(desktop)]
 #[tauri::command]
 pub async fn check_update(
     app: AppHandle,
@@ -119,6 +142,7 @@ pub async fn check_update(
 /// to stop the app recommending an upgrade the user's own relay cannot carry,
 /// and on the day it ships no relay in the world reports a version yet, so a
 /// version of this that failed the other way would offer nobody anything.
+#[cfg(desktop)]
 async fn hold_back_for_relay(app: &AppHandle, info: UpdateInfo) -> UpdateInfo {
     let Ok(mut client) = arvolo_ipc::client::DaemonClient::connect().await else {
         return info;
@@ -178,6 +202,15 @@ async fn hold_back_for_relay(app: &AppHandle, info: UpdateInfo) -> UpdateInfo {
 /// If the install fails — or the relaunch does — the hold is released: the app
 /// stays usable, and leaving it permanently without a daemon would turn a failed
 /// update into a broken installation.
+/// Same reason as [`check_update`], and the same answer said out loud: an app
+/// installed from a store is replaced by that store.
+#[cfg(mobile)]
+#[tauri::command]
+pub async fn install_update(_app: AppHandle, _version: Option<String>) -> Result<(), String> {
+    Err("updates come from the store on this platform".into())
+}
+
+#[cfg(desktop)]
 #[tauri::command]
 pub async fn install_update(app: AppHandle, version: Option<String>) -> Result<(), String> {
     let updater = updater(&app, version.as_deref())?;
@@ -242,6 +275,7 @@ pub const RELAUNCH_FAILED: &str = "relaunch-failed";
 /// gets an error, because the alternative — exiting anyway — is the behaviour
 /// this exists to remove: an app that vanishes and leaves the person guessing
 /// whether it installed, crashed, or is about to come back.
+#[cfg(desktop)]
 fn relaunch(
     #[cfg_attr(target_os = "macos", allow(unused_variables))] app: &AppHandle,
 ) -> Result<(), String> {
@@ -286,6 +320,7 @@ fn relaunch(
 /// with the last three components dropped. `None` when the layout is not a
 /// bundle, which is every `tauri dev` run.
 #[cfg(target_os = "macos")]
+#[cfg(desktop)]
 fn bundle_root() -> Option<std::path::PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let macos = exe.parent()?;

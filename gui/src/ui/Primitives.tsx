@@ -15,6 +15,7 @@ import {
   type ReactNode,
   type TextareaHTMLAttributes,
 } from "react";
+import { haptic } from "../haptics";
 import { useT } from "../i18n";
 import { Icon } from "./Icons";
 
@@ -171,7 +172,10 @@ export function Switch({
       aria-label={label}
       className="switch"
       disabled={disabled}
-      onClick={() => onChange(!checked)}
+      onClick={() => {
+        haptic.picked();
+        onChange(!checked);
+      }}
     />
   );
 }
@@ -214,6 +218,7 @@ export function Segmented<T extends string>({
   options,
   block,
   wrap,
+  chips,
   label,
 }: {
   value: T;
@@ -227,6 +232,15 @@ export function Segmented<T extends string>({
    *  destinations, where the labels are words rather than numbers and the
    *  longest set — German, in a 480px sheet at 92vw — has nowhere to fit. */
   wrap?: boolean;
+  /** Draw the choices as separate pills rather than as one joined control.
+   *
+   *  A segmented control says "one of these, and they partition the thing
+   *  below"; a row of pills says "filter". Where the choices are a filter over a
+   *  list that is still the same list — the address book's trust marks, the
+   *  log's direction — the design of record draws pills, and the difference is
+   *  legible: a pill row can be scrolled and can hold a count, a segmented
+   *  control that grew a fifth option would shrink all five. */
+  chips?: boolean;
   label: string;
 }) {
   return (
@@ -236,7 +250,7 @@ export function Segmented<T extends string>({
     <div
       className={`segmented ${block ? "segmented-block" : ""} ${
         wrap ? "segmented-wrap" : ""
-      }`}
+      } ${chips ? "segmented-chips" : ""}`}
       role="radiogroup"
       aria-label={label}
     >
@@ -247,7 +261,10 @@ export function Segmented<T extends string>({
           role="radio"
           aria-checked={value === o.value}
           aria-selected={value === o.value}
-          onClick={() => onChange(o.value)}
+          onClick={() => {
+            if (o.value !== value) haptic.picked();
+            onChange(o.value);
+          }}
         >
           {o.label}
         </button>

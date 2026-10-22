@@ -135,6 +135,35 @@ contacts.
 | Relay API | HTTP/1.1; bodies are raw bytes or short text; capability tokens travel in `x-arvolo-*` headers or the path. |
 | Integers in the link container | little-endian. |
 
+### Adding a field to anything postcard writes
+
+Postcard is **positional and not self-describing**. A field added anywhere but
+the very end moves every byte after it, and a reader built on the other side of
+that change does not fail politely — it reads the following bytes as whatever it
+expected next. `#[serde(default)]` does **nothing** here, whatever the attribute
+says on the field; it is a JSON habit, and several fields in `sync.rs` carry it
+with a comment claiming a tolerance postcard never gave them.
+
+This is not theoretical. `SeenEntry::last` was added after `v0.14.1` shipped and
+before the version was bumped, so two builds both calling themselves 0.14.1
+write two different snapshots. A device joining across that line reports success
+on one machine and, on the other, `deserialize pair payload: Found an Option
+discriminant that wasn't 0 or 1`; address-book sync between them stops with the
+same error. `decode_snapshot` now reads both shapes, so a current build can
+still take an older machine's snapshot — but the reverse is not fixable from
+here, because the older build is already out.
+
+So, when a synced or persisted struct grows a field:
+
+1. **Bump the version** in the same commit. A format change that keeps the old
+   version number is one neither side can detect.
+2. **Add a `…V<n>` mirror of the old shape and a fallback read**, newest first —
+   see `SyncSnapshotV0`. Postcard ignores trailing bytes, so an older shape will
+   happily read a current snapshot and silently drop what it does not know
+   about: the order of the attempts is load-bearing.
+3. **Test it by writing the old shape**, not by describing it. The only way to
+   have those bytes is to serialise a struct with the old fields.
+
 ---
 
 ## 4. Capability & ticket formats
@@ -221,7 +250,8 @@ survive restarts and are reaped on TTL.
 
 A fixed 16 MiB request-body limit wraps every control-plane route (rendezvous,
 inbox, presence, seed, swarm) so no handler can buffer an unbounded body. The
-streaming `/v1/deposit` route is exempt and enforces two caps of its own as it
+streaming `/v1/deposit` route — and its resumable form, the `/v1/upload` session
+(§7.4.1) — is exempt and enforces two caps of its own as it
 streams to disk (never through memory): a per-blob cap, `ARVOLO_MAX_BLOB_BYTES`
 (default 16 GiB — this is the *functional* bound on the largest file an offline
 send or link can carry; `0` lifts it), and an **aggregate** stored-bytes cap,
@@ -235,8 +265,14 @@ swarm announce) additionally share a per-IP write-rate limit
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
-| POST | `/v1/deposit?ttl=&max=` | revoke-hash (opt) | Store a ciphertext blob; returns a fresh `claim`. Headers: `x-arvolo-encapped-key` (base32, may be empty), `x-arvolo-revoke-hash` (base32 BLAKE3 of the revoke token, optional). |
-| GET | `/v1/fetch/{claim}` | bearer (the claim) | Return the ciphertext + `x-arvolo-encapped-key` header. **Burn-after-read**: the download counter is consumed server-side; the blob is deleted when it reaches the cap. |
+| POST | `/v1/deposit?ttl=&max=` | revoke-hash (opt) | Store a ciphertext blob; returns a fresh `claim`. Headers: `x-arvolo-encapped-key` (base32, may be empty), `x-arvolo-revoke-hash` (base32 BLAKE3 of the revoke token, optional). A blob over the per-blob cap gets `413` with `x-arvolo-max-blob-bytes: <cap>`; one the relay has no room left for gets `507`. |
+| POST | `/v1/upload?ttl=&max=` | revoke-hash (opt) | Open a **resumable** deposit (§7.4.1). Same headers as `/v1/deposit`, plus `x-arvolo-upload-length: N`, the full ciphertext length. The caps are settled here, before any byte is sent — `413` with `x-arvolo-max-blob-bytes` past the per-blob cap, `507` when the declared length does not fit the remaining budget — and the length is then **reserved** against that budget. `201`, body = the upload id (a capability, like a claim). |
+| GET | `/v1/upload/{id}` | bearer (the id) | Where the upload stands: `204` with `x-arvolo-upload-offset` (bytes already held) and `x-arvolo-upload-length`. `404` for an id the relay does not know, has reaped, or that sat idle past its deadline — the client's answer to all three is a new session. |
+| PATCH | `/v1/upload/{id}` | bearer (the id) | Append the body at `x-arvolo-upload-offset`, which must equal the current end. `204` with the new end in `x-arvolo-upload-offset`. A wrong offset is `409` carrying the real one; a request already appending to the same upload is `409` without one ("busy"). Bytes that arrive before the body breaks off are **kept**. Bytes past the declared length are refused (`400`) and the file is cut back. |
+| POST | `/v1/upload/{id}/commit` | bearer (the id) | The finished upload becomes an ordinary mailbox entry: answers exactly like `/v1/deposit` (body = claim, `x-arvolo-ttl`). Idempotent for an hour — a commit whose answer was lost, asked again, gets the same claim. An incomplete upload is `409` with its offset. |
+| DELETE | `/v1/upload/{id}` | bearer (the id) | Abandon it now: partial file and reservation go at once instead of at the idle deadline. |
+| GET | `/v1/fetch/{claim}` | bearer (the claim) | Return the ciphertext + `x-arvolo-encapped-key` header. **Burn-after-read**: the download counter is consumed server-side; the blob is deleted when it reaches the cap. With `?hold=1` nothing is consumed: the fetcher spends the download afterwards with the ack below. |
+| POST | `/v1/fetch/{claim}/ack` | bearer (the claim) | The second half of a held fetch: count the download now (and burn a one-shot deposit). 404 once the entry is gone. Relays that have it say `"hold":true` in `/v1/features`. |
 | DELETE | `/v1/entry/{claim}` | revoke token | Delete the blob. Header `x-arvolo-revoke-token`; the relay checks its BLAKE3 against the stored hash (constant-time). |
 | GET | `/v1/entry/{claim}/status` | none | `pending` (present) / 404 `gone`. The claim is already a secret capability, so existence leaks nothing. |
 | GET | `/v1/addr` | none | The relay blob node's iroh address + a seed token (for backfill). |
@@ -292,7 +328,7 @@ that may legitimately not need a reply.
 | GET | `/v1/swarm/{swarm_id}/peers` | none | List the live peers announced for a swarm. A poisoned/fake announce can only waste a dial: every chunk is verified by BLAKE3 hash + AEAD, so bad providers are detected, not trusted. |
 | GET | `/dl/{claim}` | none | The browser **download page** (static HTML, strict CSP). It stays a static file and translates itself in the browser (en/it/fr/de, off `navigator.languages`, English fallback). The 403 page served when links are disabled ships no script, so that one picks its language from `Accept-Language`. |
 | GET | `/dl.js`, `/arvolo-sw.js` | none | The download script and streaming service worker (embedded in the binary). |
-| GET | `/v1/features` | none | Advertise optional features so a client can fail fast: `{"links":true,"rz2":true}`. The two are read with **opposite defaults** on purpose — an unreachable or older relay means "links allowed" (worst case, a deposit is refused later) but "no rz2", because minting a v2 code no relay can host would strand whoever types it. |
+| GET | `/v1/features` | none | Advertise optional features so a client can fail fast: `{"links":true,"rz2":true,…,"max_blob_bytes":N,"upload":true}`. The two flags are read with **opposite defaults** on purpose — an unreachable or older relay means "links allowed" (worst case, a deposit is refused later) but "no rz2", because minting a v2 code no relay can host would strand whoever types it. `max_blob_bytes` is the per-blob cap `/v1/deposit` enforces (`0` = none): a client compares the file against it **before** encrypting and uploading, and names it in the refusal. `upload` says the relay offers resumable sessions (§7.4.1); absent or `false`, a client uses `/v1/deposit`. |
 | GET | `/healthz` | none | Liveness. |
 
 ### 6.2 Slots (per-epoch blinded keys)
@@ -527,12 +563,68 @@ sender:  arvolo send R file --deposit
   2. POST /v1/deposit (encapped key + optional revoke-hash) → claim
   3. print arvm… (relay, claim, sender, salt) + save a local deposit session (§8)
 receiver: arvolo recv arvm…
-  1. GET /v1/fetch/{claim} (+ encapped-key header)
+  1. GET /v1/fetch/{claim}?hold=1 (+ encapped-key header)
   2. optional password unwrap → HPKE-open with your identity (verifies sender)
-  3. burn-after-read: the blob is gone once the download cap is reached
+  3. every byte on disk → POST /v1/fetch/{claim}/ack
+  4. burn-after-read: the blob is gone once the download cap is reached — at
+     the ack, not at the first byte served, so a receiver killed mid-fetch
+     (a phone put away) finds the deposit still there. A relay without `hold`
+     burns on read as before; the ack then finds nothing, which is harmless.
 ```
 The sender can later confirm delivery via `/v1/entry/{claim}/status` (gone ⇒
 fetched) or delete it early via `/v1/entry/{claim}` with the revoke token.
+
+Step 2 is a resumable upload session (§7.4.1) when the relay offers one, and the
+single request above when it does not.
+
+#### 7.4.1 Resumable deposits (upload sessions)
+
+A single-request deposit either finishes or starts over: the relay cannot tell a
+body that broke off from one that ended, so it deletes the partial. For a large
+file over a connection that does not stay up as long as the upload takes — a
+phone, a train, a laptop lid — that is the difference between arriving and
+never arriving. Both deposit shapes (the mailbox blob above, and the link
+container of §7.6) can therefore go up in pieces:
+
+```
+client                                   relay
+  POST /v1/upload  (length N, headers)  →  caps checked, N reserved   → 201 id
+  GET  /v1/upload/{id}                  →  204 offset=o
+  PATCH /v1/upload/{id} offset=o  body  →  appended                   → 204 offset=o'
+     … connection drops …                  bytes that arrived are kept
+  GET  /v1/upload/{id}                  →  204 offset=o''   (resume from here)
+  PATCH … until offset = N
+  POST /v1/upload/{id}/commit           →  200 claim, x-arvolo-ttl   (as /v1/deposit)
+```
+
+**Why resuming is sound.** The ciphertext is a pure function of the content key
+and the file: every chunk's nonce is its index (§2.3), and the link container's
+header is fixed by the key, the size and the name. So a client that comes back —
+after a dropped connection, or after restarting — re-encrypts only the chunks
+from the relay's offset on, and the bytes it produces are exactly the ones the
+relay is missing. What the client keeps for that is small: the seal (content
+key, revoke token, and for a mailbox deposit the HPKE-wrapped key — never the
+password, which is already sealed into it) and the session id. It keeps them on
+disk only for transfers that are restored after a restart (a link, a held
+`send --to`), together with the payload's size, mtime and inode: a file that
+changed since is never resumed into, because the relay holds half of another
+file, and the upload starts over.
+
+**Client behaviour.** Appends go in segments of 32 MiB: the relay keeps every
+byte it receives, but a reverse proxy that buffers request bodies forwards
+nothing until a body is complete, so the segment is what a drop really costs. A
+request that moves no byte for 60 s is abandoned as dead. A few quick retries
+happen inside the upload; past that the transfer waits (`uploadRetry`) and the
+engine tries again on a slower rhythm, from where the relay stands.
+
+**Relay behaviour.** An open upload counts against the entry cap and reserves
+its full length against `ARVOLO_MAX_TOTAL_BLOB_BYTES` from the moment it opens,
+so admitted uploads can never promise more disk than there is. One with no byte
+arriving for 24 h is reaped with its partial file; the hourly sweep also removes
+any `.part` file whose session is gone. At most `ARVOLO_MAX_OPEN_UPLOADS`
+(default 256) are open at once. `ARVOLO_DISABLE_UPLOAD_SESSIONS=1` turns the
+whole thing off: the routes answer `404`, `/v1/features` says `"upload":false`,
+and clients use `/v1/deposit`.
 
 > Share the `arvm…` ticket over a reasonably private channel. Its contents are
 > HPKE-sealed — only the recipient's key can ever decrypt — but the claim inside
@@ -690,8 +782,12 @@ repeat for i in 0..ceil(total_size/chunk_size):
   [ct_len] chunk_ct             # seal_chunk(key, i, total_chunks, plaintext_chunk)
 ```
 The **file name is encrypted** (in `meta_ct`), so the relay learns only the
-ciphertext length. The blob is deposited via `POST /v1/deposit` with an **empty**
-encapped-key header (there is no HPKE recipient) and an optional revoke-hash.
+ciphertext length. The blob is deposited via `POST /v1/deposit` — or a resumable
+upload session, §7.4.1 — with an **empty** encapped-key header (there is no HPKE
+recipient) and an optional revoke-hash. Through the daemon a link is a transfer
+like any other: the request returns its id at once, the upload shows progress,
+survives a dropped connection and a restart, and the URL arrives as the
+`link_ready` event and stays on the row.
 
 **Delivery.** The relay serves `/dl/{claim}` (static, self-contained, strict CSP —
 `default-src 'none'`, only same-origin script/worker/fetch). The page:

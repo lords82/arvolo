@@ -4,10 +4,11 @@ use anyhow::{Context, Result};
 
 use crate::chunked::CHUNK_SIZE;
 use crate::crypto::{
-    open, open_chunk, random_chunk_key, random_pw_salt, seal, seal_chunk, unwrap_with_password,
+    open, open_chunk, random_chunk_key, random_pw_salt, seal, unwrap_with_password,
     wrap_with_password, Identity, PublicId, Sealed, CHUNK_KEY_LEN,
 };
 use crate::offline::OfflineTicket;
+use crate::upload::{DepositMeta, SealedLayout, UploadError, UploadHooks, UploadSession};
 
 use super::recv::{default_out, safe_download_name};
 use super::MAILBOX_KEY_AAD;
@@ -28,9 +29,6 @@ pub struct Deposited {
     /// that relay's behaviour was assumed to be anyway.
     pub ttl_secs: u64,
 }
-
-/// HTTP header carrying the base32 revoke-hash at deposit / revoke-token at revoke.
-const REVOKE_HASH_HEADER: &str = "x-arvolo-revoke-hash";
 
 /// Response header on a deposit: the TTL in seconds the relay granted.
 pub(crate) const GRANTED_TTL_HEADER: &str = "x-arvolo-ttl";
@@ -80,24 +78,103 @@ fn granted_ttl_from(raw: Option<&str>, asked: u64) -> u64 {
 
 const REVOKE_TOKEN_HEADER: &str = "x-arvolo-revoke-token";
 
+/// On a relay's 413: the per-blob cap it enforces, in bytes. The same figure its
+/// `/v1/features` advertises as `max_blob_bytes` ([`crate::link::relay_max_blob_bytes`]).
+const MAX_BLOB_HEADER: &str = "x-arvolo-max-blob-bytes";
+
+/// The cap a relay named on its refusal, if it named one. An older relay sends
+/// nothing, and a relay sending nonsense is read as having said nothing.
+pub(crate) fn blob_limit(resp: &reqwest::Response) -> Option<u64> {
+    resp.headers()
+        .get(MAX_BLOB_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|&n| n > 0)
+}
+
+/// A file the relay will not hold, because it is larger than the relay allows.
+///
+/// Typed, like [`crate::manager::AcceptRefusal`], because more than one program
+/// has to act on it — the daemon answers a window with a code instead of a
+/// sentence, the window translates the code and shows the limit in the reader's
+/// units — and because it carries the two numbers that make the refusal mean
+/// something: how large the file is, and how large the relay lets one be. The
+/// bare "413 Payload Too Large" it replaces said neither, and a person reading
+/// it could not tell whether a slightly smaller file would do or none would.
+///
+/// `limit` is `None` when the relay did not say: a relay older than the header
+/// and the `max_blob_bytes` feature, which still refuses, just without a number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TooLargeForRelay {
+    /// The file, in bytes.
+    pub size: u64,
+    /// The relay's per-file cap, in bytes, when it named one.
+    pub limit: Option<u64>,
+}
+
+impl TooLargeForRelay {
+    /// The stable word a front-end matches on, in place of reading the sentence.
+    /// The same word the engine's waiting reason uses for the same fact.
+    pub const CODE: &'static str = "tooLarge";
+
+    /// The refusal inside an error, if that is what it is.
+    pub fn of(e: &anyhow::Error) -> Option<Self> {
+        e.downcast_ref::<TooLargeForRelay>().copied()
+    }
+}
+
+impl std::fmt::Display for TooLargeForRelay {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.limit {
+            Some(limit) => write!(
+                f,
+                "this relay does not accept files this large: its limit is {}, and the \
+                 file is {}",
+                human_size(limit),
+                human_size(self.size)
+            ),
+            None => write!(
+                f,
+                "this relay does not accept files this large (the file is {})",
+                human_size(self.size)
+            ),
+        }
+    }
+}
+
+impl std::error::Error for TooLargeForRelay {}
+
+/// Human-readable byte size, binary units: what a refusal names a limit in.
+pub fn human_size(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut v = bytes as f64;
+    let mut u = 0;
+    while v >= 1024.0 && u < UNITS.len() - 1 {
+        v /= 1024.0;
+        u += 1;
+    }
+    if u == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{v:.1} {}", UNITS[u])
+    }
+}
+
 fn random_token() -> String {
     let bytes: [u8; 16] = rand::random();
     data_encoding::BASE32_NOPAD.encode(&bytes).to_lowercase()
 }
 
-/// Encrypt `path` for `recipient` (authenticated as `me`) and deposit the
-/// ciphertext on the relay. When `password` is set, the ciphertext is
-/// additionally wrapped under a password-derived key (E2E — the relay can never
-/// bypass it), and the recipient must supply the same password to
-/// [`fetch_offline`]. Returns the ticket plus a sender-only revoke token.
 /// Why an offline mailbox deposit couldn't be placed — lets callers react
 /// differently: [`TooLarge`](DepositError::TooLarge) will never fit (deliver live
 /// P2P instead), [`Unavailable`](DepositError::Unavailable) is transient (retry
 /// later), [`Fatal`](DepositError::Fatal) is a local, unrecoverable error.
 #[derive(Debug)]
 pub enum DepositError {
-    /// The relay refused the file as larger than its per-file cap.
-    TooLarge,
+    /// The relay refused the file as larger than its per-file cap — or said in
+    /// advance that it would, which is the same fact learnt before the upload
+    /// rather than after it.
+    TooLarge(TooLargeForRelay),
     /// The relay has no room at this moment: it is holding as many bytes as its
     /// operator allows. Distinct from [`Unavailable`](Self::Unavailable) because
     /// nothing is broken and nothing is unreachable — the mailbox is simply full
@@ -113,7 +190,7 @@ pub enum DepositError {
 impl std::fmt::Display for DepositError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            DepositError::TooLarge => write!(f, "the relay refused the file as too large"),
+            DepositError::TooLarge(e) => write!(f, "{e}"),
             DepositError::Busy => write!(
                 f,
                 "the relay is being used by a lot of people right now — try again \
@@ -127,6 +204,14 @@ impl std::fmt::Display for DepositError {
 
 impl std::error::Error for DepositError {}
 
+/// Encrypt `path` for `recipient` (authenticated as `me`) and deposit the
+/// ciphertext on the relay. When `password` is set, the ciphertext is
+/// additionally wrapped under a password-derived key (E2E — the relay can never
+/// bypass it), and the recipient must supply the same password to
+/// [`fetch_offline`]. Returns the ticket plus a sender-only revoke token.
+///
+/// One attempt, from the start: the convenience for a caller with nothing to
+/// resume. [`deposit_offline_with`] is the same deposit for one that has.
 #[allow(clippy::too_many_arguments)]
 pub async fn deposit_offline(
     source: &crate::source::SendSource,
@@ -138,174 +223,170 @@ pub async fn deposit_offline(
     max: u32,
     password: Option<&str>,
 ) -> std::result::Result<Deposited, DepositError> {
-    use std::sync::{Arc, Mutex};
+    let seal = MailboxSeal::new(source, recipient, me, password).map_err(DepositError::Fatal)?;
+    deposit_offline_with(
+        source,
+        name,
+        &seal,
+        me,
+        relay,
+        ttl,
+        max,
+        None,
+        &UploadHooks::none(),
+    )
+    .await
+}
 
-    use DepositError::Fatal;
+/// How a mailbox deposit is sealed: the content key, the key as the recipient
+/// will receive it (password-wrapped when there is a password, then HPKE-sealed
+/// to them), and the sender's revoke secret.
+///
+/// Fixed before the first byte is uploaded and kept until the last, for the
+/// same reason as [`crate::link::LinkSeal`]: the blob is a pure function of the
+/// content key and the file, so an interrupted upload resumes into exactly the
+/// bytes the relay already has. It also means a resumed deposit never needs the
+/// password again — what the password protects is already sealed in here.
+///
+/// Holds the content key in the clear: whoever writes it down writes it where
+/// only the user can read it, as with every record that carries a key.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MailboxSeal {
+    pub key: [u8; CHUNK_KEY_LEN],
+    /// Password salt; empty when there is no password.
+    pub salt: Vec<u8>,
+    /// The content key sealed to the recipient — the ticket's `wrapped_key`.
+    pub wrapped_key: Vec<u8>,
+    /// HPKE encapsulated key, handed to the relay with the blob.
+    pub encapped_key: Vec<u8>,
+    pub revoke_token: String,
+    /// Plaintext size of the file it was made for.
+    pub size: u64,
+}
 
-    // Only a path can be pre-checked; a handed-off descriptor IS the access.
-    if let crate::source::SendSource::Path(p) = source {
-        if !p.is_file() {
-            return Err(Fatal(anyhow::anyhow!("{} is not a file", p.display())));
-        }
-    }
-    let total_size = source.len().map_err(Fatal)?;
-    let total_chunks = if total_size == 0 {
-        0
-    } else {
-        total_size.div_ceil(CHUNK_SIZE as u64) as u32
-    };
-
-    // Fresh content key; password-wrap it (small) if requested, then HPKE-seal it
-    // to the recipient. The relay blob is then a stream of AES-GCM chunks under the
-    // key — so neither side ever holds the whole file in memory.
-    let key = random_chunk_key();
-    let salt = if password.map(|p| !p.is_empty()).unwrap_or(false) {
-        random_pw_salt().to_vec()
-    } else {
-        Vec::new()
-    };
-    let key_plain = if salt.is_empty() {
-        key.to_vec()
-    } else {
-        wrap_with_password(password.unwrap(), &salt, &key)
-            .context("wrap key with password")
-            .map_err(Fatal)?
-    };
-    let sealed = seal(&key_plain, recipient, me, MAILBOX_KEY_AAD)
-        .context("seal content key")
-        .map_err(Fatal)?;
-
-    // Seal each 16 MiB chunk as the upload pulls it, and hand the relay a lazy
-    // stream — no whole-file copy ever lands on local disk. The old path spooled the
-    // entire ciphertext to a temp file first, which needs as much free space as the
-    // file itself on whatever volume holds the system temp dir; a large send on a
-    // full disk died there with ENOSPC. Reading is driven by the socket, so a slow
-    // relay just pauses the reads (backpressure) rather than racing ahead of it. The
-    // relay enforces its own per-blob cap while it reads, so no Content-Length is
-    // needed for an over-limit blob to be refused.
-    let revoke_token = random_token();
-    // Sender-held revoke secret; the relay stores only its BLAKE3 hash.
-    let revoke_hash = blake3::hash(revoke_token.as_bytes());
-    let relay = relay.trim_end_matches('/').to_string();
-    let url = format!("{relay}/v1/deposit?ttl={ttl}&max={max}");
-
-    // A read or seal failure is local and fatal — the relay never saw it, retrying
-    // won't help — but it reaches the caller only as a stream error, which reqwest
-    // wraps as an ordinary send failure indistinguishable from the relay being down.
-    // Stash it out of band: after the request fails, a stashed error means Fatal, its
-    // absence means the network. Without this, a mid-file read error would demote to
-    // Unavailable and invite a pointless retry.
-    let src = source.clone();
-    let fatal: Arc<Mutex<Option<anyhow::Error>>> = Arc::new(Mutex::new(None));
-    let fatal_w = fatal.clone();
-    let body = reqwest::Body::wrap_stream(async_stream::stream! {
-        for idx in 0..total_chunks {
-            let want = if idx == total_chunks - 1 {
-                (total_size - idx as u64 * CHUNK_SIZE as u64) as usize
-            } else {
-                CHUNK_SIZE as usize
-            };
-            // Positional reads through the source (path OR handed-off
-            // descriptor), off the async workers: a 16 MiB read is blocking.
-            let s = src.clone();
-            let read = tokio::task::spawn_blocking(move || -> std::io::Result<Vec<u8>> {
-                let mut buf = vec![0u8; want];
-                let n = s.read_at_full(&mut buf, idx as u64 * CHUNK_SIZE as u64)?;
-                if n != want {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::UnexpectedEof,
-                        "source shrank mid-deposit",
-                    ));
-                }
-                Ok(buf)
-            })
-            .await;
-            let buf = match read {
-                Ok(Ok(buf)) => buf,
-                Ok(Err(e)) => {
-                    *fatal_w.lock().unwrap() = Some(anyhow::Error::from(e));
-                    yield Err(std::io::Error::other("read source file"));
-                    return;
-                }
-                Err(e) => {
-                    *fatal_w.lock().unwrap() = Some(anyhow::Error::from(e));
-                    yield Err(std::io::Error::other("read source file"));
-                    return;
-                }
-            };
-            match seal_chunk(&key, idx, total_chunks, &buf) {
-                Ok(ct) => yield Ok::<Vec<u8>, std::io::Error>(ct),
-                Err(e) => {
-                    *fatal_w.lock().unwrap() = Some(e);
-                    yield Err(std::io::Error::other("seal chunk"));
-                    return;
-                }
+impl MailboxSeal {
+    /// A fresh seal of `source` for `recipient`: new content key, new revoke
+    /// token, the key password-wrapped when `password` is non-empty.
+    pub fn new(
+        source: &crate::source::SendSource,
+        recipient: &PublicId,
+        me: &Identity,
+        password: Option<&str>,
+    ) -> Result<Self> {
+        // Only a path can be pre-checked; a handed-off descriptor IS the access.
+        if let crate::source::SendSource::Path(p) = source {
+            if !p.is_file() {
+                return Err(crate::source::NotAFile(p.clone()).into());
             }
         }
-    });
-
-    let result = crate::http::client()
-        .post(&url)
-        .header(
-            "x-arvolo-encapped-key",
-            data_encoding::BASE32_NOPAD.encode(&sealed.encapped_key),
-        )
-        .header(
-            REVOKE_HASH_HEADER,
-            data_encoding::BASE32_NOPAD.encode(revoke_hash.as_bytes()),
-        )
-        .body(body)
-        .send()
-        .await;
-
-    let resp = match result {
-        Ok(r) => r,
-        Err(e) => {
-            // A stashed local error is the true cause; the network wrapper reqwest
-            // put on the truncated body is a symptom.
-            if let Some(f) = fatal.lock().unwrap().take() {
-                return Err(Fatal(f));
-            }
-            return Err(DepositError::Unavailable(e.to_string()));
-        }
-    };
-    let status = resp.status();
-    if status == reqwest::StatusCode::PAYLOAD_TOO_LARGE {
-        return Err(DepositError::TooLarge);
-    }
-    // 507 is the relay saying it is holding all the bytes it is allowed to hold.
-    // Reported as its own case rather than folded into `Unavailable`: "the relay
-    // returned 507 Insufficient Storage" tells the person nothing they can act on,
-    // and on the shared relay this is the one failure they are most likely to meet.
-    if status == reqwest::StatusCode::INSUFFICIENT_STORAGE {
-        return Err(DepositError::Busy);
-    }
-    if !status.is_success() {
-        return Err(DepositError::Unavailable(format!(
-            "relay returned {status}"
-        )));
-    }
-    let ttl_secs = granted_ttl(&resp, ttl);
-    let claim = resp
-        .text()
-        .await
-        .map_err(|e| DepositError::Unavailable(e.to_string()))?;
-
-    Ok(Deposited {
-        ttl_secs,
-        ticket: OfflineTicket {
-            relay,
-            claim: claim.trim().to_string(),
-            sender: me.public().to_bytes(),
+        let size = source.len()?;
+        // Fresh content key; password-wrap it (small) if requested, then
+        // HPKE-seal it to the recipient. The relay blob is then a stream of
+        // AES-GCM chunks under the key — so neither side ever holds the whole
+        // file in memory.
+        let key = random_chunk_key();
+        let password = password.filter(|p| !p.is_empty());
+        let salt = if password.is_some() {
+            random_pw_salt().to_vec()
+        } else {
+            Vec::new()
+        };
+        let key_plain = match password {
+            None => key.to_vec(),
+            Some(pw) => wrap_with_password(pw, &salt, &key).context("wrap key with password")?,
+        };
+        let sealed =
+            seal(&key_plain, recipient, me, MAILBOX_KEY_AAD).context("seal content key")?;
+        Ok(Self {
+            key,
             salt,
             wrapped_key: sealed.ciphertext,
+            encapped_key: sealed.encapped_key,
+            revoke_token: random_token(),
+            size,
+        })
+    }
+}
+
+/// Deposit `source` sealed as `seal` describes, resuming `session` when there
+/// is one. On [`DepositError::Unavailable`] the session last reported through
+/// `hooks` is still good: call again with it and the same seal to carry on.
+#[allow(clippy::too_many_arguments)]
+pub async fn deposit_offline_with(
+    source: &crate::source::SendSource,
+    name: &str,
+    seal: &MailboxSeal,
+    me: &Identity,
+    relay: &str,
+    ttl: u64,
+    max: u32,
+    session: Option<UploadSession>,
+    hooks: &UploadHooks<'_>,
+) -> std::result::Result<Deposited, DepositError> {
+    use DepositError::Fatal;
+
+    let total_size = seal.size;
+    // Ask before uploading: a relay that advertises its cap lets a file it will
+    // not hold be refused here, in one small round trip, instead of after every
+    // byte of it has been encrypted and sent. A relay that does not advertise
+    // one is asked the old way — by uploading — and answers with 413.
+    if let Some(limit) = crate::link::relay_max_blob_bytes(relay).await {
+        if total_size > limit {
+            return Err(DepositError::TooLarge(TooLargeForRelay {
+                size: total_size,
+                limit: Some(limit),
+            }));
+        }
+    }
+    // The file must still be the one the seal was made for: resuming into a
+    // file that changed would stitch two files together under one key.
+    if source.len().map_err(Fatal)? != total_size {
+        return Err(Fatal(anyhow::anyhow!(
+            "{} changed size since the send was started",
+            source.label()
+        )));
+    }
+
+    // Sealed chunk by chunk as the upload pulls them — no whole-file copy ever
+    // lands in memory or on local disk. The old path spooled the entire
+    // ciphertext to a temp file first, which needs as much free space as the
+    // file itself on whatever volume holds the system temp dir; a large send on
+    // a full disk died there with ENOSPC.
+    let layout = SealedLayout::mailbox(source.clone(), seal.key, total_size);
+    let meta = DepositMeta {
+        encapped_key: seal.encapped_key.clone(),
+        // Sender-held revoke secret; the relay stores only its BLAKE3 hash.
+        revoke_hash: *blake3::hash(seal.revoke_token.as_bytes()).as_bytes(),
+        ttl,
+        max,
+    };
+    let relay = relay.trim_end_matches('/').to_string();
+    let done = crate::upload::upload(&relay, &layout, &meta, session, hooks)
+        .await
+        .map_err(|e| match e {
+            UploadError::TooLarge(t) => DepositError::TooLarge(t),
+            UploadError::Busy => DepositError::Busy,
+            UploadError::Unavailable(m) => DepositError::Unavailable(m),
+            UploadError::Fatal(e) => Fatal(e),
+            // Only a link deposit can meet this; a sealed one never does.
+            UploadError::LinksDisabled => Fatal(anyhow::anyhow!("{e}")),
+        })?;
+
+    Ok(Deposited {
+        ttl_secs: done.ttl_secs,
+        ticket: OfflineTicket {
+            relay,
+            claim: done.claim,
+            sender: me.public().to_bytes(),
+            salt: seal.salt.clone(),
+            wrapped_key: seal.wrapped_key.clone(),
             total_size,
             // Passed in rather than read off `path`: for a folder or a multi-file
             // send, what is on disk is a temporary tar, and the recipient wants
             // the name the sender meant.
             name: name.to_string(),
         },
-        revoke_token,
+        revoke_token: seal.revoke_token.clone(),
     })
 }
 
@@ -460,7 +541,12 @@ pub async fn fetch_offline_with_progress(
         anyhow::bail!("this link is password-protected — supply the password");
     }
 
-    let url = format!("{}/v1/fetch/{}", t.relay.trim_end_matches('/'), t.claim);
+    // `hold=1`: serve the blob but do not spend the download yet — that is the
+    // ack below, sent once every byte is on disk. A relay too old to know the
+    // query burns on read as it always did, and the ack then finds nothing,
+    // which is fine. See `Mailbox::fetch_plan_held` in the relay.
+    let relay = t.relay.trim_end_matches('/');
+    let url = format!("{relay}/v1/fetch/{}?hold=1", t.claim);
     let resp = crate::http::client()
         .get(&url)
         .send()
@@ -468,7 +554,19 @@ pub async fn fetch_offline_with_progress(
         .context("fetch request")?;
     let resp = match resp.error_for_status_ref() {
         Ok(_) => resp,
-        Err(e) => return Err(anyhow::Error::from(e).context(fetch_refusal(resp.status()))),
+        Err(e) => {
+            let status = resp.status();
+            let why = fetch_refusal(status);
+            // Typed when it is the one refusal a person can do something about
+            // (ask the sender again), so a window can say it in their language.
+            return Err(
+                if status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::GONE {
+                    anyhow::Error::from(e).context(crate::manager::FailReason::DepositGone(why))
+                } else {
+                    anyhow::Error::from(e).context(why)
+                },
+            );
+        }
     };
 
     let encapped = resp
@@ -548,6 +646,13 @@ pub async fn fetch_offline_with_progress(
         );
     }
     outfile.flush().await.context("flush output")?;
+    // Now, and only now, the relay may count this download — and burn a
+    // one-shot deposit. Best effort: the file is here whatever the relay says,
+    // and an unacked claim expires on its own.
+    let ack = format!("{relay}/v1/fetch/{}/ack", t.claim);
+    if let Err(e) = crate::http::client().post(&ack).send().await {
+        tracing::debug!("mailbox ack not delivered (the deposit stays until its TTL): {e}");
+    }
     Ok((out, total_size as usize))
 }
 
@@ -626,7 +731,43 @@ mod mailbox_out_tests {
 /// over-estimates, the recipient pays for as an arrival that 404s.
 #[cfg(test)]
 mod granted_ttl_tests {
-    use super::granted_ttl_from;
+    use super::{granted_ttl_from, human_size, TooLargeForRelay};
+
+    /// The sentence names both numbers when it has them, in units a person reads,
+    /// and does not invent a limit when the relay gave none.
+    #[test]
+    fn a_refusal_says_how_large_is_too_large() {
+        let with = TooLargeForRelay {
+            size: 6 * 1024 * 1024 * 1024,
+            limit: Some(5 * 1024 * 1024 * 1024),
+        }
+        .to_string();
+        assert!(with.contains("5.0 GiB"), "{with}");
+        assert!(with.contains("6.0 GiB"), "{with}");
+
+        let without = TooLargeForRelay {
+            size: 150 * 1024 * 1024,
+            limit: None,
+        }
+        .to_string();
+        assert!(without.contains("150.0 MiB"), "{without}");
+        assert!(!without.contains("limit is"), "{without}");
+
+        // Carried inside anyhow, it is still itself on the way out.
+        let e = anyhow::Error::new(TooLargeForRelay {
+            size: 1,
+            limit: Some(2),
+        });
+        assert_eq!(TooLargeForRelay::of(&e).and_then(|r| r.limit), Some(2));
+        assert_eq!(TooLargeForRelay::of(&anyhow::anyhow!("other")), None);
+    }
+
+    #[test]
+    fn sizes_read_in_binary_units() {
+        assert_eq!(human_size(512), "512 B");
+        assert_eq!(human_size(1536), "1.5 KiB");
+        assert_eq!(human_size(5 * 1024 * 1024 * 1024), "5.0 GiB");
+    }
 
     const WEEK: u64 = 7 * 24 * 3600;
 
