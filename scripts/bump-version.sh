@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Set the release version everywhere it is written down.
 #
-# It lives in five places across three files, and until the in-app updater
+# It lives in six places across three files, and until the in-app updater
 # existed, forgetting one of them was cosmetic. It is not any more: the version
 # in `gui/src-tauri/tauri.conf.json` is the number an installed copy compares
 # against `latest.json`, so a release that forgets it is a release nobody is
@@ -34,12 +34,13 @@ say() { printf '  %s\n' "$1"; }
 
 echo "setting version to $version"
 
-# The workspace version, plus the two path dependencies that repeat it — they
+# The workspace version, plus the three path dependencies that repeat it — they
 # carry a version as well as a path so the binaries can be published to
 # crates.io against a released core.
 perl -0pi -e "s/^version = \"[^\"]+\"$/version = \"$version\"/m" Cargo.toml
 perl -0pi -e "s/(arvolo-core = \{ path = \"core\", version = )\"[^\"]+\"/\${1}\"$version\"/" Cargo.toml
 perl -0pi -e "s/(arvolo-ipc = \{ path = \"arvolo-ipc\", version = )\"[^\"]+\"/\${1}\"$version\"/" Cargo.toml
+perl -0pi -e "s/(arvolo-engine = \{ path = \"engine\", version = )\"[^\"]+\"/\${1}\"$version\"/" Cargo.toml
 say "Cargo.toml"
 
 # Only the first "version" key — package.json has plenty of others further down.

@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.15.0-rc1 — deposits that pick up where they stopped
 
 ### Added
 

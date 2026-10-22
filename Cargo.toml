@@ -3,7 +3,7 @@ resolver = "2"
 members = ["core", "engine", "cli", "relay", "arvolo-ipc", "gui/src-tauri"]
 
 [workspace.package]
-version = "0.14.1"
+version = "0.15.0-rc1"
 edition = "2021"
 rust-version = "1.88"
 license = "AGPL-3.0-only"
@@ -24,12 +24,12 @@ clap = { version = "4", features = ["derive"] }
 clap_complete = { version = "=4.6.8", features = ["unstable-dynamic"] }
 # Both a path (for local builds) and a version (required so the binary crates
 # can be published to crates.io referencing a released core).
-arvolo-core = { path = "core", version = "0.14.1" }
+arvolo-core = { path = "core", version = "0.15.0-rc1" }
 # The client-side engine: address book, config, and the daemon logic the CLI
 # serves over a socket and a phone will call in-process.
-arvolo-engine = { path = "engine", version = "0.14.1" }
+arvolo-engine = { path = "engine", version = "0.15.0-rc1" }
 # The IPC wire contract + daemon client, shared by the CLI and the GUI backend.
-arvolo-ipc = { path = "arvolo-ipc", version = "0.14.1" }
+arvolo-ipc = { path = "arvolo-ipc", version = "0.15.0-rc1" }
 
 # Dependencies at opt-level 2 even in dev/test builds. Without this the whole
 # crypto and transfer stack (BLAKE3, the chunk AEAD, iroh) runs unoptimized in
