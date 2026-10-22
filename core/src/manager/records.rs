@@ -707,6 +707,55 @@ pub(super) struct CodeRecord {
     pub(super) failures: u32,
 }
 
+/// A share still being prepared — read and hashed — so that a daemon that stops
+/// in the middle starts it again instead of losing it. Its ticket does not
+/// exist yet, so nothing handed out depends on it, and preparing again (with a
+/// fresh key) is a faithful restart.
+///
+/// With the pairing code it was claimed with, when there is one: that code has
+/// already been printed, and losing the share would leave it pointing at
+/// nothing. Removed once the share is served (its [`SendRecord`] and
+/// [`CodeRecord`] take over) or ends.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(super) struct PendingShareRecord {
+    pub(super) id: u64,
+    pub(super) payload: String,
+    pub(super) name: String,
+    pub(super) archive: bool,
+    pub(super) seed_relay: Option<String>,
+    pub(super) code: Option<PendingCodeRecord>,
+}
+
+/// The claimed code of a [`PendingShareRecord`]: enough to reattach to its slot.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(super) struct PendingCodeRecord {
+    pub(super) shown: String,
+    pub(super) slot: String,
+    pub(super) secret: String,
+    pub(super) relay: String,
+    pub(super) owner_token: Vec<u8>,
+    pub(super) max_sessions: Option<u32>,
+}
+
+pub(super) fn pending_share_path(dir: &Path, id: u64) -> PathBuf {
+    dir.join(format!("pshare-{id}.pc"))
+}
+
+pub(super) fn persist_pending_share(dir: &Path, rec: &PendingShareRecord) {
+    if let Ok(bytes) = postcard::to_allocvec(rec) {
+        let _ = std::fs::create_dir_all(dir);
+        let _ = write_record_private(&pending_share_path(dir, rec.id), &bytes);
+    }
+}
+
+pub(super) fn remove_pending_share(dir: &Path, id: u64) {
+    let _ = std::fs::remove_file(pending_share_path(dir, id));
+}
+
+pub(super) fn load_pending_shares(dir: &Path) -> Vec<PendingShareRecord> {
+    load_records(dir, "pshare-")
+}
+
 pub(super) fn code_record_path(dir: &Path, id: u64) -> PathBuf {
     dir.join(format!("code-{id}.pc"))
 }

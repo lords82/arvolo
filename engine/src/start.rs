@@ -384,6 +384,11 @@ fn spawn_intake(
                     history::record_transfer(&manager, id, "deposited");
                     crate::deposits::record_from_event(Some(id), &info);
                 }
+                // A link's receipt, filed the moment its upload lands: the row
+                // completes right after, and history records it then.
+                Ok(ManagerEvent::LinkReady { id, info }) => {
+                    crate::deposits::record_from_event(Some(id), &info);
+                }
                 Ok(ManagerEvent::Failed { id, error, .. }) => {
                     history::record_transfer(&manager, id, &format!("failed: {error}"))
                 }

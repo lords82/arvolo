@@ -22,6 +22,11 @@ pub struct AppState {
     /// When an administrator disables it, the `/dl` page is not served and
     /// link deposits (HPKE-less blobs) are refused. Defaults to enabled.
     pub links_enabled: bool,
+    /// Whether this relay offers resumable upload sessions (`/v1/upload`).
+    /// Off, it answers those routes as unknown and stops advertising them, and
+    /// every client falls back to the single-request deposit. Defaults to on;
+    /// `ARVOLO_DISABLE_UPLOAD_SESSIONS=1` turns it off.
+    pub uploads_enabled: bool,
     /// Swarm tracker: `swarm_id → (peer node_addr → entry)`, in-memory with a TTL.
     /// Purely a rendezvous for peers of one shared `arvc…` ticket to find each
     /// other; the relay learns node addresses + bitfields, never the key/plaintext.
@@ -100,6 +105,20 @@ pub const MAX_SWARM_CHUNKS: u32 = 1_000_000;
 
 /// Whether the relay administrator has disabled public download links, via
 /// `ARVOLO_DISABLE_LINKS` (set to `1`/`true`/`yes`/`on`).
+/// Whether the operator turned resumable upload sessions off
+/// (`ARVOLO_DISABLE_UPLOAD_SESSIONS`). Same spelling of "yes" as
+/// [`links_disabled_from_env`].
+pub fn upload_sessions_disabled_from_env() -> bool {
+    matches!(
+        std::env::var("ARVOLO_DISABLE_UPLOAD_SESSIONS")
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
 pub fn links_disabled_from_env() -> bool {
     matches!(
         std::env::var("ARVOLO_DISABLE_LINKS")
@@ -116,6 +135,7 @@ impl AppState {
     pub fn new(mailbox: Arc<Mailbox>, blobs: Arc<BlobNode>) -> Self {
         Self {
             links_enabled: true,
+            uploads_enabled: true,
             mailbox,
             blobs,
             auth_secret: Arc::new(rand::random()),

@@ -143,6 +143,9 @@ pub(super) struct Inner {
     /// from another of its devices'. Set at startup via
     /// [`TransferManager::set_device_id`], like the display name.
     pub(super) device_id: Mutex<Option<crate::sync::DeviceId>>,
+    /// What each upload in flight was sealed with and which relay session it
+    /// is filling — see `uploads.rs`. Keyed by transfer id.
+    pub(super) uploads: Mutex<HashMap<u64, super::uploads::Resumable>>,
 }
 
 impl Inner {
@@ -316,6 +319,18 @@ impl Inner {
     pub(super) fn set_progress(&self, id: u64, transferred: u64) {
         if let Some(t) = self.transfers.lock().unwrap().get_mut(&id) {
             t.transferred = transferred;
+        }
+    }
+
+    pub(super) fn set_ticket(&self, id: u64, ticket: String) {
+        if let Some(t) = self.transfers.lock().unwrap().get_mut(&id) {
+            t.ticket = (!ticket.is_empty()).then_some(ticket);
+        }
+    }
+
+    pub(super) fn set_link(&self, id: u64, link: String) {
+        if let Some(t) = self.transfers.lock().unwrap().get_mut(&id) {
+            t.link = Some(link);
         }
     }
 

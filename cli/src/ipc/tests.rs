@@ -582,3 +582,197 @@ async fn the_reserved_word_names_our_own_devices_over_the_socket() {
     shutdown.cancel();
     std::env::remove_var("ARVOLO_CONFIG_DIR");
 }
+
+/// A relay listening in this process, for the tests that need one.
+async fn spawn_relay(links_enabled: bool) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let node = arvolo_core::backfill::BlobNode::spawn(
+        dir.path(),
+        arvolo_core::transfer::RelayChoice::Disabled,
+    )
+    .await
+    .expect("blob node");
+    let mut state = arvolo_relay::AppState::new(
+        Arc::new(arvolo_relay::Mailbox::in_memory().expect("mailbox")),
+        Arc::new(node),
+    );
+    state.links_enabled = links_enabled;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _dir = dir;
+        axum::serve(listener, arvolo_relay::router(state))
+            .await
+            .unwrap();
+    });
+    format!("http://{addr}")
+}
+
+/// A daemon whose engine deposits on `relay`.
+async fn spawn_daemon_on(relay: &str) -> (CancellationToken, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    std::env::set_var("ARVOLO_CONFIG_DIR", dir.path());
+    let manager = TransferManager::new(
+        Identity::generate(),
+        Some(relay.to_string()),
+        dir.path().join("downloads"),
+    );
+    let listener = tokio::net::UnixListener::bind(socket_path()).unwrap();
+    let shutdown = CancellationToken::new();
+    let daemon = Daemon::new(
+        manager,
+        Some(relay.to_string()),
+        dir.path().join("downloads"),
+        Arc::new(Mutex::new(HashMap::new())),
+        Arc::new(AtomicUsize::new(0)),
+        tokio::sync::broadcast::channel(64).0,
+        shutdown.clone(),
+    );
+    let stop = shutdown.clone();
+    tokio::spawn(async move {
+        let _ = server::run(daemon, listener, stop).await;
+    });
+    (shutdown, dir)
+}
+
+/// The bug this exists for: a link used to be uploaded inside the request, so
+/// a large file outlived the client's patience and was reported as a stuck
+/// daemon while it was still going up. Now the answer is the transfer, at once,
+/// and the URL follows as an event.
+#[tokio::test]
+async fn a_link_answers_at_once_and_its_url_follows() {
+    let _guard = crate::testlock::ENV
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let relay = spawn_relay(true).await;
+    let (shutdown, dir) = spawn_daemon_on(&relay).await;
+    let file = dir.path().join("photo.jpg");
+    std::fs::write(&file, vec![9u8; 2 * 1024 * 1024 + 5]).unwrap();
+
+    let mut events = DaemonClient::connect()
+        .await
+        .expect("connect")
+        .subscribe()
+        .await
+        .expect("subscribe");
+    let mut client = DaemonClient::connect().await.expect("connect");
+    let started = client
+        .create_link(file.display().to_string(), Some(3600), None, None)
+        .await
+        .expect("started");
+    let super::client::Background::Running(id) = started else {
+        panic!("a current daemon answers with the transfer, not the URL: {started:?}");
+    };
+
+    let link = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            match events.next().await.expect("stream").expect("open") {
+                super::protocol::EventDto::LinkReady { id: e, link } if e == id => return link,
+                super::protocol::EventDto::Failed { id: e, error, .. } if e == id => {
+                    panic!("{error}")
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("the URL arrives");
+    assert!(link.starts_with(&format!("{relay}/dl/")), "{link}");
+
+    // On the row, for a window that opens afterwards. (The receipt the
+    // deposits list reads is filed by the engine's event loop, which this
+    // harness does not run — `deposits::record_from_event` has its own test.)
+    let rows = client.list().await.expect("list");
+    assert_eq!(
+        rows.iter()
+            .find(|t| t.id == id)
+            .and_then(|t| t.link.clone()),
+        Some(link.clone())
+    );
+
+    shutdown.cancel();
+    std::env::remove_var("ARVOLO_CONFIG_DIR");
+}
+
+/// A refusal the relay gives before anything is sent is still an answer to the
+/// request, not a transfer that appears and fails.
+#[tokio::test]
+async fn a_relay_without_links_refuses_before_a_transfer_exists() {
+    let _guard = crate::testlock::ENV
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let relay = spawn_relay(false).await;
+    let (shutdown, dir) = spawn_daemon_on(&relay).await;
+    let file = dir.path().join("a.txt");
+    std::fs::write(&file, b"hello").unwrap();
+
+    let mut client = DaemonClient::connect().await.expect("connect");
+    let err = client
+        .create_link(file.display().to_string(), None, None, None)
+        .await
+        .expect_err("refused");
+    assert!(format!("{err:#}").contains("disabled"), "{err:#}");
+    assert!(client.list().await.expect("list").is_empty());
+
+    shutdown.cancel();
+    std::env::remove_var("ARVOLO_CONFIG_DIR");
+}
+
+/// A ticket used to be handed back only once the whole file had been read and
+/// hashed, inside the request — minutes on a large file, long past the point a
+/// client gives up. Now the share's row answers at once, in `preparing`, and
+/// the ticket follows as an event and stays on the row.
+#[tokio::test]
+async fn a_ticket_answers_at_once_and_follows_when_prepared() {
+    let _guard = crate::testlock::ENV
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let relay = spawn_relay(true).await;
+    let (shutdown, dir) = spawn_daemon_on(&relay).await;
+    let file = dir.path().join("big.bin");
+    std::fs::write(&file, vec![3u8; 3 * 1024 * 1024 + 11]).unwrap();
+
+    let mut events = DaemonClient::connect()
+        .await
+        .expect("connect")
+        .subscribe()
+        .await
+        .expect("subscribe");
+    let mut client = DaemonClient::connect().await.expect("connect");
+    let started = client
+        .serve_ticket(vec![file.display().to_string()], None, None)
+        .await
+        .expect("started");
+    let super::client::Background::Running(id) = started else {
+        panic!("a current daemon answers with the transfer: {started:?}");
+    };
+
+    let ticket = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            match events.next().await.expect("stream").expect("open") {
+                super::protocol::EventDto::TicketReady { id: e, ticket } if e == id => {
+                    return ticket
+                }
+                super::protocol::EventDto::Failed { id: e, error, .. } if e == id => {
+                    panic!("{error}")
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("the ticket arrives");
+    assert!(ticket.starts_with("arvc"), "{ticket}");
+    let row = client
+        .list()
+        .await
+        .expect("list")
+        .into_iter()
+        .find(|t| t.id == id)
+        .expect("the share's row");
+    assert_eq!(row.ticket.as_deref(), Some(ticket.as_str()));
+    assert_eq!(row.status, "active");
+
+    shutdown.cancel();
+    std::env::remove_var("ARVOLO_CONFIG_DIR");
+}

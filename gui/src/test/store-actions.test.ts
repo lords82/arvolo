@@ -235,9 +235,21 @@ describe("ticket", () => {
 describe("link", () => {
   it("78. returns the public URL, fragment key included", async () => {
     await boot();
-    const url = await s().link("/a.txt", null, null);
+    const { url } = await s().link("/a.txt", null, null);
     expect(url).toContain("#");
     expect(url).toContain("/dl/");
+  });
+
+  it("78b. a link still uploading comes back as its transfer, and its URL lands on the row", async () => {
+    await boot();
+    harness.uploadAs = 41;
+    const started = await s().link("/a.txt", null, null);
+    expect(started).toEqual({ id: 41, url: "" });
+    harness.emit({
+      started: { id: 41, direction: "send", name: "a.txt", total_size: 10 },
+    });
+    harness.emit({ link_ready: { id: 41, link: "https://relay.test/dl/q#k" } });
+    expect(s().transfers["t41"]?.link).toBe("https://relay.test/dl/q#k");
   });
 
   it("79. a refusal surfaces rather than yielding an unusable link", async () => {

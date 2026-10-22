@@ -405,6 +405,7 @@ pub async fn dispatch(d: &Daemon, cmd: Request) -> Response {
             device,
             fd_socket,
             fd_token,
+            detach,
         } => {
             push(
                 d,
@@ -413,6 +414,7 @@ pub async fn dispatch(d: &Daemon, cmd: Request) -> Response {
                 note,
                 MailboxOpts {
                     deposit,
+                    detach,
                     live_only,
                     ttl,
                     max,
@@ -431,7 +433,8 @@ pub async fn dispatch(d: &Daemon, cmd: Request) -> Response {
             seed_relay,
             fd_socket,
             fd_token,
-        } => serve_ticket(d, paths, seed_relay, (fd_socket, fd_token)).await,
+            detach,
+        } => serve_ticket(d, paths, seed_relay, (fd_socket, fd_token), detach).await,
         Request::ServeCode {
             paths,
             relay,
@@ -446,7 +449,19 @@ pub async fn dispatch(d: &Daemon, cmd: Request) -> Response {
             fd_socket,
             fd_token,
             typed_refusal,
-        } => create_link(d, path, ttl, max, (fd_socket, fd_token), typed_refusal).await,
+            detach,
+        } => {
+            create_link(
+                d,
+                path,
+                ttl,
+                max,
+                (fd_socket, fd_token),
+                typed_refusal,
+                detach,
+            )
+            .await
+        }
         Request::Recv {
             ticket,
             out,
@@ -563,6 +578,9 @@ pub async fn dispatch(d: &Daemon, cmd: Request) -> Response {
 /// What a [`Request::Push`] asked for beyond "send this to them".
 struct MailboxOpts {
     deposit: bool,
+    /// With `deposit`: answer with the transfer id at once, see
+    /// [`Request::Push::detach`].
+    detach: bool,
     /// Never the mailbox: see [`Request::Push::live_only`].
     live_only: bool,
     ttl: Option<u64>,
@@ -637,10 +655,16 @@ async fn push(
             password: opts.password.filter(|p| !p.is_empty()),
             target,
         };
-        d.manager
-            .deposit_to(&recipient, source, name, note, mailbox, theirs)
-            .await
-            .map(|(id, ticket)| (id, Some(ticket)))
+        if opts.detach {
+            d.manager
+                .deposit_to_detached(&recipient, source, name, note, mailbox, theirs)
+                .map(|id| (id, None))
+        } else {
+            d.manager
+                .deposit_to(&recipient, source, name, note, mailbox, theirs)
+                .await
+                .map(|(id, ticket)| (id, Some(ticket)))
+        }
     } else {
         d.manager
             .send_to(
@@ -978,6 +1002,7 @@ async fn serve_ticket(
     paths: Vec<String>,
     seed_relay: Option<String>,
     fds: (Option<String>, Option<String>),
+    detach: bool,
 ) -> Response {
     if paths.is_empty() {
         return Response::Error("provide at least one file or folder to serve".into());
@@ -991,6 +1016,15 @@ async fn serve_ticket(
     // Subscribe before serving so the temp archive is cleaned up once the serving
     // transfer ends (it stays alive for the whole session — chunks are on the fly).
     let watch = temp.clone().map(|t| (d.manager.subscribe(), t));
+    if detach {
+        let id = d
+            .manager
+            .serve_ticket_detached(source, name, archive, seed_relay);
+        if let Some((rx, t)) = watch {
+            spawn_temp_cleanup(rx, id, t);
+        }
+        return Response::TransferId(id);
+    }
     match d
         .manager
         .serve_ticket(source, name, archive, seed_relay)
@@ -1244,7 +1278,10 @@ async fn create_link(
     max: Option<u32>,
     fds: (Option<String>, Option<String>),
     typed_refusal: bool,
+    detach: bool,
 ) -> Response {
+    use arvolo_core::upload::UploadError;
+
     let relay = match d.relay.as_deref() {
         Some(r) => r.to_string(),
         None => return Response::Error("no relay configured — links need a relay".into()),
@@ -1256,51 +1293,65 @@ async fn create_link(
         Ok(v) => v,
         Err(e) => return Response::Error(format!("{e:#}")),
     };
-    // The upload happens inside this handler; the source (and any descriptor
-    // inside it) lives exactly as long as this call.
     let source = adopt_source(fds.0, fds.1, temp.is_none(), payload).await;
-
-    let outcome = arvolo_core::link::deposit_link(source, &relay, ttl, max).await;
-    if let Some(t) = &temp {
-        let _ = std::fs::remove_file(t);
-    }
-    match outcome {
-        Ok(out) => {
-            // Save a revocable record so a GUI-created link can still be cancelled
-            // with `arvolo cancel <id>`, exactly like a link made from the CLI.
-            let _ = crate::deposits::save(
-                crate::deposits::KIND_LINK,
-                &relay,
-                &out.claim,
-                &out.revoke_token,
-                &out.name,
-                out.size,
-                max,
-                Some(out.link.clone()),
-                // No `arvm…` ticket on the link path: the URL is the capability.
-                "",
-                None,
-                crate::now_unix().saturating_add(ttl),
-                // A link is deposited directly, not through the engine: no transfer
-                // row, and no recipient, so no inbox offer. The blob is the whole job.
-                None,
-                None,
-                // Nobody's inbox, so no offer and no second relay.
-                None,
-            );
-            Response::Link(out.link)
+    let drop_temp = || {
+        if let Some(t) = &temp {
+            let _ = std::fs::remove_file(t);
         }
-        // A file the relay will not hold is a refusal, not a failure, and a
-        // client that said it can tell them apart gets the code and the cap —
-        // the sentence travels too, for one that cannot.
-        Err(e) => match TooLargeForRelay::of(&e).filter(|_| typed_refusal) {
-            Some(r) => Response::Refused {
+    };
+
+    // The refusals the relay gives before a byte is sent, answered now rather
+    // than as a transfer that fails a moment after it appears.
+    let size = source.len().unwrap_or(0);
+    if let Err(e) = arvolo_core::link::preflight(&relay, size).await {
+        drop_temp();
+        return match e {
+            UploadError::TooLarge(r) if typed_refusal => Response::Refused {
                 code: TooLargeForRelay::CODE.to_string(),
                 message: r.to_string(),
                 limit_bytes: r.limit,
             },
-            None => Response::Error(format!("{e:#}")),
-        },
+            other => Response::Error(other.to_string()),
+        };
+    }
+
+    // Subscribed before the transfer exists, so neither the temp cleanup nor
+    // the wait below can miss an outcome that comes quickly.
+    let watch = temp.clone().map(|t| (d.manager.subscribe(), t));
+    let mut events = d.manager.subscribe();
+    let id = match d.manager.create_link(source, ttl, max) {
+        Ok(id) => id,
+        Err(e) => {
+            drop_temp();
+            return Response::Error(format!("{e:#}"));
+        }
+    };
+    if let Some((rx, t)) = watch {
+        spawn_temp_cleanup(rx, id, t);
+    }
+    // The receipt — so `arvolo cancel` and the deposits list know the link —
+    // is filed by the engine's event loop when the upload lands, the same way
+    // a mailbox deposit's is.
+    if detach {
+        return Response::TransferId(id);
+    }
+    // An older client asked for the URL as the answer: wait for it. This is the
+    // shape that outlived the client's patience on a large file, kept only so
+    // a client that knows no other still works.
+    loop {
+        match events.recv().await {
+            Ok(ManagerEvent::LinkReady { id: e, info }) if e == id => {
+                return Response::Link(info.link.unwrap_or_default());
+            }
+            Ok(ManagerEvent::Failed { id: e, error, .. }) if e == id => {
+                return Response::Error(error);
+            }
+            Ok(ManagerEvent::Cancelled { id: e }) if e == id => {
+                return Response::Error("link cancelled".into());
+            }
+            Ok(_) | Err(RecvError::Lagged(_)) => {}
+            Err(RecvError::Closed) => return Response::Error("the engine stopped".into()),
+        }
     }
 }
 

@@ -26,6 +26,8 @@ use crate::state::{
 };
 use crate::util::{constant_time_eq, now_unix, random_claim};
 
+mod upload;
+
 const ENCAPPED_KEY_HEADER: &str = "x-arvolo-encapped-key";
 /// Base32 BLAKE3 hash of the revoke token, sent at deposit (optional).
 const REVOKE_HASH_HEADER: &str = "x-arvolo-revoke-hash";
@@ -256,10 +258,11 @@ async fn features_handler(State(state): State<AppState>) -> impl IntoResponse {
     (
         [(axum::http::header::CONTENT_TYPE, "application/json")],
         format!(
-            "{{\"links\":{},\"rz2\":true,\"have\":true,\"hold\":true,\"version\":\"{}\",\"cors\":true,\"max_blob_bytes\":{}}}",
+            "{{\"links\":{},\"rz2\":true,\"have\":true,\"hold\":true,\"version\":\"{}\",\"cors\":true,\"max_blob_bytes\":{},\"upload\":{}}}",
             state.links_enabled,
             arvolo_core::VERSION,
-            max_blob_bytes()
+            max_blob_bytes(),
+            state.uploads_enabled
         ),
     )
 }
@@ -358,6 +361,16 @@ async fn swarm_peers_handler(
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/v1/deposit", post(deposit_handler))
+        // The resumable form of the same deposit — see `http/upload.rs`. Exempt
+        // from the body limit for the same reason: an append streams to disk.
+        .route("/v1/upload", post(upload::open_handler))
+        .route(
+            "/v1/upload/{id}",
+            get(upload::status_handler)
+                .patch(upload::append_handler)
+                .delete(upload::abort_handler),
+        )
+        .route("/v1/upload/{id}/commit", post(upload::commit_handler))
         .route("/v1/features", get(features_handler))
         .route(
             "/v1/fetch/{claim}",

@@ -244,6 +244,26 @@ the `/dl` page and its assets, and refuses link deposits. `arvolo send
 the administrator disabled the feature; normal `arvolo send` and all other
 paths are unaffected.
 
+### Resumable uploads (on by default)
+
+Large deposits and links go up through upload sessions (`/v1/upload`, see
+`docs/PROTOCOL.md` §7.4.1): a connection that drops costs only the bytes in
+flight, and the client carries on from where the relay stands. Three things to
+know when running a relay:
+
+- **Each append is a request of up to 32 MiB.** A proxy that limits request
+  bodies (`client_max_body_size` in nginx) must allow at least that — the
+  single-request `/v1/deposit` already needs far more, so a proxy configured for
+  it is fine. Buffering request bodies at the proxy is harmless but makes a drop
+  cost the whole segment; `proxy_request_buffering off;` on `location /v1/`
+  avoids it.
+- **An open upload reserves its full length** against
+  `ARVOLO_MAX_TOTAL_BLOB_BYTES` and counts as an entry. One left idle for 24 h is
+  reaped. `ARVOLO_MAX_OPEN_UPLOADS` (default 256) caps how many are open at once.
+- **Off switch.** `ARVOLO_DISABLE_UPLOAD_SESSIONS=1` makes the relay behave like
+  one from before sessions: the routes answer `404`, `/v1/features` reports
+  `"upload":false`, and clients fall back to the single request.
+
 ## 4. The NAT relay (`iroh-relay`)
 
 `iroh-relay` can terminate TLS itself (Let's Encrypt) or run behind a proxy. See

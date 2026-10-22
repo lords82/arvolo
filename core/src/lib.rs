@@ -26,6 +26,7 @@ pub mod source;
 pub mod swarm;
 pub mod sync;
 pub mod transfer;
+pub mod upload;
 pub mod wordlist;
 
 /// Re-exports of types that appear in the public API.

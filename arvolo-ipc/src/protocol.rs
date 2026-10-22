@@ -93,6 +93,13 @@ pub enum Request {
         fd_socket: Option<String>,
         #[serde(default)]
         fd_token: Option<String>,
+        /// With `deposit`: answer [`Response::TransferId`] as soon as the
+        /// deposit is under way, instead of [`Response::Served`] once the whole
+        /// file is on the relay. The ticket then arrives with the deposit's
+        /// receipt. A large deposit takes longer than any client should wait on
+        /// one answer; an older daemon ignores this and answers at the end.
+        #[serde(default)]
+        detach: bool,
     },
     /// The machines that share this identity → [`Response::Devices`].
     ///
@@ -129,6 +136,13 @@ pub enum Request {
         fd_socket: Option<String>,
         #[serde(default)]
         fd_token: Option<String>,
+        /// Answer [`Response::TransferId`] at once, while the payload is still
+        /// being read and hashed; the ticket follows as
+        /// [`EventDto::TicketReady`] and stays on the row. Without it the daemon
+        /// answers [`Response::Served`] once the ticket exists — which on a
+        /// large file is longer than a client waits. An older daemon ignores it.
+        #[serde(default)]
+        detach: bool,
     },
     /// Serve a short pairing code in the background: the daemon hosts the
     /// rendezvous *and* the ticket behind it. → [`Response::CodeServed`].
@@ -166,6 +180,13 @@ pub enum Request {
         /// as `tooLarge` with the cap in `limit_bytes`.
         #[serde(default)]
         typed_refusal: bool,
+        /// Answer [`Response::TransferId`] at once and upload as a transfer —
+        /// progress, cancel, and a dropped connection that resumes instead of
+        /// failing. The URL arrives with [`EventDto::LinkReady`] and stays on
+        /// the row. Without it the daemon answers [`Response::Link`] at the end,
+        /// as it always did; an older daemon ignores the flag and does that.
+        #[serde(default)]
+        detach: bool,
     },
     /// Cancel a transfer by id → [`Response::Ok`].
     Cancel {
@@ -726,6 +747,13 @@ pub struct TransferDto {
     /// worst case is the behaviour of the day before.
     #[serde(default)]
     pub can_pause: Option<bool>,
+    /// The browser URL of a finished link transfer; `None` for everything else.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<String>,
+    /// The sender's `arvm…` ticket for a mailbox deposit that is on the relay;
+    /// `None` for everything else.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ticket: Option<String>,
 }
 
 /// A parked incoming offer awaiting the user's accept/reject.
@@ -1101,6 +1129,23 @@ pub enum EventDto {
     Deposited {
         id: u64,
     },
+    /// A link transfer's upload finished; `link` is the URL to share. Unlike
+    /// [`Self::Deposited`] it carries something: the URL is what the link is
+    /// *for*, the row shows it to anyone who can list transfers anyway, and a
+    /// window that started the link has no other way to learn it. The revoke
+    /// token stays behind, as it does for a deposit.
+    LinkReady {
+        id: u64,
+        link: String,
+    },
+    /// A share finished preparing and is being served: `ticket` is the `arvc…`
+    /// to hand over. Sent only after a detached [`Request::ServeTicket`] or a
+    /// code, whose preparation runs after the answer; it is the same string
+    /// that request used to answer with, to the same subscribers.
+    TicketReady {
+        id: u64,
+        ticket: String,
+    },
     /// A send has begun reading and encrypting its payload; nothing is on the wire
     /// and the recipient has not been offered anything yet.
     Preparing {
@@ -1267,6 +1312,8 @@ impl From<&Transfer> for TransferDto {
             fail_code: (!t.fail_code.is_empty()).then(|| t.fail_code.clone()),
             fail_detail: (!t.fail_detail.is_empty()).then(|| t.fail_detail.clone()),
             can_pause: Some(t.can_pause),
+            link: t.link.clone(),
+            ticket: t.ticket.clone(),
         }
     }
 }
@@ -1330,6 +1377,14 @@ impl From<&ManagerEvent> for EventDto {
             // a sender-only secret, and every subscriber on the socket would get a
             // copy. A UI only ever needs the id — it asks the daemon to withdraw.
             ManagerEvent::Deposited { id, .. } => EventDto::Deposited { id: *id },
+            ManagerEvent::TicketReady { id, ticket } => EventDto::TicketReady {
+                id: *id,
+                ticket: ticket.clone(),
+            },
+            ManagerEvent::LinkReady { id, info } => EventDto::LinkReady {
+                id: *id,
+                link: info.link.clone().unwrap_or_default(),
+            },
             ManagerEvent::Preparing { id } => EventDto::Preparing { id: *id },
             ManagerEvent::Waiting {
                 id,
@@ -1392,6 +1447,7 @@ mod tests {
                 device: None,
                 fd_socket: None,
                 fd_token: None,
+                detach: false,
             },
         };
         let line = serde_json::to_string(&env).unwrap();
@@ -1423,6 +1479,7 @@ mod tests {
                 device: None,
                 fd_socket: None,
                 fd_token: None,
+                detach: false,
             }
         );
     }
@@ -1536,6 +1593,7 @@ mod tests {
                 offer_id: "offer-1".into(),
                 poster_token: "SUPER-SECRET-POSTER-TOKEN".into(),
                 ticket: "arvmHANDOVERTICKET".into(),
+                link: None,
             },
         };
         let line = serde_json::to_string(&EventDto::from(&ev)).unwrap();

@@ -7,7 +7,7 @@
 
 use std::path::PathBuf;
 
-use arvolo_ipc::client::DaemonClient;
+use arvolo_ipc::client::{Background, DaemonClient};
 use arvolo_ipc::protocol::{
     ConfigDto, ConfigPatch, ContactDto, DepositDto, DeviceDto, HistoryDto, OfferDto, PairKind,
     PresenceDto, StatusDto, SyncDto, TransferDto,
@@ -19,6 +19,16 @@ use serde::Serialize;
 pub struct ServedDto {
     pub id: u64,
     pub ticket: String,
+}
+
+/// What starting a link hands back to the UI: the transfer that uploads it, and
+/// the URL — empty until the upload lands, which arrives as a `link_ready`
+/// event. A daemon from before links were transfers answers with the URL and no
+/// id: the upload already happened inside the request.
+#[derive(Debug, Clone, Serialize)]
+pub struct LinkStartedDto {
+    pub id: Option<u64>,
+    pub url: String,
 }
 
 /// A code-serve result handed back to the UI.
@@ -785,7 +795,13 @@ pub async fn deposit_to(
         .deposit(to, r.paths, note, ttl, max, password, device, r.fds.clone())
         .await
     {
-        Ok((id, ticket)) => Ok(ServedDto { id, ticket }),
+        // Running: the ticket is not there yet — it lands on the transfer row
+        // when the upload does. Empty says exactly that to the window.
+        Ok(Background::Running(id)) => Ok(ServedDto {
+            id,
+            ticket: String::new(),
+        }),
+        Ok(Background::Done((id, ticket))) => Ok(ServedDto { id, ticket }),
         Err(e) => {
             Resolved::abandon(&r.fds);
             err(e)
@@ -876,7 +892,13 @@ pub async fn serve_ticket(
     let r = state.resolve(&items, spool(&app).as_deref())?;
     let mut c = client().await?;
     match c.serve_ticket(r.paths, seed_relay, r.fds.clone()).await {
-        Ok((id, ticket)) => Ok(ServedDto { id, ticket }),
+        // Still being prepared: the ticket lands on the row, and in a
+        // `ticket_ready` event, when the file has been read and hashed.
+        Ok(Background::Running(id)) => Ok(ServedDto {
+            id,
+            ticket: String::new(),
+        }),
+        Ok(Background::Done((id, ticket))) => Ok(ServedDto { id, ticket }),
         Err(e) => {
             Resolved::abandon(&r.fds);
             err(e)
@@ -891,7 +913,7 @@ pub async fn create_link(
     item: String,
     ttl: Option<u64>,
     max: Option<u32>,
-) -> Result<String, LinkFailed> {
+) -> Result<LinkStartedDto, LinkFailed> {
     let mut r = state.resolve(std::slice::from_ref(&item), spool(&app).as_deref())?;
     let mut c = client().await?;
     let out = c
@@ -900,7 +922,14 @@ pub async fn create_link(
     if out.is_err() {
         Resolved::abandon(&r.fds);
     }
-    out.map_err(LinkFailed::from)
+    out.map(|started| match started {
+        Background::Running(id) => LinkStartedDto {
+            id: Some(id),
+            url: String::new(),
+        },
+        Background::Done(url) => LinkStartedDto { id: None, url },
+    })
+    .map_err(LinkFailed::from)
 }
 
 #[tauri::command]

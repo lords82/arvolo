@@ -31,6 +31,7 @@
 use anyhow::{anyhow, Context, Result};
 
 use crate::crypto::{open_chunk, random_chunk_key, seal_chunk, CHUNK_KEY_LEN};
+use crate::upload::{DepositMeta, SealedLayout, UploadError, UploadHooks, UploadSession};
 
 /// Container magic + version tag. Bump the digits on any format change.
 const MAGIC: &[u8; 8] = b"ARVLNK01";
@@ -75,49 +76,82 @@ fn total_chunks_for(size: u64, chunk_size: u32) -> u32 {
     (size.div_ceil(cs)) as u32
 }
 
-/// Encrypt `path` into a link container blob. Returns the blob, the per-transfer
-/// key (goes in the URL fragment), the file name, and its plaintext size.
+/// What a link is sealed with: the key that goes in the URL fragment, the
+/// sender's revoke secret, and the name and size the container describes.
+///
+/// Fixed before the first byte is uploaded and kept until the last, because the
+/// container is a pure function of it and the file — so an upload interrupted
+/// half-way, even across a restart, resumes into the very bytes the relay
+/// already holds. A fresh key would make the second half undecryptable with
+/// the first half's.
+///
+/// Holds the link's key in the clear: whoever writes it down writes it where
+/// only the user can read it, as with every record that carries a key.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LinkSeal {
+    pub key: [u8; CHUNK_KEY_LEN],
+    pub revoke_token: String,
+    pub name: String,
+    pub size: u64,
+}
+
+impl LinkSeal {
+    /// A fresh seal for `source`: new key, new revoke token.
+    pub fn new(source: &crate::source::SendSource) -> Result<Self> {
+        if let crate::source::SendSource::Path(p) = source {
+            if !p.is_file() {
+                return Err(crate::source::NotAFile(p.clone()).into());
+            }
+        }
+        let size = source.len()?;
+        // The label is the original path (or filename) even for a handed-off
+        // descriptor, so the download page never says "3" for `/dev/fd/3`.
+        let name = std::path::Path::new(&source.label())
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("download.bin")
+            .to_string();
+        Ok(Self {
+            key: random_chunk_key(),
+            revoke_token: random_token(),
+            name,
+            size,
+        })
+    }
+}
+
+/// The link container for `source` under `seal`, described rather than built:
+/// see [`SealedLayout`]. Its header — magic, chunk size, file size, the sealed
+/// name — is assembled here; the chunks are sealed on demand as they are sent.
+pub fn link_layout(source: crate::source::SendSource, seal: &LinkSeal) -> Result<SealedLayout> {
+    let chunk_size = LINK_CHUNK_SIZE;
+    let total_chunks = total_chunks_for(seal.size, chunk_size);
+    // Encrypted metadata (the UTF-8 filename): sealed as the reserved META_INDEX
+    // chunk so the browser can show the real name without the relay ever seeing it.
+    let meta_ct = seal_chunk(&seal.key, META_INDEX, total_chunks, seal.name.as_bytes())
+        .context("seal meta")?;
+    let mut prefix = Vec::with_capacity(24 + meta_ct.len());
+    prefix.extend_from_slice(MAGIC);
+    prefix.extend_from_slice(&chunk_size.to_le_bytes());
+    prefix.extend_from_slice(&seal.size.to_le_bytes());
+    prefix.extend_from_slice(&(meta_ct.len() as u32).to_le_bytes());
+    prefix.extend_from_slice(&meta_ct);
+    Ok(SealedLayout::new(
+        source, seal.key, chunk_size, seal.size, prefix, true,
+    ))
+}
+
+/// Encrypt `path` into a link container blob, in memory. Returns the blob, the
+/// per-transfer key (goes in the URL fragment), the file name, and its plaintext
+/// size. The deposit path never does this — it streams the same bytes from
+/// [`link_layout`] — so it is only for tests and small tools.
 pub fn encrypt_link(
     source: impl Into<crate::source::SendSource>,
 ) -> Result<(Vec<u8>, [u8; CHUNK_KEY_LEN], String, u64)> {
     let source = source.into();
-    if let crate::source::SendSource::Path(p) = &source {
-        if !p.is_file() {
-            return Err(crate::source::NotAFile(p.clone()).into());
-        }
-    }
-    let data = source.read_all()?;
-    let size = data.len() as u64;
-    // The label is the original path (or filename) even for a handed-off
-    // descriptor, so the download page never says "3" for `/dev/fd/3`.
-    let name = std::path::Path::new(&source.label())
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("download.bin")
-        .to_string();
-
-    let chunk_size = LINK_CHUNK_SIZE;
-    let total_chunks = total_chunks_for(size, chunk_size);
-    let key = random_chunk_key();
-
-    // Encrypted metadata (the UTF-8 filename): sealed as the reserved META_INDEX
-    // chunk so the browser can show the real name without the relay ever seeing it.
-    let meta_ct =
-        seal_chunk(&key, META_INDEX, total_chunks, name.as_bytes()).context("seal meta")?;
-
-    let mut blob = Vec::with_capacity(data.len() + meta_ct.len() + 24 + total_chunks as usize * 20);
-    blob.extend_from_slice(MAGIC);
-    blob.extend_from_slice(&chunk_size.to_le_bytes());
-    blob.extend_from_slice(&size.to_le_bytes());
-    blob.extend_from_slice(&(meta_ct.len() as u32).to_le_bytes());
-    blob.extend_from_slice(&meta_ct);
-    for (i, chunk) in data.chunks(chunk_size as usize).enumerate() {
-        let ct = seal_chunk(&key, i as u32, total_chunks, chunk)
-            .with_context(|| format!("seal chunk {i}"))?;
-        blob.extend_from_slice(&(ct.len() as u32).to_le_bytes());
-        blob.extend_from_slice(&ct);
-    }
-    Ok((blob, key, name, size))
+    let seal = LinkSeal::new(&source)?;
+    let blob = link_layout(source, &seal)?.to_vec()?;
+    Ok((blob, seal.key, seal.name, seal.size))
 }
 
 /// Encode a link key for the URL fragment (URL-safe base64, no padding).
@@ -243,7 +277,7 @@ fn parse_max_blob_bytes(body: &str) -> Option<u64> {
 /// `GET /v1/features`, as text, when the relay answered it. Shared by the probes
 /// above so a deposit that asks two questions makes one round trip per question
 /// and no more — each probe reads what it needs by hand.
-async fn features_doc(relay: &str) -> Option<String> {
+pub(crate) async fn features_doc(relay: &str) -> Option<String> {
     let url = format!("{}/v1/features", relay.trim_end_matches('/'));
     let resp = crate::http::client().get(&url).send().await.ok()?;
     if !resp.status().is_success() {
@@ -258,6 +292,9 @@ async fn features_doc(relay: &str) -> Option<String> {
 /// sealed to a specific recipient: whoever holds the link (its fragment key) can
 /// download it — the link *is* the capability. The relay still only sees
 /// ciphertext.
+///
+/// One attempt, from the start: the convenience for a caller with nothing to
+/// resume. [`deposit_link_with`] is the same deposit for one that has.
 pub async fn deposit_link(
     source: impl Into<crate::source::SendSource>,
     relay: &str,
@@ -265,81 +302,99 @@ pub async fn deposit_link(
     max: u32,
 ) -> Result<LinkOutcome> {
     let source = source.into();
+    let seal = LinkSeal::new(&source)?;
+    deposit_link_with(source, &seal, relay, ttl, max, None, &UploadHooks::none())
+        .await
+        .map_err(|e| match e {
+            // Typed, so a caller can still read the cap off it.
+            UploadError::TooLarge(t) => anyhow::Error::from(t),
+            other => anyhow!("{other}"),
+        })
+}
+
+/// The refusals a relay gives a link before any of it is sent: links turned
+/// off, or a file over its per-file cap. Two small requests; a relay that does
+/// not answer them is not refused here — the upload will find out.
+///
+/// For a caller that wants to say no straight away rather than start a
+/// transfer only to fail it a moment later.
+pub async fn preflight(relay: &str, size: u64) -> std::result::Result<(), UploadError> {
+    if !relay_allows_links(relay).await.unwrap_or(true) {
+        return Err(UploadError::LinksDisabled);
+    }
+    if let Some(limit) = relay_max_blob_bytes(relay).await {
+        if size > limit {
+            return Err(UploadError::TooLarge(crate::flow::TooLargeForRelay {
+                size,
+                limit: Some(limit),
+            }));
+        }
+    }
+    Ok(())
+}
+
+/// Deposit the link `seal` describes, resuming `session` when there is one.
+///
+/// Checks what can be checked before sending anything — links turned off, a
+/// file over the relay's cap — and then hands the container to
+/// [`crate::upload::upload`]. On [`UploadError::Unavailable`] the session last
+/// reported through `hooks` is still good: call again with it and the same
+/// seal to carry on.
+pub async fn deposit_link_with(
+    source: crate::source::SendSource,
+    seal: &LinkSeal,
+    relay: &str,
+    ttl: u64,
+    max: u32,
+    session: Option<UploadSession>,
+    hooks: &UploadHooks<'_>,
+) -> std::result::Result<LinkOutcome, UploadError> {
     // Fail fast (before encrypting/uploading) if the relay administrator has
     // turned links off — with a message that says exactly that.
-    anyhow::ensure!(
-        relay_allows_links(relay).await?,
-        "this relay has public download links disabled by its administrator — \
-         send it sealed to a recipient with --to, or use a different relay"
-    );
+    if !relay_allows_links(relay)
+        .await
+        .map_err(|e| UploadError::Unavailable(format!("{e:#}")))?
+    {
+        return Err(UploadError::LinksDisabled);
+    }
     // And if the file is larger than the relay lets one be — the same way, and
     // for the same reason: the refusal is certain, so it should cost one small
     // request and say what the limit is, not a full upload and a status code.
-    let size = source.len()?;
     if let Some(limit) = relay_max_blob_bytes(relay).await {
-        if size > limit {
-            return Err(crate::flow::TooLargeForRelay {
-                size,
+        if seal.size > limit {
+            return Err(UploadError::TooLarge(crate::flow::TooLargeForRelay {
+                size: seal.size,
                 limit: Some(limit),
-            }
-            .into());
+            }));
         }
     }
-
-    let (blob, key, name, _) = encrypt_link(source)?;
-
-    // Sender-held revoke secret; the relay stores only its BLAKE3 hash.
-    let revoke_token = random_token();
-    let revoke_hash = blake3::hash(revoke_token.as_bytes());
-
-    let relay = relay.trim_end_matches('/').to_string();
-    let url = format!("{relay}/v1/deposit?ttl={ttl}&max={max}");
-    let resp = crate::http::client()
-        .post(&url)
+    // The file must still be the one the seal was made for: resuming into a
+    // file that changed would stitch two files together under one key.
+    let now = source.len().map_err(UploadError::Fatal)?;
+    if now != seal.size {
+        return Err(UploadError::Fatal(anyhow!(
+            "{} changed size since the link was started",
+            source.label()
+        )));
+    }
+    let layout = link_layout(source, seal).map_err(UploadError::Fatal)?;
+    let meta = DepositMeta {
         // No HPKE on the link path → empty encapped key (decodes to no bytes).
-        .header("x-arvolo-encapped-key", "")
-        .header(
-            "x-arvolo-revoke-hash",
-            data_encoding::BASE32_NOPAD.encode(revoke_hash.as_bytes()),
-        )
-        .body(blob)
-        .send()
-        .await
-        .context("deposit request")?;
-    // The one refusal a person meets on a shared relay, and the one where the raw
-    // status says nothing they can act on: 507 means the relay is holding all the
-    // bytes its operator allows. It clears as deposits expire, so say "later or
-    // yours" rather than "rejected".
-    if resp.status() == reqwest::StatusCode::INSUFFICIENT_STORAGE {
-        anyhow::bail!(
-            "the relay is being used by a lot of people right now — try again shortly, \
-             or use a relay of your own"
-        );
-    }
-    // The other refusal a person meets, typed so the daemon can hand a window the
-    // code and the number rather than a sentence (see `TooLargeForRelay`). The
-    // pre-flight above catches it on a relay that advertises its cap; this is
-    // the older relay, which only says so once it has been sent the whole file.
-    if resp.status() == reqwest::StatusCode::PAYLOAD_TOO_LARGE {
-        return Err(crate::flow::TooLargeForRelay {
-            size,
-            limit: crate::flow::blob_limit(&resp),
-        }
-        .into());
-    }
-    let resp = resp.error_for_status().context("relay rejected deposit")?;
-    let ttl_secs = crate::flow::granted_ttl(&resp, ttl);
-    let claim = resp.text().await.context("read claim")?;
-    let claim = claim.trim().to_string();
-
-    let link = format!("{relay}/dl/{claim}#{}", encode_key(&key));
+        encapped_key: Vec::new(),
+        // Sender-held revoke secret; the relay stores only its BLAKE3 hash.
+        revoke_hash: *blake3::hash(seal.revoke_token.as_bytes()).as_bytes(),
+        ttl,
+        max,
+    };
+    let relay = relay.trim_end_matches('/').to_string();
+    let done = crate::upload::upload(&relay, &layout, &meta, session, hooks).await?;
     Ok(LinkOutcome {
-        link,
-        claim,
-        name,
-        size,
-        revoke_token,
-        ttl_secs,
+        link: format!("{relay}/dl/{}#{}", done.claim, encode_key(&seal.key)),
+        claim: done.claim,
+        name: seal.name.clone(),
+        size: seal.size,
+        revoke_token: seal.revoke_token.clone(),
+        ttl_secs: done.ttl_secs,
     })
 }
 

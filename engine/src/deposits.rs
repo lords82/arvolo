@@ -278,6 +278,30 @@ pub fn save(
 /// Best-effort: a receipt we failed to write must not take down the transfer it
 /// describes. The deposit itself stands either way.
 pub fn record_from_event(transfer_id: Option<u64>, info: &arvolo_core::manager::DepositInfo) {
+    // A link is filed as one — no recipient, no offer, the URL as the thing
+    // to hand over — exactly as the daemon filed it when it uploaded links
+    // itself.
+    if let Some(link) = &info.link {
+        if let Err(e) = save(
+            KIND_LINK,
+            &info.relay,
+            &info.claim,
+            &info.revoke_token,
+            &info.name,
+            info.size,
+            info.max,
+            Some(link.clone()),
+            "",
+            None,
+            info.expires,
+            transfer_id,
+            None,
+            None,
+        ) {
+            tracing::warn!("could not record link '{}': {e:#}", info.name);
+        }
+        return;
+    }
     if let Err(e) = save(
         KIND_OFFLINE,
         &info.relay,
@@ -670,6 +694,48 @@ expires = 1700003600
         // don't-erase rule, not a write-once one.
         args("arvmREPLACED").unwrap();
         assert_eq!(load(&rec.id).expect("load").ticket, "arvmREPLACED");
+
+        std::env::remove_var("ARVOLO_CONFIG_DIR");
+    }
+
+    /// A link the engine uploaded is filed as a link: the kind the deposits list
+    /// and `arvolo cancel` read, with the URL as the thing to hand over. The
+    /// daemon used to file it itself, inside the request that uploaded it; now
+    /// the engine's event does, and it must come out the same.
+    #[test]
+    fn a_link_from_the_engine_is_filed_as_a_link() {
+        let _guard = crate::testlock::ENV
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("ARVOLO_CONFIG_DIR", dir.path());
+
+        record_from_event(
+            Some(12),
+            &arvolo_core::manager::DepositInfo {
+                relay: "https://relay.example".into(),
+                claim: "linkclaim".into(),
+                revoke_token: "revoke-link".into(),
+                name: "photo.jpg".into(),
+                size: 99,
+                expires: now_secs() + 3600,
+                max: UNLIMITED,
+                recipient: None,
+                offer_id: String::new(),
+                poster_token: String::new(),
+                ticket: String::new(),
+                link: Some("https://relay.example/dl/linkclaim#k".into()),
+            },
+        );
+        let all = list();
+        let rec = all.iter().find(|r| r.claim == "linkclaim").expect("filed");
+        assert_eq!(rec.kind, KIND_LINK);
+        assert_eq!(
+            rec.link.as_deref(),
+            Some("https://relay.example/dl/linkclaim#k")
+        );
+        assert_eq!(rec.revoke_token, "revoke-link");
+        assert!(rec.recipient.is_none());
 
         std::env::remove_var("ARVOLO_CONFIG_DIR");
     }

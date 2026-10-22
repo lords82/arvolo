@@ -31,22 +31,25 @@ COPY core/Cargo.toml core/Cargo.toml
 COPY cli/Cargo.toml cli/Cargo.toml
 COPY relay/Cargo.toml relay/Cargo.toml
 COPY arvolo-ipc/Cargo.toml arvolo-ipc/Cargo.toml
+COPY engine/Cargo.toml engine/Cargo.toml
 COPY gui/src-tauri/Cargo.toml gui/src-tauri/Cargo.toml
-RUN mkdir -p core/src cli/src relay/src arvolo-ipc/src gui/src-tauri/src \
+RUN mkdir -p core/src cli/src relay/src arvolo-ipc/src engine/src gui/src-tauri/src \
  && echo "" > core/src/lib.rs \
  && echo "" > arvolo-ipc/src/lib.rs \
+ && echo "" > engine/src/lib.rs \
  && echo "fn main() {}" > cli/src/main.rs \
  && echo "fn main() {}" > relay/src/main.rs \
  && echo "fn main() {}" > gui/src-tauri/src/main.rs \
+ && echo "" > gui/src-tauri/src/lib.rs \
  && echo "fn main() {}" > gui/src-tauri/build.rs \
  && cargo build --release --locked -p arvolo-relay ${CARGO_JOBS:+-j ${CARGO_JOBS}} \
- && rm -rf core/src cli/src relay/src arvolo-ipc/src gui/src-tauri
+ && rm -rf core/src cli/src relay/src arvolo-ipc/src engine/src gui/src-tauri
 
 # 2) Build the real binary (deps are cached above). Touch the workspace sources
 # so cargo recompiles our crates instead of reusing the dummy dep-cache build
 # (Docker COPY mtimes can otherwise make cargo think they're unchanged).
 COPY . .
-RUN find core cli relay arvolo-ipc -name "*.rs" -exec touch {} + \
+RUN find core cli relay arvolo-ipc engine -name "*.rs" -exec touch {} + \
  && cargo build --release --locked -p arvolo-relay ${CARGO_JOBS:+-j ${CARGO_JOBS}}
 
 FROM debian:trixie-slim

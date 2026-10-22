@@ -804,11 +804,48 @@ pub(crate) async fn serve_ticket_via_daemon(
         .collect::<Result<Vec<_>>>()
         .context("no such file or folder to serve")?;
     let (handoff, _offer) = offer_sources(&paths);
-    let (id, ticket) = client
+    // Subscribed first, so a preparation that ends quickly cannot announce its
+    // ticket before anyone is listening.
+    let events = daemon_events().await.ok();
+    let started = client
         .serve_ticket(paths_s, seed_relay, handoff)
         .await
         .context("daemon rejected the serve")?;
+    let (id, ticket) = match (started, events) {
+        (ipc::client::Background::Done(done), _) => done,
+        (ipc::client::Background::Running(id), Some(events)) => {
+            (id, wait_for_ticket(events, id).await?)
+        }
+        (ipc::client::Background::Running(id), None) => anyhow::bail!(
+            "the daemon is preparing the share as transfer {id}, but its events could \
+             not be followed here — `arvolo status` shows it"
+        ),
+    };
     Ok((handle_for(&mut client, id).await, ticket))
+}
+
+/// Wait for a share the daemon is preparing to have its ticket. Reading and
+/// hashing a large file takes minutes, and a terminal that sat silent for them
+/// would look exactly like the hang this replaced, so it says what it is doing.
+async fn wait_for_ticket(mut events: ipc::client::EventStream, id: u64) -> Result<String> {
+    use ipc::protocol::EventDto;
+    eprintln!("Preparing the file (reading and hashing it)…");
+    loop {
+        match events.next().await? {
+            Some(EventDto::TicketReady { id: e, ticket }) if e == id => return Ok(ticket),
+            Some(EventDto::Failed { id: e, error, .. }) if e == id => {
+                anyhow::bail!("the share could not be prepared: {error}")
+            }
+            Some(EventDto::Cancelled { id: e }) if e == id => {
+                anyhow::bail!("the share was cancelled while it was being prepared")
+            }
+            Some(_) => {}
+            None => anyhow::bail!(
+                "lost the daemon while it was preparing the share — `arvolo status` shows \
+                 whether it is still going"
+            ),
+        }
+    }
 }
 
 /// Hand a pairing code to the daemon: it hosts the rendezvous *and* serves the
@@ -944,6 +981,8 @@ mod share_line_tests {
             can_pause: None,
             fail_code: None,
             fail_detail: None,
+            link: None,
+            ticket: None,
         }
     }
 

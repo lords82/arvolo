@@ -17,11 +17,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { api } from "../ipc";
-import { fmtBytes, isMedia } from "../format";
+import { failText, fmtBytes, isMedia, waitingText } from "../format";
 import { useT } from "../i18n";
 import { SELF_RECIPIENT, useStore, type ComposeTo } from "../store";
 import type { PickedItem, RecentPhoto } from "../types";
-import { useCopy } from "../ui/Bits";
+import { Progress, useCopy } from "../ui/Bits";
 import { Icon } from "../ui/Icons";
 import { Switch } from "../ui/Primitives";
 import { toast } from "../ui/Toasts";
@@ -110,7 +110,9 @@ export function ComposeView() {
   const [opts, setOpts] = useState<Opts>(DEFAULT_OPTS);
   const [optsOpen, setOptsOpen] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [ready, setReady] = useState<string | null>(null);
+  /** The link just started: its URL once it has one, and the transfer
+   *  uploading it — the URL lands on that row. */
+  const [ready, setReady] = useState<{ url: string; transfer: number | null } | null>(null);
   /** 17e: il campo ha il fuoco. La griglia si ritira e il foglio sale con la
    *  tastiera — `--kb` fa già lo spazio, qui si decide chi lo occupa. */
   const [writing, setWriting] = useState(false);
@@ -320,8 +322,8 @@ export function ComposeView() {
           toast.info(t("send.linkTooMany"));
           return;
         }
-        const url = await link(files[0].id, opts.ttl, opts.max === DEFAULT_MAX ? null : opts.max);
-        setReady(url);
+        const started = await link(files[0].id, opts.ttl, opts.max === DEFAULT_MAX ? null : opts.max);
+        setReady({ url: started.url, transfer: started.id });
         return;
       }
       if (to.kind === "code") {
@@ -644,7 +646,8 @@ export function ComposeView() {
 
       {ready && (
         <LinkReady
-          url={ready}
+          url={ready.url}
+          transfer={ready.transfer}
           what={bytes ? `${what} · ${fmtBytes(bytes)}` : what}
           onDone={() => {
             setReady(null);
@@ -810,16 +813,26 @@ function Options({
  *  oggi iOS. Su Android `ACTION_SEND` è ancora da scrivere in Kotlin, e un
  *  bottone che non fa niente è peggio di un bottone che non c'è. */
 function LinkReady({
-  url,
+  url: given,
+  transfer,
   what,
   onDone,
 }: {
   url: string;
+  /** The transfer uploading the link, when it is still going up. */
+  transfer: number | null;
   what: string;
   onDone: () => void;
 }) {
   const t = useT();
   const { state, copy } = useCopy();
+  // Until the relay has the file there is no address to hand over: the sheet
+  // shows the upload instead, and turns into «Link pronto» when its row gets
+  // the URL. Closing it in between only stops watching.
+  const tx = useStore((s) => (transfer != null ? s.transfers[`t${transfer}`] : undefined));
+  const cancel = useStore((s) => s.cancel);
+  const url = given || tx?.link || "";
+  const failed = tx?.status === "failed" || tx?.status === "cancelled";
   // Tutti e due i telefoni, adesso: iOS col suo `UIActivityViewController`,
   // Android con `ACTION_SEND`. La finestra no — lì un link si copia.
   const canShare = phoneOs() !== "other";
@@ -837,10 +850,32 @@ function LinkReady({
           <span className="ready-ico" aria-hidden>
             <Icon.Link size={26} />
           </span>
-          <div className="ready-title">{t("compose.linkReady")}</div>
+          <div className="ready-title">
+            {url
+              ? t("compose.linkReady")
+              : failed
+                ? t("send.uploadFailedTitle")
+                : t(
+                    "send.uploadingTitle",
+                    fmtBytes(tx?.transferred ?? 0),
+                    fmtBytes(tx?.size ?? 0)
+                  )}
+          </div>
           <div className="ready-what tnum">{what}</div>
         </div>
-        <div className="ready-url mono">{url}</div>
+        {url ? (
+          <div className="ready-url mono">{url}</div>
+        ) : tx && !failed ? (
+          <>
+            <Progress t={tx} />
+            {tx.status === "stalled" && (
+              <div className="ready-note">{waitingText(tx)}</div>
+            )}
+          </>
+        ) : tx?.status === "failed" ? (
+          <div className="ready-note">{failText(tx.failCode, tx.failDetail, tx.reason)}</div>
+        ) : null}
+        {url ? (
         <div className="ready-acts">
           <button
             className="ready-btn"
@@ -865,7 +900,23 @@ function LinkReady({
             </button>
           ) : null}
         </div>
-        <div className="ready-note">{t("compose.linkWhereBack")}</div>
+        ) : !failed ? (
+          <div className="ready-acts">
+            <button
+              className="ready-btn"
+              onClick={() => {
+                if (transfer != null) void cancel(transfer);
+              }}
+            >
+              {t("send.uploadStopAction")}
+            </button>
+          </div>
+        ) : null}
+        {url ? (
+          <div className="ready-note">{t("compose.linkWhereBack")}</div>
+        ) : !failed ? (
+          <div className="ready-note">{t("send.uploadingNote")}</div>
+        ) : null}
         <button className="ready-done" onClick={onDone}>
           {t("common.done")}
         </button>

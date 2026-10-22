@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The five places the version is written must agree.
+# The six places the version is written must agree.
 #
 # Run by CI, because the failure this catches has no other symptom. A stale
 # `gui/src-tauri/tauri.conf.json` does not break the build, does not break the
@@ -15,6 +15,7 @@ cd "$(dirname "$0")/.."
 
 workspace=$(perl -ne 'print "$1\n" and exit if /^version = "([^"]+)"$/m' Cargo.toml)
 core_dep=$(perl -ne 'print "$1\n" and exit if /arvolo-core = \{ path = "core", version = "([^"]+)"/' Cargo.toml)
+engine_dep=$(perl -ne 'print "$1\n" and exit if /arvolo-engine = \{ path = "engine", version = "([^"]+)"/' Cargo.toml)
 ipc_dep=$(perl -ne 'print "$1\n" and exit if /arvolo-ipc = \{ path = "arvolo-ipc", version = "([^"]+)"/' Cargo.toml)
 pkg=$(perl -ne 'print "$1\n" and exit if /"version": "([^"]+)"/' gui/package.json)
 tauri=$(perl -ne 'print "$1\n" and exit if /"version": "([^"]+)"/' gui/src-tauri/tauri.conf.json)
@@ -22,12 +23,13 @@ tauri=$(perl -ne 'print "$1\n" and exit if /"version": "([^"]+)"/' gui/src-tauri
 printf '%-34s %s\n' \
   "Cargo.toml [workspace.package]" "$workspace" \
   "Cargo.toml arvolo-core dep" "$core_dep" \
+  "Cargo.toml arvolo-engine dep" "$engine_dep" \
   "Cargo.toml arvolo-ipc dep" "$ipc_dep" \
   "gui/package.json" "$pkg" \
   "gui/src-tauri/tauri.conf.json" "$tauri"
 
 status=0
-for v in "$core_dep" "$ipc_dep" "$pkg" "$tauri"; do
+for v in "$core_dep" "$engine_dep" "$ipc_dep" "$pkg" "$tauri"; do
   [ "$v" = "$workspace" ] || status=1
 done
 
@@ -39,4 +41,4 @@ if [ "$status" -ne 0 ]; then
 fi
 
 echo
-echo "all five agree on $workspace"
+echo "all six agree on $workspace"
