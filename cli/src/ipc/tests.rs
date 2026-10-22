@@ -717,3 +717,62 @@ async fn a_relay_without_links_refuses_before_a_transfer_exists() {
     shutdown.cancel();
     std::env::remove_var("ARVOLO_CONFIG_DIR");
 }
+
+/// A ticket used to be handed back only once the whole file had been read and
+/// hashed, inside the request — minutes on a large file, long past the point a
+/// client gives up. Now the share's row answers at once, in `preparing`, and
+/// the ticket follows as an event and stays on the row.
+#[tokio::test]
+async fn a_ticket_answers_at_once_and_follows_when_prepared() {
+    let _guard = crate::testlock::ENV
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let relay = spawn_relay(true).await;
+    let (shutdown, dir) = spawn_daemon_on(&relay).await;
+    let file = dir.path().join("big.bin");
+    std::fs::write(&file, vec![3u8; 3 * 1024 * 1024 + 11]).unwrap();
+
+    let mut events = DaemonClient::connect()
+        .await
+        .expect("connect")
+        .subscribe()
+        .await
+        .expect("subscribe");
+    let mut client = DaemonClient::connect().await.expect("connect");
+    let started = client
+        .serve_ticket(vec![file.display().to_string()], None, None)
+        .await
+        .expect("started");
+    let super::client::Background::Running(id) = started else {
+        panic!("a current daemon answers with the transfer: {started:?}");
+    };
+
+    let ticket = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            match events.next().await.expect("stream").expect("open") {
+                super::protocol::EventDto::TicketReady { id: e, ticket } if e == id => {
+                    return ticket
+                }
+                super::protocol::EventDto::Failed { id: e, error, .. } if e == id => {
+                    panic!("{error}")
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("the ticket arrives");
+    assert!(ticket.starts_with("arvc"), "{ticket}");
+    let row = client
+        .list()
+        .await
+        .expect("list")
+        .into_iter()
+        .find(|t| t.id == id)
+        .expect("the share's row");
+    assert_eq!(row.ticket.as_deref(), Some(ticket.as_str()));
+    assert_eq!(row.status, "active");
+
+    shutdown.cancel();
+    std::env::remove_var("ARVOLO_CONFIG_DIR");
+}

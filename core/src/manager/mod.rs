@@ -63,6 +63,30 @@ pub struct MailboxOpts {
     pub target: Option<crate::sync::DeviceId>,
 }
 
+/// A pairing code claimed for a share that is still being prepared: answered
+/// once the ticket exists. See [`TransferManager::serve_code`].
+struct PendingCode {
+    shown: String,
+    host: code::CodeHost,
+    max_sessions: Option<u32>,
+    /// Claimed by a previous run: the slot has to be reattached (or reclaimed)
+    /// before it is hosted, as for any restored code.
+    restored: bool,
+}
+
+impl PendingCode {
+    fn record(&self) -> PendingCodeRecord {
+        PendingCodeRecord {
+            shown: self.shown.clone(),
+            slot: self.host.slot.clone(),
+            secret: self.host.secret.clone(),
+            relay: self.host.relay.clone(),
+            owner_token: self.host.owner_token.to_vec(),
+            max_sessions: self.max_sessions,
+        }
+    }
+}
+
 /// Direction of a transfer, from this client's point of view.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Direction {
@@ -573,10 +597,12 @@ pub struct Transfer {
     /// `path` is: a window that opens after the upload finished rebuilds its
     /// rows from the list, and a link row that forgot its URL is useless.
     pub link: Option<String>,
-    /// The sender's own `arvm…` ticket for a mailbox deposit, once it is on the
-    /// relay — what a person hands over when the inbox route is not wanted. Not
-    /// a secret the way the revoke token is (see [`DepositInfo::ticket`]), and
-    /// on the row for the same reason as `link`.
+    /// What to hand over, once there is something: the `arvc…` ticket of a
+    /// share when its preparation ends, and the sender's own `arvm…` ticket of
+    /// a mailbox deposit when it is on the relay. On the row for the same
+    /// reason as `link`. An `arvm…` is not a secret the way the revoke token is
+    /// (see [`DepositInfo::ticket`]); an `arvc…` is the share itself, and goes
+    /// exactly where the answer to the request that started it always went.
     pub ticket: Option<String>,
     /// Whether [`TransferManager::pause`] would actually do something.
     ///
@@ -742,6 +768,10 @@ pub enum ManagerEvent {
     /// [`Deposited`](ManagerEvent::Deposited) does — and like it, crosses the
     /// IPC boundary as no more than what is safe to hand any subscriber.
     LinkReady { id: u64, info: DepositInfo },
+    /// A share finished preparing: `ticket` is what to hand over, and it is
+    /// being served. Before this the row is
+    /// [`Preparing`](TransferStatus::Preparing) and there is no ticket yet.
+    TicketReady { id: u64, ticket: String },
     /// A short pairing code is live and listening for receivers. Raised on the
     /// first claim and again after a restart, so a front-end can show the code
     /// without having to have seen the command that created it.
@@ -1819,21 +1849,134 @@ impl TransferManager {
         archive: bool,
         seed_relay: Option<String>,
     ) -> Result<(u64, String)> {
-        let payload = payload.into();
-        let session = flow::prepare_send(
-            payload.clone(),
-            &name,
-            archive,
-            None,
-            seed_relay,
-            RelayChoice::from_env(),
-        )
-        .await
-        .context("prepare send")?;
+        // Subscribed before the share exists, so a preparation that ends
+        // quickly cannot announce its ticket to nobody.
+        let mut events = self.subscribe();
+        let id = self.start_share(payload.into(), name, archive, seed_relay, None);
+        loop {
+            match events.recv().await {
+                Ok(ManagerEvent::TicketReady { id: e, ticket }) if e == id => {
+                    return Ok((id, ticket))
+                }
+                Ok(ManagerEvent::Failed { id: e, error, .. }) if e == id => {
+                    anyhow::bail!("{error}")
+                }
+                Ok(ManagerEvent::Cancelled { id: e }) if e == id => {
+                    anyhow::bail!("cancelled while preparing")
+                }
+                Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                Err(broadcast::error::RecvError::Closed) => {
+                    anyhow::bail!("the engine stopped while preparing")
+                }
+            }
+        }
+    }
+
+    /// [`serve_ticket`](Self::serve_ticket) without waiting for the ticket:
+    /// returns the transfer id at once, while the payload is still being read
+    /// and hashed. The ticket follows as [`ManagerEvent::TicketReady`] and stays
+    /// on the row.
+    ///
+    /// What a front-end calls. The preparation reads and encrypts the whole
+    /// file — about two minutes per 15 GB on a fast disk — and an answer that
+    /// waits for it outlives every client's patience, which is how a working
+    /// daemon came to be reported as a stuck one.
+    pub fn serve_ticket_detached(
+        &self,
+        payload: impl Into<crate::source::SendSource>,
+        name: String,
+        archive: bool,
+        seed_relay: Option<String>,
+    ) -> u64 {
+        self.start_share(payload.into(), name, archive, seed_relay, None)
+    }
+
+    /// Register a share's row, then prepare and serve it in the background —
+    /// and, with `code`, host a pairing code for it once its ticket exists.
+    fn start_share(
+        &self,
+        payload: crate::source::SendSource,
+        name: String,
+        archive: bool,
+        seed_relay: Option<String>,
+        code: Option<PendingCode>,
+    ) -> u64 {
+        let size = payload.len().unwrap_or(0);
+        let (id, cancel) = self.register(Direction::Send, None, name.clone(), size);
+        self.inner.set_status_live(id, TransferStatus::Preparing);
+        self.inner.emit(ManagerEvent::Preparing { id });
+        if let Some(dir) = &self.inner.state_dir {
+            persist_pending_share(
+                dir,
+                &PendingShareRecord {
+                    id,
+                    payload: payload.label(),
+                    name: name.clone(),
+                    archive,
+                    seed_relay: seed_relay.clone(),
+                    code: code.as_ref().map(PendingCode::record),
+                },
+            );
+        }
+        // The code is live from the moment it is claimed — printed, and on the
+        // row — even though it answers only once the share is prepared.
+        if let Some(c) = &code {
+            self.inner.set_code(id, Some(c.shown.clone()));
+        }
+        let this = self.clone();
+        tokio::spawn(async move {
+            let prep = flow::prepare_send(
+                payload.clone(),
+                &name,
+                archive,
+                None,
+                seed_relay,
+                RelayChoice::from_env(),
+            );
+            let prepared = tokio::select! {
+                _ = cancel.cancelled() => None,
+                r = prep => Some(r),
+            };
+            let session = match prepared {
+                None => {
+                    if let Some(c) = code {
+                        let _ = c.host.close().await;
+                    }
+                    finish(&this.inner, id, true, Ok(None));
+                    return;
+                }
+                Some(Err(e)) => {
+                    if let Some(c) = code {
+                        let _ = c.host.close().await;
+                    }
+                    finish(&this.inner, id, false, Err(e.context("prepare send")));
+                    return;
+                }
+                Some(Ok(s)) => s,
+            };
+            let ticket = this.begin_serving(id, cancel, &payload, session);
+            if let Some(c) = code {
+                this.host_code(id, &ticket, c);
+            }
+            // The send and code records have taken over.
+            if let Some(dir) = &this.inner.state_dir {
+                remove_pending_share(dir, id);
+            }
+        });
+        id
+    }
+
+    /// The share is prepared: write it down so a restart resumes it, start
+    /// serving, and hand out the ticket.
+    fn begin_serving(
+        &self,
+        id: u64,
+        cancel: CancellationToken,
+        payload: &crate::source::SendSource,
+        session: flow::SendSession,
+    ) -> String {
         let ticket = session.ticket.clone();
-        let total = session.total_size;
         let node_seed = session.node_seed();
-        let (id, cancel) = self.register(Direction::Send, None, name, total);
 
         // Persist so the daemon can resume serving this ticket after a restart —
         // the same content key (carried in the ticket) + node seed reproduce the
@@ -1859,9 +2002,14 @@ impl TransferManager {
             );
             persist_share(dir, id, &stats);
         }
-
+        self.inner.set_status_live(id, TransferStatus::Active);
+        self.inner.set_ticket(id, ticket.clone());
+        self.inner.emit(ManagerEvent::TicketReady {
+            id,
+            ticket: ticket.clone(),
+        });
         tokio::spawn(serve_session(self.inner.clone(), session, id, cancel));
-        Ok((id, ticket))
+        ticket
     }
 
     /// Serve an anonymous ticket **and** host a short pairing code for it in the
@@ -1871,6 +2019,9 @@ impl TransferManager {
     /// `max_sessions` is `Some(1)` for the default one-shot code and `None` for
     /// `--keep`. Needs a relay that speaks rendezvous v2: a v1 slot cannot outlive
     /// the process that claimed it, which is the whole point here.
+    ///
+    /// Returns as soon as the code is claimed: the payload is prepared in the
+    /// background, and the code starts answering receivers once it is.
     pub async fn serve_code(
         &self,
         payload: impl Into<crate::source::SendSource>,
@@ -1890,18 +2041,29 @@ impl TransferManager {
         let (shown, host) = code::claim_code(&relay)
             .await
             .context("claim a pairing code")?;
+        let id = self.start_share(
+            payload,
+            name,
+            archive,
+            Some(relay),
+            Some(PendingCode {
+                shown: shown.clone(),
+                host,
+                max_sessions,
+                restored: false,
+            }),
+        );
+        Ok((id, shown))
+    }
 
-        let (id, ticket) = match self
-            .serve_ticket(payload, name, archive, Some(relay.clone()))
-            .await
-        {
-            Ok(v) => v,
-            Err(e) => {
-                let _ = host.close().await;
-                return Err(e);
-            }
-        };
-
+    /// Start answering a claimed code with `ticket`, for transfer `id`.
+    fn host_code(&self, id: u64, ticket: &str, c: PendingCode) {
+        let PendingCode {
+            shown,
+            host,
+            max_sessions,
+            restored,
+        } = c;
         let opts = code::HostOpts {
             max_sessions,
             ..code::HostOpts::default()
@@ -1912,8 +2074,8 @@ impl TransferManager {
             secret: host.secret.clone(),
             relay: host.relay.clone(),
             owner_token: host.owner_token.to_vec(),
-            payload: ticket.into_bytes(),
-            shown: shown.clone(),
+            payload: ticket.as_bytes().to_vec(),
+            shown,
             max_sessions,
             max_failures: opts.max_failures,
             sessions_done: 0,
@@ -1921,6 +2083,12 @@ impl TransferManager {
         };
         if let Some(dir) = &self.inner.state_dir {
             persist_code(dir, &rec);
+        }
+        // A slot claimed by a previous run is reattached first, exactly as a
+        // restored code is.
+        if restored {
+            self.resume_code(rec, id);
+            return;
         }
         // A child of the transfer's own token: `arvolo cancel <id>` retires the
         // code with the send, while the daemon merely exiting leaves the slot
@@ -1941,7 +2109,6 @@ impl TransferManager {
             code::HostState::default(),
             cancel,
         ));
-        Ok((id, shown))
     }
 
     /// Bring a persisted code back after a restart, alongside the send it belongs
@@ -2787,6 +2954,35 @@ impl TransferManager {
         for rec in links {
             uploads::remove_link_record(&dir, rec.id);
             self.restore_link(rec);
+        }
+        // Shares the last run was still preparing: prepared again from the
+        // start (their ticket was never handed out), with the code they had
+        // already printed reattached once they are ready.
+        let pending = load_pending_shares(&dir);
+        let n = n + pending.len();
+        for rec in pending {
+            remove_pending_share(&dir, rec.id);
+            let code = rec.code.and_then(|c| {
+                let owner_token = <[u8; 32]>::try_from(c.owner_token.as_slice()).ok()?;
+                Some(PendingCode {
+                    shown: c.shown,
+                    host: code::CodeHost {
+                        slot: c.slot,
+                        secret: c.secret,
+                        relay: c.relay,
+                        owner_token,
+                    },
+                    max_sessions: c.max_sessions,
+                    restored: true,
+                })
+            });
+            self.start_share(
+                crate::source::SendSource::Path(PathBuf::from(&rec.payload)),
+                rec.name,
+                rec.archive,
+                rec.seed_relay,
+                code,
+            );
         }
         // Whatever upload state is left belonged to a transfer that did not come
         // back. It holds a content key, and its relay session holds space.
@@ -3763,5 +3959,62 @@ mod waiting_reason_tests {
             active.waiting_code, "",
             "an active row must not still explain why it was waiting"
         );
+    }
+}
+
+#[cfg(test)]
+mod pending_share_tests {
+    use super::*;
+
+    /// A daemon that stops while a share is still being read and hashed brings
+    /// it back and finishes it: the request that started it has already
+    /// answered, and a printed code may already point at it.
+    #[tokio::test]
+    async fn a_share_interrupted_while_preparing_is_prepared_again() {
+        let state = tempfile::tempdir().unwrap();
+        let dl = tempfile::tempdir().unwrap();
+        let f = state.path().join("photo.jpg");
+        std::fs::write(&f, vec![4u8; 70_000]).unwrap();
+        persist_pending_share(
+            state.path(),
+            &PendingShareRecord {
+                id: 7,
+                payload: f.display().to_string(),
+                name: "photo.jpg".into(),
+                archive: false,
+                seed_relay: None,
+                code: None,
+            },
+        );
+
+        let m = TransferManager::with_state_dir(
+            Identity::generate(),
+            None,
+            dl.path().to_path_buf(),
+            Some(state.path().to_path_buf()),
+        );
+        let mut events = m.subscribe();
+        assert!(m.resume_incomplete() >= 1);
+        let ticket = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+            loop {
+                if let Ok(ManagerEvent::TicketReady { ticket, .. }) = events.recv().await {
+                    return ticket;
+                }
+            }
+        })
+        .await
+        .expect("prepared again");
+        assert!(ticket.starts_with("arvc"));
+        let row = m
+            .list()
+            .into_iter()
+            .find(|t| t.name == "photo.jpg")
+            .unwrap();
+        assert_eq!(row.ticket.as_deref(), Some(ticket.as_str()));
+        assert!(
+            load_pending_shares(state.path()).is_empty(),
+            "the send record has taken over"
+        );
+        assert_eq!(load_sends(state.path()).len(), 1);
     }
 }

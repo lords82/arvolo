@@ -384,12 +384,16 @@ impl DaemonClient {
     }
 
     /// Serve an anonymous P2P ticket in the daemon; returns (transfer id, `arvc…`).
+    /// A current daemon answers at once with the share's transfer,
+    /// [`Background::Running`], and the ticket follows as
+    /// [`crate::protocol::EventDto::TicketReady`]; an older one prepares inside
+    /// the request and answers with both, [`Background::Done`].
     pub async fn serve_ticket(
         &mut self,
         paths: Vec<String>,
         seed_relay: Option<String>,
         fds: Option<FdHandoff>,
-    ) -> Result<(u64, String)> {
+    ) -> Result<Background<(u64, String)>> {
         let (fd_socket, fd_token) = split(fds);
         match self
             .request(Request::ServeTicket {
@@ -397,10 +401,12 @@ impl DaemonClient {
                 seed_relay,
                 fd_socket,
                 fd_token,
+                detach: true,
             })
             .await?
         {
-            Response::Served { id, ticket } => Ok((id, ticket)),
+            Response::TransferId(id) => Ok(Background::Running(id)),
+            Response::Served { id, ticket } => Ok(Background::Done((id, ticket))),
             other => unexpected(other),
         }
     }

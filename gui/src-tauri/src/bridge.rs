@@ -892,7 +892,13 @@ pub async fn serve_ticket(
     let r = state.resolve(&items, spool(&app).as_deref())?;
     let mut c = client().await?;
     match c.serve_ticket(r.paths, seed_relay, r.fds.clone()).await {
-        Ok((id, ticket)) => Ok(ServedDto { id, ticket }),
+        // Still being prepared: the ticket lands on the row, and in a
+        // `ticket_ready` event, when the file has been read and hashed.
+        Ok(Background::Running(id)) => Ok(ServedDto {
+            id,
+            ticket: String::new(),
+        }),
+        Ok(Background::Done((id, ticket))) => Ok(ServedDto { id, ticket }),
         Err(e) => {
             Resolved::abandon(&r.fds);
             err(e)

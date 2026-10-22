@@ -136,6 +136,13 @@ pub enum Request {
         fd_socket: Option<String>,
         #[serde(default)]
         fd_token: Option<String>,
+        /// Answer [`Response::TransferId`] at once, while the payload is still
+        /// being read and hashed; the ticket follows as
+        /// [`EventDto::TicketReady`] and stays on the row. Without it the daemon
+        /// answers [`Response::Served`] once the ticket exists — which on a
+        /// large file is longer than a client waits. An older daemon ignores it.
+        #[serde(default)]
+        detach: bool,
     },
     /// Serve a short pairing code in the background: the daemon hosts the
     /// rendezvous *and* the ticket behind it. → [`Response::CodeServed`].
@@ -1131,6 +1138,14 @@ pub enum EventDto {
         id: u64,
         link: String,
     },
+    /// A share finished preparing and is being served: `ticket` is the `arvc…`
+    /// to hand over. Sent only after a detached [`Request::ServeTicket`] or a
+    /// code, whose preparation runs after the answer; it is the same string
+    /// that request used to answer with, to the same subscribers.
+    TicketReady {
+        id: u64,
+        ticket: String,
+    },
     /// A send has begun reading and encrypting its payload; nothing is on the wire
     /// and the recipient has not been offered anything yet.
     Preparing {
@@ -1362,6 +1377,10 @@ impl From<&ManagerEvent> for EventDto {
             // a sender-only secret, and every subscriber on the socket would get a
             // copy. A UI only ever needs the id — it asks the daemon to withdraw.
             ManagerEvent::Deposited { id, .. } => EventDto::Deposited { id: *id },
+            ManagerEvent::TicketReady { id, ticket } => EventDto::TicketReady {
+                id: *id,
+                ticket: ticket.clone(),
+            },
             ManagerEvent::LinkReady { id, info } => EventDto::LinkReady {
                 id: *id,
                 link: info.link.clone().unwrap_or_default(),

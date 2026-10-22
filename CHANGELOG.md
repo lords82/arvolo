@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **A ticket or a code for a large file timed out the same way a link did.**
+  Both read and hash the whole file before there is anything to hand over —
+  about two minutes per 15 GB on a fast disk — and the daemon did that inside
+  the request, so a window gave up after 60 seconds and called a working daemon
+  stuck. A code is now answered as soon as it is claimed, and starts pairing
+  once the file is ready; a ticket answers with its row, in *preparing*, and
+  arrives when it exists. A share interrupted while it is being prepared is
+  prepared again when the daemon comes back, with the code it had already
+  printed.
+
 ## v0.15.0-rc1 — deposits that pick up where they stopped
 
 ### Added

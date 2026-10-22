@@ -2201,6 +2201,8 @@ pub(super) fn finish(inner: &Inner, id: u64, cancelled: bool, result: Result<Opt
         // The counters belonged to the share, and the share is over. Left behind
         // they would be inherited by whatever id came round to that number next.
         remove_share(dir, id);
+        // A share that ended while still being prepared.
+        remove_pending_share(dir, id);
     }
     // Drop any held `send --to` delivery state (memory + its durable record).
     drop_held(inner, id);

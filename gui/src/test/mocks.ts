@@ -367,7 +367,13 @@ export function makeIpcMock() {
         harness.recorder.sendTo.push([to, paths, note, device]);
         return guard("sendTo", 1);
       },
-      serveTicket: () => guard("serveTicket", { id: 1, ticket: P2P_TICKET }),
+      serveTicket: () =>
+        guard(
+          "serveTicket",
+          harness.uploadAs != null
+            ? { id: harness.uploadAs, ticket: "" }
+            : { id: 1, ticket: P2P_TICKET }
+        ),
       depositTo: (
         to: string,
         paths: string[],

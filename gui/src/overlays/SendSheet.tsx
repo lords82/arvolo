@@ -110,15 +110,40 @@ function Uploading({
   tx,
   name,
   size,
+  preparing,
   onStop,
 }: {
   tx: UITransfer | undefined;
   name: string;
   size: number;
+  /** A share, whose wait is its preparation rather than an upload. */
+  preparing: boolean;
   onStop: () => void;
 }) {
   const t = useT();
   const failed = tx?.status === "failed" || tx?.status === "cancelled";
+  // A share has nothing going up yet: its file is being read and hashed, and
+  // the ticket is what that produces. Said as what it is, with no byte count —
+  // nothing has left this machine.
+  if (tx?.status === "preparing" || (preparing && !tx)) {
+    return (
+      <div className="stack">
+        <div className="link-file">
+          <ExtChip name={name} />
+          <span className="grow" style={{ minWidth: 0 }}>
+            <span className="link-file-name">{name}</span>
+            <span className="link-file-size tnum">{fmtBytes(size)}</span>
+          </span>
+        </div>
+        {tx && <Progress t={{ ...tx, status: "active", size: 0 }} />}
+        <div className="t-sm" role="status" aria-live="polite">
+          {t("send.preparingTitle")}
+        </div>
+        <div className="t-sm t-sec">{t("send.preparingNote")}</div>
+        <Button onClick={onStop}>{t("common.cancel")}</Button>
+      </div>
+    );
+  }
   const line = !tx
     ? t("send.uploadingTitle", fmtBytes(0), fmtBytes(size))
     : tx.status === "failed"
@@ -659,6 +684,9 @@ export function SendSheet() {
         setResult({
           kind: "ticket",
           value: r.ticket,
+          // Empty while the share is being prepared: read off the row when
+          // `ticket_ready` lands.
+          transfer: r.ticket ? undefined : r.id,
           detail: t("send.ticketDetail"),
         });
       }
@@ -777,6 +805,7 @@ export function SendSheet() {
           tx={liveTx}
           name={files[0]?.name ?? ""}
           size={files.reduce((n, f) => n + (f.size ?? 0), 0)}
+          preparing={shown.kind === "ticket"}
           onStop={() => {
             if (shown.transfer != null) void cancelTransfer(shown.transfer);
           }}

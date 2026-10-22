@@ -433,7 +433,8 @@ pub async fn dispatch(d: &Daemon, cmd: Request) -> Response {
             seed_relay,
             fd_socket,
             fd_token,
-        } => serve_ticket(d, paths, seed_relay, (fd_socket, fd_token)).await,
+            detach,
+        } => serve_ticket(d, paths, seed_relay, (fd_socket, fd_token), detach).await,
         Request::ServeCode {
             paths,
             relay,
@@ -1001,6 +1002,7 @@ async fn serve_ticket(
     paths: Vec<String>,
     seed_relay: Option<String>,
     fds: (Option<String>, Option<String>),
+    detach: bool,
 ) -> Response {
     if paths.is_empty() {
         return Response::Error("provide at least one file or folder to serve".into());
@@ -1014,6 +1016,15 @@ async fn serve_ticket(
     // Subscribe before serving so the temp archive is cleaned up once the serving
     // transfer ends (it stays alive for the whole session — chunks are on the fly).
     let watch = temp.clone().map(|t| (d.manager.subscribe(), t));
+    if detach {
+        let id = d
+            .manager
+            .serve_ticket_detached(source, name, archive, seed_relay);
+        if let Some((rx, t)) = watch {
+            spawn_temp_cleanup(rx, id, t);
+        }
+        return Response::TransferId(id);
+    }
     match d
         .manager
         .serve_ticket(source, name, archive, seed_relay)

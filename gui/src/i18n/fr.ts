@@ -733,6 +733,8 @@ export const fr: Dict = {
   "send.uploadingNote": "Vous pouvez fermer : l'envoi continue dans Activité et, si la connexion tombe, il reprend là où il s'était arrêté.",
   "send.uploadStopAction": "Annuler l'envoi",
   "send.uploadFailedTitle": "L'envoi n'a pas abouti",
+  "send.preparingTitle": "Préparation du fichier",
+  "send.preparingNote": "Un gros fichier prend quelques minutes : il est lu et son empreinte calculée. Le ticket apparaît ici dès qu'il est prêt.",
   "send.filesLabel": "Ce que vous envoyez",
   "send.whatNothing": "Rien de choisi",
   "send.whatPick": "Touchez pour choisir",

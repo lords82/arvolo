@@ -1146,6 +1146,25 @@ describe("the send panel", () => {
     );
   });
 
+  it("a ticket still being prepared says so, then shows itself", async () => {
+    harness.uploadAs = 79;
+    useStore.setState({ sheetPicks: [pick("a.txt")] });
+    render(<App />);
+    fireEvent.click(await screen.findByText("Ticket"));
+    fireEvent.click(screen.getByText(en["send.submitTicket"]));
+    expect(await screen.findByText(en["send.preparingTitle"])).toBeTruthy();
+    act(() => {
+      harness.emit({
+        started: { id: 79, direction: "send", name: "a.txt", total_size: 10 },
+      });
+      harness.emit({ preparing: { id: 79 } });
+      harness.emit({ ticket_ready: { id: 79, ticket: P2P_TICKET } });
+    });
+    await waitFor(() =>
+      expect(screen.queryByText(en["send.preparingTitle"])).toBeNull()
+    );
+  });
+
   it("131. a relay that refuses links says so instead of showing nothing", async () => {
     harness.fail = new Set(["createLink"]);
     useStore.setState({ sheetPicks: [pick("a.txt")] });

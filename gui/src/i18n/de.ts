@@ -731,6 +731,8 @@ export const de: Dict = {
   "send.uploadingNote": "Sie können schließen: Der Upload läuft in Aktivität weiter und setzt nach einem Verbindungsabbruch dort fort, wo er stand.",
   "send.uploadStopAction": "Upload abbrechen",
   "send.uploadFailedTitle": "Der Upload ist nicht fertig geworden",
+  "send.preparingTitle": "Datei wird vorbereitet",
+  "send.preparingNote": "Eine große Datei braucht ein paar Minuten: Sie wird gelesen und ihr Fingerabdruck berechnet. Das Ticket erscheint hier, sobald es bereit ist.",
   "send.filesLabel": "Was Sie senden",
   "send.whatNothing": "Noch nichts gewÃ¤hlt",
   "send.whatPick": "Zum WÃ¤hlen tippen",

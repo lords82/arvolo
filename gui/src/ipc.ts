@@ -99,6 +99,9 @@ export const api = {
       password,
       device,
     }),
+  /** Answers at once with the share's id; `ticket` is empty while the file is
+   *  still being read and hashed, and arrives as `ticket_ready`. Filled only
+   *  against a daemon that prepares inside the call. */
   serveTicket: (items: string[], seedRelay: string | null) =>
     invoke<{ id: number; ticket: string }>("serve_ticket", {
       items,

@@ -97,8 +97,28 @@ jobs:
       - name: Install frontend deps
         working-directory: gui
         run: npm ci
+      # Windows Installer versions are four numbers, so "0.15.0-rc2" is not one:
+      # the bundler refuses a prerelease tag outright, and every rc shipped no
+      # .msi. A prerelease gets major.minor.patch.N, N being the digits of its
+      # suffix (rc2 → 2); a release keeps the version as it is.
+      - name: An MSI-shaped version for a prerelease
+        working-directory: gui
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          extra=""
+          case "$tag" in
+            *-*)
+              n=$(printf '%s' "${tag#*-}" | tr -cd '0-9')
+              printf '{"bundle":{"windows":{"wix":{"version":"%s.%s"}}}}' "${tag%%-*}" "${n:-0}" \
+                > src-tauri/msi-version.json
+              extra="--config src-tauri/msi-version.json"
+              ;;
+          esac
+          echo "MSI_EXTRA=$extra" >> "$GITHUB_ENV"
       - name: Bundle
         working-directory: gui
+        shell: bash
         # The signing key is what makes the .msi installable *as an update*: the
         # app refuses anything it cannot verify against the public key compiled
         # into it. Unrelated to code signing — this one is ours, and the .msi is
@@ -106,7 +126,7 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: npm run tauri build -- --bundles msi --config src-tauri/tauri.release.conf.json
+        run: npm run tauri build -- --bundles msi --config src-tauri/tauri.release.conf.json $MSI_EXTRA
       - name: Name it after the tag
         shell: bash
         run: |

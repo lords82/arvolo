@@ -823,6 +823,8 @@ export const en = {
   "send.uploadingNote": "You can close this: the upload carries on in Activity, and if the connection drops it picks up where it stopped.",
   "send.uploadStopAction": "Cancel the upload",
   "send.uploadFailedTitle": "The upload did not finish",
+  "send.preparingTitle": "Preparing the file",
+  "send.preparingNote": "A large file takes a few minutes: it is being read and fingerprinted. The ticket appears here as soon as it is ready.",
   "send.filesLabel": "What you are sending",
   // Invia as a place (the design of record's 8a/9c): one question, and answers
   // that are situations rather than transports.

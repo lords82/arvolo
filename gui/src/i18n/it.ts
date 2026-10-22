@@ -732,6 +732,8 @@ export const it: Dict = {
   "send.uploadingNote": "Puoi chiudere: il caricamento continua in Attività, e se la connessione cade riprende da dove si era fermato.",
   "send.uploadStopAction": "Annulla il caricamento",
   "send.uploadFailedTitle": "Il caricamento non è riuscito",
+  "send.preparingTitle": "Preparo il file",
+  "send.preparingNote": "Su un file grande ci vuole qualche minuto: lo leggo e ne calcolo l'impronta. Il ticket compare qui appena è pronto.",
   "send.filesLabel": "Cosa mandi",
   "send.whatNothing": "Non hai ancora scelto",
   "send.whatPick": "Tocca per scegliere",

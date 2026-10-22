@@ -1334,6 +1334,9 @@ export const useStore = create<State>((set, get) => {
           refreshDeposits();
           break;
         }
+        case "ticket_ready":
+          patch(ev.id, (tx) => ({ ...tx, ticket: ev.ticket, status: "active" }));
+          break;
         case "link_ready":
           patch(ev.id, (tx) => ({ ...tx, link: ev.link }));
           // The receipt is filed by now: the list is where the link lives once

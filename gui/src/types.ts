@@ -350,6 +350,8 @@ export type EngineEvent =
   | { type: "deposited"; id: number }
   /** A link's upload landed: here is the URL to share. */
   | { type: "link_ready"; id: number; link: string }
+  /** A share finished preparing: here is its `arvc…` ticket. */
+  | { type: "ticket_ready"; id: number; ticket: string }
   /** Reading and encrypting the payload: nothing on the wire yet, and the
    *  recipient has not been offered anything. */
   | { type: "preparing"; id: number }
@@ -466,7 +468,8 @@ export interface UITransfer {
   canPause: boolean;
   /** A link's URL, once uploaded — what the panel that started it shows. */
   link?: string;
-  /** A deposit's `arvm…` ticket, once it is on the relay. */
+  /** What to hand over once it exists: a share's `arvc…` ticket when its
+   *  preparation ends, a deposit's `arvm…` when it is on the relay. */
   ticket?: string;
   /** Completed-receive path (for "open folder"). */
   path?: string;
